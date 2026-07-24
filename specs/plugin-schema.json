@@ -3,13 +3,17 @@
   "$id": "https://ryuhq.com/schemas/plugin.json",
   "title": "Ryu Plugin Manifest",
   "description": "The manifest.json schema for Ryu apps. Defines runnables, permissions, activation events, and marketplace metadata.",
+  "$comment": "HAND-MAINTAINED — this is the author-facing doc schema served at https://ryuhq.com/schemas/plugin.json, deliberately NOT the machine-generated contract. The generated one is crates/core/kernel-contracts/schemas/plugin-manifest.schema.json (blessed by `RYU_REGEN_SCHEMAS=1 cargo test -p ryu-kernel-contracts`, consumed by the TS SDK's `generate:contracts`); it carries every internal field plus rustdoc intra-doc links, so it is the wrong thing to hand a plugin author. This file must track these Rust types in crates/core/kernel-contracts/src/manifest.rs: PluginManifest, RunnableEntry, Surface, CompanionSurface, Contributes, TurnHookContribution, HookMatch, McpServerDecl, SettingsTabContribution, SettingsFieldContribution, SettingsFieldType, SettingsFieldOption, SettingsScope, ToolFilterContribution, Requires, CapabilityReq. Three deliberate divergences, all the same shape — Rust is permissive at the parse boundary so one bad string cannot take a whole manifest down, while this schema is strict so the author is told at authoring time instead of shipping something inert: (1) TurnHookContribution.on is a bare `String` in Rust and unknown phases are dropped at dispatch, but here it is enum-constrained to the 16 phases Core actually fires — hand-synced from the `pub const ON_*` declarations in apps/core/src/plugin_host/mod.rs; a permissive `type: \"string\"` here is exactly what let authors ship hooks Core silently never fires, so add a phase here only after the const exists there. (2) SettingsFieldType and (3) SettingsScope both fall back (to text / node) via custom deserializers in Rust, but each list is a transcription of a closed renderer switch, so an unrecognised value is an author typo worth flagging, not forward-compat. Deliberately NOT documented, because none are hand-written by a plugin author: `backend_code` / `backend_sha256` / `ui_code_sha256` are computed by `ryu pack` / `ryu publish`; `source` and `runtime` are set by the installer; `permissions`, `surfaces`, `icon`, `banner`, `accentColor`, `iconBackground` and `iconDither` exist on PluginManifest but are unused by all 80 first-party manifests, so documenting them here would be transcription without a single example to check against — take them from the generated schema if that changes. The root object is intentionally open (no additionalProperties:false): closing it would reject those legitimate unlisted fields and every future one. Verify this file by validating every apps/core/src/plugin_manifest/fixtures/*.manifest.json and apps-store/*/manifest.json against it — all 80 pass as of this revision, and a regression there is the cheapest signal that the Rust moved.",
   "type": "object",
   "required": ["id", "name", "version"],
   "properties": {
     "id": {
       "type": "string",
-      "description": "Reverse-domain unique identifier (e.g. com.ryu.mail). Must be lowercase, dot-separated, path-traversal-safe.",
-      "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*)*$"
+      "description": "Unique app identifier, and also the directory name the app is installed under — which is why the alphabet is a strict allowlist rather than a blocklist: it is a path-traversal sink. Both bare-kebab (ghost, data-grid-explorer) and dotted reverse-domain (com.ryu.mail, com.example.research-assistant) forms are accepted. Allowed characters a-z A-Z 0-9 . - _; no '..' anywhere; no leading '.' or '-'; no trailing '.'; at most 128 bytes.",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_-])?$",
+      "not": { "pattern": "\\.\\." }
     },
     "name": {
       "type": "string",
@@ -41,6 +45,14 @@
         "type": "string"
       }
     },
+    "mcp_servers": {
+      "type": "object",
+      "description": "Declarative stdio MCP servers this plugin registers into Core's MCP registry on enable (and deregisters on disable/uninstall). Keyed by the server name the registry uses — the same key a user's mcp.json would use, and a user mcp.json entry with that name still wins. This is how a plugin ships agent tooling instead of Core baking a built-in server in.",
+      "default": {},
+      "additionalProperties": {
+        "$ref": "#/$defs/McpServerDecl"
+      }
+    },
     "companion": {
       "$ref": "#/$defs/CompanionSurface",
       "description": "Optional in-desktop overlay or sidebar panel surface."
@@ -69,9 +81,21 @@
         "$ref": "#/$defs/Surface"
       }
     },
-    "affiliate": {
-      "$ref": "#/$defs/Affiliate",
-      "description": "Marketplace affiliate terms (commission for referrers)."
+    "engines": {
+      "$ref": "#/$defs/EnginesReq",
+      "description": "The Core version this plugin needs — the plugin-to-Core edge, as opposed to the plugin-to-plugin edge in `requires`."
+    },
+    "sidecars": {
+      "type": "array",
+      "description": "Declarative managed sidecars the plugin ships (the app-to-sidecar bridge): long-running child processes Core downloads/provisions, spawns and health-monitors, exactly like a built-in sidecar. Gated at enable by the sidecar:process grant — automatic for Core-tier apps, an approved grant for community ones.",
+      "default": [],
+      "items": { "$ref": "#/$defs/SidecarSpec" }
+    },
+    "provides": {
+      "type": "array",
+      "description": "Capabilities this plugin SERVES — the other half of requires.capabilities. Binds an abstract capability name to a concrete serving surface on this manifest, so the broker can route a consumer's call to it without the consumer knowing which app answers.",
+      "default": [],
+      "items": { "$ref": "#/$defs/ProvidesEntry" }
     },
     "description": {
       "type": "string",
@@ -154,11 +178,12 @@
   "$defs": {
     "RunnableMeta": {
       "type": "object",
+      "description": "One Runnable entry inside the manifest (Rust: RunnableEntry).",
       "required": ["id", "name", "kind"],
       "properties": {
         "id": {
           "type": "string",
-          "description": "Stable unique identifier (e.g. agent-researcher).",
+          "description": "Stable unique identifier within this app (e.g. tool-web-search).",
           "minLength": 1
         },
         "name": {
@@ -167,19 +192,27 @@
           "minLength": 1
         },
         "kind": {
-          "type": "string",
-          "enum": ["agent", "workflow", "tool", "skill", "companion"],
-          "description": "The kind of Runnable."
+          "$ref": "#/$defs/RunnableKind",
+          "description": "Discriminant that determines which per-kind config shape is required."
         },
         "config": {
-          "type": "object",
-          "description": "Optional per-kind configuration blob. Schema varies by kind."
+          "description": "Per-kind configuration. Some kinds (agent) treat this as optional and apply defaults; others (tool, workflow) require it."
         }
       }
     },
     "RunnableKind": {
       "type": "string",
-      "enum": ["agent", "workflow", "tool", "skill", "companion"]
+      "enum": [
+        "agent",
+        "workflow",
+        "tool",
+        "skill",
+        "companion",
+        "channel",
+        "engine",
+        "policy"
+      ],
+      "description": "The kind of Runnable — the union of every executable thing in Ryu. agent: system prompt + tools + model/engine binding. workflow: a DAG of typed nodes. tool: a callable tool. skill: an Agent Skill. companion: an in-desktop overlay or sidebar surface. channel: a channel bot adapter (Telegram, Slack, WhatsApp, Discord). engine: a pluggable model/inference engine binding. policy: a Gateway policy fragment (firewall rule, DLP filter, budget cap)."
     },
     "Surface": {
       "type": "string",
@@ -188,22 +221,21 @@
     },
     "CompanionSurface": {
       "type": "object",
-      "required": ["type"],
+      "description": "Companion surface descriptor — an optional in-desktop overlay or sidebar panel an app registers. The fields mirror the UX primitives a companion widget needs; everything but label is optional.",
+      "required": ["label"],
       "properties": {
-        "type": {
+        "label": {
           "type": "string",
-          "enum": ["panel", "overlay"],
-          "description": "The companion surface type."
+          "description": "Display label for the companion panel tab or tooltip.",
+          "minLength": 1
         },
-        "position": {
+        "icon": {
           "type": "string",
-          "enum": ["left", "right", "bottom"],
-          "description": "Panel position (for panel type)."
+          "description": "Icon identifier, resolved by the desktop shell."
         },
-        "defaultOpen": {
-          "type": "boolean",
-          "description": "Whether the companion opens by default.",
-          "default": false
+        "shortcut": {
+          "type": "string",
+          "description": "Keyboard shortcut string (e.g. ctrl+shift+r)."
         }
       }
     },
@@ -213,20 +245,10 @@
       "properties": {
         "turn_hooks": {
           "type": "array",
-          "description": "Server-side turn hooks triggered on chat events.",
+          "description": "Server-side turn hooks: JS that Core runs in the plugin sandbox at a turn boundary and that returns a directive. Self-contained — a hook carries its own inline code and is NOT cross-referenced against runnables.",
+          "default": [],
           "items": {
-            "type": "object",
-            "properties": {
-              "event": {
-                "type": "string",
-                "enum": ["pre_turn", "post_turn", "on_tool_use", "on_session_start"],
-                "description": "The hook event type."
-              },
-              "handler": {
-                "type": "string",
-                "description": "The handler function identifier."
-              }
-            }
+            "$ref": "#/$defs/TurnHookContribution"
           }
         },
         "composer_controls": {
@@ -243,14 +265,18 @@
         },
         "settings_tabs": {
           "type": "array",
-          "description": "Custom settings tabs contributed to the desktop app.",
+          "description": "Settings tabs contributed to the desktop settings dialogs. A tab is EITHER declarative (fields bound to preference keys, drawn by the shared renderer) OR a named view the shell resolves to a bespoke component — a tab with neither is rejected at import.",
+          "default": [],
           "items": {
-            "type": "object",
-            "properties": {
-              "id": { "type": "string" },
-              "label": { "type": "string" },
-              "icon": { "type": "string" }
-            }
+            "$ref": "#/$defs/SettingsTabContribution"
+          }
+        },
+        "tool_filters": {
+          "type": "array",
+          "description": "Tools this plugin wants withheld from the model's offered tool list — the declarative half of a tool firewall. Not a security boundary: hiding a tool does not revoke the capability, it only stops the tool being advertised. Enforcement stays with permissions and grants.",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolFilterContribution"
           }
         },
         "slash_commands": {
@@ -278,25 +304,267 @@
         }
       }
     },
+    "TurnHookContribution": {
+      "type": "object",
+      "description": "One server-side chat turn hook. `code` is a JS body run in the plugin sandbox with `ctx` (the turn context) and `host` (the capability bridge: host.sideModel, host.storage, host.log) in scope; it returns a directive such as {kind:\"none\"}, {kind:\"note\",text} or {kind:\"continue\",text}.",
+      "required": ["id", "on", "code"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id for this hook (used in logging/audit), unique within the plugin.",
+          "minLength": 1
+        },
+        "on": {
+          "type": "string",
+          "enum": [
+            "post_assistant_turn",
+            "pre_user_turn",
+            "session_start",
+            "stop",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_result",
+            "subagent_stop",
+            "session_end",
+            "notification",
+            "context",
+            "message_end",
+            "session_before_compact",
+            "session_compact",
+            "model_select",
+            "session_tree"
+          ],
+          "description": "The turn boundary this hook fires on. Only these phases exist — Core dispatches by exact string match, so a phase spelled any other way is a hook that never runs. `stop` is an accepted alias of `post_assistant_turn` (Claude's naming). post_tool_use, subagent_stop, session_end, notification, model_select and session_tree are observation-only: their directives are not applied."
+        },
+        "code": {
+          "type": "string",
+          "description": "The JS hook body executed in the sandbox. Returns a directive.",
+          "minLength": 1
+        },
+        "match": {
+          "$ref": "#/$defs/HookMatch",
+          "description": "Optional cheap pre-gate, evaluated in Rust before the sandbox is spawned. Absent (or all fields empty) means the hook always runs."
+        }
+      }
+    },
+    "HookMatch": {
+      "type": "object",
+      "description": "A pre-gate for a turn hook. Conditions are OR-ed: the hook runs if any present condition matches. Exists purely to skip the sandbox spawn on turns where the hook provably cannot act — richer matching belongs inside the hook JS.",
+      "properties": {
+        "flag": {
+          "type": "string",
+          "description": "Run only when the request set this composer flag true (ctx.flags[flag]), e.g. io.ryu.double-check."
+        },
+        "commands": {
+          "type": "array",
+          "description": "Run when the trimmed last user message starts with any of these prefixes, e.g. [\"/goal\"]. This is how a slash-command hook wakes up.",
+          "items": { "type": "string" }
+        },
+        "stateful": {
+          "type": "boolean",
+          "description": "Run when the plugin has stored state for this conversation (a value keyed by conversation_id in its default KV namespace), e.g. an active goal.",
+          "default": false
+        },
+        "tools": {
+          "type": "array",
+          "description": "For pre_tool_use / post_tool_use / tool_result hooks: run when the tool being called matches any of these patterns. A pattern is a tool id with optional leading/trailing * (\"*\" = every tool, \"bash*\" = ids starting with bash).",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "McpServerDecl": {
+      "type": "object",
+      "description": "One declarative stdio MCP server. Spawned per request as `command args…`.",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Executable to spawn (e.g. npx, an absolute path, or a ~/.ryu/bin name).",
+          "minLength": 1
+        },
+        "command_env": {
+          "type": "string",
+          "description": "Name of an env var whose value, when set, OVERRIDES command with an absolute binary path (e.g. RYU_GHOST_BIN). Lets a plugin ship a bare command that Core repoints at a profile-specific downloaded binary. Absent means use command verbatim."
+        },
+        "args": {
+          "type": "array",
+          "description": "Arguments passed to the command.",
+          "items": { "type": "string" }
+        },
+        "env": {
+          "type": "object",
+          "description": "Extra environment variables for the server process.",
+          "additionalProperties": { "type": "string" }
+        },
+        "description": {
+          "type": "string",
+          "description": "Human description shown by the MCP listing endpoint."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "When false the server is registered but skipped by list/call. Defaults true so a bare { command } entry just works.",
+          "default": true
+        }
+      }
+    },
+    "SettingsTabContribution": {
+      "type": "object",
+      "description": "One settings tab. Declare either fields or view — a tab with neither is rejected at import rather than silently dropped by the renderer.",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id for this tab within the plugin; the settings nav routes to it. Required — the desktop's <plugin>.settings fallback collides the moment a plugin declares a second tab.",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "description": "Header label for the section.",
+          "default": "Settings"
+        },
+        "scope": {
+          "$ref": "#/$defs/SettingsScope",
+          "description": "Which settings dialog this tab lands in. Anything unrecognised falls back to node."
+        },
+        "view": {
+          "type": "string",
+          "description": "A rich settings view this app ships instead of declarative fields. The settings renderer owns the vocabulary and resolves the name to a component (first-party) or a sandboxed UI (third-party)."
+        },
+        "fields": {
+          "type": "array",
+          "description": "The declarative fields this tab renders. Empty is only legal alongside a view.",
+          "items": { "$ref": "#/$defs/SettingsFieldContribution" }
+        }
+      }
+    },
+    "SettingsScope": {
+      "type": "string",
+      "enum": ["node", "user"],
+      "default": "node",
+      "description": "Where the tab's preferences live. A node preference is stored on the node and is therefore shared by EVERY user of that node; a user preference is client-local. Default node, which is the historical behaviour — a per-user knob has to say so."
+    },
+    "SettingsFieldType": {
+      "type": "string",
+      "enum": [
+        "text",
+        "textarea",
+        "number",
+        "toggle",
+        "select",
+        "model_picker",
+        "agent_picker"
+      ],
+      "default": "text",
+      "description": "The control this field renders as. This list is the desktop renderer's control switch — an unrecognised type falls back to a plain text input. `model_picker` stores a bare model id; `agent_picker` stores the full selection the chat composer can express (agent, provider, model, thinking level, effort, access mode) as an AgentSelection JSON object. Either one, left unset, inherits the node-wide default selection."
+    },
+    "SettingsFieldOption": {
+      "description": "One choice for a select field. A bare string means value and label are the same — the form every hand-written manifest reaches for.",
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["value"],
+          "properties": {
+            "value": {
+              "type": "string",
+              "description": "The value persisted to the preference key."
+            },
+            "label": {
+              "type": "string",
+              "description": "Display label. Absent shows the raw value."
+            }
+          }
+        }
+      ]
+    },
+    "SettingsFieldContribution": {
+      "type": "object",
+      "description": "One configurable field, bound to exactly one preference key. The default/required/min/max/min_length/max_length block is validation metadata cross-checked against type at import — declaring a min on a toggle is an error, because validation that is silently ignored reads as a guarantee that was never enforced.",
+      "required": ["pref_key"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/SettingsFieldType",
+          "description": "The control to render. Absent means a plain text input."
+        },
+        "pref_key": {
+          "type": "string",
+          "description": "The preference key this field reads/writes via /api/preferences/:key. Also the field's identity, so two fields in one tab may not share it. Restricted to a path-safe alphabet — it becomes a URL path segment.",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "description": "Display label. Absent shows the pref_key."
+        },
+        "description": {
+          "type": "string",
+          "description": "Helper caption shown under the field."
+        },
+        "placeholder": {
+          "type": "string",
+          "description": "Placeholder for text and model-picker inputs."
+        },
+        "options": {
+          "type": "array",
+          "description": "Choices for a select field; required for that type and inert for every other one.",
+          "items": { "$ref": "#/$defs/SettingsFieldOption" }
+        },
+        "default": {
+          "description": "Default value in the field's own JSON type (boolean for a toggle, number for a number, string elsewhere) — NOT the stringified form preferences are stored in, so the manifest stays readable and the type is checkable."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the user must supply a value. Advisory: enforced by the renderer, declared here so the contract is one place.",
+          "default": false
+        },
+        "min": {
+          "type": "number",
+          "description": "Inclusive lower bound for a number field."
+        },
+        "max": {
+          "type": "number",
+          "description": "Inclusive upper bound for a number field."
+        },
+        "min_length": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum length for a text/textarea value."
+        },
+        "max_length": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum length for a text/textarea value."
+        }
+      }
+    },
+    "ToolFilterContribution": {
+      "type": "object",
+      "description": "One tool id withheld from the model's offered tool list.",
+      "required": ["tool"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "Fully-qualified tool id (<server>__<tool>, e.g. browser__navigate), optionally ending in * to hide every tool with that prefix (shadow__* hides a whole server). The namespace is mandatory — a bare navigate is ambiguous across servers and is rejected at import. A trailing * is the only wildcard position allowed: an interior or leading * invites a pattern that silently matches far more than the author pictured.",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the plugin hides it. Surfaced in the plugin's listing so a user can see what a plugin removes from the model's view before installing it."
+        }
+      }
+    },
     "Requires": {
       "type": "object",
-      "description": "Plugin dependencies and capability requirements.",
+      "description": "Plugin-to-plugin dependencies. Distinct from engines, which constrains plugin-to-Core. Absent means no dependencies — the plugin enables standalone.",
       "properties": {
         "apps": {
           "type": "array",
-          "description": "Other plugin IDs this plugin depends on.",
-          "items": { "type": "string" }
+          "description": "Other plugins that must be installed, and are auto-enabled in dependency order, before this one can enable.",
+          "items": { "$ref": "#/$defs/AppDependency" }
         },
         "capabilities": {
           "type": "array",
-          "description": "Abstract capability requirements (e.g. rag, memory, tts). Resolved by the capability broker.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "capability": { "type": "string" },
-              "version": { "type": "string" }
-            }
-          }
+          "description": "Abstract capability requirements (e.g. rag, memory, tts) the capability broker resolves to a concrete provider app at bind time. Distinct from apps: an apps edge names a specific plugin id, a capabilities edge lets the binding registry — or the user — pick which enabled provider serves it.",
+          "items": { "$ref": "#/$defs/CapabilityReq" }
         },
         "grants": {
           "type": "array",
@@ -305,39 +573,132 @@
         }
       }
     },
-    "Affiliate": {
+    "AppDependency": {
       "type": "object",
+      "description": "A single plugin-to-plugin dependency edge.",
+      "required": ["id"],
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false
+        "id": {
+          "type": "string",
+          "description": "The id of the plugin this one depends on.",
+          "minLength": 1
         },
-        "rule": {
+        "min_version": {
+          "type": "string",
+          "description": "Optional MINIMUM version the dependency must satisfy. A bare version (\"1.2.0\") means \">=1.2.0\" — deliberately not semver's default caret, which would reject 2.0.0. Explicit comparator syntax (\">=1.2, <2\", \"^1.2\", \"~1.2\") is honoured verbatim."
+        }
+      }
+    },
+    "CapabilityReq": {
+      "type": "object",
+      "description": "One required-capability edge.",
+      "required": ["capability"],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "description": "The capability name (e.g. rag, tts), matched against a provider's declared capability.",
+          "minLength": 1
+        },
+        "min_version": {
+          "type": "string",
+          "description": "Optional minimum CAPABILITY version the bound provider must satisfy (bare \"1.2.0\" = \">=1.2.0\"). Checked against the provider's declared capability version, not against the provider plugin's own semver. Absent means any version is acceptable."
+        }
+      }
+    },
+    "EnginesReq": {
+      "type": "object",
+      "description": "The required Ryu version, mirroring VS Code's engines.vscode.",
+      "required": ["ryu"],
+      "properties": {
+        "ryu": {
+          "type": "string",
+          "description": "Semver requirement the running Core version must satisfy (e.g. \">=0.3.0\", \"^1.2\"). An unparseable value, or one the running Core does not satisfy, makes the loader reject the manifest.",
+          "minLength": 1
+        }
+      }
+    },
+    "ProvidesEntry": {
+      "type": "object",
+      "description": "One capability this plugin serves. The broker forwards a consumer's /api/host/capability/<capability> call to the named sidecar's route using the PROVIDER's minted token — the consumer never sees it.",
+      "required": ["capability", "version"],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "description": "The capability name served (e.g. rag). Consumers match on this in their requires.capabilities.",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "description": "The capability's own semver version, independent of the plugin version, so a consumer's min_version floor is checked against the capability contract rather than the app release."
+        },
+        "sidecar": {
+          "type": "string",
+          "description": "The local name of one of this manifest's sidecars that serves the capability; cross-validated at import. Absent means an in-process capability the broker declines to proxy."
+        },
+        "route": {
+          "type": "string",
+          "description": "The proxied sub-path on that sidecar's http spec the broker forwards capability calls to (e.g. /rag/query). Cross-validated against the sidecar's declared routes."
+        },
+        "grant": {
+          "type": "string",
+          "description": "The Gateway-approved grant a consumer must hold to invoke this capability. Absent means no grant beyond declaring the edge."
+        }
+      }
+    },
+    "SidecarSpec": {
+      "type": "object",
+      "description": "One managed sidecar process. The nested process/http/host_api payloads are intentionally left open here — they are large, evolve fastest, and the generated contract at crates/core/kernel-contracts/schemas/plugin-manifest.schema.json is their authority. This def pins the parts an author gets wrong most.",
+      "required": ["name", "process", "port"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local name, unique within the plugin. Namespaced to <plugin_id>/<name> by Core, and the key provides.sidecar references.",
+          "minLength": 1
+        },
+        "process": {
           "type": "object",
+          "description": "How Core obtains and runs the process. Tagged by kind so a future runtime is a data change, not a code change.",
+          "required": ["kind"],
           "properties": {
-            "type": {
+            "kind": {
               "type": "string",
-              "enum": ["percent", "flat"]
-            },
-            "value": {
-              "type": "number",
-              "minimum": 0,
-              "description": "Basis points for percent (2000 = 20%) or minor units for flat."
-            },
-            "recurring": {
-              "type": "boolean",
-              "default": false
-            },
-            "durationMonths": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "fundedBy": {
-              "type": "string",
-              "enum": ["platform", "seller"],
-              "default": "platform"
+              "enum": ["binary", "python", "local", "node"],
+              "description": "binary: a checksum-verified download placed in the plugin's bin/ dir. python: the external-runtime provisioner (venv + pip + assets), then python -m <entry>. local: an already-present command on PATH or resolved from an env var. node: a bundled JS entrypoint."
             }
           }
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "TCP port the process's HTTP server binds to; used to build the health-check URL and the proxy target."
+        },
+        "health_path": {
+          "type": "string",
+          "description": "Health-check path on the process's server.",
+          "default": "/health"
+        },
+        "lazy": {
+          "type": "boolean",
+          "description": "Spawn on first use instead of at plugin-enable.",
+          "default": false
+        },
+        "idle_stop_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scale-to-zero timeout in seconds: stop the sidecar after this long with no traffic. Absent means it stays up."
+        },
+        "http": {
+          "type": "object",
+          "description": "Optional HTTP proxy declaration. public_mount is the generic ext-proxy surface clients reach at /api/ext/<plugin_id>/… — the reason an app never needs a bespoke route baked into Core."
+        },
+        "host_api": {
+          "type": "object",
+          "description": "Optional host-API declaration: the subset of the owning plugin's approved grants this sidecar may call back into Core with."
+        },
+        "provides_provider": {
+          "type": "object",
+          "description": "Optional model-provider declaration, for a sidecar that serves an OpenAI-compatible inference endpoint Core should register as a provider."
         }
       }
     },

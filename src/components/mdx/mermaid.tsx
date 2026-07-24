@@ -119,7 +119,7 @@ export function Mermaid({ chart }: { chart: string }) {
 }
 
 const ZOOM_MIN = 0.2;
-const ZOOM_MAX = 5;
+const ZOOM_MAX = Number.POSITIVE_INFINITY;
 
 function MermaidDialog({
   onClose,
@@ -215,7 +215,7 @@ function MermaidDialog({
       onClick={handleBackdropClick}
       ref={dialogRef}
     >
-      <div className="relative flex h-[85vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-xl border border-fd-border bg-fd-background shadow-2xl">
+      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-fd-background">
         {/* Toolbar */}
         <div className="flex items-center justify-between border-b border-fd-border px-4 py-2">
           <span className="font-medium text-fd-muted-foreground text-sm">

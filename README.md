@@ -1,6 +1,6 @@
 # <img src="https://raw.githubusercontent.com/amajorai/ryu/main/.github/logo.png" width="50" align="middle" alt="" />&nbsp; Ryu Docs
 
-> The documentation site for [Ryu](https://github.com/amajorai/ryu) — 200+ hand-written pages
+> The documentation site for [Ryu](https://github.com/amajorai/ryu) — 200+ pages
 > plus hundreds of generated API-reference pages, live at **[ryuhq.com/docs](https://ryuhq.com/docs)**.
 
 [![License](https://shieldcn.dev/badge/License-Apache--2.0-73DC8C.svg?logo=apache&logoColor=white)](./LICENSE)
