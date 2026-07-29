@@ -151,7 +151,7 @@ export function Architecture() {
             y={84}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={11}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-muted-foreground)"
             letterSpacing={1.4}
             textAnchor="start"
@@ -163,7 +163,7 @@ export function Architecture() {
             y={84}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={11}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-muted-foreground)"
             letterSpacing={1.4}
             textAnchor="end"
@@ -186,7 +186,7 @@ export function Architecture() {
             y={124.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -208,7 +208,7 @@ export function Architecture() {
             y={179.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -230,7 +230,7 @@ export function Architecture() {
             y={234.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -251,7 +251,7 @@ export function Architecture() {
             y={289.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -273,7 +273,7 @@ export function Architecture() {
             y={344.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -295,7 +295,7 @@ export function Architecture() {
             y={399.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -317,7 +317,7 @@ export function Architecture() {
             y={124.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -339,7 +339,7 @@ export function Architecture() {
             y={179.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -361,7 +361,7 @@ export function Architecture() {
             y={234.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -383,7 +383,7 @@ export function Architecture() {
             y={289.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -405,7 +405,7 @@ export function Architecture() {
             y={344.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -427,7 +427,7 @@ export function Architecture() {
             y={399.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={14}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="end"
           >
@@ -459,7 +459,7 @@ export function Architecture() {
             y={139}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={10.5}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-background)"
             letterSpacing={1.4}
             textAnchor="start"
@@ -471,14 +471,14 @@ export function Architecture() {
             y={158}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={21}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-background)"
             textAnchor="start"
           >
             Ryu Gateway
           </text>
           <rect
-            x={446}
+            x={436}
             y={126}
             width={98}
             height={24}
@@ -488,11 +488,11 @@ export function Architecture() {
             strokeWidth={1.2}
           />
           <text
-            x={495}
+            x={485}
             y={142}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={11}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-background)"
             textAnchor="middle"
           >
@@ -522,7 +522,7 @@ export function Architecture() {
             y={268.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -541,7 +541,7 @@ export function Architecture() {
             y={268.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -560,7 +560,7 @@ export function Architecture() {
             y={318.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -579,7 +579,7 @@ export function Architecture() {
             y={318.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -598,7 +598,7 @@ export function Architecture() {
             y={368.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -617,7 +617,7 @@ export function Architecture() {
             y={368.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -652,7 +652,7 @@ export function Architecture() {
             y={139}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={10.5}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-muted-foreground)"
             letterSpacing={1.4}
             textAnchor="start"
@@ -664,7 +664,7 @@ export function Architecture() {
             y={158}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={21}
-            fontWeight={500}
+            fontWeight={700}
             fill="var(--color-fd-foreground)"
             textAnchor="start"
           >
@@ -694,7 +694,7 @@ export function Architecture() {
             y={268.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -713,7 +713,7 @@ export function Architecture() {
             y={268.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -732,7 +732,7 @@ export function Architecture() {
             y={318.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -751,7 +751,7 @@ export function Architecture() {
             y={318.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -770,7 +770,7 @@ export function Architecture() {
             y={368.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >
@@ -789,7 +789,7 @@ export function Architecture() {
             y={368.5}
             fontFamily="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
             fontSize={13.5}
-            fontWeight={500}
+            fontWeight={600}
             fill="var(--color-fd-foreground)"
             textAnchor="middle"
           >

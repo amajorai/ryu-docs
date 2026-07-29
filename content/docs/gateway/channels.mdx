@@ -1,6 +1,6 @@
 ---
 title: "Channel Bots"
-description: "Run Telegram, Slack, WhatsApp, and Discord bots through the full Gateway pipeline onto a Core agent or team"
+description: "Run Telegram, Slack, WhatsApp, Discord, and iMessage bots through the full Gateway pipeline onto a Core agent or team"
 ---
 
 A channel bot turns a chat platform into a front door for Ryu. The Gateway runs the platform
@@ -10,11 +10,55 @@ the same memory, tools, and Gateway governance on the path.
 
 Channels are configured in **Gateway settings**, not on a Core node, and they are **account-global**.
 
+## What each platform can do
+
+Platforms differ enormously in what they can express, so each adapter declares its capabilities and
+the shared path uses the best verb available, falling back to plain text. Nothing below is emulated —
+a cell is only ticked where the platform has a real API for it.
+
+| | Telegram | Slack | Discord | WhatsApp | iMessage |
+|---|---|---|---|---|---|
+| Typing indicator | Yes | Best-effort<sup>1</sup> | Yes | Yes | Private API<sup>2</sup> |
+| Rich text replies | Yes | mrkdwn<sup>3</sup> | - | - | - |
+| Streaming drafts | DMs only<sup>4</sup> | - | - | - | - |
+| Threads / topics | Yes | Yes | Yes | - | - |
+| Command menu | Yes | -<sup>5</sup> | -<sup>6</sup> | -<sup>7</sup> | -<sup>7</sup> |
+| Voice replies | Yes | Yes | Yes | -<sup>8</sup> | Private API |
+| Attachments in | Yes | Yes | Yes | Yes | Yes |
+| Reactions | Yes | Yes | Yes | Yes | Private API |
+
+1. Slack bots cannot send a true typing indicator (only the retired RTM API could). The adapter uses
+   the assistant thread status, which fails harmlessly for a plain bot.
+2. BlueBubbles typing, read receipts and tapbacks need the Private API helper installed on the Mac.
+3. Slack's mrkdwn is not CommonMark, so the adapter converts rather than emitting raw markdown that
+   would render as literal asterisks.
+4. `sendMessageDraft` is private-chat-only, and Core's channel endpoint is non-streaming today, so
+   this shows a "Thinking..." draft and then the finished rich message - not live tokens.
+5. A Slack slash command must be declared in the app manifest by the operator; the Gateway cannot
+   register one at runtime.
+6. Deliberate. Discord slash-command *invocation* needs an interactions webhook on a public HTTPS URL
+   or an identified Gateway WebSocket, and this adapter is REST-polling. Registering a menu whose
+   entries error on click is worse than no menu. Commands typed as text still work.
+7. No command menu exists on the platform. Commands typed as text still work, and `/help` lists them.
+8. WhatsApp's audio types exclude WAV, which is what Core's TTS emits, so a spoken reply there would
+   be unplayable. The bot answers with text instead.
+
+<Callout type="info">
+  There is no bot "online" presence on Telegram, and Discord's green dot needs an identified Gateway
+  WebSocket the REST-polling adapter does not open. What Ryu shows instead is its own liveness dot,
+  driven by the adapter heartbeating the control plane - that reports whether the bot is actually
+  running, which is the question the dot is usually being asked.
+</Callout>
+
 ## How a bot turn works
 
-Each platform has an adapter (`telegram.rs`, `slack.rs`, `whatsapp.rs`, `discord.rs`) that normalizes
-inbound deliveries to a `{chat id, text}` message. When the channel is bound to an agent or a team,
-the adapter routes the turn through Core's session seam rather than a one-shot Gateway-pipeline call.
+Each platform has an adapter (`telegram.rs`, `slack.rs`, `whatsapp.rs`, `discord.rs`,
+`bluebubbles.rs`) that owns only its transport and its platform verbs. Everything between - the
+access gate, media ingest, the Core call, reply delivery - is shared, so adding a channel means
+implementing the `Channel` trait and nothing else.
+
+When the channel is bound to an agent or a team, the adapter routes the turn through Core's session
+seam rather than a one-shot Gateway-pipeline call.
 
 ```mermaid
 flowchart LR
@@ -49,7 +93,8 @@ tools.
 <TryInRyu page="channels" />
 
 1. Get a bot token from the platform: a Telegram BotFather token, a Slack bot token, a WhatsApp
-   Cloud API token, or a Discord bot token.
+   Cloud API token, or a Discord bot token. For iMessage there is no token - you run
+   [BlueBubbles Server](https://bluebubbles.app) on a Mac and paste its URL and password.
 2. In the desktop, open **Gateway -> Channels** (`apps/desktop/src/components/gateway/ChannelsSection.tsx`,
    rendered inside `GatewayDialog.tsx`). You can also reach it from the command palette, a
    `ryu://...channels` deep link, or **Settings -> Advanced** - all open the dialog at the Channels
@@ -62,7 +107,24 @@ tools.
    inbound messages.
 
 For WhatsApp, front the webhook bind with a public HTTPS reverse proxy - Meta requires HTTPS for
-webhook delivery (`apps/gateway/src/channels/whatsapp.rs`).
+webhook delivery (`crates/gateway/channels/src/whatsapp.rs`).
+
+### iMessage, via BlueBubbles
+
+iMessage has no bot API, so it is bridged: [BlueBubbles Server](https://bluebubbles.app) runs on a
+Mac signed into Messages.app, and the Gateway talks to it over HTTP. That Mac has to stay awake and
+online - if it sleeps, the channel is down. This is an ordinary in-process adapter like the other
+four; there is no channel-sidecar mechanism and none is needed.
+
+Inbound arrives by webhook, so point BlueBubbles Server (**Settings -> Webhooks**) at the Gateway's
+BlueBubbles webhook URL. Typing indicators, read receipts and tapback reactions additionally need the
+BlueBubbles **Private API** helper installed on the Mac; without it the bot still sends and receives
+plain messages and attachments.
+
+<Callout type="warn">
+  BlueBubbles does not sign its webhooks, so the receiver cannot verify that a POST really came from
+  your Mac. Bind it to loopback or a trusted LAN interface - do not expose it to the internet.
+</Callout>
 
 ## Routing to an agent or a team
 
@@ -108,11 +170,54 @@ Before a matched group message is routed to Core, the connector rewrites it twic
   attribute turns in a multi-person chat.
 
 <Callout type="info">
-  The default flipped to mentions-only, so an existing group bot becomes mention-gated - intended, to
-  keep bots quiet in busy rooms. Slack and WhatsApp carry the `groupReplyMode` field but have no gate
-  logic yet, and the shared official-token front door (`apps/cloud-bot`) does its own mentions-only
+  The default is mentions-only, so a group bot stays quiet in a busy room unless addressed. Telegram,
+  Discord and Slack each implement the gate in a pure `decide_reply` helper with its own tests.
+  WhatsApp and iMessage do **not** gate groups yet - they carry the field but answer per their access
+  policy - and the shared official-token front door (`apps/cloud-bot`) does its own mentions-only
   detection rather than reading this per-channel field.
 </Callout>
+
+## Commands: the same ones the desktop offers
+
+A channel bot is the same assistant reached over a different wire, so it offers the same slash
+commands. Core serves the union at `GET /api/channels/commands`: commands contributed by enabled
+plugins, plus installed skills. Telegram publishes them with `setMyCommands`; platforms without a
+menu recognise them as text and answer `/help` with the list.
+
+Dispatch needed nothing new. A plugin command is intercepted by a `pre_user_turn` hook inside Core's
+`run_reply_text`, which the channel path already runs - so the command text only has to *reach* Core
+intact. What was missing was never execution, only discovery.
+
+<Callout type="warn">
+  A command from a *disabled* plugin is never published. The endpoint applies the same enabled-plugin
+  filter as the desktop contributions endpoint, sharing one helper, so the two cannot drift into a bot
+  advertising a command that does nothing.
+</Callout>
+
+## Voice, photos and files
+
+Inbound media is normalized and folded into the turn:
+
+- **Voice notes and audio** are downloaded and transcribed through Core's `POST /api/voice/transcribe`,
+  and the transcript becomes the message text. A transcription failure degrades to a placeholder so
+  the user still gets an answer that acknowledges the voice note.
+- **Images, video and documents** are annotated onto the turn (`[attached image: cat.png]`) so the
+  agent knows what arrived. An image with no caption becomes the whole prompt.
+- Every download is capped, because a channel is an untrusted ingress.
+
+Outbound speech is opt-in per bot: `never` (default), `mirror` (speak only when the user sent a voice
+note), or `always`. A spoken reply is sent **alongside** the text, never instead of it - a voice note
+you cannot skim is worse than one you can.
+
+## Threads and topics
+
+Threaded platforms need two ids to answer - the room and the thread - but Core takes one opaque
+`conversation_id`. Slack solved this by packing `"<channel>:<thread_ts>"`; that convention is now
+shared, so Telegram forum topics and Discord threads reuse it. The effect worth knowing: **each thread
+keeps its own conversation history**, because the packed key is what Core stores against.
+
+Discord can additionally open a thread per triggering message (`threadReplies`), which keeps a busy
+channel readable. If the thread cannot be created the reply still lands in the parent channel.
 
 ## Where config lives
 
