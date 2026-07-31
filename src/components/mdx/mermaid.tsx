@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * Renders a Mermaid diagram. Used both directly as `<Mermaid chart="..." />`
@@ -23,7 +24,6 @@ export function Mermaid({ chart }: { chart: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const currentChartRef = useRef<string | null>(null);
   const { resolvedTheme } = useTheme();
-  const dialogRef = useRef<HTMLDialogElement>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -73,7 +73,6 @@ export function Mermaid({ chart }: { chart: string }) {
   }, [chart, id, resolvedTheme]);
 
   const openDialog = useCallback(() => {
-    dialogRef.current?.showModal();
     setDialogOpen(true);
   }, []);
 
@@ -207,15 +206,15 @@ function MermaidDialog({
     );
   }, [svg]);
 
-  return (
+  return createPortal(
     <dialog
       aria-label="Expanded diagram view"
-      className="backdrop:bg-fd-background/80 border-0 bg-transparent p-0 shadow-2xl backdrop:backdrop-blur-sm open:flex open:fixed open:inset-0 open:z-50 open:items-center open:justify-center"
+      className="backdrop:bg-fd-background/80 m-0 h-dvh max-h-none w-dvw max-w-none border-0 bg-transparent p-0 shadow-2xl backdrop:backdrop-blur-sm open:flex open:fixed open:inset-0 open:z-50 open:items-center open:justify-center"
       onClose={handleDialogClose}
       onClick={handleBackdropClick}
       ref={dialogRef}
     >
-      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-fd-background">
+      <div className="relative flex h-dvh w-dvw flex-col overflow-hidden bg-fd-background">
         {/* Toolbar */}
         <div className="flex items-center justify-between border-b border-fd-border px-4 py-2">
           <span className="font-medium text-fd-muted-foreground text-sm">
@@ -292,6 +291,7 @@ function MermaidDialog({
           </div>
         </div>
       </div>
-    </dialog>
+    </dialog>,
+    document.body,
   );
 }

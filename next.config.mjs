@@ -6,9 +6,8 @@ const withMDX = createMDX();
 const config = {
   // Self-contained server bundle for a lean Docker runtime (apps/fumadocs/Dockerfile).
   output: "standalone",
-  // Type/lint are gated in CI/editor, not the deploy build.
+  // Type checks and lint are gated in CI/editor, not the deploy build.
   typescript: { ignoreBuildErrors: true },
-  eslint: { ignoreDuringBuilds: true },
   serverExternalPackages: ["@takumi-rs/image-response"],
   reactStrictMode: true,
   async rewrites() {
@@ -25,7 +24,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/start-here",
+        destination: "/docs/0.0.16/start-here",
         permanent: false,
       },
       // The recipes gallery became its own "Cookbook" root. Keep the old

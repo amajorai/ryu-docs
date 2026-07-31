@@ -3,10 +3,11 @@ import { Card, Cards } from "fumadocs-ui/components/card";
 import type { ReactNode } from "react";
 
 import { LevelBadge } from "@/components/mdx/level-badge";
-import { source } from "@/lib/source";
+import { versionedDocsHref } from "@/lib/docs-version";
+import { getPageByHref, source } from "@/lib/source";
 
 function lookup(href: string) {
-  return source.getPageByHref(href)?.page;
+  return getPageByHref(href)?.page;
 }
 
 /**
@@ -23,13 +24,14 @@ export function DocCard({
   title?: ReactNode;
   description?: ReactNode;
 }) {
-  const page = lookup(href);
+  const target = versionedDocsHref(href);
+  const page = lookup(target);
   const level = page?.data.level;
-  const cardTitle = title ?? page?.data.title ?? href;
+  const cardTitle = title ?? page?.data.title ?? target;
 
   return (
     <Card
-      href={href}
+      href={target}
       title={
         level === undefined ? (
           cardTitle
@@ -52,7 +54,7 @@ export function DocCard({
  * folder index page to list its children with descriptions automatically.
  */
 export function AutoCards({ url }: { url: string }) {
-  const peers = getPageTreePeers(source.pageTree, url);
+  const peers = getPageTreePeers(source.pageTree, versionedDocsHref(url));
 
   return (
     <Cards>

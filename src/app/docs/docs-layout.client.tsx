@@ -1,23 +1,29 @@
 "use client";
 
+import { SidebarTabsDropdown } from "fumadocs-ui/components/sidebar/tabs/dropdown";
 import { DocsLayout } from "fumadocs-ui/layouts/docs";
+import type { LayoutTab } from "fumadocs-ui/layouts/shared";
 import { usePathname } from "next/navigation";
 import type { ComponentProps, ReactNode } from "react";
 
 import { realmTabTitle } from "@/components/realm-alpha-badge";
+import {
+  DOCS_VERSION,
+  DOCS_VERSIONS,
+  docsPathForVersion,
+  docsSegmentsFromPathname,
+} from "@/lib/docs-version";
 
 /*
  * Per-root theming, matching the official Fumadocs docs site.
  *
- * Each root ("/docs/<segment>") owns an accent color defined as a CSS variable
+ * Each root ("/docs/<version>/<segment>") owns an accent color defined as a CSS variable
  * "--<segment>-color" in global.css. We tint the root selector icon with it, and
  * a "data-docs-root" wrapper switches "--color-fd-primary" so the whole layout
  * (sidebar, content, TOC) takes on that root's color while you are inside it.
  */
 function rootSegment(url: string): string {
-  // url looks like "/docs/gateway" - take the segment after "docs".
-  const parts = url.split("/").filter(Boolean);
-  return parts[1] ?? "";
+  return docsSegmentsFromPathname(url)[0] ?? "";
 }
 
 function rootColor(segment: string): string {
@@ -29,6 +35,34 @@ function rootColor(segment: string): string {
 type DocsLayoutClientProps = ComponentProps<typeof DocsLayout> & {
   children: ReactNode;
 };
+
+function DocsVersionSwitcher() {
+  const pathname = usePathname();
+  const segments = docsSegmentsFromPathname(pathname);
+  const targetSegments = segments.length > 0 ? segments : ["start-here"];
+  const legacyPath = segments.length ? `/docs/${segments.join("/")}` : "/docs";
+
+  const options = DOCS_VERSIONS.map((version) => {
+    const url = docsPathForVersion(version.slug, ...targetSegments);
+    const urls =
+      version.slug === DOCS_VERSION ? new Set([url, legacyPath]) : undefined;
+
+    return {
+      title: version.title,
+      description: version.description,
+      url,
+      urls,
+    };
+  }) satisfies LayoutTab[];
+
+  return (
+    <SidebarTabsDropdown
+      aria-label="Documentation version"
+      options={options}
+      placeholder={<span>Docs version</span>}
+    />
+  );
+}
 
 export function DocsLayoutClient({
   children,
@@ -44,6 +78,15 @@ export function DocsLayoutClient({
     <div data-docs-root={activeRoot} style={{ display: "contents" }}>
       <DocsLayout
         {...props}
+        nav={{
+          ...props.nav,
+          children: (
+            <>
+              {props.nav?.children}
+              <DocsVersionSwitcher />
+            </>
+          ),
+        }}
         sidebar={{
           tabs: {
             transform(option, node) {

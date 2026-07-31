@@ -8,17 +8,28 @@ import {
 } from "fumadocs-ui/layouts/docs/page";
 import { createRelativeLink } from "fumadocs-ui/mdx";
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 
 import { APIPage } from "@/components/api-page";
-import { getMDXComponents } from "@/components/mdx";
+import { getMDXComponents, VersionedAnchor } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
+import { docsPath, isDocsVersionSlug } from "@/lib/docs-version";
 import { gitConfig } from "@/lib/layout.shared";
-import { getPageImage, source } from "@/lib/source";
+import {
+  generateDocsParams,
+  getPage,
+  getPageImage,
+  source,
+} from "@/lib/source";
 
 export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
-  const page = source.getPage(params.slug);
+  const slugs = params.slug ?? [];
+  if (!isDocsVersionSlug(slugs[0])) {
+    permanentRedirect(docsPath(...slugs));
+  }
+
+  const page = getPage(slugs);
   if (!page) notFound();
 
   const MDX = page.data.body;
@@ -51,6 +62,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
             a: createRelativeLink(
               source as unknown as Parameters<typeof createRelativeLink>[0],
               page,
+              VersionedAnchor,
             ),
             // renders the interactive OpenAPI reference in generated API pages
             APIPage,
@@ -62,14 +74,14 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
 }
 
 export async function generateStaticParams() {
-  return source.generateParams();
+  return generateDocsParams();
 }
 
 export async function generateMetadata(
   props: PageProps<"/docs/[[...slug]]">,
 ): Promise<Metadata> {
   const params = await props.params;
-  const page = source.getPage(params.slug);
+  const page = getPage(params.slug);
   if (!page) notFound();
 
   return {

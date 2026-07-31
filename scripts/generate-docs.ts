@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { generateFiles, type OutputEntry } from "fumadocs-openapi";
 import { createOpenAPI } from "fumadocs-openapi/server";
 
+import { docsPath } from "../src/lib/docs-version";
+
 /**
  * Generate the interactive API reference pages from the OpenAPI specs.
  *
@@ -63,7 +65,7 @@ function landingPage(
   spec: (typeof specs)[number],
   entries: OutputEntry[],
 ): string {
-  const surfaceBase = `/docs/develop/api-reference/${spec.out}`;
+  const surfaceBase = docsPath("develop", "api-reference", spec.out);
   const href = (entryPath: string) =>
     `${surfaceBase}/${entryPath
       .split(path.sep)

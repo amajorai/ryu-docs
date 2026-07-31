@@ -18,8 +18,8 @@ Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
 
 - GET /llms.txt                    — Index of all pages (title + URL)
 - GET /llms-full.txt               — This file (all pages concatenated)
-- GET /llms.mdx/docs/{slug}        — Single page as processed Markdown
-- GET /docs/{path}.mdx             — Processed Markdown (rewrite to /llms.mdx/)
+- GET /llms.mdx/docs/{version}/{slug} — Single page as processed Markdown
+- GET /docs/{version}/{path}.mdx   — Processed Markdown (rewrite to /llms.mdx/)
 - GET /llms-sections/{section}     — All pages in a section (start-here, gateway, core, etc.)
 - GET /schemas/plugin.json         — JSON Schema for manifest.json manifests
 

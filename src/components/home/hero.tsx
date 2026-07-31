@@ -21,9 +21,9 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-
-import { RyuLogo } from "@/components/ryu-logo";
 import { AlphaBadge, isAlphaRealm } from "@/components/realm-alpha-badge";
+import { RyuLogo } from "@/components/ryu-logo";
+import { docsPath } from "@/lib/docs-version";
 
 type Realm = {
   slug: string;
@@ -147,16 +147,24 @@ type QuickLink = {
 };
 
 const QUICK_LINKS: QuickLink[] = [
-  { id: "install", label: "Install", href: "/docs/start-here/getting-started" },
+  {
+    id: "install",
+    label: "Install",
+    href: docsPath("start-here", "getting-started"),
+  },
   {
     id: "architecture",
     label: "Architecture",
-    href: "/docs/start-here/architecture",
+    href: docsPath("start-here", "architecture"),
   },
-  { id: "cookbook", label: "Cookbook", href: "/docs/cookbook" },
-  { id: "api", label: "API reference", href: "/docs/develop/api-reference" },
-  { id: "security", label: "Security", href: "/docs/security" },
-  { id: "benchmark", label: "Benchmarks", href: "/docs/benchmark" },
+  { id: "cookbook", label: "Cookbook", href: docsPath("cookbook") },
+  {
+    id: "api",
+    label: "API reference",
+    href: docsPath("develop", "api-reference"),
+  },
+  { id: "security", label: "Security", href: docsPath("security") },
+  { id: "benchmark", label: "Benchmarks", href: docsPath("benchmark") },
 ];
 
 type Stat = {
@@ -184,7 +192,7 @@ type Featured = {
 const FEATURED: Featured[] = [
   {
     id: "architecture",
-    href: "/docs/start-here/architecture",
+    href: docsPath("start-here", "architecture"),
     eyebrow: "Start Here",
     title: "The architecture, end to end",
     description:
@@ -193,7 +201,7 @@ const FEATURED: Featured[] = [
   },
   {
     id: "gateway",
-    href: "/docs/gateway",
+    href: docsPath("gateway"),
     eyebrow: "Gateway",
     title: "The Gateway: routing, firewall, and budgets",
     description:
@@ -202,7 +210,7 @@ const FEATURED: Featured[] = [
   },
   {
     id: "workflows",
-    href: "/docs/core/workflows",
+    href: docsPath("core", "workflows"),
     eyebrow: "Core",
     title: "Workflows and the DAG engine",
     description:
@@ -211,7 +219,7 @@ const FEATURED: Featured[] = [
   },
   {
     id: "cookbook",
-    href: "/docs/cookbook",
+    href: docsPath("cookbook"),
     eyebrow: "Cookbook",
     title: "Recipes: real flows, start to finish",
     description:
@@ -321,7 +329,7 @@ function RealmCard({ realm }: { realm: Realm }) {
   return (
     <Link
       className="group relative flex flex-col gap-3 rounded-xl bg-fd-secondary p-5 transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
-      href={`/docs/${realm.slug}`}
+      href={docsPath(realm.slug)}
     >
       <div className="flex items-center justify-between">
         <span

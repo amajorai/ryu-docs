@@ -2,20 +2,53 @@ import { docs } from "collections/server";
 import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 
-import { openapi } from "@/lib/openapi";
+import {
+  DOCS_VERSION,
+  docsPath,
+  stripDocsVersion,
+  versionedDocsHref,
+} from "@/lib/docs-version";
 import { siteConfig } from "@/lib/metadata";
+import { openapi } from "@/lib/openapi";
 
 // See https://fumadocs.dev/docs/headless/source-api for more info
 export const source = loader({
   baseUrl: "/docs",
   source: docs.toFumadocsSource(),
+  url: (slugs) => docsPath(...slugs),
   // `openapi.loaderPlugin()` decorates generated API pages in the page tree with
   // their HTTP method badge (GET/POST/...).
   plugins: [lucideIconsPlugin(), openapi.loaderPlugin()],
 });
 
-export function getPageImage(page: InferPageType<typeof source>) {
-  const segments = [...page.slugs, "image.webp"];
+export type DocsPage = InferPageType<typeof source>;
+
+export function getPage(slugs: string[] | undefined): DocsPage | undefined {
+  return source.getPage(stripDocsVersion(slugs));
+}
+
+export function getPageByHref(href: string) {
+  const result = source.getPageByHref(versionedDocsHref(href));
+  if (!result) {
+    return;
+  }
+
+  const page = getPage(result.page.slugs);
+  if (!page) {
+    return;
+  }
+
+  return { ...result, page };
+}
+
+export function generateDocsParams() {
+  return source
+    .generateParams()
+    .map(({ slug }) => ({ slug: [DOCS_VERSION, ...slug] }));
+}
+
+export function getPageImage(page: DocsPage) {
+  const segments = [DOCS_VERSION, ...page.slugs, "image.webp"];
 
   return {
     segments,
@@ -23,13 +56,16 @@ export function getPageImage(page: InferPageType<typeof source>) {
   };
 }
 
-export async function getLLMText(page: InferPageType<typeof source>) {
+export async function getLLMText(page: DocsPage) {
   const processed = await page.data.getText("processed");
 
   // For API reference pages, extract the HTTP method and path from frontmatter
   // to produce a structured header that agents can parse.
   const openapi = (page.data as Record<string, unknown>)._openapi as
-    | { method?: string; structuredData?: { contents?: Array<{ content?: string }> } }
+    | {
+        method?: string;
+        structuredData?: { contents?: Array<{ content?: string }> };
+      }
     | undefined;
 
   const methodLine = openapi?.method

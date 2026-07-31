@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { docsPath } from "@/lib/docs-version";
 import { getLLMText, source } from "@/lib/source";
 
 export const revalidate = false;
@@ -36,8 +37,8 @@ export async function GET(
     .getPages()
     .filter(
       (page) =>
-        page.url === `/docs/${section}` ||
-        page.url.startsWith(`/docs/${section}/`),
+        page.url === docsPath(section) ||
+        page.url.startsWith(`${docsPath(section)}/`),
     );
 
   if (pages.length === 0) {
