@@ -7,12 +7,18 @@ Before Core runs any shell command a tool produced, it sends the command to the 
 
 ## Modes
 
-The mode comes from `RYU_EXEC_APPROVAL_MODE` and defaults to `manual`.
+The mode comes from `RYU_EXEC_APPROVAL_MODE`. **The gate is armed whenever that value is anything
+other than `off`, including when it is unset** — disarming is explicit, never a default. That
+posture is what keeps a headless (non-interactive) run from auto-approving unscanned commands.
+
+The desktop writes the mode as a preference (**exec-approval-mode**) which seeds the env var once
+at startup, so changing it is restart-to-apply. A hand-exported env var wins over the stored
+preference, so an operator can force the gate on regardless of what the desktop has saved.
 
 | Mode | Wire value | Behavior |
 |---|---|---|
-| Manual | `manual` (default) | Every matched pattern requires human approval |
-| Smart | `smart` | A cheap classifier auto-allows low-risk commands, auto-denies clearly dangerous ones, and escalates the uncertain to human approval |
+| Manual | `manual` | Every matched pattern requires human approval |
+| Smart | `smart` | A cheap classifier auto-allows low-risk commands, auto-denies clearly dangerous ones, and escalates the uncertain to human approval — see [Local classifier tier](/docs/core/classifier-tier) |
 | Off | `off` | Pattern approval is disabled; the hardline blocklist below still always denies |
 
 A session or global YOLO bypass, where one exists, can skip pattern approval - but the hardline blocklist ignores mode and YOLO entirely.
@@ -96,7 +102,23 @@ If the scanner is unreachable, Core default-denies. The only escape hatch is `RY
 
 ACP agents (Claude Code, Codex, and the flagship Pi engine) run their own shell, so Ryu gates them at the ACP permission-request seam. When an agent asks to run a tool and `RYU_EXEC_APPROVAL_MODE` is not `off`, Core extracts the command from the request and runs it through the same scanner before granting: a `deny` verdict rejects the permission outright - even in a headless session that would otherwise auto-approve - and `approval_required` rejects in headless mode or surfaces to the user in interactive mode.
 
-Command extraction is best-effort (the scanner is accident prevention, not containment): a tool call with no recoverable command string is not scanned. Note that ACP agents are first-party binaries that legitimately need their own credentials, so Ryu gates their commands rather than scrubbing their environment - see [Credential and environment scrubbing](/docs/security/credential-scrubbing). Command approval also composes with each agent's permission mode; see [ACP session controls](/docs/develop).
+**File-mutating tools are gated too, not just shell exec.** Native coding agents do not run `sed` to
+edit a file — they call a dedicated tool shaped `{ file_path, content }` or `{ file_path, new_string }`
+with no `command` field at all, so a shell-only scan would let every write slip the gate. For
+`Write`/`Edit`/`MultiEdit`/`NotebookEdit` and their equivalents, Core synthesizes a `write <path>`
+string and scans that, so a policy denying writes under `.ssh`, `.env`, or `/etc` still fires.
+Read-only tools that carry a path but no write payload (`Read`, `Grep`) are deliberately not swept in.
+
+Command extraction is otherwise best-effort (the scanner is accident prevention, not containment): a
+tool call from which neither a command nor a write target is recoverable is not scanned. Note that ACP
+agents are first-party binaries that legitimately need their own credentials, so Ryu gates their
+commands rather than scrubbing their environment - see [Credential and environment scrubbing](/docs/security/credential-scrubbing).
+
+Ryu deliberately does **not** install filesystem hooks into each agent's own config (Claude
+`settings.json`, Codex `config.toml`). That would re-implement the gate the ACP permission seam
+already provides, and it would cost either a folder-trust supply-chain hole (enabling
+project-local settings sources) or a subscription-credential migration (relocating the agent's
+config directory). One seam governs every ACP agent uniformly with neither cost. Command approval also composes with each agent's permission mode; see [ACP session controls](/docs/develop).
 
 <Callout type="warn">
 Smart mode's classifier may be heuristic or a stub at ship - if so, prefer `manual` anywhere the blast radius matters. The hardline blocklist is the only layer guaranteed to deny unconditionally; everything else depends on the configured mode. In shared or server deployments keep `RYU_EXEC_APPROVAL_MODE=manual` and never set `RYU_ALLOW_GATEWAY_FALLBACK=1`.

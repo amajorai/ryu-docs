@@ -5,14 +5,14 @@ description: "Run model-authored JavaScript that fans out across many tools and 
 
 Programmatic tool calling lets a model author one JavaScript program that calls many tools, and
 returns only its final value plus console logs. Intermediate tool results never re-enter the model.
-The implementation lives in `apps/core/src/tool_exec/`.
+The implementation lives in `crates/core/tool-exec/src/`.
 
 ## Why PTC
 
 The usual chat tool loop sends one tool call per turn, and every intermediate result re-enters the
 model's context. PTC inverts that: the model emits a single program that fans out across tools
 through an injected `tools` proxy, and only its `return` value and `console.log` output come back.
-That is the context-saving win documented in `apps/core/src/tool_exec/mod.rs` - intermediate
+That is the context-saving win documented in `crates/core/tool-exec/src/mod.rs` - intermediate
 results stay inside the sandbox.
 
 The program reaches tools through a proxy, for example:
@@ -23,10 +23,10 @@ const open = issues.filter((i) => i.state === "open");
 return open.length;
 ```
 
-The `execute` meta-tool's own description (`apps/core/src/tool_exec/schema.rs`) steers the model to
+The `execute` meta-tool's own description (`crates/core/tool-exec/src/schema.rs`) steers the model to
 call `tool_search` first to discover tool paths, then write a program. A tool path like
 `tools.spider.crawl` maps to the registry id `spider__crawl`, and `tools.composio.<SLUG>` maps to
-`composio__<SLUG>` (`apps/core/src/tool_exec/invoker.rs`, `tool_path_to_id`).
+`composio__<SLUG>` (`crates/core/tool-exec/src/invoker.rs`, `tool_path_to_id`).
 
 ## Endpoints
 
@@ -49,28 +49,30 @@ schema). An unknown id returns `404 execution_not_found`.
 ## Per-agent allowlist, no escalation
 
 The agent's resolved tool allowlist travels unchanged into the execution. A program cannot reach a
-tool the agent could not call in chat. `resolve_agent_allowlist` (`apps/core/src/tool_exec/mod.rs`)
+tool the agent could not call in chat. `resolve_agent_allowlist` (`crates/core/tool-exec/src/mod.rs`)
 is fail-closed: an absent or unknown `agent_id` is rejected before any code runs. The flagship `ryu`
 agent defaults to no restriction; other agents are restricted to their allowlist. Tool calls route
 through the same `McpRegistry::call_tool` path the chat tool loop uses
-(`apps/core/src/tool_exec/invoker.rs`).
+(`crates/core/tool-exec/src/invoker.rs`).
 
 ## Execution backend
 
-The v1 default backend is a Deno subprocess (`apps/core/src/tool_exec/deno_backend.rs`). Core spawns
+The v1 default backend is a Deno subprocess (`crates/core/tool-exec/src/deno_backend.rs`). Core spawns
 `deno run` with zero `--allow-*` flags plus `--no-prompt`, so the program has no network, no
 filesystem, and no environment access, and any attempt fails rather than prompting. The `tools`
 proxy travels over stdio, never the network: each call writes a tagged JSON request line to stdout,
 and Core writes the tool result back to stdin. The privileged registry call happens in Core; the
 sandbox itself can reach nothing.
 
-The in-process `rquickjs` backend is gated behind the off-by-default `tool-exec-quickjs` cargo
-feature and is not built for the default surface (`apps/core/src/tool_exec/mod.rs`). The
-`CodeExecutor` enum keeps the choice reversible.
+There is exactly one other backend: `tool-exec-securexec` (rivet secure-exec, a V8 isolate,
+`crates/core/tool-exec/src/securexec_backend.rs`), off by default and behind a `securexec_available()`
+probe. The `CodeExecutor` enum keeps the choice reversible. An in-process `rquickjs` backend was
+described here for a while; it never existed — the `tool-exec-quickjs` feature gated no code and has
+been deleted, so do not pass it.
 
 ### Bounds
 
-Each run carries hard limits (`apps/core/src/tool_exec/mod.rs`, `deno_backend.rs`):
+Each run carries hard limits (`crates/core/tool-exec/src/mod.rs`, `deno_backend.rs`):
 
 | Bound | Default | Override |
 |---|---|---|
@@ -87,7 +89,7 @@ output, logs, and error text are control-stripped and length-capped before they 
 ## Human-in-the-loop pause and resume
 
 When a tool call needs a connected account or consent, the registry returns a `__ryu_elicitation__`
-envelope (`apps/core/src/tool_exec/invoker.rs`, `detect_elicitation`). The invoker suspends the whole
+envelope (`crates/core/tool-exec/src/invoker.rs`, `detect_elicitation`). The invoker suspends the whole
 program: the host keeps the subprocess alive and blocked on stdin, parks it in the bounded global
 store, and returns `paused` with an `execution_id` and the elicitation details.
 
@@ -95,13 +97,13 @@ store, and returns `paused` with an `execution_id` and the elicitation details.
 resolves, `decline` makes that call reject (the program may catch it), and `cancel` kills the
 subprocess. The resume is ownership-checked: only the agent that created the execution may resume it,
 and a mismatch returns `404` exactly like an unknown id, so a foreign agent cannot use resume as an
-existence oracle (`apps/core/src/tool_exec/deno_backend.rs`, `resume_parked`).
+existence oracle (`crates/core/tool-exec/src/deno_backend.rs`, `resume_parked`).
 
 ## Gateway governance
 
 Per the Core vs Gateway rule, what runs is Core and what is measured is the Gateway. Every execution
 and every resume brackets the work with a fail-closed gateway exec-budget check before it runs and an
-exec-audit report after (`apps/core/src/tool_exec/mod.rs`, `execute_code` and
+exec-audit report after (`crates/core/tool-exec/src/mod.rs`, `execute_code` and
 `resume_execution_opt`). Without the budget bracket a program could pause then resume to run an
 unmetered, unaudited second segment.
 
@@ -124,7 +126,7 @@ error (`apps/gateway/src/tools/catalog_client.rs`).
   probes for the `deno` binary on `PATH`; with no backend feature it is always false. The default
   Deno backend therefore needs the `deno` binary installed, and the gateway exec front needs
   `CORE_URL` plus a trusted-forwarder or master key and a running Core to exercise end to end. The
-  in-process `rquickjs` backend stays feature-gated off.
+  `tool-exec-securexec` backend stays feature-gated off.
 </Callout>
 
 The desktop Tools page (`apps/desktop/src/pages/ToolsPage.tsx`) lists and test-calls tools over the

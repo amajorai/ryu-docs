@@ -91,13 +91,34 @@ Compiling a firewall's regexes per request would be wasteful, so `FirewallResolv
 
 Alongside the regex scanner, the firewall can run an opt-in cheap-LLM inspector (`apps/gateway/src/firewall/inspector.rs`) that asks a model whether the inbound turn is a prompt injection or leaks PII / secrets, then applies the same `FirewallPolicy` action (Block / Sanitize / Warn) to a flagged turn.
 
-- **Swappable model.** The inspector model resolves through the normal `ModelRouter` (an empty `model` uses the router default) and is called via `provider.complete` directly - exactly like smart routing - so it can never recurse back into the pipeline or the tool loop.
+- **Swappable model, resolving to a local tier.** The inspector model resolves through the normal `ModelRouter` and is called via `provider.complete` directly - exactly like smart routing - so it can never recurse back into the pipeline or the tool loop. Leaving `model` blank resolves to this node's [local classifier tier](/docs/core/classifier-tier), a dedicated small model on its own port, rather than to your chat model or a hosted provider. Naming any other model id routes it like any other request, so pointing inspection at a hosted model is a one-field change.
 - **Fail-open everywhere.** A disabled config, a too-short turn (below `min_chars`), an unconfigured provider, a provider error, a timeout, or an unparseable reply all resolve to "not flagged" (allow) with a warning. A cheap local model emits dirty JSON, so the verdict is parsed defensively (the first `{…}` block; on any failure, allow).
 
 The inspector config is part of the cascade (`InspectorConfig` with `enabled`, `model`, `mode`, `min_chars`, `timeout_ms`, `action`), so a locked inspector at a broader scope can only be tightened by a narrower one.
 
+### What the judge adds over the regex scanner
+
+The two layers are complements, not alternatives, and the regex patterns are deliberately narrow so
+the judge owns the cases they cannot reach:
+
+| Regex catches | The judge is for |
+|---|---|
+| Structured PII: email, phone, SSN, credit card (Luhn-validated), public IPv4, IBAN | Contextual judgment — a slur quoted in order to discuss it, a term that is innocuous in context (`flame retardant`) |
+| Known secret shapes: provider keys, PATs, bearer tokens, PEM blocks, connection strings | Identifiers that are only sensitive given context, and obfuscations no pattern anticipates |
+| Seven fixed injection phrasings, over Unicode-normalized text (zero-width stripped, confusables folded) | Novel or paraphrased injections, and **encoded payload bodies** — the request to decode is a phrasing a pattern can match, the base64 body is not |
+
+Because the judge fails open, a flagged-vs-clean verdict and a judge that never answered are
+different things — the verdict carries whether the judge actually ran, so a deterministic lexical
+floor can back-stop the cases where it did not.
+
 <Callout type="warn">
-The inspector is **opt-in** (`enabled` defaults off) and **inbound-only** in v1 - it inspects the prompt, not the response. Outbound streaming LLM inspection is a deliberate follow-on. Because it fails open, a misconfiguration or a flaky model degrades to the regex scanner alone, never to a blocked request.
+The inspector is **opt-in** (`enabled` defaults off). The `InspectorConfig` stage inspects the
+**prompt**, not the response. Response-side LLM judging is a separate mechanism — output-target
+`LlmJudge` evaluators (toxicity, bias, PII leakage) run against the completion and apply the same
+Block / Sanitize / Warn actions; see [Evals and audit](/docs/gateway/evals-audit). Those evaluators
+read the inspector's model and timeout settings, so configuring this section also configures them.
+Because every judge path fails open, a misconfiguration or a flaky model degrades to the regex
+scanner alone, never to a blocked request.
 </Callout>
 
 ## Outbound DLP

@@ -69,7 +69,8 @@ flowchart LR
     B --> C[Model generates response]
     C --> D[pre_tool_use]
     D --> E[Tool executes]
-    E --> F[post_tool_use]
+    E --> T[tool_result]
+    T --> F[post_tool_use]
     F --> C
     C --> G[post_assistant_turn]
     G --> H[Turn ends]
@@ -87,7 +88,8 @@ flowchart LR
 | **Session start** | `session_start` | First turn of a conversation | `inject`, `note` |
 | **Pre-user turn** | `pre_user_turn` | Before the user message reaches the model | `replace`, `inject` |
 | **Pre-tool use** | `pre_tool_use` | Before a tool call executes | `deny` (blocks the call) |
-| **Post-tool use** | `post_tool_use` | After a tool call returns | Observation only (v1) |
+| **Tool result** | `tool_result` | After a tool call returns, **awaited** | `transform` (rewrites the result before the model sees it) |
+| **Post-tool use** | `post_tool_use` | After a tool call returns | Observation only — detached, fail-open |
 | **Post-assistant turn** | `post_assistant_turn` | After the assistant reply streams and persists | `note`, `continue` |
 | **Sub-agent stop** | `subagent_stop` | When a delegated sub-agent finishes | Observation only (v1) |
 | **Session end** | `session_end` | When a conversation is deleted | Observation only (v1) |
@@ -103,6 +105,31 @@ flowchart LR
 | `{ kind: "replace", text }` | Swap the outgoing user message before it reaches the model | `pre_user_turn` |
 | `{ kind: "inject", text }` | Append additional context to the outgoing message | `pre_user_turn`, `session_start` |
 | `{ kind: "deny", reason }` | Block a pending tool call; `reason` returned as tool error | `pre_tool_use` |
+| `{ kind: "transform", output }` | Rewrite a tool's result before the model sees it | `tool_result` |
+
+### `deny` and `transform` are the two halves of a tool firewall
+
+`deny` stops a call from happening. `transform` reshapes what a call that already happened reports
+back — it is the redaction and narrowing primitive, so a hook can read a tool's output and return a
+rewritten value, keeping secrets, PII, or an oversized payload out of the transcript entirely.
+
+Because `reason` on a `deny` comes back to the model as the tool's **error result** rather than as a
+silent failure, the model can adapt — ask the user, try a different approach — instead of behaving
+as though the call succeeded.
+
+Two rules make `transform` trustworthy as a security boundary:
+
+- **No chaining.** The first hook in plugin order to return `transform` wins, and its rewrite is
+  *not* re-fed through the remaining `tool_result` hooks. With chaining, the value each hook
+  inspected would depend on install order, so a redaction hook could be silently defeated by
+  another plugin installed ahead of it.
+- **Downstream observers see the rewrite, not the original.** The detached `post_tool_use`
+  observers receive the transformed output, so a redaction is not undone by handing the raw value
+  to every other installed plugin.
+
+Pick `post_tool_use` when you only need to watch — it stays detached, so logging and telemetry cost
+the hot path nothing. Pick `tool_result` only when you need to *change* the result, and accept the
+awaited cost.
 
 ## The tool glob gate
 

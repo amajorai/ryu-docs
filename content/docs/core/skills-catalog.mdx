@@ -135,6 +135,10 @@ like `web_fetch` and `threads`) exposes two tools through the same catalog and
 | `skills__search { query }` | Find skills by task. Returns ranked `{ id, name, description }`. |
 | `skills__load { id }` | Return a skill's full `instructions`. |
 
+`skills__search` ranks through the shared `ToolRanker` — BM25 by default, or the semantic ranker
+when `tools.active_ranker` selects it — so skill discovery and tool discovery use one ranking
+strategy and one preference. See [Unified tool catalog](/docs/core/unified-tool-catalog#ranking).
+
 A loaded skill's instructions come back as the **tool result** — the result *is* the
 injection. The model reads it and follows it for the rest of the turn, the same
 mechanism as Claude Code's Skill tool. A skill stays instruction text, not a callable
@@ -148,6 +152,15 @@ the **L1 index** built by `SkillRegistry::progressive_block`
 enabled-and-allowed skill (capped at 20; beyond that the model is pointed at
 `skills__search`), plus a one-line instruction to call `skills__load` before using a
 skill.
+
+The index is **deterministically ordered by skill id**, so which entries fall inside the cap is
+reproducible across restarts rather than depending on filesystem enumeration order. Past 20
+enabled skills the cut is therefore stable but alphabetical — if a skill must always be visible up
+front rather than discovered through `skills__search`, mark it `always-on: true`.
+
+The index is deliberately **query-independent**: it is part of the system preamble, and a preamble
+that varied per message would invalidate the provider-side prompt cache on every turn. Narrowing
+by relevance is `skills__search`'s job, which the model calls when it needs it.
 
 ### ACP only, by design
 
@@ -168,11 +181,23 @@ low-context target, `ryu` (acp:pi), is an ACP agent, so it gets the benefit.
   (`SkillRecord.always_on`): its full body is injected up front regardless of mode — the
   escape hatch for a critical skill or a model you do not trust to self-load.
 
+### The allowlist scopes the tools, not just the index
+
+`skills__search` and `skills__load` are scoped by the calling agent's allowlist, not only by the
+global enabled set — so the index the model sees and the skills it can actually reach are the same
+set. A load for an id outside the allowlist is refused with the same message as a load for an id
+that does not exist, so the response cannot be used to probe for skills the agent is not allowed
+to see.
+
+Scoping is resolved from the agent record, so it applies on both agent planes. Autonomous engine
+operations that carry no agent card (scheduled quests, monitors, workflow steps) run against the
+full enabled set: a skill is instruction text rather than a credential, so this scoping is about
+keeping an agent focused, not about confidentiality.
+
 <Callout type="warn">
-v1 limits: `skills__load` and `skills__search` operate over the globally-enabled skill
-set — the per-agent allowlist scopes what the model *sees* in the L1 index, not what the
-tool can load. An agent that carries a restricted tool allowlist must include `skills__*`
-in it. The per-skill always-on control is front-matter only (no desktop toggle yet).
+An agent that carries a restricted **tool** allowlist must include `skills__*` in it, or it cannot
+reach any skill at all. The per-skill always-on control is front-matter only (no desktop toggle
+yet).
 </Callout>
 
 ## Autonomous skill authoring
