@@ -1,4 +1,4 @@
-export const DOCS_VERSION = "0.0.16" as const;
+export const DOCS_VERSION = "0.0.17" as const;
 
 export const DOCS_VERSIONS = [
   {
