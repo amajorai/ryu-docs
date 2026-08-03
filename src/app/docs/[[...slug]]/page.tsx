@@ -13,7 +13,13 @@ import { notFound, permanentRedirect } from "next/navigation";
 import { APIPage } from "@/components/api-page";
 import { getMDXComponents, VersionedAnchor } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
-import { docsPath, isDocsVersionSlug } from "@/lib/docs-version";
+import {
+  archivedDocsUrl,
+  docsPath,
+  docsPathForVersion,
+  isDocsVersionSlug,
+  isVersionSegment,
+} from "@/lib/docs-version";
 import { gitConfig } from "@/lib/layout.shared";
 import {
   generateDocsParams,
@@ -26,6 +32,25 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
   const slugs = params.slug ?? [];
   if (!isDocsVersionSlug(slugs[0])) {
+    // A STALE version segment must be dropped, not carried along. This used to
+    // pass `slugs` through whole, so `/docs/0.1.1/start-here` redirected to
+    // `/docs/<current>/0.1.1/start-here` — a path with a version segment buried
+    // in the middle, which resolves to nothing and 404s. Every deep link
+    // published under a previous release died that way at each bump.
+    //
+    // If that version has an archived deployment, send the reader there: those
+    // docs actually describe the release they asked for. Otherwise fall back to
+    // the same page on the current version, losing the version but never the
+    // reader.
+    if (isVersionSegment(slugs[0])) {
+      const rest = slugs.slice(1);
+      const archived = archivedDocsUrl(slugs[0]);
+      permanentRedirect(
+        archived
+          ? `${archived}${docsPathForVersion(slugs[0], ...rest)}`
+          : docsPath(...rest)
+      );
+    }
     permanentRedirect(docsPath(...slugs));
   }
 

@@ -22,7 +22,6 @@ import {
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AlphaBadge, isAlphaRealm } from "@/components/realm-alpha-badge";
-import { RyuLogo } from "@/components/ryu-logo";
 import { docsPath } from "@/lib/docs-version";
 
 type Realm = {
@@ -174,7 +173,9 @@ type Stat = {
 };
 
 const STATS: Stat[] = [
-  { id: "guides", value: "200+", label: "hand-written guides" },
+  // No "hand-written guides" row. It was the one stat making a claim about how
+  // the docs were produced rather than what is in them, and that claim is not
+  // one this repo can keep true.
   { id: "api", value: "480+", label: "API reference pages" },
   { id: "sections", value: "14", label: "documentation sections" },
   { id: "diagrams", value: "75+", label: "architecture diagrams" },
@@ -205,7 +206,7 @@ const FEATURED: Featured[] = [
     eyebrow: "Gateway",
     title: "The Gateway: routing, firewall, and budgets",
     description:
-      "Every model call passes through — routing picks the provider, the firewall blocks what shouldn't leave, budgets cap spend.",
+      "Every model call passes through: routing picks the provider, the firewall blocks what shouldn't leave, budgets cap spend.",
     accent: "var(--gateway-color)",
   },
   {
@@ -299,19 +300,19 @@ function StatStrip() {
 export function Hero() {
   return (
     <section className="mx-auto flex w-full max-w-4xl flex-col items-center px-4 pt-16 pb-8 text-center sm:pt-24">
-      <span className="inline-flex items-center gap-2 rounded-full bg-fd-secondary px-3 py-1 font-medium text-fd-muted-foreground text-xs">
-        <RyuLogo size={14} />
-        Ryu Documentation
-      </span>
-
-      <h1 className="mt-6 text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
-        Find anything in Ryu, in seconds.
+      {/* Headline is the marketing hero's, verbatim (packages/blocks/src/web/
+          hero.tsx). Docs used to open on "Find anything in Ryu, in seconds",
+          which described the search box rather than the product, so someone
+          arriving from ryuhq.com met a different pitch one click in. */}
+      <h1 className="text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
+        We scale companies to 24/7 private and secure AI agent-native ops
+        without hiring, in minutes.
       </h1>
 
       <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
-        Ryu wraps any AI engine — OpenAI, Claude Code, Gemma, or anything
-        OpenAI-compatible — with routing, budgets, firewall, and tooling, so you
-        can run agents without wiring infrastructure yourself.
+        Ryu wraps any AI engine, from OpenAI and Claude Code to Gemma or
+        anything OpenAI-compatible, with routing, budgets, firewall, and
+        tooling, so you can run agents without wiring infrastructure yourself.
       </p>
 
       <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">

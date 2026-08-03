@@ -43,7 +43,13 @@ function DocsVersionSwitcher() {
   const legacyPath = segments.length ? `/docs/${segments.join("/")}` : "/docs";
 
   const options = DOCS_VERSIONS.map((version) => {
-    const url = docsPathForVersion(version.slug, ...targetSegments);
+    // An archived version lives on its OWN deployment (a `docs/<version>` branch),
+    // so its option leaves this site entirely. Keeping the same sub-path means the
+    // reader lands on the page they were already reading, in the docs that match
+    // the release they picked.
+    const url = version.externalUrl
+      ? `${version.externalUrl}${docsPathForVersion(version.slug, ...targetSegments)}`
+      : docsPathForVersion(version.slug, ...targetSegments);
     const urls =
       version.slug === DOCS_VERSION ? new Set([url, legacyPath]) : undefined;
 
