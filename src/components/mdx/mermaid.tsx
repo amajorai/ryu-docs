@@ -77,7 +77,6 @@ export function Mermaid({ chart }: { chart: string }) {
   }, []);
 
   const closeDialog = useCallback(() => {
-    dialogRef.current?.close();
     setDialogOpen(false);
   }, []);
 
