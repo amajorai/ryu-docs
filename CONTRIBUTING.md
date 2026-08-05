@@ -16,6 +16,26 @@ This unit is developed in Ryu's monorepo, which is the canonical source. The pub
 generated one-way from the monorepo, so it is read-only at the file level: open issues and pull
 requests here and a maintainer will land accepted changes upstream, then sync them back out.
 
+## This site is public — internal content does not belong here
+
+Everything under `content/` ships to the live public docs site and into `llms.txt` /
+`llms-full.txt`. It is customer-facing documentation, not an internal wiki. Never add:
+
+- **Program/status pages** — extraction or migration programs with wave tables,
+  effort estimates, statuses, LoC counts, commit hashes, or dated "current state"
+  snapshots.
+- **Internal inventories** — crate lists, app/package references, gateway-stage or
+  ghost/shadow catalogs, or debugging pages dumping internal endpoints, ports, or
+  probe commands.
+- **Links to internal artifacts** — pointers into the monorepo's `docs/*.md` (specs,
+  audits, QA findings, deploy procedures, decomposition records) or to the closed
+  GitHub repo. Those are development-internal.
+- **Internal env vars or secrets surfaces** — private environment variables, admin
+  emails, affiliate internals, or undocumented internal API routes.
+
+There is no "internal" tag — a page is public by default. If it leaks the development
+roadmap or would embarrass the team on the homepage, it does not belong here.
+
 ## Development
 
 ```bash

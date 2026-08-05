@@ -1,4 +1,4 @@
-export const DOCS_VERSION = "0.1.3" as const;
+export const DOCS_VERSION = "0.1.4" as const;
 
 /**
  * Versions served from their OWN deployment, cut as a `docs/<version>` branch at
@@ -79,7 +79,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.1.3", not "v0.1.3".
+    // Bare number, no "v" prefix — the switcher reads "0.1.4", not "v0.1.4".
     title: DOCS_VERSION,
     description: "Ryu docs and API reference",
   },

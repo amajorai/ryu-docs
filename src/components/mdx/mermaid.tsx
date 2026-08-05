@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -116,8 +117,44 @@ export function Mermaid({ chart }: { chart: string }) {
   );
 }
 
-const ZOOM_MIN = 0.2;
+const ZOOM_MIN = 0.05;
 const ZOOM_MAX = Number.POSITIVE_INFINITY;
+/** Upper bound for the automatic fit, so tiny diagrams don't fill the screen. */
+const FIT_MAX = 4;
+/** Breathing room, in px, kept between the diagram and the viewport edges. */
+const FIT_PADDING = 48;
+
+type SvgContent = { html: string; width: number; height: number };
+
+const VIEWBOX_RE = /viewBox="([^"]+)"/;
+
+/**
+ * Mermaid emits `width="100%"` plus an inline `max-width`, which makes the
+ * rendered size depend on whatever box it lands in — useless for computing a
+ * fit. Prepend the intrinsic viewBox size so the dialog can measure it.
+ *
+ * Done by string prepend rather than DOM parsing: with `htmlLabels` on, mermaid
+ * puts HTML inside `<foreignObject>`, which is not well-formed XML, so
+ * `DOMParser` in svg mode would fail on exactly the most common diagrams. The
+ * injected attributes win because an HTML parser keeps the first of a duplicate
+ * pair and ignores the later one.
+ */
+function prepareSvg(svg: string): SvgContent {
+  const parts = svg.match(VIEWBOX_RE)?.[1].split(/[\s,]+/).map(Number) ?? [];
+  const valid = parts.length === 4 && parts.every(Number.isFinite);
+  const width = valid ? (parts[2] ?? 0) : 0;
+  const height = valid ? (parts[3] ?? 0) : 0;
+  const sized =
+    width > 0 && height > 0 ? ` width="${width}" height="${height}"` : "";
+  return {
+    html: svg.replace(
+      /<svg/,
+      `<svg${sized} style="max-width:none;max-height:none"`,
+    ),
+    width,
+    height,
+  };
+}
 
 function MermaidDialog({
   onClose,
@@ -129,6 +166,8 @@ function MermaidDialog({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
+  const [measured, setMeasured] = useState(false);
+  const fitScaleRef = useRef(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef({
     active: false,
@@ -138,17 +177,59 @@ function MermaidDialog({
     startOffsetY: 0,
   });
 
+  const content = useMemo(() => prepareSvg(svg), [svg]);
+
+  const computeFit = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!(viewport && content.width > 0 && content.height > 0)) {
+      return null;
+    }
+    const rect = viewport.getBoundingClientRect();
+    const fit = Math.min(
+      (rect.width - FIT_PADDING) / content.width,
+      (rect.height - FIT_PADDING) / content.height,
+    );
+    return Math.min(FIT_MAX, Math.max(ZOOM_MIN, fit));
+  }, [content.width, content.height]);
+
+  // showModal() and the fit measurement must happen in this order: a closed
+  // <dialog> is display:none, so the viewport would measure 0x0 before it.
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+    const fit = computeFit();
+    if (fit !== null) {
+      fitScaleRef.current = fit;
+      setScale(fit);
+      setOffset({ x: 0, y: 0 });
+    }
+    setMeasured(true);
+  }, [computeFit]);
+
+  // Keep the Fit target current on resize, but never override the zoom the
+  // reader has chosen since opening.
   useEffect(() => {
-    dialogRef.current?.showModal();
-  }, []);
+    const onResize = () => {
+      const fit = computeFit();
+      if (fit !== null) {
+        fitScaleRef.current = fit;
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [computeFit]);
+
+  const zoomMin = Math.min(ZOOM_MIN, fitScaleRef.current);
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      setScale((prev) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, prev * delta)));
+      setScale((prev) => Math.min(ZOOM_MAX, Math.max(zoomMin, prev * delta)));
     },
-    [],
+    [zoomMin],
   );
 
   const handlePointerDown = useCallback(
@@ -181,7 +262,7 @@ function MermaidDialog({
   }, []);
 
   const resetView = useCallback(() => {
-    setScale(1);
+    setScale(fitScaleRef.current);
     setOffset({ x: 0, y: 0 });
   }, []);
 
@@ -197,13 +278,6 @@ function MermaidDialog({
     },
     [onClose],
   );
-
-  const svgWithKeys = useMemo(() => {
-    return svg.replace(
-      /<svg/,
-      '<svg style="max-width:none;max-height:none"',
-    );
-  }, [svg]);
 
   return createPortal(
     <dialog
@@ -228,7 +302,7 @@ function MermaidDialog({
               onClick={resetView}
               type="button"
             >
-              Reset
+              Fit
             </button>
             <button
               className="rounded-md bg-fd-secondary px-2 py-1 text-fd-muted-foreground text-xs transition-colors hover:bg-fd-accent hover:text-fd-foreground"
@@ -239,7 +313,7 @@ function MermaidDialog({
             </button>
             <button
               className="rounded-md bg-fd-secondary px-2 py-1 text-fd-muted-foreground text-xs transition-colors hover:bg-fd-accent hover:text-fd-foreground"
-              onClick={() => setScale((s) => Math.max(ZOOM_MIN, s * 0.8))}
+              onClick={() => setScale((s) => Math.max(zoomMin, s * 0.8))}
               type="button"
             >
               Zoom out
@@ -281,11 +355,13 @@ function MermaidDialog({
               transition: dragRef.current.active
                 ? "none"
                 : "transform 0.1s ease-out",
+              // Avoid a one-frame flash of the un-fitted diagram.
+              visibility: measured ? "visible" : "hidden",
             }}
           >
             <div
               className="[&_svg]:pointer-events-none [&_svg]:max-w-none"
-              dangerouslySetInnerHTML={{ __html: svgWithKeys }}
+              dangerouslySetInnerHTML={{ __html: content.html }}
             />
           </div>
         </div>
