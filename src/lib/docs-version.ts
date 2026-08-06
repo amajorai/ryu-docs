@@ -1,4 +1,4 @@
-export const DOCS_VERSION = "0.1.4" as const;
+export const DOCS_VERSION = "0.1.5" as const;
 
 /**
  * Versions served from their OWN deployment, cut as a `docs/<version>` branch at
@@ -17,7 +17,26 @@ export const DOCS_VERSION = "0.1.4" as const;
 export const ARCHIVED_DOCS_VERSIONS: readonly {
   readonly slug: string;
   readonly url: string;
-}[] = [];
+}[] = [
+  // Each entry is a `docs/<version>` branch of ryu-closed deployed as its own
+  // Dokploy app — the branch-per-version model Fumadocs itself recommends, so an
+  // archive keeps its own content AND its own dependencies rather than
+  // relabelling today's tree.
+  //
+  // This list stayed EMPTY for four releases while the branches were being cut
+  // and pushed, which is why the switcher only ever showed one version: nothing
+  // renders a version that is not in here, and `archivedDocsUrl` returns
+  // undefined so a stale `/docs/<old>/…` link falls back to current instead of
+  // landing on the release it was written for.
+  //
+  // Add an entry only AFTER the site answers 200 — the switcher renders whatever
+  // is in this list, so an unbacked entry is a dead dropdown row.
+  //
+  // Newest first: the switcher renders in array order.
+  { slug: "0.1.4", url: "https://docs-0-1-4.ryuhq.com" },
+  { slug: "0.1.3", url: "https://docs-0-1-3.ryuhq.com" },
+  { slug: "0.1.2", url: "https://docs-0-1-2.ryuhq.com" },
+];
 
 /** Matches a bare semver-ish version segment, e.g. `0.1.1`. */
 const VERSION_SEGMENT_RE = /^\d+\.\d+\.\d+$/;
@@ -79,7 +98,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.1.4", not "v0.1.4".
+    // Bare number, no "v" prefix — the switcher reads "0.1.5", not "v0.1.5".
     title: DOCS_VERSION,
     description: "Ryu docs and API reference",
   },

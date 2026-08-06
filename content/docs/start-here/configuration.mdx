@@ -1,0 +1,188 @@
+---
+title: Configuration
+description: Where Ryu's settings actually live - the channel bot store, node preferences, and gateway.toml - and why most environment variables are a last-resort override rather than the place you configure things.
+---
+
+Most of what you configure in Ryu is **not** an environment variable. Bots, agent bindings,
+models, prompts and policies live in real config stores you edit from Settings, and each one
+has an environment variable only as a *last-resort override* for headless and container
+deployments.
+
+The [Environment Variables](/docs/start-here/environment-variables) page lists every variable
+Ryu reads. Because it lists them flat, a fallback-tier variable looks identical to a required
+one. This page is the other half: what the primary config surfaces are, and how precedence
+resolves between them.
+
+## The three tiers
+
+| Tier | What lives here | Stored in | You change it via |
+|---|---|---|---|
+| **1. Bootstrap** | Profile, bind addresses, data directory, the path *to* the config file, node auth token | Environment only | Shell, systemd unit, Docker/compose |
+| **2. Secrets** | Provider API keys, bot tokens | Environment, or sealed per-value inside the channel store | Shell, or Settings (sealed, write-only) |
+| **3. Behavior** | Bots, agent bindings, models, prompts, reply policies, budgets | Channel store, node preferences, `gateway.toml` | Settings UI, or the TOML file |
+
+Tier 1 is env by necessity: Ryu cannot read a setting out of a config file whose location that
+setting would have told it. Tier 3 is where nearly all the volume is, and where env is the
+weakest source.
+
+<Callout type="info">
+  **Rule of thumb.** If a setting has a picker in Settings, the picker wins. The matching
+  environment variable only applies when nothing has been set through the UI.
+</Callout>
+
+## Channel bots
+
+Telegram, Slack, Discord, WhatsApp and iMessage bots are configured **per bot**, not per
+platform. Each bot is its own record with its own token, its own agent, and its own reply
+policy.
+
+This is what lets you run several bots on the same platform pointed at different agents - a
+support bot on one Telegram token bound to one agent, a marketing bot on another token bound to
+a different one. Bot records are unique per organization, channel type and name, so the only
+thing you cannot do is give two bots on the same platform the same name.
+
+Add and edit them under **Channels** in the desktop app or the web dashboard. The Gateway loads
+every enabled record on start and runs one adapter per record.
+
+### Per-bot settings
+
+| Field | What it does |
+|---|---|
+| `name` | Label for the bot. Unique per platform. |
+| `channelType` | `telegram`, `slack`, `discord`, `whatsapp`, `bluebubbles`. |
+| `secrets` | Bot token and any platform credentials. Write-only - never returned by read endpoints. |
+| `agentId` | Core agent this bot routes to. This is the binding that makes two bots behave differently. |
+| `teamId` | Route to a team (a lead agent orchestrating members) instead of a single agent. Takes precedence over `agentId`. |
+| `model` | Model override, used when no agent or team is bound. |
+| `systemPrompt` | System prompt prepended to every inbound conversation. |
+| `groupReplyMode` | Whether the bot answers everything in a group or only on mention. Defaults to mentions-only. |
+| `dmPolicy` / `dmAllowlist` | Who may DM the bot, and how a stranger enrols. |
+| `groupPolicy` / `groupAllowlist` | Whether and where the bot answers in groups. |
+| `typingIndicator`, `publishCommands`, `richText` | Presentation toggles. On by default. |
+| `streaming` | Stream the reply as it generates instead of sending it whole. |
+| `voiceReply` | `never`, `mirror` (speak only when the user sent a voice note), or `always`. |
+| `threadReplies` | Discord: answer inside a thread opened on the triggering message. |
+| `sendReadReceipts` | WhatsApp / iMessage: mark inbound messages read. |
+| `profileName`, `profileShortBio`, `profileDescription` | Bot profile shown on the platform. |
+
+### The environment fallback
+
+If you have configured **no** bots for a platform, the Gateway falls back to a single
+env-configured bot for it. A single bot per platform is all this path supports, which is why it
+exists only for headless and container deployments.
+
+The credential that enables it (`TELEGRAM_BOT_TOKEN`, `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN`,
+`DISCORD_BOT_TOKEN`, the `WHATSAPP_*` set, or the `BLUEBUBBLES_*` set) is listed on the
+[Environment Variables](/docs/start-here/environment-variables) page. The behaviour knobs that
+mirror the bot-record fields are:
+
+| Environment variable | Bot record field |
+|---|---|
+| `TELEGRAM_MODEL`, `SLACK_MODEL`, `DISCORD_MODEL`, `WHATSAPP_MODEL` | `model` |
+| `TELEGRAM_SYSTEM_PROMPT`, `SLACK_SYSTEM_PROMPT`, `DISCORD_SYSTEM_PROMPT`, `WHATSAPP_SYSTEM_PROMPT` | `systemPrompt` |
+| `TELEGRAM_AGENT_ID`, `SLACK_AGENT_ID`, `DISCORD_AGENT_ID`, `WHATSAPP_AGENT_ID` | `agentId` |
+| `TELEGRAM_TEAM_ID`, `SLACK_TEAM_ID`, `DISCORD_TEAM_ID`, `WHATSAPP_TEAM_ID` | `teamId` |
+| `TELEGRAM_GROUP_REPLY_MODE`, `SLACK_GROUP_REPLY_MODE`, `DISCORD_GROUP_REPLY_MODE`, `WHATSAPP_GROUP_REPLY_MODE` | `groupReplyMode` |
+| `RYU_CHANNEL_ALLOWED_USERS`, `RYU_CHANNEL_ALLOWED_USERS_TELEGRAM`, `RYU_CHANNEL_ALLOW_ALL` | `dmAllowlist` / `dmPolicy` |
+
+<Callout type="warn">
+  **The fallback is all-or-nothing, per platform.** As soon as one Telegram bot exists in the
+  store, `TELEGRAM_BOT_TOKEN` and every other `TELEGRAM_*` variable stop being read. Nothing
+  logs that they were ignored. If you added a bot in Settings and your env token appears dead,
+  this is why - move its settings onto the bot record.
+</Callout>
+
+`gateway.toml` also carries a `[channels.<platform>]` table with the same knobs, which behaves
+like the env fallback: one bot per platform, superseded by the store.
+
+## Node preferences
+
+Core keeps a preferences store on the node for settings that belong to the machine rather than
+to a deployment. Every key below is set from Settings, and the environment variable next to it
+is only read when the preference is unset.
+
+Resolution is: **explicit request argument -> preference -> node-wide default agent selection ->
+environment variable -> built-in default.**
+
+### Model selection
+
+| Preference | Environment fallback | What it selects |
+|---|---|---|
+| `advisor-model` | `RYU_ADVISOR_MODEL` | Stronger reviewer model for `/advisor`. Shared with the advisor plugin's settings tab. |
+| `btw-model`, `btw-effort` | `RYU_BTW_MODEL`, `RYU_BTW_EFFORT` | Side-question model for `/btw`. |
+| `auto-title-model`, `auto-title-effort` | - | Conversation auto-titling. Falls back to the resident local engine, so titles never leave the machine. |
+| `chat-suggestions-model` | - | Follow-up suggestion generation. |
+| `context.compact-model` | - | Model used to compact a conversation that outgrew its window. |
+| `default-agent-selection` | `RYU_DEFAULT_LLM_MODEL` | Node-wide default every unset model selection inherits. |
+
+### Recall and context
+
+| Preference | Environment fallback | Default |
+|---|---|---|
+| `auto-recall-enabled` | `RYU_AUTO_RECALL_ENABLED` | On |
+| `auto-recall-top-k` | `RYU_AUTO_RECALL_TOP_K` | 5 |
+| `fts-recall-enabled` | `RYU_FTS_RECALL_ENABLED` | Off |
+| `context.max-tokens` | `RYU_CONTEXT_MAX_TOKENS` | Per-model window |
+| `context.auto-compact` | - | On |
+
+### Routing
+
+| Preference | What it does |
+|---|---|
+| `routing-fallback-policy` | Which cheaper model to fall back to when credit or quota runs low. |
+| `routing-retry-policy` | Whether a capped turn retries automatically on the next-best window. |
+
+## Gateway TOML
+
+The Gateway's own settings - providers, pipeline, budgets, prompt cache - live in
+`gateway.toml`, with `GATEWAY_*` environment variables as overrides on top of it. The file is
+the primary source; see [Gateway configuration](/docs/gateway/configuration) for the full
+reference.
+
+`GATEWAY_CONFIG` is a tier-1 variable: it is the path to that file, so it can only be an
+environment variable.
+
+## App settings are registered by the app
+
+Feature apps own their own configuration. An app that has settings declares them in its manifest
+under `contributes.settings_tabs`, and Settings renders the tab from that declaration - Core has
+no hardcoded page for it:
+
+```json
+"contributes": {
+  "settings_tabs": [
+    { "id": "learning.settings", "title": "Learning", "scope": "node", "view": "learning" }
+  ]
+}
+```
+
+`scope: "node"` means the values are stored per node, alongside Core's other node preferences.
+The rest of the apps contribute only sidebar sections, views, dock panels or hook events, and
+have no settings surface of their own.
+
+| App | Settings tab | Enabled on a fresh install |
+|---|---|---|
+| Dictation | Dictation | Yes |
+| Learning | Learning | Yes |
+| Meetings | Meetings | No - enable it first |
+| Autocomplete (`predict`) | Autocomplete | No - opt-in by design, since it sends text from other apps to a model |
+| Tasks (`quests`) | Tasks | No - enable it first |
+
+<Callout type="warn">
+  **A settings tab inherits its app's enablement.** A disabled app contributes nothing, so its
+  tab is simply absent from Settings rather than shown greyed out. If you cannot find a
+  feature's settings, enable the app first.
+</Callout>
+
+## What stays in the environment
+
+These have no config-file home and never will:
+
+- **Bootstrap** - `RYU_PROFILE`, `RYU_BIND`, `RYU_DIR`, `RYU_TOKEN`, `GATEWAY_CONFIG`
+- **Master key** - `RYU_MASTER_KEY`, which unseals everything else
+- **Provider API keys** - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and the rest, unless you enter
+  them in Settings instead
+- **Deployment shape** - container ports, `RYU_GATEWAY_FLEET`, service URLs
+
+Everything else on the [Environment Variables](/docs/start-here/environment-variables) page is
+an override for a setting that has a real home described above.
