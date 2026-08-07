@@ -56,29 +56,44 @@ export function getPageImage(page: DocsPage) {
   };
 }
 
+/**
+ * The first `structuredData.contents[].content` string fumadocs-openapi wrote,
+ * or "" if this page has none. Narrows step by step because `_openapi` is typed
+ * as an open record — the generator owns its shape, not this file.
+ */
+function specDescription(openapi: Record<string, unknown> | undefined): string {
+  const structured = openapi?.structuredData;
+  if (typeof structured !== "object" || structured === null) {
+    return "";
+  }
+  const { contents } = structured as { contents?: unknown };
+  if (!Array.isArray(contents)) {
+    return "";
+  }
+  const [first] = contents;
+  if (typeof first !== "object" || first === null) {
+    return "";
+  }
+  const { content } = first as { content?: unknown };
+  return typeof content === "string" ? content : "";
+}
+
 export async function getLLMText(page: DocsPage) {
   const processed = await page.data.getText("processed");
 
   // For API reference pages, extract the HTTP method and path from frontmatter
-  // to produce a structured header that agents can parse.
-  const openapi = (page.data as Record<string, unknown>)._openapi as
-    | {
-        method?: string;
-        structuredData?: { contents?: Array<{ content?: string }> };
-      }
-    | undefined;
+  // to produce a structured header that agents can parse. `_openapi` is an open
+  // record on the schema, so each field is narrowed rather than asserted.
+  const openapi = page.data._openapi;
+  const method = openapi?.method;
+  const methodLine = typeof method === "string" ? `Method: ${method.toUpperCase()}` : "";
+  const descriptionFromSpec = specDescription(openapi);
 
-  const methodLine = openapi?.method
-    ? `Method: ${openapi.method.toUpperCase()}`
-    : "";
-  const descriptionFromSpec =
-    openapi?.structuredData?.contents?.[0]?.content ?? "";
-
-  // Extract tags from frontmatter for agent-optimized discoverability
-  const frontmatter = (page.data as Record<string, unknown>).frontmatter as
-    | { tags?: string[] }
-    | undefined;
-  const tags = frontmatter?.tags;
+  // Tags for agent-optimized discoverability. Read straight off `page.data`,
+  // which IS the parsed frontmatter — the previous `page.data.frontmatter.tags`
+  // was a level too deep, so it was always undefined and this line never
+  // rendered on any of the 33 pages that declare tags.
+  const tags = page.data.tags;
   const tagsLine = tags?.length ? `Tags: ${tags.join(", ")}` : "";
 
   const header = [
