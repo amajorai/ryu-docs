@@ -1,0 +1,225 @@
+---
+title: "Testing Plugin Tools"
+description: "Write plugin tool bodies as deterministic functions and prove them with a golden case table, so a tool is verified before anything is allowed to call it"
+---
+
+A tool your plugin contributes is code an agent will call without asking you first.
+If it is flaky, the agent's failure looks like a bad answer rather than a bad tool —
+which is the hardest kind of bug to attribute. This page is how to make a tool body
+**testable**, what "deterministic" can actually mean for one, and how to run the
+checks.
+
+<Callout type="info">
+The harness described here ships in the repository as `tools/toolsmith`. It has no
+dependencies beyond Node's own test runner.
+</Callout>
+
+## Why a tool body needs a harness at all
+
+A tool body is a **fragment**, not a module. Ryu splices it into an async IIFE with
+a fixed set of bindings already in scope, and the body `return`s its result:
+
+```js title="tools/word_count.js"
+// `input` and `host` are already bound. No import, no export.
+if (typeof input.text !== "string") {
+	throw new Error("word_count: 'text' is required and must be a string");
+}
+return { words: input.text.trim().split(/\s+/).filter(Boolean).length };
+```
+
+That top-level `return` is correct, and it is also why no test runner can simply
+`import()` the file — a module parser rejects the form. So testing a tool body means
+reproducing the splice, and reproducing the splice is the job the harness does once
+instead of every plugin doing it slightly differently.
+
+There are three fragment forms, distinguished by what gets injected:
+
+| Form | Injected bindings | Used by |
+| --- | --- | --- |
+| `inline_tool` | `input`, `host` | a tool with `backend: "inline_deno"` |
+| `adapter` | `input`, `defaults`, `callTool`, `callNamed` | a [capability adapter](/docs/develop/extensions/capability-broker) |
+| `turn_hook` | `ctx`, `host` | a [turn hook](/docs/develop/extensions/plugin-runtime) |
+
+## What "deterministic" means for a tool
+
+A tool that calls a search API is not deterministic and never will be. Demanding
+that is how you end up with no tests at all. The property that *is* achievable, and
+that the sandbox already supports:
+
+> The body is a **pure function of its injected input and the answers its declared
+> effects returned.** Every source of nondeterminism is confined to `host.*`,
+> `callTool` and `callNamed` — which are exactly the calls a test can stub.
+
+Concretely, that rules out reaching for anything ambient:
+
+- **No clock.** No `Date.now()`, no argless `new Date()`. If the tool needs a
+  timestamp, take one as an input field so the caller owns it.
+- **No randomness.** No `Math.random()`, no `crypto.randomUUID()`. A tool that mints
+  its own id cannot be replayed. Let the caller supply it.
+- **No ambient environment.** No `process.env`. Values that vary per install belong
+  in the manifest (`arg_defaults`, `secret_headers`), resolved before the body runs.
+- **No direct network.** No `fetch`. Egress is not granted in the sandbox anyway —
+  route it through `callTool` / `callNamed` or a host function.
+- **No timers.** A tool body is a straight-line function of its input.
+
+`Math.max` and `new Date(someMillis)` are perfectly pure and stay available. Only
+the impure members are off-limits.
+
+## Writing the body
+
+Four rules that matter more than style:
+
+1. **Validate the input and throw a named error.** A tool that returns `{}` on bad
+   input teaches the model that the call succeeded.
+2. **Never fabricate a plausible empty result from a broken call.** If a provider
+   answered with an error envelope, return the envelope — not `{ results: [] }`.
+   The second is an invisible lie that reads as "no matches" and sends the agent
+   confidently down the wrong path.
+3. **Return a stable shape.** Same keys on every path; absent data is `null`, not a
+   missing key.
+4. **Keep it narrow.** One tool with a `mode` argument routes worse than three tools
+   with three clear descriptions — the model picks by description.
+
+## Writing the cases
+
+Cases live in a `cases.json` beside the body. Each one supplies the input, stubs the
+effects, and states the expectation:
+
+```json title="cases.json"
+{
+  "tool": "word_count",
+  "kind": "inline_tool",
+  "code_file": "tools/word_count.js",
+  "cases": [
+    {
+      "name": "counts words separated by runs of whitespace",
+      "input": { "text": "one  two\tthree" },
+      "expect": { "words": 3 }
+    },
+    {
+      "name": "empty text is zero words, not one empty word",
+      "input": { "text": "   " },
+      "expect": { "words": 0 }
+    },
+    {
+      "name": "rejects a non-string instead of stringifying it",
+      "input": { "text": 42 },
+      "expectError": "'text' is required"
+    }
+  ]
+}
+```
+
+Each case declares exactly one of `expect` (deep-equals the return value),
+`expectError` (a regex the thrown message must match), or `expectImpure` (documents
+a body deliberately rejected as nondeterministic).
+
+**At least three cases are required.** The floor is happy path, boundary, and
+failure — one happy path proves nothing about a tool.
+
+### Stubbing effects
+
+For an `inline_tool` or `turn_hook`, the `host` fixture drives the host facade:
+
+```json
+"host": {
+  "sideModel": [ { "text": "first answer" }, { "text": "second answer" } ],
+  "storage": { "seen": "1" }
+}
+```
+
+`sideModel` and `runAgent` are **queues** — one entry per expected call, served in
+order, so a body that calls more often than the fixture allows fails loudly instead
+of silently reusing one answer. `storage` seeds a real in-memory map, so
+read-after-write behaves the way it will in production.
+
+For an `adapter`, the `provider` fixture drives the provider calls:
+
+```json
+"provider": {
+  "call":  [ { "structuredContent": { "results": [] } } ],
+  "named": { "job__status": [ { "done": true } ] }
+}
+```
+
+`callNamed` is checked against the `adapter.tools` allowlist your manifest declared,
+mirroring the host-side check — so a case cannot pass against a call the real
+runtime would refuse.
+
+### Pinning the outcome, not just the output
+
+`expect` checks what came back. `expectCalls` checks **what the tool asked the world
+to do** — every effect, in order, with exact arguments:
+
+```json
+"expectCalls": [
+  { "path": "callTool", "args": { "query": "lisbon", "limit": 5 } }
+]
+```
+
+This is the assertion that catches a tool returning the right shape while calling
+the wrong endpoint. Use it whenever the tool has an effect.
+
+## Running the checks
+
+`--out` is your plugin's directory — the one holding its `manifest.json`, which for
+an installed plugin is `~/.ryu/plugins/<id>/`.
+
+```bash
+# create a package: body, cases.json, and its test file
+node tools/toolsmith/index.mjs scaffold \
+  --id @scope/name --tool word_count --out ~/.ryu/plugins/@scope/name
+
+# seal the authored body into the manifest (inline_deno tools only)
+node tools/toolsmith/index.mjs sync ~/.ryu/plugins/@scope/name
+
+# the gate
+node tools/toolsmith/index.mjs verify ~/.ryu/plugins/@scope/name
+```
+
+Re-running `scaffold` regenerates only the test file; your body and `cases.json` are
+never overwritten.
+
+`verify` runs four steps, and the order matters:
+
+1. **Purity scan.** A static pass over the source that rejects every ambient
+   construct listed above. It runs first, before the body executes, and a violation
+   stops everything.
+2. **Manifest contract.** The tool is seated in the manifest, is routable (a real
+   description and an `input_schema`), and is callable — an `inline_deno` tool needs
+   `"tool:execute"` in `permission_grants`, and without it the tool registers,
+   appears in discovery, and then refuses every call it receives.
+3. **Drift check.** The manifest carries exactly the body the cases tested.
+4. **Cases.** Every case runs **twice** against fresh, identically-seeded stubs, and
+   the two results must match. Anything nondeterministic that slipped past the scan
+   fails here.
+
+The generated test file runs the same four steps, so the automated suite can never
+be greener than the command.
+
+<Callout type="warn">
+The purity scan is a guardrail, not a sandbox. It is a conservative source-level
+denylist, and the body runs with full privileges in the test process. Use it on tool
+bodies you or your team wrote and have read — it is not a vetting step for an
+untrusted third-party plugin. The thing that actually confines plugin code at
+runtime is the deny-by-default Deno sandbox.
+</Callout>
+
+## Authoring in a file, shipping in the manifest
+
+A capability adapter and a turn hook both reference their body by path
+(`code_file`), and Ryu reads that file from the plugin's own directory. An
+`inline_deno` tool has no such field — its only loadable form is a string inside
+`manifest.json`.
+
+Write the body in a file anyway, and let `sync` copy it into the manifest. A
+`\n`-escaped one-line blob in JSON is not reviewable, not diffable, and not
+lintable, and "nobody reads it" is precisely the property malicious code relies on.
+`sync --check` — which `verify` runs — is what keeps the file and the manifest from
+drifting apart.
+
+## Related
+
+- [Plugin Runtime (Turn Hooks)](/docs/develop/extensions/plugin-runtime)
+- [`plugin.json` Manifest](/docs/develop/extensions/plugin-json-manifest)
+- [Capability Broker](/docs/develop/extensions/capability-broker)

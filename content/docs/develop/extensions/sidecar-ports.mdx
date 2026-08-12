@@ -1,0 +1,131 @@
+---
+title: "Pick a Sidecar Port"
+description: "How Core assigns, shifts, and health-checks the port your manifest sidecar binds - and why your process should read it from the environment instead of hardcoding it"
+tags: ["sidecar", "port", "port_env", "manifest", "extension", "collision"]
+---
+
+A manifest sidecar declares one TCP port:
+
+```json
+{
+  "sidecars": [
+    {
+      "name": "engine",
+      "process": { "kind": "local", "command": "my-engine", "port_env": "MY_ENGINE_PORT" },
+      "port": 8321,
+      "health_path": "/health"
+    }
+  ]
+}
+```
+
+Core uses that number for three things: it tells your process which port to bind, it health-checks
+`http://127.0.0.1:<port><health_path>`, and it forwards proxied requests there. All three must
+agree, and the way they stay in agreement is that **your process binds the port Core hands it**,
+not a constant you compiled in.
+
+This page is only about the port. For the rest of the field, see
+[Bundle Runnables with manifest.json](/docs/develop/extensions/plugin-json-manifest#declare-a-managed-sidecar);
+for download, spawn, health and reconcile behaviour, see
+[App Manifest & Lifecycle](/docs/core/app-manifest-lifecycle#manifest-declared-managed-sidecars).
+
+## Read your port from `port_env`
+
+Name an environment variable in `port_env` and Core sets it on your child process at spawn:
+
+```json
+"process": { "kind": "local", "command": "my-engine", "port_env": "MY_ENGINE_PORT" }
+```
+
+Your process reads it, and falls back to the declared port only so it stays runnable standalone:
+
+```ts
+const PORT = Number.parseInt(process.env.MY_ENGINE_PORT ?? "", 10) || 8321;
+app.listen(PORT, "127.0.0.1");
+```
+
+```python
+port = int(os.environ.get("MY_ENGINE_PORT") or 8321)
+uvicorn.run(app, host="127.0.0.1", port=port)
+```
+
+<Callout type="warn">
+  Bind `127.0.0.1`, never `0.0.0.0`. A sidecar that binds all interfaces is reachable from the
+  local network, and Core's proxy is the only intended way in.
+</Callout>
+
+### Why the environment wins over the constant
+
+The value Core injects is **not always the number in your manifest**. A node runs under a
+*profile*, and every profile but the default shifts every port by a fixed offset - a `dev` node
+adds 1000 to everything, so a developer can run a dev build beside a release install without the
+two fighting over sockets. Core shifts your sidecar's port the same way it shifts its own.
+
+So on a `dev` node, a manifest that says `8321` is health-checked and proxied on `9321`. A process
+that hardcodes `8321` binds a port nobody is watching: Core reports the sidecar unhealthy, the
+proxy 502s, and nothing in the error names a port. Reading `port_env` makes that case correct for
+free.
+
+The same reasoning covers the future: treat the manifest `port` as *what you would like*, and the
+environment as *what you got*. A process written that way keeps working if Core ever assigns the
+port itself.
+
+<Callout type="warn">
+  `port_env` exists on the `local` and `python` process kinds only. A `binary` or `node` sidecar
+  has no equivalent field and is spawned with no port injection at all, so it must bind the
+  declared port literally - which makes it correct on a default-profile node and wrong on any
+  other, because Core still health-checks and proxies the shifted port. If your process reads
+  configuration from the environment anyway, that gap is a reason to prefer `local` or `python`;
+  if you ship a downloaded binary you have no choice, so test on the profile your users run.
+</Callout>
+
+## Choosing a number
+
+There is no port registry: the number in your manifest is the number Core tries, and a collision is
+resolved by refusing to start rather than by moving anyone. Before spawning, Core bind-probes the
+port and fails the start if anything already holds it:
+
+```
+port 8321 is already in use on the host (bind probe failed: …)
+port 8321 is already claimed by sidecar '@acme/other/engine'
+```
+
+That is detection, not repair - the user sees an app that will not start. So pick with some care:
+
+| Range | Who uses it | Safe for your app? |
+| --- | --- | --- |
+| `3200`, `7980`, `8000`, `8080`-`8096`, `9070`, `30000` | Core's own substrate - local inference engines, speech, image generation, the workflow runtime, the SDK adapter | No, never |
+| `7990`-`8096` | Ryu's first-party apps and engines | No - this band fills up as Ryu ships apps |
+| `8300`-`8699` | unclaimed | Yes - pick here |
+
+Within `8300`-`8699`, pick a number that is not a round or famous one (`8500`, `8443` are crowded by
+other software), and check the ports of any apps you depend on - a plugin you install alongside
+yours is as likely to collide as Ryu itself. `GET /api/sidecar/status` lists what is registered on
+the node you are testing against.
+
+## Your port is not your public URL
+
+Clients never dial your sidecar. Core exposes it at
+
+```
+/api/ext/<plugin_id>/<your route>
+```
+
+and proxies through to whatever port your process ended up on. That indirection is what makes a
+port change - a profile shift, a reinstall, a future allocator - invisible to every caller. Do not
+publish `127.0.0.1:<port>` in your app's own docs or bake it into a companion UI; use the
+`/api/ext/` path, which is stable.
+
+The shorter `/api/<name>` mounts you see on Ryu's first-party apps are reserved to built-ins and
+registered when Core builds its router, so a third-party app cannot claim one - and does not need
+to.
+
+## Checklist
+
+- Declare `port` and `port_env` together.
+- Read `port_env` in the process; fall back to the declared port only for standalone runs.
+- Bind `127.0.0.1`.
+- Serve `health_path` (default `/health`) with a 2xx as soon as you are listening - Core treats
+  that as "started".
+- Pick from `8300`-`8999`.
+- Point clients at `/api/ext/<plugin_id>/*`, never at the port.
