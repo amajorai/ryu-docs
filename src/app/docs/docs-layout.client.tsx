@@ -55,7 +55,6 @@ function DocsVersionSwitcher() {
 
     return {
       title: version.title,
-      description: version.description,
       url,
       urls,
     };

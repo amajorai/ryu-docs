@@ -92,7 +92,6 @@ export function archivedDocsUrl(slug: string): string | undefined {
 export const DOCS_VERSIONS: readonly {
   readonly slug: string;
   readonly title: string;
-  readonly description: string;
   /** Set for archived versions: the switcher links OUT to that deployment. */
   readonly externalUrl?: string;
 }[] = [
@@ -100,12 +99,10 @@ export const DOCS_VERSIONS: readonly {
     slug: DOCS_VERSION,
     // Bare number, no "v" prefix — the switcher reads "0.1.11", not "v0.1.11".
     title: DOCS_VERSION,
-    description: "Ryu docs and API reference",
   },
   ...ARCHIVED_DOCS_VERSIONS.map((v) => ({
     slug: v.slug,
     title: v.slug,
-    description: "Archived release",
     externalUrl: v.url,
   })),
 ];
