@@ -24,12 +24,27 @@ import { useEffect, useState } from "react";
 import { AlphaBadge, isAlphaRealm } from "@/components/realm-alpha-badge";
 import { docsPath } from "@/lib/docs-version";
 
+/**
+ * `track` is the documentation split.
+ *
+ * Ryu is one product sold through two motions, and the two must never share
+ * copy: a firm hires it to do work and lives in the app; a developer runs it
+ * themselves and wires it into their own stack. The business site is written
+ * entirely for the first reader. These docs serve BOTH, so rather than pick a
+ * voice they separate by track — "use" answers "how do I get my work done with
+ * this", "build" answers "how do I run and extend it".
+ *
+ * A realm belongs in "build" if reading it requires a terminal.
+ */
+type Track = "build" | "use";
+
 type Realm = {
   slug: string;
   title: string;
   description: string;
   icon: LucideIcon;
   accent: string;
+  track: Track;
 };
 
 const REALMS: Realm[] = [
@@ -40,6 +55,7 @@ const REALMS: Realm[] = [
       "Install Ryu, understand how the pieces fit together, and send your first message.",
     icon: Rocket,
     accent: "var(--start-here-color)",
+    track: "use",
   },
   {
     slug: "desktop",
@@ -48,6 +64,7 @@ const REALMS: Realm[] = [
       "The flagship app and its companions (Island, extension, Raycast): chat, agents, teams, engines, and more.",
     icon: Monitor,
     accent: "var(--desktop-color)",
+    track: "use",
   },
   {
     slug: "cli",
@@ -56,6 +73,7 @@ const REALMS: Realm[] = [
       "The Rust terminal UI: chat, a fuzzy command palette, live list tabs, and GitOps from your shell.",
     icon: Terminal,
     accent: "var(--cli-color)",
+    track: "build",
   },
   {
     slug: "mobile",
@@ -64,6 +82,7 @@ const REALMS: Realm[] = [
       "The Expo app: chat and a drawer of screens over the same Core, through the active node.",
     icon: Smartphone,
     accent: "var(--mobile-color)",
+    track: "use",
   },
   {
     slug: "hardware",
@@ -72,6 +91,7 @@ const REALMS: Realm[] = [
       "ESP32-S3 devices (watch, necklace, desk hub) that capture audio and camera and run all inference on a node: protocol, pairing, ambient capture, firmware, and deployment.",
     icon: CircuitBoard,
     accent: "var(--hardware-color)",
+    track: "build",
   },
   {
     slug: "skills",
@@ -80,6 +100,7 @@ const REALMS: Realm[] = [
       "Agent skills: reusable SKILL.md instruction packs that load on demand. The setup-ryu flagship, the shipped catalog, authoring, and publishing.",
     icon: Sparkles,
     accent: "var(--skills-color)",
+    track: "use",
   },
   {
     slug: "mcp",
@@ -88,6 +109,7 @@ const REALMS: Realm[] = [
       "Connect Claude Desktop or any MCP host to your node: quickstart config, the tool list, remote-node setup, and security.",
     icon: PlugZap,
     accent: "var(--mcp-color)",
+    track: "build",
   },
   {
     slug: "cookbook",
@@ -96,6 +118,7 @@ const REALMS: Realm[] = [
       "End-to-end recipes: agents, routing, deployments, multi-node, and channel bots.",
     icon: BookOpen,
     accent: "var(--cookbook-color)",
+    track: "build",
   },
   {
     slug: "academy",
@@ -104,6 +127,7 @@ const REALMS: Realm[] = [
       "Structured courses from first chat to certified builder, with knowledge checks.",
     icon: GraduationCap,
     accent: "var(--academy-color)",
+    track: "use",
   },
   {
     slug: "gateway",
@@ -112,6 +136,7 @@ const REALMS: Realm[] = [
       "The LLM control plane: routing, firewall, budgets, evals, and audit.",
     icon: Shield,
     accent: "var(--gateway-color)",
+    track: "build",
   },
   {
     slug: "core",
@@ -120,6 +145,7 @@ const REALMS: Realm[] = [
       "Local backend internals: sessions, memory, RAG, workflows, sandboxes, and MCP.",
     icon: Cpu,
     accent: "var(--core-color)",
+    track: "build",
   },
   {
     slug: "security",
@@ -128,6 +154,7 @@ const REALMS: Realm[] = [
       "Ryu's security model: trust boundary, sandboxing, command approval and HITL, credential scrubbing, outbound DLP, SSRF protection, and deployment hardening.",
     icon: ShieldCheck,
     accent: "var(--security-color)",
+    track: "build",
   },
   {
     slug: "develop",
@@ -136,6 +163,7 @@ const REALMS: Realm[] = [
       "Build on Ryu: TypeScript SDK, Rust SDK, plugin manifests, and the full API reference.",
     icon: Code2,
     accent: "var(--develop-color)",
+    track: "build",
   },
 ];
 
@@ -300,19 +328,22 @@ function StatStrip() {
 export function Hero() {
   return (
     <section className="mx-auto flex w-full max-w-4xl flex-col items-center px-4 pt-16 pb-8 text-center sm:pt-24">
-      {/* Headline is the marketing hero's, verbatim (packages/blocks/src/web/
-          hero.tsx). Docs used to open on "Find anything in Ryu, in seconds",
-          which described the search box rather than the product, so someone
-          arriving from ryuhq.com met a different pitch one click in. */}
+      {/* These docs deliberately do NOT reuse the marketing headline. They used
+          to carry it verbatim, on the theory that someone arriving from
+          ryuhq.com should not meet a different pitch one click in — but that
+          site is written for a firm hiring Ryu to do its work, and this site is
+          read by someone who has to run it. Sharing a sentence between the two
+          means one of the two readers is being addressed in the wrong language.
+          What the two surfaces share is the idea, not the copy: works with
+          everything, locked to nothing. */}
       <h1 className="text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
-        We scale companies to 24/7 private and secure AI agent-native ops
-        without hiring, in minutes.
+        Everything Ryu does, written down.
       </h1>
 
       <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
-        Ryu wraps any AI engine, from OpenAI and Claude Code to Gemma or
-        anything OpenAI-compatible, with routing, budgets, firewall, and
-        tooling, so you can run agents without wiring infrastructure yourself.
+        Two tracks over one product. Use Ryu to get work done in the app, or
+        run it yourself and build on it — same engine underneath, wrapped
+        around any model you point it at.
       </p>
 
       <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">
@@ -363,6 +394,52 @@ function RealmCard({ realm }: { realm: Realm }) {
   );
 }
 
+const TRACKS: {
+  description: string;
+  id: Track;
+  title: string;
+}[] = [
+  {
+    id: "use",
+    title: "Use Ryu",
+    description:
+      "You want Ryu to do the work. The app and its companions, what to ask them, and how to check what they did.",
+  },
+  {
+    id: "build",
+    title: "Build on Ryu",
+    description:
+      "You want to run it yourself. The gateway and Core internals, the SDKs and API, MCP, security, and hands-on recipes.",
+  },
+];
+
+function TrackSection({ track }: { track: (typeof TRACKS)[number] }) {
+  const realms = REALMS.filter((realm) => realm.track === track.id);
+  const headingId = `track-${track.id}-heading`;
+
+  return (
+    <section aria-labelledby={headingId} className="mt-10 first:mt-0">
+      <h3
+        className="font-heading font-medium text-fd-foreground text-lg"
+        id={headingId}
+      >
+        {track.title}
+      </h3>
+      <p className="mt-1 text-fd-muted-foreground text-sm">
+        {track.description}
+      </p>
+      <nav
+        aria-label={track.title}
+        className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
+        {realms.map((realm) => (
+          <RealmCard key={realm.slug} realm={realm} />
+        ))}
+      </nav>
+    </section>
+  );
+}
+
 export function Realms() {
   return (
     <section
@@ -376,17 +453,14 @@ export function Realms() {
         Documentation
       </h2>
       <p className="mt-1 text-fd-muted-foreground text-sm">
-        Everything from getting started and the desktop app, to the Gateway
-        control plane, Core internals, security, SDK, and hands-on recipes.
+        Split by what you came here to do. Nothing is hidden from either track —
+        the line is simply whether reading it needs a terminal.
       </p>
-      <nav
-        aria-label="Documentation sections"
-        className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
-      >
-        {REALMS.map((realm) => (
-          <RealmCard key={realm.slug} realm={realm} />
+      <div className="mt-8">
+        {TRACKS.map((track) => (
+          <TrackSection key={track.id} track={track} />
         ))}
-      </nav>
+      </div>
     </section>
   );
 }
