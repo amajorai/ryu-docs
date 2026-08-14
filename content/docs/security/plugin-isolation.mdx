@@ -1,0 +1,109 @@
+---
+title: "Plugin isolation"
+description: "What a plugin can reach, lane by lane - which parts run in a real sandbox, which run with full host privileges, and how publisher trust is decided."
+---
+
+A plugin is not one kind of thing. It can contribute a turn hook, a capability adapter, a UI panel, a background sidecar, an MCP server - and those run on **different lanes with very different isolation**. The strength of the sandbox around a plugin depends entirely on which lanes it uses, so "is this plugin sandboxed?" has no single answer until you know what it contributes.
+
+This page is the contract. Read it before installing anything you did not write.
+
+## The lanes
+
+| Lane | What runs there | Isolation today |
+|---|---|---|
+| Turn hooks | A JS fragment run at the turn boundary | **Sandboxed.** Deny-by-default, no ambient access |
+| Capability adapters | A JS body implementing a capability verb | **Sandboxed.** Same lane, same rules |
+| UI bundles | A plugin's panel or companion interface | **Sandboxed.** Browser iframe, no same-origin access |
+| Sidecars | A background process (binary, Python, or JS backend) | **Not isolated.** Full host privileges |
+| MCP servers | A spawned MCP server process | **Not isolated.** Full host privileges |
+
+The split is the thing to internalize: the **small** contributions are contained, the **large** ones are not.
+
+### The sandboxed lanes
+
+Hook and adapter code runs in a sandbox that denies everything unless the plugin was granted it, and an ungranted access **fails** rather than prompting:
+
+- Filesystem reads and writes are limited to the specific paths granted - not "the disk", specific paths.
+- Network access is limited to the specific hosts granted, or absent entirely.
+- Subprocess spawning is limited to a named allowlist of programs.
+- The environment is never handed over, so the code cannot read your credentials out of it.
+
+UI bundles render in a browser sandbox with scripting allowed but no same-origin access, so a panel cannot reach into the surrounding app or its storage.
+
+These are mechanically enforced. A plugin cannot opt out of them by asking.
+
+### The native lane
+
+<Callout type="warn">
+**A sidecar or MCP server runs with the same privileges as Ryu itself.** There is no OS-level sandbox around it today. It can read and write your files, open network connections, and spawn processes, regardless of what its manifest declares.
+
+A manifest's declared permissions are **recorded** for this lane, not enforced - they tell you what the author says the process needs, and Ryu does not currently hold them to it. Treat installing a plugin that ships a sidecar as equivalent to running that publisher's program on your machine, because that is what it is.
+</Callout>
+
+This is the same posture most extension ecosystems ship with, and the same reason they all lean on publisher review. It is called out here rather than buried because the declared-permissions block makes it easy to assume otherwise.
+
+## Publisher trust
+
+Because the native lane cannot be contained mechanically, it is governed by **who published the plugin** instead. Every install records where it came from, at the moment it is installed:
+
+| Trust basis | What it means |
+|---|---|
+| System plugin | Built into Ryu itself and shipped with the binary |
+| Verified publisher | Published to the official Ryu marketplace by an organization that passed identity verification |
+| Official marketplace | Published to the official Ryu marketplace, publisher not identity-verified |
+| Allowlisted | You explicitly trusted this plugin, and its provenance already vouched for the publisher |
+| Untrusted | Anything else - a third-party catalog, a sideload, or an install that predates provenance capture |
+
+Two properties of this that matter:
+
+**Provenance is captured at install, not checked later.** The trust decision reads what was recorded when you installed, so it never depends on the network being reachable. The trade-off is that verification changes are not retroactive - if a publisher loses its verified status after you installed, your install keeps its recorded status until you next update the plugin. Updating re-records it.
+
+**Verification only counts from the official marketplace.** A third-party catalog can put a "verified" flag in its own listing data, because that data is written by whoever runs the catalog. Ryu's verification is a decision made in Ryu's control plane, so a claim carried by any other source is ignored.
+
+<Callout type="info">
+System plugins are described as such, not exempted from anything. They ship inside the Ryu binary, so they were never candidates for the plugin sandbox in the first place - the label reports where the code came from, it does not represent a policy decision someone made.
+</Callout>
+
+## Seeing what you have installed
+
+Ask your node which of its installed plugins run on which lanes:
+
+```bash
+curl -H "Authorization: Bearer $RYU_TOKEN" \
+  http://127.0.0.1:7980/api/plugins/isolation
+```
+
+Each plugin reports its lanes, what each lane can enforce, its trust basis, and whether it uses host access. The summary counts how many are fully sandboxed and how many use host access with nothing vouching for the publisher.
+
+The response separates two things that look similar and are not:
+
+- **Not enforceable** - the lane has no isolation mechanism. This is a statement about Ryu, not about the plugin, and nobody chose it.
+- **Permitted** - the lane uses host access and a trust basis allows it.
+
+Keep them apart when reading the report. A plugin is not doing anything unusual by appearing in the first category; every sidecar does.
+
+## Choosing what to trust
+
+Two settings govern the native lane:
+
+- **Trusted plugins** - an explicit list of plugins you allow to run host-access lanes.
+- **Require trust for host access** - when on, a plugin whose host-access lane has no trust basis is refused rather than merely reported. **Off by default**, because turning it on can stop an already-installed plugin from running. That is your call to make, not a default that changes under you.
+
+<Callout type="warn">
+The trusted list is not a bypass. Naming a plugin there only re-labels one whose provenance already vouches for its publisher - it cannot promote a sideloaded or third-party-catalog plugin to trusted. If it could, the setting would be a universal way around publisher trust for anything that could write it.
+</Callout>
+
+## What is NOT a boundary today
+
+<Callout type="warn">
+Plugin isolation contains hook, adapter, and UI code. It does **not** contain sidecars or MCP servers, and it is not a defense against a publisher you should not have trusted. It is also not multi-tenant isolation - see [Trust model](/docs/security/trust-model) for why everything in one install shares one trust domain.
+</Callout>
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/security/trust-model" />
+  <DocCard href="/docs/security/sandboxing-isolation" />
+  <DocCard href="/docs/security/permissions" />
+  <DocCard href="/docs/security/credential-scrubbing" />
+</Cards>

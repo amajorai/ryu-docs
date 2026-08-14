@@ -194,20 +194,13 @@ const QUICK_LINKS: QuickLink[] = [
   { id: "benchmark", label: "Benchmarks", href: docsPath("benchmark") },
 ];
 
-type Stat = {
-  id: string;
-  value: string;
-  label: string;
-};
-
-const STATS: Stat[] = [
-  // No "hand-written guides" row. It was the one stat making a claim about how
-  // the docs were produced rather than what is in them, and that claim is not
-  // one this repo can keep true.
-  { id: "api", value: "480+", label: "API reference pages" },
-  { id: "sections", value: "14", label: "documentation sections" },
-  { id: "diagrams", value: "75+", label: "architecture diagrams" },
-];
+// The hero used to close with a strip of hardcoded document counts (API
+// reference pages, documentation sections, architecture diagrams), and the
+// search placeholder quoted the API-page figure a second time. Nothing in the build
+// recomputed any of them, so every page added or removed made the landing page
+// a little more wrong, silently. Counting the corpus for real is not worth a
+// build step, and a stale count is worse than no count, so the claim is gone
+// rather than automated. Do not reintroduce one by hand.
 
 type Featured = {
   id: string;
@@ -280,7 +273,7 @@ function SearchTrigger() {
         className="size-5 shrink-0 text-fd-muted-foreground transition-colors group-hover:text-fd-foreground"
       />
       <span className="flex-1 text-base text-fd-muted-foreground">
-        Search 200+ guides and 480+ API pages…
+        Search the documentation…
       </span>
       <kbd className="hidden shrink-0 items-center gap-1 rounded-md bg-fd-background px-2 py-1 font-medium font-mono text-fd-muted-foreground text-xs sm:inline-flex">
         {isMac ? "⌘" : "Ctrl"} K
@@ -305,23 +298,6 @@ function QuickLinks() {
         ))}
       </ul>
     </nav>
-  );
-}
-
-function StatStrip() {
-  return (
-    <dl className="mt-12 flex flex-wrap justify-center gap-x-8 gap-y-6 sm:gap-x-12">
-      {STATS.map((stat) => (
-        <div className="flex flex-col items-center text-center" key={stat.id}>
-          <dt className="font-heading font-medium text-2xl text-fd-foreground tabular-nums sm:text-3xl">
-            {stat.value}
-          </dt>
-          <dd className="mt-1 max-w-[7.5rem] text-fd-muted-foreground text-xs leading-tight sm:text-sm">
-            {stat.label}
-          </dd>
-        </div>
-      ))}
-    </dl>
   );
 }
 
@@ -350,8 +326,6 @@ export function Hero() {
         <SearchTrigger />
         <QuickLinks />
       </div>
-
-      <StatStrip />
     </section>
   );
 }
