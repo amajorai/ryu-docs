@@ -5,7 +5,7 @@ description: "The plugin lifecycle from install to activation, the hook phases a
 
 Plugins in Ryu go through a well-defined lifecycle: install, validate, enable, run, disable, and
 uninstall. At each stage, Core enforces manifest schema validation and Gateway grant checks. Hooks
-let your plugin code react to chat events at specific boundaries — before a user message, after an
+let your plugin code react to chat events at specific boundaries: before a user message, after an
 assistant reply, before or after a tool call, and more.
 
 This page is the single reference for how plugins load, when hooks fire, and what lifecycle events
@@ -81,19 +81,38 @@ flowchart LR
     K[session_end] -.-> L[Observation only]
     M[notification] -.-> N[Observation only]
   end
+
+  subgraph Message Plane
+    O[context] --> P[rewrite / replace]
+    Q[message_end] --> R[replace]
+    S[session_before_compact] -.-> SB[Observation]
+    S2[session_compact] --> SC[replace summary]
+    T2[model_select] -.-> U2[Observation]
+    V[session_tree] -.-> W[Observation]
+    X[workflow_run_*] -.-> Y[Observation]
+  end
 ```
 
 | Phase | `on` value | Fires when | Directives |
 |---|---|---|---|
 | **Session start** | `session_start` | First turn of a conversation | `inject`, `note` |
-| **Pre-user turn** | `pre_user_turn` | Before the user message reaches the model | `replace`, `inject` |
+| **Pre-user turn** | `pre_user_turn` | Before the user message reaches the model | `replace`, `inject`, `handled` |
 | **Pre-tool use** | `pre_tool_use` | Before a tool call executes | `deny` (blocks the call) |
 | **Tool result** | `tool_result` | After a tool call returns, **awaited** | `transform` (rewrites the result before the model sees it) |
 | **Post-tool use** | `post_tool_use` | After a tool call returns | Observation only — detached, fail-open |
 | **Post-assistant turn** | `post_assistant_turn` | After the assistant reply streams and persists | `note`, `continue` |
+| **Context** | `context` | Before the assembled context leaves Ryu for the model | `rewrite` (message-array plane) / `replace` (ACP plane) |
+| **Message end** | `message_end` | When an assistant message is finalized, before it persists | `replace` |
+| **Before compact** | `session_before_compact` | Before Ryu drops older turns to fit the context window | Observation only — sees what is about to be dropped |
+| **Session compact** | `session_compact` | After dropped turns have been summarized | `replace` (the summary text) |
 | **Sub-agent stop** | `subagent_stop` | When a delegated sub-agent finishes | Observation only (v1) |
 | **Session end** | `session_end` | When a conversation is deleted | Observation only (v1) |
 | **Notification** | `notification` | When a notification is fanned out | Observation only (v1) |
+| **Model select** | `model_select` | When the active model or thinking/effort level changes | Observation only |
+| **Session tree** | `session_tree` | When the conversation's message tree branches (edit/regenerate) | Observation only |
+| **Workflow started** | `workflow_run_started` | When a workflow run starts | Observation only |
+| **Workflow finished** | `workflow_run_finished` | When a workflow run completes successfully | Observation only |
+| **Workflow failed** | `workflow_run_failed` | When a workflow run fails (or a gate is rejected) | Observation only |
 
 ### Directives reference
 
@@ -102,19 +121,21 @@ flowchart LR
 | `{ kind: "none" }` | Do nothing (also the fail-safe for errors) | All |
 | `{ kind: "note", text }` | Surface `text` to the user as a `data-plugin_note` part, never in history | `post_assistant_turn`, `session_start` |
 | `{ kind: "continue", text }` | Inject `text` as a follow-up user turn, loop < 25 | `post_assistant_turn` |
-| `{ kind: "replace", text }` | Swap the outgoing user message before it reaches the model | `pre_user_turn` |
+| `{ kind: "replace", text }` | Swap the pending text before it reaches the model | `pre_user_turn`, `message_end`, `session_compact`, `context` (ACP plane) |
 | `{ kind: "inject", text }` | Append additional context to the outgoing message | `pre_user_turn`, `session_start` |
 | `{ kind: "deny", reason }` | Block a pending tool call; `reason` returned as tool error | `pre_tool_use` |
 | `{ kind: "transform", output }` | Rewrite a tool's result before the model sees it | `tool_result` |
+| `{ kind: "rewrite", messages }` | Replace the ENTIRE outbound message array before it reaches the model | `context` (message-array plane) |
+| `{ kind: "handled", text }` | Fully handle the turn: `text` becomes the assistant reply, no model call | `pre_user_turn` |
 
 ### `deny` and `transform` are the two halves of a tool firewall
 
 `deny` stops a call from happening. `transform` reshapes what a call that already happened reports
-back — it is the redaction and narrowing primitive, so a hook can read a tool's output and return a
+back. It is the redaction and narrowing primitive, so a hook can read a tool's output and return a
 rewritten value, keeping secrets, PII, or an oversized payload out of the transcript entirely.
 
 Because `reason` on a `deny` comes back to the model as the tool's **error result** rather than as a
-silent failure, the model can adapt — ask the user, try a different approach — instead of behaving
+silent failure, the model can adapt: ask the user, try a different approach, instead of behaving
 as though the call succeeded.
 
 Two rules make `transform` trustworthy as a security boundary:
@@ -127,9 +148,43 @@ Two rules make `transform` trustworthy as a security boundary:
   observers receive the transformed output, so a redaction is not undone by handing the raw value
   to every other installed plugin.
 
-Pick `post_tool_use` when you only need to watch — it stays detached, so logging and telemetry cost
+Pick `post_tool_use` when you only need to watch. It stays detached, so logging and telemetry cost
 the hot path nothing. Pick `tool_result` only when you need to *change* the result, and accept the
 awaited cost.
+
+### Message-plane phases
+
+Beyond the chat turn, a set of Pi-parity phases fire at Ryu's own dispatch sites, so one plugin
+governs every agent (Claude, Codex, or any other ACP agent) rather than only Pi-routed turns.
+
+- **`context`** is the context-engineering phase, and it spans two structurally different planes. On
+  the OpenAI-compat / local-engine / SDK plane, Ryu owns a real message array: `ctx.messages` is
+  populated and a hook returns `{ kind: "rewrite", messages }` to replace the whole array (multimodal
+  content survives because the array is carried as raw JSON). On the ACP plane there is no array to
+  rewrite; Ryu flattens the window into one prompt string, so `ctx.input` carries that string and a
+  hook returns `{ kind: "replace", text }` instead. A hook must check which field is set; the wrong
+  directive for the plane is ignored.
+- **`message_end`** fires when an assistant message is finalized, *before* it is persisted, and a
+  `replace` rewrites both the persisted content and the sealed parts. It is distinct from
+  `post_assistant_turn`, which runs after persistence and can only append a `note` or `continue`.
+- **`session_before_compact`** fires before Ryu drops older turns to fit the context window. A hook
+  sees what is about to be dropped. **`session_compact`** fires after the dropped turns are
+  summarized, and a `replace` rewrites the summary text before it merges back into the window.
+  (These fire at Ryu's own compaction sites, not Pi's. Pi auto-compacting inside its own turn loop
+  is invisible to Core.)
+- **`model_select`**, **`session_tree`**, and the three **`workflow_run_*`** phases are observation
+  only: their payload rides in `ctx.event` (`{ run_id, workflow_id, workflow_name, ... }` for the
+  workflow phases), and no directive can change what they report. `workflow_run_*` fire once per run
+  as a user understands it, not per resume or nested sub-workflow, and a run suspended at an
+  approval gate fires neither `finished` nor `failed` until it resumes and terminates.
+
+### `handled` — own a turn without a model call
+
+`replace` and `inject` still run the turn; they only reshape the prompt. `{ kind: "handled", text }`
+ends it: `text` becomes the assistant reply and **no model call is made**. That is what lets a
+plugin own a slash command, answer from cache, or refuse a prompt outright without burning a model
+call. The reply is persisted like any assistant message, and first writer wins. Once one hook
+handles a turn, later hooks do not run.
 
 ## The tool glob gate
 
@@ -229,11 +284,11 @@ Each hook body runs in a fresh Deno sandbox with exactly two globals:
 | `host.log(...args)` | none | Captured logs |
 
 Storage is namespaced per plugin. An ungranted capability call rejects with `is_error: true`; an
-uncaught throw degrades the hook to `{ kind: "none" }` — a misbehaving plugin can never block a turn.
+uncaught throw degrades the hook to `{ kind: "none" }`. A misbehaving plugin can never block a turn.
 
 ## Where hooks run
 
-Hooks live in `apps/core/src/plugin_host/` because they decide *what runs next* — a Core concern.
+Hooks live in `apps/core/src/plugin_host/` because they decide *what runs next*: a Core concern.
 Any model call a hook makes (`host.sideModel`) still routes through the Gateway.
 
 ```mermaid
@@ -253,11 +308,12 @@ flowchart TD
 
 The chat path wires hooks at `run_chat_with_hooks` (`apps/core/src/server/mod.rs`). When no plugin
 contributes a hook (the common case) or the sandbox backend is absent, the inner stream is returned
-unwrapped — zero overhead on the hot path.
+unwrapped, at zero overhead on the hot path.
 
 ## The process-global dispatcher
 
-Off-path phases (`pre_tool_use`, `post_tool_use`, `subagent_stop`, `session_end`, `notification`)
+Off-path phases (`pre_tool_use`, `post_tool_use`, `subagent_stop`, `session_end`, `notification`,
+and the observation-only message-plane phases `model_select`, `session_tree`, `workflow_run_*`)
 fire at sites that have no `ServerState`. They reach the runtime through a process-global dispatcher
 (`dispatch_global(phase, ctx)` over the `HookDispatch` trait), installed once at boot via `set_global`.
 
@@ -270,13 +326,21 @@ plugin is actually loaded.
 | Phase | Live-tested | Directives applied |
 |---|---|---|
 | `post_assistant_turn` | Yes (double-check, goal, advisor fixtures) | `note`, `continue` |
-| `pre_user_turn` | Wired | `replace`, `inject` |
+| `pre_user_turn` | Wired | `replace`, `inject`, `handled` |
 | `session_start` | Wired | `inject`, `note` |
 | `pre_tool_use` | Wired | `deny` (blocks the call) |
+| `tool_result` | Wired | `transform` |
 | `post_tool_use` | Wired | Observation only |
+| `context` | Wired | `rewrite` / `replace` |
+| `message_end` | Wired | `replace` |
+| `session_before_compact` | Wired | Observation only |
+| `session_compact` | Wired | `replace` |
 | `subagent_stop` | Wired | Observation only |
 | `session_end` | Wired | Observation only |
 | `notification` | Wired | Observation only |
+| `model_select` | Wired | Observation only |
+| `session_tree` | Wired | Observation only |
+| `workflow_run_started` / `_finished` / `_failed` | Wired | Observation only |
 
 <Callout type="info">
   The observation-only phases fire (detached, fail-open) but their directives are not applied to

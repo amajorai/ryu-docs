@@ -7,7 +7,7 @@
 [![Stack](https://shieldcn.dev/badge/Next.js-Fumadocs-000000.svg?logo=nextdotjs&logoColor=white)](https://github.com/amajorai/ryu)
 
 A Next.js + Fumadocs app: the deep "state of everything" reference for Ryu, organized into
-13 sidebar realms and kept honest with file citations.
+18 sidebar realms and kept honest with file citations.
 
 > **Read-only mirror.** This repo is generated from the Ryu monorepo — see
 > [Contributing](#contributing) before opening a PR.
@@ -31,9 +31,9 @@ Container: `docker build -t ryu-docs . && docker run -p 3002:3002 ryu-docs`.
 
 ## What it provides
 
-- **13 sidebar realms:** Start Here, Desktop, CLI, Mobile, Hardware, Gateway, Core, Security,
-  Develop, Benchmark, Skills, MCP Server, Cookbook, and Academy — defined by `root: true`
-  `meta.json` files.
+- **19 sidebar realms:** Start Here, Integrate, Billing, Desktop, CLI, Mobile, Hardware, Gateway,
+  Core, Primitives, Security, Develop, Apps, Plugins, Benchmark, Skills, MCP Server, Cookbook, and
+  Academy — defined by `root: true` `meta.json` files.
 - **Interactive OpenAPI reference** (`content/docs/develop/api-reference/`): rendered by
   `fumadocs-openapi` with a live request playground.
 - **Two source specs** (`specs/`): `gateway-openapi.yaml` (hand-authored) and

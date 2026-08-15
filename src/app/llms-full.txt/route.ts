@@ -23,7 +23,7 @@ Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
 - GET /llms-sections/{section}     — All pages in a section (start-here, gateway, core, etc.)
 - GET /schemas/plugin.json         — JSON Schema for manifest.json manifests
 
-Valid sections: start-here, integrate, desktop, cli, mobile, hardware, gateway, core, security, develop, benchmark, skills, mcp, cookbook, academy
+Valid sections: start-here, integrate, billing, desktop, cli, mobile, hardware, gateway, core, primitives, security, develop, apps, plugins, benchmark, skills, mcp, cookbook, academy
 
 ---
 

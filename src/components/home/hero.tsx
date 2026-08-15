@@ -7,10 +7,13 @@ import {
   CircuitBoard,
   Code2,
   Cpu,
+  CreditCard,
+  Gauge,
   GraduationCap,
   type LucideIcon,
   Monitor,
   PlugZap,
+  Puzzle,
   Rocket,
   Search,
   Shield,
@@ -55,6 +58,24 @@ const REALMS: Realm[] = [
       "Install Ryu, understand how the pieces fit together, and send your first message.",
     icon: Rocket,
     accent: "var(--start-here-color)",
+    track: "use",
+  },
+  {
+    slug: "integrate",
+    title: "Integrate",
+    description:
+      "Every surface, protocol, and API Ryu exposes for agents, tools, and applications — find the right integration path.",
+    icon: Puzzle,
+    accent: "var(--integrate-color)",
+    track: "build",
+  },
+  {
+    slug: "billing",
+    title: "Billing & Plans",
+    description:
+      "Plans, limits, credits, AI pools, Agent Inboxes, and the free tier baseline.",
+    icon: CreditCard,
+    accent: "var(--billing-color)",
     track: "use",
   },
   {
@@ -163,6 +184,15 @@ const REALMS: Realm[] = [
       "Build on Ryu: TypeScript SDK, Rust SDK, plugin manifests, and the full API reference.",
     icon: Code2,
     accent: "var(--develop-color)",
+    track: "build",
+  },
+  {
+    slug: "benchmark",
+    title: "RyuBench",
+    description:
+      "Measure how well any model or harness can operate Ryu — execution-verified, cost-normalized, hard to game.",
+    icon: Gauge,
+    accent: "var(--benchmark-color)",
     track: "build",
   },
 ];
@@ -304,22 +334,15 @@ function QuickLinks() {
 export function Hero() {
   return (
     <section className="mx-auto flex w-full max-w-4xl flex-col items-center px-4 pt-16 pb-8 text-center sm:pt-24">
-      {/* These docs deliberately do NOT reuse the marketing headline. They used
-          to carry it verbatim, on the theory that someone arriving from
-          ryuhq.com should not meet a different pitch one click in — but that
-          site is written for a firm hiring Ryu to do its work, and this site is
-          read by someone who has to run it. Sharing a sentence between the two
-          means one of the two readers is being addressed in the wrong language.
-          What the two surfaces share is the idea, not the copy: works with
-          everything, locked to nothing. */}
       <h1 className="text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
-        Everything Ryu does, written down.
+        The universal agent interface.
       </h1>
 
       <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
-        Two tracks over one product. Use Ryu to get work done in the app, or
-        run it yourself and build on it — same engine underneath, wrapped
-        around any model you point it at.
+        An open, composable platform for agent orchestration and knowledge
+        sharing. Build plugins that extend capabilities and apps that leverage
+        pre-built primitives. Ryu is not another agent — it is a whole
+        infrastructure layer.
       </p>
 
       <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">

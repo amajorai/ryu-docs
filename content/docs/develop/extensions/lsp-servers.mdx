@@ -121,6 +121,42 @@ Everything else about the node is unaffected: the other servers start, the plugi
 sidecars and tools are untouched, and the agent runs normally with no language support for that
 extension.
 
+## Built-in language plugins
+
+Ryu ships one plugin per language, mirroring Anthropic's official Claude Code code-intelligence
+plugins field-for-field — the same config body loads in either host. They are **config-only** and
+**opt-in**: Community-tier, so nothing is enabled on a fresh install; enabling the plugin for a
+language you actually use writes its server into the managed Pi's config on the next spawn. A
+missing binary is a graceful skip, never a hard failure.
+
+| Plugin | Language | Server binary |
+|---|---|---|
+| `@ryu/clangd-lsp` | C/C++ | `clangd` |
+| `@ryu/csharp-lsp` | C# | `csharp-ls` |
+| `@ryu/gopls-lsp` | Go | `gopls` |
+| `@ryu/jdtls-lsp` | Java | `jdtls` |
+| `@ryu/kotlin-lsp` | Kotlin | `kotlin-lsp` |
+| `@ryu/lua-lsp` | Lua | `lua-language-server` |
+| `@ryu/php-lsp` | PHP | `intelephense` |
+| `@ryu/pyright-lsp` | Python | `pyright-langserver` |
+| `@ryu/ruby-lsp` | Ruby | `ruby-lsp` |
+| `@ryu/rust-analyzer-lsp` | Rust | `rust-analyzer` |
+| `@ryu/swift-lsp` | Swift | `sourcekit-lsp` |
+| `@ryu/typescript-lsp` | TypeScript/JavaScript | `typescript-language-server` |
+
+Install the binary first, then enable the plugin. Each plugin's README carries its language's exact
+install command (`brew install gopls`, `npm install -g typescript-language-server typescript`,
+`rustup component add rust-analyzer`, …). Two plugins pin a longer `startupTimeout` because their
+servers are slow to handshake: `jdtls` and `kotlin-lsp` wait 120s, mirroring Claude Code.
+
+`@ryu/clangd-lsp` deliberately omits the uppercase `.C`/`.H` entries from Claude's config: Ryu's
+extension lookup lowercases file extensions, so `.C` would collide with `.c` and misroute a C file
+to the C++ language id. clangd detects the language itself, so nothing is lost.
+
+The plugins share one extension namespace, so **first registration wins applies across them too**: if
+you also write your own `lsp_servers` declaration claiming `.go`, whichever plugin sorts first owns
+it, and the other is told who won.
+
 ## How declarations across plugins are resolved
 
 Core arbitrates every enabled plugin's declarations into one table before anything spawns
@@ -180,7 +216,7 @@ so the spawn is kicked off without awaiting it and every edit after the handshak
 
 ### Navigation tools
 
-Four tools are registered, and only when at least one server survives resolution. Line and column
+Eight tools are registered, and only when at least one server survives resolution. Line and column
 are 1-based.
 
 | Tool | Parameters | Returns |
@@ -188,7 +224,22 @@ are 1-based.
 | `lsp_definition` | `path`, `line`, `column?` | Where the symbol is defined |
 | `lsp_references` | `path`, `line`, `column?`, `includeDeclaration?` | Every reference to the symbol |
 | `lsp_hover` | `path`, `line`, `column?` | Resolved type, signature and doc comment |
+| `lsp_symbols` | `path` | An indented outline of every symbol in the file |
+| `lsp_symbol_search` | `query`, `path?` | Symbols whose name matches `query`, across the workspace |
+| `lsp_implementations` | `path`, `line`, `column?` | Every concrete implementation of an interface or class |
+| `lsp_call_hierarchy` | `path`, `line`, `column?`, `direction?`, `depth?` | Callers (`incoming`) or callees (`outgoing`) as an indented tree |
 | `lsp_diagnostics` | `path?` | Diagnostics for one file, or for everything analysed so far when `path` is omitted. Capped at 60, since the model asked for these explicitly |
+
+`lsp_symbol_search` is the one workspace-wide tool. Without `path` it asks every *already-running*
+server that supports it, so a cold server is never started to answer it — the model touches (or
+edits) a file in the target language first, which starts the server. Pass `path` to scope the search
+to that file's server and warm it on demand. A match renders as `path:line:col [kind] name`, with the
+server's id prefixed when the query spanned more than one server.
+
+`lsp_call_hierarchy` walks the call graph from the symbol at a position to `depth` levels (default 2,
+max 4), capped at 40 nodes so a hot function cannot turn into dozens of sequential round trips. `←`
+marks callers, `→` marks callees. Support varies by server: clangd, for example, answers callees
+(`outgoing`) for virtual methods but not callers, because it cannot trace calls through a vtable.
 
 A crash is not the same fate as a slow start. A server that exits unexpectedly is restarted up to
 `maxRestarts` times when `restartOnCrash` is on, then left down with a logged reason; a server that

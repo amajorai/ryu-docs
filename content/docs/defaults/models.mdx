@@ -1,0 +1,137 @@
+---
+title: "Default Models"
+description: "The default model of every Ryu surface - the managed desktop agent, the Gateway, every local inference engine, and each app's side model - and how each one is overridden."
+tags: ["Defaults", "Models"]
+---
+
+Every surface in Ryu starts with a default model. This page is the complete map. Every value is a
+swappable default - the model id resolves through the provider registry (`apps/core/src/registry`),
+Pi's managed config (`apps/core/src/pi_config`), or a per-app constant, and each has an
+environment override.
+
+## The managed desktop agent
+
+The flagship agent (Pi with the Gateway on top) is configured for you in `~/.ryu/pi-agent`. The
+default depends on how you connect:
+
+| Connection | Default provider | Default model | Override |
+|---|---|---|---|
+| Local (zero keys) | `gateway` (built-in `openai` pinned at the local Gateway) | `gemma-4-E2B-it-Q4_K_M` (local llama.cpp) | `RYU_LOCAL_CHAT_MODEL_ID` |
+| Managed subscription | `managed-openrouter` | `openrouter/auto` (OpenRouter auto-router, metered to your Ryu wallet) | Pick a model in Settings |
+| Direct (your own key) | Your configured provider | Your configured default | - |
+
+`openrouter/auto` is the Gateway's Auto Router: it picks a good model per prompt at no extra fee.
+The managed provider is always Gateway-routed so egress stays governed and metered. In local mode
+the model is the same GGUF that powers the `@ryu/engines` chat engine.
+
+## Utility and sub-agent completions
+
+Anything that runs on your behalf without a full conversation - side models, workflow steps,
+sub-agents, evals - uses a cheap remote default:
+
+| Purpose | Default model | Override |
+|---|---|---|
+| Clean-context utility / sub-agent completions | `gpt-4o-mini` | `RYU_DEFAULT_LLM_MODEL` |
+| ACP adapter fallback (no model configured) | `gemma2` | `RYU_FALLBACK_LLM_MODEL` |
+| Predict / autocomplete brain | `gpt-4o-mini` | `RYU_DEFAULT_LLM_MODEL` |
+| Evals | `gpt-4o-mini` | per-eval `model` field |
+
+Every app or plugin `model_picker` preference you do not set falls back to this node-wide default
+(the local engine when that is the node default, else `gpt-4o-mini`).
+
+## The Gateway
+
+| Setting | Default | Override |
+|---|---|---|
+| `routing.default_provider` | `openai` | `gateway.toml` |
+| `routing.default_model` (smart-routing fallback) | keep the requested model | `gateway.toml` |
+| Smart routing (Inspector) | **off** (opt-in) | `gateway.toml` |
+| Classify / inspector model | `gemma-3-270m-it-qat-Q4_0` | `RYU_CLASSIFY_MODEL_ID` |
+| Embedding model (rules, semantic routing) | `nomic-embed-text-v1.5` | `RYU_EMBED_LLM_URL` / `RYU_EMBED_MODEL` |
+| Channel bot model (all channels) | `gpt-4o` | per-bot `model` field |
+| Managed bot URL | `https://bot.ryuhq.com` | `gateway.toml` |
+| Anthropic upstream | `https://api.anthropic.com` | `gateway.toml` |
+| Codex upstream | `https://chatgpt.com/backend-api/codex` | `gateway.toml` |
+| Evaluator pass threshold | `0.5` | per-evaluator config |
+
+The Gateway pipeline runs stages in a fixed order by default (Rate Limit → Firewall → Inspector →
+Inline Input → Policy → Companion DLP → Route → Audit); that order is reorderable in `gateway.toml`.
+
+## Local inference engines
+
+These are the engines Core starts and the models they serve by default. Ports are release-profile
+values (shift `+1000` on dev, `+2000` on canary).
+
+| Engine | Default model | Port | Purpose |
+|---|---|---|---|
+| llama.cpp (`llamacpp`) | `gemma-4-E2B-it-Q4_K_M` (+ `mmproj` vision adapter) | 8080 | Local chat |
+| llama.cpp embed (`llamacpp-embed`) | `nomic-embed-text-v1.5` (768-dim GGUF) | 8081 | Embeddings for RAG, memory, search |
+| llama.cpp rerank | `BAAI/bge-reranker` | 8082 | RAG reranker |
+| llama.cpp classify | `gemma-3-270m-it-qat-Q4_0` | 8083 | Smart-routing / inspector |
+| whisper.cpp | `ggml-base.en.bin` | 8090 | Speech-to-text (STT) |
+| parakeet | `parakeet-v3-int8` (ONNX, in-process) | - | Alternative STT (feature-gated) |
+| sd.cpp | `sdxl_base_1.0_Q8_0.gguf` | 8083 | Image generation |
+| ryutts (TTS) | Kokoro 82M v1.0 (`kokoro-v1.0.onnx`), voice `af_heart` | 8085 | Text-to-speech (default engine) |
+| outetts | `OuteTTS-0.2-500M-Q4_K_M.gguf` | - | TTS (alternate) |
+| MLX | model passed at spawn | 8086 | Apple Silicon chat |
+| MLX-VLM | model passed at spawn | 8084 | Apple Silicon vision |
+| vLLM / OMLX | model passed at spawn | 8000 | Heavy remote-style serving |
+| SGLang | model passed at spawn | 30000 | Heavy serving |
+| Ollama (managed sidecar) | `ollama serve` (no default model) | 11434 | Ollama-compatible runtime |
+
+<Callout type="info">
+  **STT defaults.** `whisper.cpp` is the STT engine that works out of the box - the `ggml-base.en`
+  model is downloaded on first run. Parakeet is installed ready but its inference is gated behind
+  the off-by-default `voice-parakeet` build feature. See [Voice engines](/docs/desktop/engines/voice-engines).
+</Callout>
+
+The default model downloads are all owned by one routine (`install_local_stack` in
+`apps/core/src/sidecar/onboarding.rs`) - see [Batteries included](/docs/start-here/architecture/batteries-included)
+for the install order. Each download is non-fatal and independent: a failure never blocks chat.
+
+## Shadow's context model
+
+Shadow, the ambient context monitor, uses its own small local model for summarization:
+
+| Default | Override |
+|---|---|
+| `qwen2.5:7b-instruct` via Ollama (`http://localhost:11434`) | `SHADOW_LLM_MODEL` |
+
+## App side models
+
+Several apps route a background step - translation, notes, judging, diagnosing - through a side
+model. Most share the same cheap local default so the step stays private and free:
+
+| App | Step | Default model | Override |
+|---|---|---|---|
+| Subtitles | Translation | `gemma-4-E2B-it-Q4_K_M` | `RYU_DEFAULT_LLM_MODEL` |
+| Meetings | Meeting notes | `gemma-4-E2B-it-Q4_K_M` | `RYU_DEFAULT_LLM_MODEL` |
+| Quests | Quest judging | `gemma-4-E2B-it-Q4_K_M` | `RYU_DEFAULT_LLM_MODEL` |
+| Healing | Diagnose / self-heal | `gemma-4-E2B-it-Q4_K_M` | `RYU_DEFAULT_LLM_MODEL` |
+| News | News briefs | fast model (`model_picker`, no hard default) | app settings |
+| Reasoning | Extraction / authoring | fast / strong (`model_picker`) | app settings |
+| RLM | Planner / reader | strong / cheap (`model_picker`) | app settings |
+| Tuition | Generation / grading | `model_picker` (objective items graded deterministically) | app settings |
+| Mission Control | Side summaries | `hook:side-model` (node default) | node settings |
+| Social | Side summaries | `hook:side-model` (node default) | node settings |
+
+The `gemma-4-E2B-it-Q4_K_M` default in these apps is the same local GGUF as the chat engine - it
+ships with the install, so the side step runs on your machine with no API key.
+
+## CLI, TUI, mobile and web
+
+These surfaces do not pick their own default model. They inherit the node's configured default
+through the Core API: the CLI shows the agent's configured model, the TUI renders
+`routing.default_model` from the Gateway's effective config, and the mobile and web apps ask Core
+(`model: null` means "use the node default").
+
+## See also
+
+<Cards>
+  <DocCard href="/docs/start-here/architecture/providers" />
+  <DocCard href="/docs/start-here/architecture/batteries-included" />
+  <DocCard href="/docs/desktop/engines/chat-engines" />
+  <DocCard href="/docs/desktop/engines/voice-engines" />
+  <DocCard href="/docs/desktop/models" />
+  <DocCard href="/docs/benchmark/local-models" />
+</Cards>

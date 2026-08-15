@@ -1,14 +1,16 @@
 ---
 title: "Side Questions (/btw)"
-description: "An ephemeral question about the current conversation, with no tools and no persistence"
+description: "A quick question about the current conversation, answered with full context and no tools"
 ---
 
 A side question lets you ask something quick *about the conversation you are already in* without
-starting a new turn, spawning a tool, or leaving a trace. It is modeled on Claude Code's
-interactive `/btw` and is the inverse of a sub-agent: full conversation context, zero tools. The
-model sees the transcript, answers once, and Core persists nothing.
+starting a new turn or spawning a tool. It is modeled on Claude Code's interactive `/btw` and is
+the inverse of a sub-agent: full conversation context, zero tools. The model sees the transcript
+and answers once. When the question is asked over a stored conversation, Core keeps the exchange
+as a lightweight "side chat" entry tied to that conversation; when the client holds its own
+transcript (no Core `conversation_id`), nothing is persisted.
 
-Core owns one stateless primitive, `POST /api/btw`, handled by `btw_handler` in
+Core owns one side-question primitive, `POST /api/btw`, handled by `btw_handler` in
 `apps/core/src/server/mod.rs`. It reuses the same single non-streaming gateway call as
 [double-check](/docs/core/double-check) (`call_side_model`), so the model call still routes
 through the Gateway like every other model call in Ryu.
@@ -24,8 +26,8 @@ For how to fire a side question from the composer, see
 | Handler | `btw_handler`, `apps/core/src/server/mod.rs` |
 | Backing call | `call_side_model` - one non-streaming gateway call |
 | Tools | None. The system prompt tells the model it has no tools and cannot run commands, read files, or browse |
-| Persistence | None. The question and answer never enter chat history |
-| Returns | `{ answer, model }` |
+| Persistence | A `btw_entries` row keyed to the parent conversation, when a `conversation_id` is supplied. The exchange never becomes chat history |
+| Returns | `{ answer, model, id }` |
 
 The route is top-level rather than nested under a conversation because some clients (the CLI and
 mobile) hold their own transcript and have no Core `conversation_id` to address.
@@ -55,9 +57,33 @@ POST /api/btw
 ```json
 {
   "answer": "You chose OpenRouter routing the Gemini slug, since there is no direct Google provider.",
-  "model": "..."
+  "model": "...",
+  "id": "…"
 }
 ```
+
+When the request carried a `conversation_id`, `id` is the persisted side-chat entry (present and
+non-null). A request with only a client-held `messages` transcript gets `id: null` and is not
+persisted anywhere.
+
+## Persistence
+
+Side questions over a stored conversation are kept in the `btw_entries` table in the same
+`~/.ryu/conversations.db` as messages, sealed at rest with the same `FieldCipher` (see
+[Encryption at rest](/docs/core/encryption-at-rest)). Each row stores the question, answer, model
+and timestamp, keyed to its parent conversation — so it is **not** chat history and never renders
+in the conversation timeline, but it can be listed and deleted like one:
+
+| Route | Purpose |
+|---|---|
+| `POST /api/btw` | Ask a side question; persists a row when `conversation_id` is supplied |
+| `GET /api/conversations/:id/btw` | List a conversation's side chats, newest first |
+| `DELETE /api/btw/:id` | Delete one side chat |
+
+The desktop Context rail and sidebar both show a conversation's persisted side chats and can
+re-open them; the rail's "New side chat" action and the sidebar rows round-trip through these
+endpoints (`apps/desktop/src/lib/api/btw.ts`). A `conversation_id` supplied only for context
+still answers — it just also leaves a recoverable entry behind.
 
 ## Model and effort resolution
 
@@ -71,11 +97,12 @@ matching the rest of Core's side-model surfaces.
 
 ## Behavior and guarantees
 
-- **Stateless.** Core writes nothing. There is no row, no message, no run record for a side
-  question.
+- **Side chat, not history.** When asked over a stored conversation, the exchange is persisted as
+  a `btw_entries` row (sealed at rest) and can be listed and deleted, but it never becomes a chat
+  message. A client-held transcript with no `conversation_id` is answered and forgotten.
 - **No tools.** The system prompt instructs the model to answer only from the provided context and
   to say so briefly rather than guess when the answer is not there.
-- **Single answer.** One gateway call in, one `{ answer, model }` out. There is no streaming and no
+- **Single answer.** One gateway call in, one `{ answer, model, id }` out. There is no streaming and no
   follow-up turn.
 - **Context-bounded.** When loading from `conversation_id`, only the most recent 30 messages
   (`BTW_TRANSCRIPT_LIMIT`) are included.

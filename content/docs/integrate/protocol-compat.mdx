@@ -1,0 +1,92 @@
+---
+title: "Anthropic & Gemini Compatible Endpoints"
+description: "Point Claude Code, the Gemini CLI, or any Anthropic- or Gemini-format client at the Ryu Gateway. Requests run through the same firewall, budgets, evals, and audit as every other path."
+tags: ["anthropic", "gemini", "messages", "generateContent", "compat", "gateway", "base-url", "claude-code"]
+---
+
+Alongside the OpenAI-compatible surface, the Ryu Gateway speaks the **Anthropic Messages** and
+**Google Gemini** wire formats. Swap the `baseURL` of a native-format client, add a gateway API key,
+and every request runs through the same governed pipeline — budgets, firewall, routing, audit, and
+the live-traffic feed — before reaching the upstream provider. Both handlers live in
+`apps/gateway/src/compat/` and translate request and response between the native dialect and the
+pipeline's unified OpenAI shape.
+
+## Anthropic Messages (`POST /v1/messages`)
+
+```
+POST http://localhost:7981/v1/messages
+```
+
+This is the endpoint Claude Code can point its `ANTHROPIC_BASE_URL` at. The handler translates the
+Anthropic request into the pipeline's OpenAI body, runs the full governance pipeline, and projects
+the response back into the Anthropic wire format — including `system` hoisting, tool
+`tool_use`/`tool_result` ↔ `tool_calls` conversion, and stop-reason mapping.
+
+Streaming (`"stream": true`) emits Anthropic-style SSE events: a `message_start`,
+`content_block_start`, one `content_block_delta` per text fragment, then `content_block_stop` /
+`message_stop`.
+
+```bash
+curl http://localhost:7981/v1/messages \
+  -H "Authorization: Bearer ryu-sk-your-secret-key" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello from Claude Code via Ryu!"}]
+  }'
+```
+
+## Gemini (`POST /v1beta/models/{model}:generateContent`)
+
+```
+POST http://localhost:7981/v1beta/models/gemini-2.0-flash:generateContent
+```
+
+Gemini carries the model on the URL path, not in the body — the whole trailing segment
+(`{model}:generateContent`) is captured, so a single route serves every model. Streaming is selected
+by the `:streamGenerateContent` suffix:
+
+```
+POST http://localhost:7981/v1beta/models/gemini-2.0-flash:streamGenerateContent
+```
+
+Streaming output is a bare `data: {candidates...}` line per chunk (no named events), matching the
+Gemini protocol. This is the endpoint a Gemini SDK or the Gemini CLI can point its base URL at.
+
+```bash
+curl http://localhost:7981/v1beta/models/gemini-2.0-flash:generateContent \
+  -H "Authorization: Bearer ryu-sk-your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"parts": [{"text": "Hello from a Gemini client via Ryu!"}]}]
+  }'
+```
+
+## How the translation works
+
+Each compat handler authenticates exactly like `/v1/chat/completions` (Bearer gateway key), calls the
+same governed pipeline, then projects the result back to the caller's native format. Translation
+happens in pure functions (`apps/gateway/src/compat/{anthropic,gemini}.rs`); the streaming variants
+translate the pipeline's OpenAI SSE byte stream into the native SSE dialect on the fly.
+
+## Response headers
+
+Responses carry the same diagnostic headers as the OpenAI surface — `x-request-id`, `x-routed-model`,
+`x-provider`, `x-cache` — so a compat call is traceable through the audit log exactly like any other.
+
+## Desktop usage
+
+The desktop Gateway dialog's **API & traffic** tab shows copyable endpoint URLs for all three dialects
+(OpenAI, Anthropic, Gemini), issues local API keys, and renders a live traffic dashboard. See
+[Gateway configuration](/docs/gateway/configuration).
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/integrate/openai-compat" />
+  <DocCard href="/docs/gateway/loopback-routes" />
+  <DocCard href="/docs/gateway/configuration" />
+  <DocCard href="/docs/gateway/gateway-for-any-agent" />
+</Cards>

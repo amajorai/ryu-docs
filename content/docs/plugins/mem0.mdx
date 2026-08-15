@@ -1,0 +1,86 @@
+---
+title: "Mem0"
+description: "Recall and record in an existing Mem0 project inside Ryu"
+tags: ["Knowledge & Memory"]
+---
+
+## What it does
+
+Read and write a hosted Mem0 memory project (https://mem0.ai) through the Mem0 Platform REST API, exposed as three declarative HTTP tools. The SECOND provider of the swappable `memory` layer - the built-in store stays the default and keeps running alongside it - so selecting Mem0 re-points the stable `memory__search` / `memory__store` / `memory__sync` / `memory__forget` tools at your Mem0 project without changing what agents call, and turns on the kernel bridges that fold Mem0 into every turn's recall and echo this node's writes out to it. The one canonical verb Mem0 does NOT serve is `memory__context`: Mem0 publishes no standing-summary endpoint, and forcing the verb onto its get-all would dump raw facts at system rank under a label promising a synthesis. The two WRITE verbs both post to `POST /v3/memories/add/`, which is ASYNCHRONOUS - it answers `&#123;message, status: "PENDING", event_id&#125;` and never a fact id - so `memory__store` returns an accepted-for-processing envelope, not the id of the fact it created, and nothing may chain `memory__forget` onto its result. That is fine for the way both verbs are used: the kernel `mirror` and `sync` bridges are fire-and-forget and never read the response. The two verbs differ in ONE documented field: `store` sends `infer: false` because the caller has already decided the fact and Mem0 should keep the text as-is, while `sync` hands over a raw turn with Mem0's default inference on and lets Mem0 mine it. Note the entity id lives in two different places in Mem0's own API - nested inside `filters` for search, top-level for add - and both are pinned from the same `mem0.user-id` preference. Requires a BYOK Mem0 API key.
+
+## Surfaces
+
+| Surface | Support |
+|---|---|
+| gateway | none |
+| core | full |
+| desktop | full |
+| island | limited |
+| mobile | limited |
+| extension | limited |
+| web | full |
+| cli | full |
+
+## What it exposes
+
+### Tools
+
+### `mem0__search` - Mem0 Search
+
+Search a hosted Mem0 project with hybrid retrieval (semantic + BM25 + entity matching) and return ranked memories. Mem0 requires the entity id INSIDE `filters` - a top-level `user_id` is rejected with 400 - and Ryu reads everything from the single bucket named by the `mem0.user-id` preference, so pass exactly that unless you know the project uses other ids. Requires RYU_MEM0_API_KEY.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | yes | Natural-language search query. |
+| `filters` | object | yes | Entity and metadata filters. Must include at least one entity id (`user_id`, `agent_id`, `app_id`, or `run_id`); Ryu's bucket comes from the `mem0.user-id` preference. Also supports AND / OR / NOT and the comparison operators in / gte / lte / gt / lt / ne / icontains. |
+| `top_k` | integer | no | Number of memories to return (Mem0 default 10). |
+| `threshold` | number | no | Minimum combined relevance score to keep (Mem0 default 0.1; pass 0.0 to disable). |
+| `rerank` | boolean | no | Apply Mem0's managed reranker for better ordering (Mem0 default false; adds latency). |
+| `show_expired` | boolean | no | Include memories whose expiration_date has passed (Mem0 default false). |
+
+### `mem0__add` - Mem0 Add
+
+Hand conversation turns to a hosted Mem0 project so it can extract and store memories. ASYNCHRONOUS: Mem0 answers `&#123;message, status, event_id&#125;` with status PENDING and queues the work, so this tool reports that the write was ACCEPTED and never returns the id of a stored fact - do not feed `event_id` to mem0__delete, it is a job id, not a memory id. Unlike mem0__search, this endpoint takes the entity id TOP-LEVEL (`user_id`), not inside `filters`. Requires RYU_MEM0_API_KEY.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `messages` | array | yes | Conversation turns for Mem0 to extract memories from. Each object must carry `role` and `content`; a message missing `role` is not a documented shape. |
+| `user_id` | string | no | Entity the memory is associated with. Mem0 requires at least one entity id (`user_id`, `agent_id`, `app_id`, or `run_id`) and takes it TOP-LEVEL on this endpoint - the nesting under `filters` that mem0__search needs would be silently ignored here and the write would be rejected for having no entity. |
+| `infer` | boolean | no | Mem0 default true: run Mem0's own extraction over `messages` and store what it derives. Set false to skip inference and store the provided text as-is, which is what a fact the caller has already decided on wants. |
+
+### `mem0__delete` - Mem0 Delete
+
+Delete one memory from the Mem0 project by its id, as returned by mem0__search. Answers `&#123;status, body&#125;` rather than the raw upstream body: Mem0 documents this as a 204, and an unwrapped 204 with an empty payload reaches the caller as a bare empty string, which reads like a failure. Requires RYU_MEM0_API_KEY.
+
+Backend: HTTP · Method: DELETE
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `memory_id` | string | yes | The Mem0 memory id (a uuid) to delete. |
+
+### Capabilities
+
+- **Memory** - capability `memory`
+  - Verbs:
+    - `memory__search` -> `mem0__search`
+    - `memory__store` -> `mem0__add`
+    - `memory__sync` -> `mem0__add`
+    - `memory__forget` -> `mem0__delete`
+
+## Permissions
+
+**Grants:** `tool:http-egress:api.mem0.ai`
+
+## UI it contributes
+
+### Settings tabs
+
+- **Mem0** (fields: Mem0 user id (text), Mem0 API key (secret))
+
+## Engine requirement
+
+Requires Ryu >=0.1.0.

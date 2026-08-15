@@ -1,0 +1,164 @@
+---
+title: "Harbor"
+description: "Your pipeline, your schema, your machine"
+tags: ["Productivity"]
+---
+
+## What it does
+
+A CRM that starts as a data model rather than a fixed set of screens. Harbor ships the five objects every pipeline needs - companies, people, deals, notes, tasks - and then gets out of the way: add your own objects, give any of them typed fields (currency, status, rating, multi-select, or a relation to another object), and every view, filter, board, and report picks them up without a migration or a settings trip. Records are validated value bags, so a `stage` that used to be free text can become a status field with colours and the old rows keep working. Relations are materialised as real edges in both directions, which is why a company page can show its people, its open deals, and every note anyone wrote against any of them without you modelling the reverse side. Each record carries one unified timeline - notes, calls, meetings, tasks, and the field and stage changes the store writes itself - so "what happened with this account" is one read, not four. CSV import is a first-class flow, not an afterthought: drop a file, see inferred columns with sampled values, map each to an existing field or make a new one, pick a dedupe key, then read a dry run that tells you exactly how many rows would be created, updated, and skipped before anything is written. Duplicates get found and merged field by field, with activities, list memberships, and relation edges reparented onto the survivor. Everything lives in one SQLite database the node owns, indexed with FTS5 for search, and the whole app runs as a sidecar process reached over loopback - no cloud tenant, no seat count, and no third party holding your pipeline.
+
+## Surfaces
+
+| Surface | Support |
+|---|---|
+| gateway | none |
+| core | full |
+| desktop | full |
+| island | limited |
+| mobile | limited |
+| extension | none |
+| web | full |
+| cli | list |
+
+## What it exposes
+
+### Tools
+
+### `crm__search` - Search CRM
+
+Full-text search across every CRM record on this node. Use it when you know roughly what you are looking for but not which object it lives on - it ranks hits across companies, people, deals and any custom object at once, and each hit names the field that matched with a snippet. Returns `&#123;ok, hits:[&#123;record_id, object, title, field, snippet&#125;]&#125;`. To look a record up by an exact field value instead (an email address, a domain), use `crm__find_record` - it is exact and this one is fuzzy.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | yes | What to search for. |
+| `object` | string | no | Optional object slug to scope the search to, e.g. `company`, `person`, `deal`. Omit to search everything. |
+| `limit` | integer | no | Max hits. Defaults to the node's page size; clamped to its ceiling. |
+
+### `crm__find_record` - Find CRM Record
+
+Look records up by an EXACT field value on one object - the tool to reach for before creating anything, so you update the existing company instead of making a second one. With no `field` it matches against the object's title field. Returns `&#123;ok, records:[…]&#125;`, empty when nothing matches; an empty result is a normal answer, not an error.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `object` | string | yes | Object slug, e.g. `company`, `person`, `deal`. |
+| `field` | string | no | Field slug to match on, e.g. `email` or `domain`. Omit to match the object's title field. |
+| `value` | string | yes | The exact value to match. |
+| `limit` | integer | no | Max records to return. |
+
+### `crm__get_record` - Get CRM Record
+
+Read one record in full by id: every field value as the store normalized it, plus its related records and recent timeline. Values come back normalized rather than as they were written, so this is also how you check what an update actually stored.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `record_id` | string | yes | The record's id, as returned by search or find. |
+
+### `crm__create_record` - Create CRM Record
+
+Create a record on an object. `values` is keyed by field slug and goes through the SAME validator the UI form uses, so a bad value is rejected rather than stored loosely - and every rejected field is reported at once, so one retry can fix them all instead of discovering them one at a time. Check for an existing record with `crm__find_record` first; this tool does not deduplicate for you. Returns `&#123;ok:false, errors:&#123;field: reason&#125;&#125;` on rejection.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `object` | string | yes | Object slug, e.g. `company`, `person`, `deal`. |
+| `values` | object | yes | Field values keyed by field slug. Currency fields are integer cents. Dates and datetimes are RFC-3339 strings. A select or status field takes one of its declared option values. |
+
+### `crm__update_record` - Update CRM Record
+
+Merge new values into an existing record - fields you do not name are left alone, so this is safe to call with a partial set. The response names only the fields that actually CHANGED, so re-sending a value the record already had reports no change rather than pretending to have done something. Moving a status field through this tool raises the same stage-changed event a human dragging the card would.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `record_id` | string | yes | The record to update. |
+| `values` | object | yes | Field values keyed by field slug. Only the fields present are touched. |
+
+### `crm__log_activity` - Log CRM Activity
+
+Append a note, call, or meeting to a record's timeline - how you write down what happened after a conversation so the next person reading the record sees it. Use `crm__create_task` for something still to be DONE; this is for something already done.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `record_id` | string | yes | The record this happened against. |
+| `kind` | string (one of: note, call, meeting) | yes | What kind of entry this is. `field_change` and `stage_change` are written by the store itself and cannot be logged here. |
+| `title` | string | yes | One-line summary shown in the timeline. |
+| `body` | string | no | Optional longer detail. |
+| `assignee` | string | no | Optional person this is attributed to. |
+| `due_at` | string | no | Ignored for notes/calls/meetings; use crm__create_task instead. |
+
+### `crm__create_task` - Create CRM Task
+
+Create a follow-up task, optionally attached to a record. A task with a `due_at` is swept when it comes due and raises `task.due` exactly once, which is what makes it reachable by an automation - a task with no due time is just a to-do line and will never announce itself.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `title` | string | yes | What needs doing. |
+| `record_id` | string | no | Optional record to hang the task off. Omit for a standalone to-do. |
+| `body` | string | no | Optional detail. |
+| `assignee` | string | no | Who owns it. |
+| `due_at` | string | no | RFC-3339 timestamp. Required if you want the task to raise `task.due` when it comes due. |
+
+### `crm__pipeline` - CRM Pipeline Report
+
+Summarize a pipeline: record count and summed value per stage of a status field, with win rate and average age in stage. Defaults to the `deal` object and its own status and currency fields, so calling it with no arguments answers "how is the pipeline doing". Point `object_id` at any object that has a status field to get the same shape for it.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `object_id` | string | no | Object slug or id. Defaults to `deal`. |
+| `field_id` | string | no | The status field to group by. Defaults to the object's own status field. |
+| `value_field_id` | string | no | The currency/number field to sum per stage. Defaults to the object's amount field. |
+| `include_closed` | boolean | no | Include stages marked as closed/won/lost. Defaults to false, i.e. open pipeline only. |
+
+## Permissions
+
+**Grants:** `crm:crud`, `tool:http-egress:127.0.0.1`
+
+| Level | Description | Implies |
+|---|---|---|
+| **Can view** | Read the objects, records, views, lists, and activity timelines on this node, and run searches and pipeline reports. |  |
+| **Can edit** | Create and change records, log activities, and manage views and lists. Does not include changing the schema or importing files. | `crm.view` |
+| **Can administer** | Change the schema itself - add and delete objects and fields - and run CSV imports and record merges. These are the operations that rewrite or destroy many rows at once, which is why they are a separate level from ordinary editing. | `crm.edit` |
+
+## UI it contributes
+
+### Dock panels
+
+- **Harbor** (placement: both)
+
+### Data categories
+
+- **Delete all Harbor data**
+
+### Hook events
+
+- **Record created** - A new record committed to an object. Fires once per record at the moment the row is durable - including for each row a CSV import creates, so a 2,000-row import raises 2,000 events. It does NOT fire for a validation failure (nothing was written) and does NOT fire for the survivor of a merge (that record already existed).
+- **Record updated** - At least one field value on a record changed. `changed` names only the fields that actually differ, so a PATCH that re-sends identical values raises nothing at all. Fires once per write, not once per field. A stage move raises this AND `deal.stage_changed` - subscribe to one or the other, not both, unless you want to see it twice.
+- **Deal stage changed** - A record's status field moved from one stage to another - the event a pipeline automation actually wants, carrying both the old and the new stage so a rule can fire on a direction rather than on arrival. Fires for any object with a status field, not only the built-in deal, and only on a real transition: setting the stage to the value it already held is silent. Dragging a card on the board and PATCHing the field are the same event.
+- **Task became due** - An open task passed its due time and was claimed by the sweep. Fires exactly ONCE per task: the claim is a compare-and-set, so a node running two Harbor processes against one data dir still announces it once, and a node that was offline for a month emits its backlog over several ticks rather than in one burst. Completing or rescheduling a task before it comes due means this never fires for it; reopening an already-announced task can let it fire again.
+
+### Sidebar sections
+
+- **Follow-ups**
+
+## Engine requirement
+
+Requires Ryu >=0.1.0.
+
+## Sidecar
+
+Runs an out-of-process sidecar: `crm`.

@@ -1,0 +1,106 @@
+---
+title: "Live Activities"
+description: "The Dynamic-Island dock: small always-live status cards for work in progress, on the empty shell page and in the sidebar."
+---
+
+Live Activities are small, always-live status cards the desktop shell renders for things in progress — an
+agent working, a download, a pending approval, a recording. They bring the iOS / macOS Live Activities
+(Dynamic Island) mental model to the desktop: each card starts when the thing starts, updates as it
+progresses, and ends with a terminal `done` / `error` state. The same status vocabulary drives the
+[mobile app's agent activity](/docs/mobile), so "an agent is working" reads identically on every device.
+
+They appear in two places:
+
+- **The empty shell page** (when no tabs are open): a compact pill dock below the composer. Each pill
+  shows the activity's glyph and a pulsing status dot; interacting with it expands the pill into a
+  detail card with the status badge, the detail line, a determinate progress bar, and an **Open** action.
+- **The sidebar**: a pinned **Live** block above the announcements, self-hiding when nothing is running.
+
+The whole dock self-hides when nothing is live, so an idle machine stays calm.
+
+## What's built in
+
+The desktop ships live activities for the state it already streams, so the dock works out of the box:
+
+| Activity | Source | Status |
+|---|---|---|
+| Agent run | `GET /api/runs/stream` | `running` → `done` / `error` |
+| Download | the shared downloads store | `running` with live progress |
+| Pending approval | the approvals inbox | `waiting` ("needs your input") |
+| Meeting recording | the meetings stream | `running` while recording |
+
+Tapping a built-in card opens its owning surface: the chat that owns the run, the download center, the
+approval inbox, or the meetings page.
+
+## How apps and plugins expose one
+
+Any enabled plugin can contribute live activities declaratively with **zero sidecar code** — the same
+relationship `sidebar_sections` has to the sidebar. Add a `live_activities` entry to the manifest's
+`contributes` block; each entry names a `source` (a Core `/api/` path the shell polls) and a field-map
+from response rows to card fields:
+
+```json
+{
+  "contributes": {
+    "live_activities": [
+      {
+        "id": "working",
+        "title": "Working",
+        "icon": "lucide:loader-circle",
+        "accent": "var(--primary)",
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/runs" },
+            "items": "runs",
+            "filter": [{ "key": "run_status", "equals": "running" }],
+            "map": {
+              "id": "id",
+              "title": "title",
+              "titleFallback": "Untitled run",
+              "detail": "folder_path"
+            },
+            "refreshMs": 5000,
+            "limit": 5
+          },
+          "map": {
+            "status": "run_status",
+            "statusMap": {
+              "running": "running",
+              "completed": "done",
+              "failed": "error"
+            }
+          },
+          "target": "/chat?conversationId={{item.id}}"
+        }
+      }
+    ]
+  }
+}
+```
+
+- `source` is the same `ViewSource` a `list-detail` view or a `sidebar_sections` entry uses: a Core
+  `/api/` path, an optional `items` array key, row `filter`/`limit`, and a `refreshMs` poll cadence.
+- `map.status` names the row key whose value is a status string; `statusMap` remaps backend wording
+  onto the five shared statuses (`running`, `waiting`, `review`, `done`, `error`). Unmapped values fall
+  back to `running`. `map.progress` names a row key holding a 0–1 (or 0–100) progress value.
+- `target` is a route template opened when the card is activated, filled with the row's
+  `{{item.<key>}}` values — the same templating vocabulary `sidebar_sections` uses.
+
+The card the user sees is rendered by the shell from this data — the app never supplies markup, so a
+contributed activity cannot be made ugly. The `Agent Status` app ships a working example: see
+[Agent Status](/docs/apps/agent-status).
+
+## Statuses
+
+Every card carries one of five statuses, matching the mobile agent-activity vocabulary:
+
+| Status | Meaning |
+|---|---|
+| `running` | In flight (pulsing dot) |
+| `waiting` | Blocked on input (e.g. a pending approval) |
+| `review` | Needs review |
+| `done` | Finished |
+| `error` | Failed |
+
+Terminal (`done` / `error`) cards linger briefly so the dock shows "just finished", then drop off —
+the dock only accumulates live work.
