@@ -1,4 +1,4 @@
-export const DOCS_VERSION = "0.1.13" as const;
+export const DOCS_VERSION = "0.1.14" as const;
 
 /**
  * Versions served from their OWN deployment, cut as a `docs/<version>` branch at
@@ -97,7 +97,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.1.13", not "v0.1.13".
+    // Bare number, no "v" prefix — the switcher reads "0.1.14", not "v0.1.14".
     title: DOCS_VERSION,
   },
   ...ARCHIVED_DOCS_VERSIONS.map((v) => ({

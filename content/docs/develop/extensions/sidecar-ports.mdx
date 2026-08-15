@@ -1,7 +1,7 @@
 ---
 title: "Pick a Sidecar Port"
-description: "How Core assigns, shifts, and health-checks the port your manifest sidecar binds - and why your process should read it from the environment instead of hardcoding it"
-tags: ["sidecar", "port", "port_env", "manifest", "extension", "collision"]
+description: "How Core assigns, shifts, and health-checks the port your manifest sidecar binds, which band a community app should pick from, and what happens when something else on the machine already holds the port"
+tags: ["sidecar", "port", "port_env", "manifest", "extension", "collision", "conflict"]
 ---
 
 A manifest sidecar declares one TCP port:
@@ -71,37 +71,101 @@ environment as *what you got*. A process written that way keeps working if Core 
 port itself.
 
 <Callout type="warn">
-  `port_env` exists on the `local` and `python` process kinds only. A `binary` or `node` sidecar
-  has no equivalent field and is spawned with no port injection at all, so it must bind the
-  declared port literally - which makes it correct on a default-profile node and wrong on any
-  other, because Core still health-checks and proxies the shifted port. If your process reads
-  configuration from the environment anyway, that gap is a reason to prefer `local` or `python`;
-  if you ship a downloaded binary you have no choice, so test on the profile your users run.
+  `port_env` exists on the `local` and `python` process kinds only, but a `node` sidecar is still
+  told its port - it has no `port_env` field because the value arrives under a fixed name,
+  `RYU_HOST_PORT`, alongside `RYU_HOST_HEALTH_PATH`. Read that one instead.
+
+  A **`binary`** sidecar is the exception: it is spawned with no port injection at all, so it must
+  bind the declared port literally. That is correct on a default-profile node and wrong on every
+  other one, because Core still health-checks and proxies the shifted port. If your process reads
+  configuration from the environment anyway, that gap is a reason to prefer `local` or `python`; if
+  you ship a downloaded executable you have no choice, so test on the profile your users run.
 </Callout>
 
 ## Choosing a number
 
-There is no port registry: the number in your manifest is the number Core tries, and a collision is
-resolved by refusing to start rather than by moving anyone. Before spawning, Core bind-probes the
-port and fails the start if anything already holds it:
-
-```
-port 8321 is already in use on the host (bind probe failed: …)
-port 8321 is already claimed by sidecar '@acme/other/engine'
-```
-
-That is detection, not repair - the user sees an app that will not start. So pick with some care:
+There is no port registry, and no allocator: the number in your manifest is the number Core tries.
+Pick from the community band.
 
 | Range | Who uses it | Safe for your app? |
 | --- | --- | --- |
 | `3200`, `7980`, `8000`, `8080`-`8096`, `9070`, `30000` | Core's own substrate - local inference engines, speech, image generation, the workflow runtime, the SDK adapter | No, never |
-| `7990`-`8096` | Ryu's first-party apps and engines | No - this band fills up as Ryu ships apps |
-| `8300`-`8699` | unclaimed | Yes - pick here |
+| `7990`-`8079` | Ryu's first-party apps | No - this band fills up as Ryu ships apps |
+| `8300`-`8699` | community | Yes - pick here |
 
-Within `8300`-`8699`, pick a number that is not a round or famous one (`8500`, `8443` are crowded by
-other software), and check the ports of any apps you depend on - a plugin you install alongside
-yours is as likely to collide as Ryu itself. `GET /api/sidecar/status` lists what is registered on
-the node you are testing against.
+Two things about that band that are easy to get wrong.
+
+**It ends at `8699` because plugins share the space.** App sidecars and plugin sidecars are
+allocated from one range, and installed plugins already sit above it - `8787` is taken by a
+first-party plugin, and one declares `47821`. There is no separate "plugin ports" region to hide in.
+
+**`8000` is carved out of the first-party band, not spare.** It sits inside `7990`-`8079` but Core's
+own inference server binds it, so it belongs to the row above.
+
+Within `8300`-`8699`, avoid round and famous numbers - `8500`, `8443` and the like are crowded by
+software that has nothing to do with Ryu. Check the ports of any app or plugin you expect to be
+installed next to yours: a neighbour is as likely to collide as Ryu itself.
+`GET /api/sidecar/status` lists what is registered on the node you are testing against.
+
+## When the port is already taken
+
+Port numbers are not unique to Ryu. Your user's machine also runs their own software, and nothing
+stops a database, a dashboard, or another vendor's agent from binding the number you picked. The
+band table above tells you what *Ryu* claims; it cannot tell you what else is on the host.
+
+Core checks before it spawns you. `claim_port` consults its registry of live sidecars and then
+bind-probes the port itself, and **fails the start** if either check fails:
+
+```
+port 8321 is already claimed by sidecar '@acme/other/engine'
+port 8321 is already in use on the host (bind probe failed: …)
+```
+
+The first means another Ryu sidecar holds it. The second means anything at all does - another Ryu
+sidecar that is a compiled-in built-in, or software Ryu has never heard of.
+
+<Callout type="warn">
+  This is detection, not resolution. Core does **not** move your sidecar to a free port, and there
+  is no per-app port override a user can set. A collision is an app that will not start, and the
+  only place the port is named is that error string.
+</Callout>
+
+The failure is quieter than you would expect, in three ways worth designing against:
+
+- **Enabling the app still succeeds.** The sidecar is spawned off the request thread so a slow
+  download never blocks enable, so the enable call returns fine and the app reads as on.
+- **The sidecar is missing from `GET /api/sidecar/status`, not listed as unhealthy.** A sidecar that
+  never cleared the port check is never registered, so it does not appear at all. Code that polls
+  status for your sidecar must treat *absent* as a failure state, not as "still starting".
+- **Requests are still proxied to that port.** The proxy resolves its target from your manifest
+  rather than from whether your process actually started, so `/api/ext/<plugin_id>/*` is forwarded
+  to whatever is listening there. You do not get a clean error; you get another program's answers.
+  Never assume a response on your own route came from your own process - version or identify it.
+
+Nothing retries, either: the health monitor reports and does not restart, so a sidecar that lost its
+port stays down until Core restarts.
+
+So the remedies are all outside the app:
+
+- **Free the port.** Stop whatever holds it. This is the only fix that keeps the declared number.
+- **Shift every Ryu port at once** by running the node under a non-default profile - each profile
+  offsets the whole set, which resolves a collision against non-Ryu software but moves Core too.
+- **Report it to the app author.** A port that collides on many machines is a bad pick, and the fix
+  is a new manifest port in the next release.
+
+Design for the failure rather than assuming it away: surface the sidecar's health state in your UI
+instead of letting requests hang, so a user whose port is occupied sees a reason.
+
+### The probe cannot be airtight
+
+A bind probe proves the port was free a moment ago, not that it is free when your process binds. The
+listener Core opens is dropped immediately so your child can take the port, and another process can
+win that gap. If your process can lose the race, exit non-zero on `EADDRINUSE` rather than retrying
+in a loop or silently binding something else - a sidecar listening on a port Core is not watching is
+reported unhealthy and proxied to a dead socket, which is much harder to diagnose than a clean exit.
+
+Treat the manifest `port` as *what you asked for* and `port_env` as *what you got*. An app written
+that way needs no changes if the number it is handed ever stops matching the number it declared.
 
 ## Your port is not your public URL
 
@@ -127,5 +191,6 @@ to.
 - Bind `127.0.0.1`.
 - Serve `health_path` (default `/health`) with a 2xx as soon as you are listening - Core treats
   that as "started".
-- Pick from `8300`-`8999`.
+- Pick from `8300`-`8699`, avoiding round numbers and the ports of apps you ship beside.
+- Exit non-zero if the bind fails; never fall back to a different port on your own.
 - Point clients at `/api/ext/<plugin_id>/*`, never at the port.
