@@ -34,7 +34,7 @@ Container: `docker build -t ryu-docs . && docker run -p 3002:3002 ryu-docs`.
 - **19 sidebar realms:** Start Here, Integrate, Billing, Desktop, CLI, Mobile, Hardware, Gateway,
   Core, Primitives, Security, Develop, Apps, Plugins, Benchmark, Skills, MCP Server, Cookbook, and
   Academy — defined by `root: true` `meta.json` files.
-- **Interactive OpenAPI reference** (`content/docs/develop/api-reference/`): rendered by
+- **Interactive OpenAPI reference** (`content/docs/extend/develop/api-reference/`): rendered by
   `fumadocs-openapi` with a live request playground.
 - **Two source specs** (`specs/`): `gateway-openapi.yaml` (hand-authored) and
   `core-openapi.json` (generated from Core's Axum handlers via utoipa, e.g.
