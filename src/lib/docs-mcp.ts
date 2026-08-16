@@ -155,7 +155,7 @@ export function createDocsServer(): McpServer {
       path: z
         .string()
         .describe(
-          "The docs page to read: a URL or path, e.g. '/docs/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
+          "The docs page to read: a URL or path, e.g. '/docs/extend/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
         ),
     },
     async ({ path }) => {

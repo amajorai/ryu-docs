@@ -10,20 +10,25 @@ chat.
 
 ## The workspace bar
 
-Directly above the composer is a **workspace bar** (`apps/desktop/src/components/chat/WorkspaceBar.tsx`)
-with up to three click-to-change segments, left to right:
+Directly above the composer is a **workspace bar** with click-to-change segments:
 
-| Segment | What it sets | Component |
-|---|---|---|
-| Project folder | The active folder the run is rooted in (`cwd`) | `ProjectPicker.tsx` |
-| Git branch | The branch the folder is on, with a switcher | `WorkspacePicker.tsx` |
-| Run mode | Run in place, or in an isolated worktree | `WorkspacePicker.tsx` |
+| Segment | What it sets |
+|---|---|
+| Project folder | The active folder the run is rooted in |
+| Run mode | Run in place, or in an isolated worktree |
+| Local environment | The named setup used for a new worktree and its agent process |
+| Git branch | The branch the folder is on, with a switcher |
 
-The branch and run-mode segments render only when the selected folder is a git repository. For a
-plain folder (or no folder) the bar collapses to just the project picker.
+The branch and run-mode segments render only when the selected folder is a git repository. The local
+environment segment appears when the project has at least one environment configured.
 
-The branch segment polls `GET /api/git/status?cwd=<path>` for the current branch and dirty state
-(`apps/core/src/server/git.rs`), shows an amber dot when the working tree is dirty, and on click lists
+The same project, run-mode, branch, and change totals remain available in the connected **Pinned
+summary** rail beside the conversation. Choose **Commit or push** there to open the git action
+dialog: add an optional commit message, choose whether to include unstaged changes, then select
+**Commit**, **Commit and push**, or **Push**. The summary refreshes its counts after the action.
+
+The branch segment polls `GET /api/git/status?cwd=<path>` for the current branch and dirty state,
+shows an amber dot when the working tree is dirty, and on click lists
 local branches from `GET /api/git/branches` so you can switch with `POST /api/git/checkout`. Checkout
 goes through `git switch` and is validated against the real branch list, so a typo or an injected
 argument is rejected.
@@ -32,6 +37,16 @@ argument is rejected.
   The branch and worktree controls only apply to a folder that is a git repo. Pick a non-repo folder
   and those segments disappear, leaving an ordinary folder-rooted chat with no isolation.
 </Callout>
+
+## Open workspace files in desktop apps
+
+Open the **Files** workspace tab to browse the active project. Right-click a file or folder—or use
+its row action—to open it with the operating system's default app, reveal it in Finder, Explorer, or
+Files, or send it to an installed editor such as VS Code, Cursor, or Zed. Installed terminal options
+also appear; for a file, Ryu opens its containing folder in the selected terminal.
+
+Ryu resolves every action beneath the active project folder before handing it to the operating
+system. A path that leaves the project through parent traversal or a symlink is rejected.
 
 ## Run mode: this folder vs an isolated worktree
 
@@ -49,29 +64,69 @@ shows it read-only with the count of changed files
 (`apps/desktop/src/components/chat/WorkspacePicker.tsx`).
 
 On each turn the chat request carries `cwd`, `worktree_isolation`, and the desired `worktree_branch`
-(`apps/desktop/src/pages/ChatPage.tsx`). Worktree isolation is opt-in per the run-mode pick, not on by
-default for every folder.
+. Worktree isolation is opt-in per the run-mode pick, not on by default for every folder.
+
+## Local environments
+
+Open a project's menu and choose **Edit project** to add one or more named local environments. Each
+environment can define:
+
+- A default setup script plus optional macOS, Linux, and Windows overrides.
+- A default cleanup script plus the same platform overrides.
+- Plain environment variables inherited by setup, cleanup, project actions, and the coding agent.
+- Named actions such as **Dev stack**, **Desktop**, **Core**, or **Tests**, each with optional
+  platform-specific commands. Actions appear in the workspace bar.
+
+The active environment can be switched from the workspace bar before a worktree is created. Once a
+conversation has a live worktree, its environment is fixed; select a different environment for the
+next worktree instead.
+
+Setup runs once from the new worktree root. Ryu supplies `RYU_PROJECT_PATH` for the main checkout and
+`RYU_WORKTREE_PATH` for the isolated checkout. Cleanup runs from that same worktree immediately before
+Ryu removes it, including after apply. A failed setup stops the agent turn and reports the script
+error instead of silently running against the main checkout.
+
+<Callout type="warn">
+  Environment variables are stored as local project settings. Do not put passwords, API keys, or
+  other secrets in them; use the credential or secret storage supported by the tool that needs the
+  secret.
+</Callout>
+
+### Monorepo example
+
+For a Bun/Turborepo workspace that also contains Rust crates, a useful setup is:
+
+```sh
+bun install --frozen-lockfile
+cargo fetch
+```
+
+Then add focused actions such as `bun run dev`, `bun run dev:desktop`, `bun run dev:core`, and
+`bun run check-types`. Keeping these as separate actions avoids forcing every worktree to start every
+service. Commands run from the worktree root, so package-specific actions can use the repository's
+workspace filters or an explicit `cd`.
 
 ## What Core does with a worktree
 
 When a chat request arrives with `cwd` set, `worktree_isolation` true, and the folder is a git repo,
-Core creates a per-run worktree (`apps/core/src/server/worktree.rs`):
+Core creates a per-conversation worktree:
 
 - The worktree directory is placed under `<repo>/.ryu-worktrees/ryu-run-<uuid>`, inside the repo so
   it stays below `.gitignore`.
 - The branch is your sanitized friendly name when you supplied one (with a short suffix appended on a
   name collision), or the auto-generated `ryu/run-<uuid>` otherwise.
 - Core records the HEAD commit at creation time as the diff base.
-- The worktree is an RAII guard: when the run's stream finishes or the client disconnects, the
-  worktree directory and its branch are removed automatically.
+- The worktree remains available across turns. Applying or discarding it runs the selected
+  environment's cleanup hook, then removes the directory and branch automatically.
 
 ## Review the diff in chat
 
-After a run, the in-chat **diff panel** (`apps/desktop/src/components/chat/DiffReviewPane.tsx`) reads
+After a run, the in-chat **diff panel** reads
 the aggregate worktree diff from `GET /api/worktree/:run_id/diff`, where `run_id` is the conversation
-id. It shows the changed-file list with per-file additions and deletions plus the unified diff. The
-diff captures both committed changes on the worktree branch and uncommitted working-tree edits, so
-files the agent created but never committed still appear (Core stages with `git add -A` before
+id. It shows one file at a time with line numbers and addition/deletion highlighting. Use the
+filterable changed-file list to move between files; the header keeps the aggregate totals visible.
+The diff captures both committed changes on the worktree branch and uncommitted working-tree edits,
+so files the agent created but never committed still appear (Core stages with `git add -A` before
 diffing).
 
 ## Apply the changes

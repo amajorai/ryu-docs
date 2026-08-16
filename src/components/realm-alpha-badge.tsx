@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-const ALPHA_REALMS = new Set(["cli", "hardware", "mobile"]);
+const ALPHA_REALMS = new Set(["roadmap"]);
 
 export function isAlphaRealm(segment: string): boolean {
   return ALPHA_REALMS.has(segment);

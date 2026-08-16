@@ -24,7 +24,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.1.14/start-here",
+        destination: "/docs/0.1.15/start-here",
         permanent: false,
       },
       // The recipes gallery became its own "Cookbook" root. Keep the old
@@ -33,24 +33,133 @@ const config = {
       // on Cookbook, not desktop/recipes.
       {
         source: "/docs/using-ryu/recipes",
-        destination: "/docs/cookbook",
+        destination: "/docs/learn/cookbook",
         permanent: true,
       },
       {
         source: "/docs/using-ryu/recipes/:path*",
-        destination: "/docs/cookbook/:path*",
+        destination: "/docs/learn/cookbook/:path*",
         permanent: true,
       },
       // "Using Ryu" was re-cut into per-surface realms; its content now lives
-      // under the "Desktop" root. Preserve every old /docs/using-ryu URL.
+      // under the "Surfaces" root. Preserve every old /docs/using-ryu URL.
       {
         source: "/docs/using-ryu",
-        destination: "/docs/desktop",
+        destination: "/docs/surfaces/desktop",
         permanent: true,
       },
       {
         source: "/docs/using-ryu/:path*",
-        destination: "/docs/desktop/:path*",
+        destination: "/docs/surfaces/desktop/:path*",
+        permanent: true,
+      },
+      // The docs were re-cut from per-section roots into grouped realms
+      // (Surfaces, Extend, Reference, Learn). Every old URL keeps
+      // working. The bare /docs/desktop/surfaces page (companions) is now the
+      // /docs/surfaces overview; the companions got their own pages.
+      {
+        source: "/docs/desktop/surfaces",
+        destination: "/docs/surfaces",
+        permanent: true,
+      },
+      {
+        source: "/docs/desktop",
+        destination: "/docs/surfaces/desktop",
+        permanent: true,
+      },
+      {
+        source: "/docs/desktop/:path*",
+        destination: "/docs/surfaces/desktop/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/cli",
+        destination: "/docs/surfaces/cli",
+        permanent: true,
+      },
+      {
+        source: "/docs/cli/:path*",
+        destination: "/docs/surfaces/cli/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/develop",
+        destination: "/docs/extend/develop",
+        permanent: true,
+      },
+      {
+        source: "/docs/develop/:path*",
+        destination: "/docs/extend/develop/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/integrate",
+        destination: "/docs/extend/integrate",
+        permanent: true,
+      },
+      {
+        source: "/docs/integrate/:path*",
+        destination: "/docs/extend/integrate/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/mcp",
+        destination: "/docs/extend/mcp",
+        permanent: true,
+      },
+      {
+        source: "/docs/mcp/:path*",
+        destination: "/docs/extend/mcp/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/skills",
+        destination: "/docs/extend/skills",
+        permanent: true,
+      },
+      {
+        source: "/docs/skills/:path*",
+        destination: "/docs/extend/skills/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/defaults",
+        destination: "/docs/reference/defaults",
+        permanent: true,
+      },
+      {
+        source: "/docs/defaults/:path*",
+        destination: "/docs/reference/defaults/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/benchmark",
+        destination: "/docs/reference/benchmark",
+        permanent: true,
+      },
+      {
+        source: "/docs/benchmark/:path*",
+        destination: "/docs/reference/benchmark/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/cookbook",
+        destination: "/docs/learn/cookbook",
+        permanent: true,
+      },
+      {
+        source: "/docs/cookbook/:path*",
+        destination: "/docs/learn/cookbook/:path*",
+        permanent: true,
+      },
+      {
+        source: "/docs/academy",
+        destination: "/docs/learn/academy",
+        permanent: true,
+      },
+      {
+        source: "/docs/academy/:path*",
+        destination: "/docs/learn/academy/:path*",
         permanent: true,
       },
     ];

@@ -2,25 +2,21 @@
 
 import { useSearchContext } from "fumadocs-ui/contexts/search";
 import {
+  AppWindow,
   ArrowRight,
+  Blocks,
   BookOpen,
-  CircuitBoard,
   Code2,
   Cpu,
   CreditCard,
-  Gauge,
   GraduationCap,
   type LucideIcon,
   Monitor,
-  PlugZap,
-  Puzzle,
   Rocket,
+  Route,
   Search,
   Shield,
   ShieldCheck,
-  Smartphone,
-  Sparkles,
-  Terminal,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -61,12 +57,66 @@ const REALMS: Realm[] = [
     track: "use",
   },
   {
-    slug: "integrate",
-    title: "Integrate",
+    slug: "surfaces",
+    title: "Surfaces",
     description:
-      "Every surface, protocol, and API Ryu exposes for agents, tools, and applications — find the right integration path.",
-    icon: Puzzle,
-    accent: "var(--integrate-color)",
+      "The desktop app, the Island overlay, Raycast, and the CLI — each a thin client over the same Core.",
+    icon: Monitor,
+    accent: "var(--surfaces-color)",
+    track: "use",
+  },
+  {
+    slug: "core",
+    title: "Core",
+    description:
+      "Local backend internals: sessions, memory, RAG, workflows, sandboxes, and MCP.",
+    icon: Cpu,
+    accent: "var(--core-color)",
+    track: "build",
+  },
+  {
+    slug: "gateway",
+    title: "Gateway",
+    description:
+      "The LLM control plane: routing, firewall, budgets, evals, and audit.",
+    icon: Shield,
+    accent: "var(--gateway-color)",
+    track: "build",
+  },
+  {
+    slug: "extend",
+    title: "Extend",
+    description:
+      "Build on Ryu: plugins, apps, skills, MCP servers, the SDKs, and the full API reference.",
+    icon: Code2,
+    accent: "var(--extend-color)",
+    track: "build",
+  },
+  {
+    slug: "apps",
+    title: "Apps",
+    description:
+      "The apps Ryu ships in the store: each a self-contained product — a sidecar plus a surface.",
+    icon: AppWindow,
+    accent: "var(--apps-color)",
+    track: "use",
+  },
+  {
+    slug: "plugins",
+    title: "Plugins",
+    description:
+      "manifest.json bundles that extend capabilities with net-new tools, agents, workflows, and skills.",
+    icon: Blocks,
+    accent: "var(--plugins-color)",
+    track: "use",
+  },
+  {
+    slug: "security",
+    title: "Security",
+    description:
+      "Ryu's security model: trust boundary, sandboxing, command approval and HITL, credential scrubbing, outbound DLP, SSRF protection, and deployment hardening.",
+    icon: ShieldCheck,
+    accent: "var(--security-color)",
     track: "build",
   },
   {
@@ -79,121 +129,31 @@ const REALMS: Realm[] = [
     track: "use",
   },
   {
-    slug: "desktop",
-    title: "Desktop",
+    slug: "reference",
+    title: "Reference",
     description:
-      "The flagship app and its companions (Island, extension, Raycast): chat, agents, teams, engines, and more.",
-    icon: Monitor,
-    accent: "var(--desktop-color)",
-    track: "use",
-  },
-  {
-    slug: "cli",
-    title: "CLI",
-    description:
-      "The Rust terminal UI: chat, a fuzzy command palette, live list tabs, and GitOps from your shell.",
-    icon: Terminal,
-    accent: "var(--cli-color)",
-    track: "build",
-  },
-  {
-    slug: "mobile",
-    title: "Mobile",
-    description:
-      "The Expo app: chat and a drawer of screens over the same Core, through the active node.",
-    icon: Smartphone,
-    accent: "var(--mobile-color)",
-    track: "use",
-  },
-  {
-    slug: "hardware",
-    title: "Hardware",
-    description:
-      "ESP32-S3 devices (watch, necklace, desk hub) that capture audio and camera and run all inference on a node: protocol, pairing, ambient capture, firmware, and deployment.",
-    icon: CircuitBoard,
-    accent: "var(--hardware-color)",
-    track: "build",
-  },
-  {
-    slug: "skills",
-    title: "Skills",
-    description:
-      "Agent skills: reusable SKILL.md instruction packs that load on demand. The setup-ryu flagship, the shipped catalog, authoring, and publishing.",
-    icon: Sparkles,
-    accent: "var(--skills-color)",
-    track: "use",
-  },
-  {
-    slug: "mcp",
-    title: "MCP Server",
-    description:
-      "Connect Claude Desktop or any MCP host to your node: quickstart config, the tool list, remote-node setup, and security.",
-    icon: PlugZap,
-    accent: "var(--mcp-color)",
-    track: "build",
-  },
-  {
-    slug: "cookbook",
-    title: "Cookbook",
-    description:
-      "End-to-end recipes: agents, routing, deployments, multi-node, and channel bots.",
+      "The defaults Ryu ships with, the swappable building blocks (primitives), and the RyuBench benchmark.",
     icon: BookOpen,
-    accent: "var(--cookbook-color)",
+    accent: "var(--reference-color)",
     track: "build",
   },
   {
-    slug: "academy",
-    title: "Academy",
+    slug: "learn",
+    title: "Learn",
     description:
-      "Structured courses from first chat to certified builder, with knowledge checks.",
+      "Structured courses from first chat to certified builder, plus end-to-end recipes.",
     icon: GraduationCap,
-    accent: "var(--academy-color)",
+    accent: "var(--learn-color)",
     track: "use",
   },
   {
-    slug: "gateway",
-    title: "Gateway",
+    slug: "roadmap",
+    title: "Roadmap",
     description:
-      "The LLM control plane: routing, firewall, budgets, evals, and audit.",
-    icon: Shield,
-    accent: "var(--gateway-color)",
-    track: "build",
-  },
-  {
-    slug: "core",
-    title: "Core",
-    description:
-      "Local backend internals: sessions, memory, RAG, workflows, sandboxes, and MCP.",
-    icon: Cpu,
-    accent: "var(--core-color)",
-    track: "build",
-  },
-  {
-    slug: "security",
-    title: "Security",
-    description:
-      "Ryu's security model: trust boundary, sandboxing, command approval and HITL, credential scrubbing, outbound DLP, SSRF protection, and deployment hardening.",
-    icon: ShieldCheck,
-    accent: "var(--security-color)",
-    track: "build",
-  },
-  {
-    slug: "develop",
-    title: "Develop",
-    description:
-      "Build on Ryu: TypeScript SDK, Rust SDK, plugin manifests, and the full API reference.",
-    icon: Code2,
-    accent: "var(--develop-color)",
-    track: "build",
-  },
-  {
-    slug: "benchmark",
-    title: "RyuBench",
-    description:
-      "Measure how well any model or harness can operate Ryu — execution-verified, cost-normalized, hard to game.",
-    icon: Gauge,
-    accent: "var(--benchmark-color)",
-    track: "build",
+      "What is in flight but not finished: the browser extension, the hardware line, and the mobile app.",
+    icon: Route,
+    accent: "var(--roadmap-color)",
+    track: "use",
   },
 ];
 
@@ -214,14 +174,14 @@ const QUICK_LINKS: QuickLink[] = [
     label: "Architecture",
     href: docsPath("start-here", "architecture"),
   },
-  { id: "cookbook", label: "Cookbook", href: docsPath("cookbook") },
+  { id: "cookbook", label: "Cookbook", href: docsPath("learn", "cookbook") },
   {
     id: "api",
     label: "API reference",
-    href: docsPath("develop", "api-reference"),
+    href: docsPath("extend", "develop", "api-reference"),
   },
   { id: "security", label: "Security", href: docsPath("security") },
-  { id: "benchmark", label: "Benchmarks", href: docsPath("benchmark") },
+  { id: "benchmark", label: "Benchmarks", href: docsPath("reference", "benchmark") },
 ];
 
 // The hero used to close with a strip of hardcoded document counts (API
@@ -271,12 +231,12 @@ const FEATURED: Featured[] = [
   },
   {
     id: "cookbook",
-    href: docsPath("cookbook"),
+    href: docsPath("learn", "cookbook"),
     eyebrow: "Cookbook",
     title: "Recipes: real flows, start to finish",
     description:
       "Monitor a price and alert Slack, give a model a tool, route coding to Claude, ship an SDK agent.",
-    accent: "var(--cookbook-color)",
+    accent: "var(--learn-color)",
   },
 ];
 
@@ -400,13 +360,13 @@ const TRACKS: {
     id: "use",
     title: "Use Ryu",
     description:
-      "You want Ryu to do the work. The app and its companions, what to ask them, and how to check what they did.",
+      "You want Ryu to do the work. The desktop app and its surfaces, what to ask them, and how to check what they did.",
   },
   {
     id: "build",
     title: "Build on Ryu",
     description:
-      "You want to run it yourself. The gateway and Core internals, the SDKs and API, MCP, security, and hands-on recipes.",
+      "You want to run it yourself. The gateway and Core internals, how to extend it, security, and hands-on recipes.",
   },
 ];
 

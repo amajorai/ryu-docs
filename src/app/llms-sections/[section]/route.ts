@@ -5,35 +5,45 @@ import { getLLMText, source } from "@/lib/source";
 
 export const revalidate = false;
 
-const VALID_SECTIONS = [
-  "start-here",
-  "integrate",
-  "billing",
-  "desktop",
-  "cli",
-  "mobile",
-  "hardware",
-  "gateway",
-  "core",
-  "primitives",
-  "security",
-  "develop",
-  "apps",
-  "plugins",
-  "benchmark",
-  "skills",
-  "mcp",
-  "cookbook",
-  "academy",
-] as const;
+// Section slugs accepted by /llms-sections/{section}. Values are the URL prefix
+// that section owns (relative to /docs/{version}/). Legacy slugs from the
+// pre-reorg layout map onto the realm they now live in, so old clients that
+// asked for /llms-sections/desktop still get the desktop pages.
+const VALID_SECTIONS: Record<string, string> = {
+  "start-here": "start-here",
+  surfaces: "surfaces",
+  core: "core",
+  gateway: "gateway",
+  extend: "extend",
+  apps: "apps",
+  plugins: "plugins",
+  security: "security",
+  billing: "billing",
+  reference: "reference",
+  learn: "learn",
+  // Legacy aliases → the realm that absorbed them.
+  desktop: "surfaces/desktop",
+  cli: "surfaces/cli",
+  island: "surfaces/island",
+  raycast: "surfaces/raycast",
+  develop: "extend/develop",
+  integrate: "extend/integrate",
+  skills: "extend/skills",
+  mcp: "extend/mcp",
+  cookbook: "learn/cookbook",
+  academy: "learn/academy",
+  defaults: "reference/defaults",
+  benchmark: "reference/benchmark",
+};
 
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ section: string }> },
 ) {
   const { section } = await params;
+  const prefix = VALID_SECTIONS[section];
 
-  if (!(VALID_SECTIONS as readonly string[]).includes(section)) {
+  if (!prefix) {
     notFound();
   }
 
@@ -41,8 +51,8 @@ export async function GET(
     .getPages()
     .filter(
       (page) =>
-        page.url === docsPath(section) ||
-        page.url.startsWith(`${docsPath(section)}/`),
+        page.url === docsPath(...prefix.split("/")) ||
+        page.url.startsWith(`${docsPath(...prefix.split("/"))}/`),
     );
 
   if (pages.length === 0) {
@@ -72,5 +82,5 @@ Each page below starts with a Source/Title header followed by its full Markdown 
 }
 
 export function generateStaticParams() {
-  return VALID_SECTIONS.map((section) => ({ section }));
+  return Object.keys(VALID_SECTIONS).map((section) => ({ section }));
 }

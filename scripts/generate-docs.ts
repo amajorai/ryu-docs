@@ -21,7 +21,7 @@ import { docsPath } from "../src/lib/docs-version";
  * so we build the landing pages ourselves in `beforeWrite` instead.
  */
 const CONTENT_ROOT = path.join("content", "docs");
-const API_DIR = path.join(CONTENT_ROOT, "develop", "api-reference");
+const API_DIR = path.join(CONTENT_ROOT, "extend", "develop", "api-reference");
 
 const specs = [
   {
@@ -65,7 +65,12 @@ function landingPage(
   spec: (typeof specs)[number],
   entries: OutputEntry[],
 ): string {
-  const surfaceBase = docsPath("develop", "api-reference", spec.out);
+  const surfaceBase = docsPath(
+    "extend",
+    "develop",
+    "api-reference",
+    spec.out,
+  );
   const href = (entryPath: string) =>
     `${surfaceBase}/${entryPath
       .split(path.sep)

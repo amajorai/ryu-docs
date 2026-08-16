@@ -1,0 +1,106 @@
+---
+title: Authenticated MCP servers
+description: Let users connect their own account to a plugin's remote MCP server with OAuth 2.1 and PKCE.
+---
+
+An app or plugin can ask Ryu to connect a user's account to a remote MCP server. Ryu opens the
+provider's authorization page, keeps the resulting tokens encrypted on the user's node, refreshes
+them when needed, and attaches a bearer token only to that MCP server.
+
+This is for remote Streamable HTTP MCP servers. Stdio servers, direct HTTP tools, and long-running
+sidecars continue to use their existing API-key or process-specific authentication.
+
+## Declare OAuth
+
+Add `auth` to the remote server and request both governance grants:
+
+```json
+{
+  "permission_grants": ["mcp:server", "identity.read"],
+  "mcp_servers": {
+    "mail": {
+      "type": "streamable-http",
+      "url": "https://mcp.example.com/mcp",
+      "auth": {
+        "type": "oauth"
+      }
+    }
+  }
+}
+```
+
+If the provider assigned your plugin a public client ID, add `client_id`. Otherwise Ryu uses a
+Client ID Metadata Document when the authorization server advertises support and the node has a
+stable HTTPS public callback. It falls back to dynamic client registration when available.
+
+```json
+"auth": {
+  "type": "oauth",
+  "client_id": "provider-issued-public-client-id"
+}
+```
+
+The `auth` object intentionally accepts no client secret, token, endpoints, redirect URI, or scope
+list. Ryu discovers those values from the MCP authorization challenge, protected-resource metadata,
+and authorization-server metadata. A manifest containing an unknown auth field is rejected.
+
+OAuth MCP URLs must use HTTPS. Plain HTTP is accepted only for an explicit loopback development
+server. An OAuth declaration cannot be combined with a static `Authorization` header.
+
+## What users see
+
+After enabling the app or plugin, its account appears under **Marketplace → Connections**. The user
+chooses an identity profile and selects **Connect**. Ryu opens the system browser and polls the
+short-lived flow until it completes. Personal nodes use an ephemeral `127.0.0.1` callback. A remote
+node with an HTTPS `RYU_NODE_PUBLIC_URL` uses its fixed, state-bound hosted callback and publishes a
+Client ID Metadata Document from the same origin. In both modes, Core performs the code exchange on
+the node that owns the PKCE verifier; the browser never receives an access or refresh token.
+
+Connecting an account does not attach the server's tools to an agent. Agent tool allowlists and the
+normal Gateway capability checks remain authoritative.
+
+If a tool is called before the account is connected, or a refresh token is no longer valid, Ryu
+pauses the action with a Connect prompt. After authorization, the user can retry the operation.
+
+## Connection API
+
+The protected Core API exposes metadata and flow status, never credential material:
+
+- `GET /api/plugins/{plugin_id}/auth` lists OAuth MCP servers and connections for the caller.
+- `POST /api/plugins/{plugin_id}/auth/{server_name}/connect` accepts `profile_id` and an optional
+  `callback_mode` of `auto`, `loopback`, or `hosted`.
+- `GET /api/plugins/{plugin_id}/auth/flows/{flow_id}` reports `pending`, `connected`, or `failed`.
+- `DELETE /api/plugins/{plugin_id}/auth/{server_name}?profile_id=…` revokes when possible and always
+  deletes the local binding.
+
+`connect` returns a short-lived `authorization_url`, `flow_id`, callback mode, requested scopes,
+status, and expiry. The caller opens the URL and polls the flow endpoint.
+
+## Credential lifecycle
+
+- Access, refresh, and ID tokens plus dynamic-client material are encrypted in the Identity Vault.
+- Connections are isolated by user, identity profile, plugin, and MCP server. One account is active
+  for each such binding.
+- Ryu refreshes shortly before expiry and stores rotated refresh tokens atomically.
+- Disabling a plugin blocks its MCP server but retains the encrypted connection and performs no
+  refresh traffic.
+- **Disconnect** attempts provider revocation and always removes the local encrypted credentials.
+- Removing a plugin attempts revocation for every owned profile and then removes its local
+  connections and pending flows. If a provider cannot confirm revocation, Ryu reports that warning
+  instead of claiming the remote token was revoked.
+
+Tokens never enter model arguments, tool results, plugin settings, sidecar environments, or the MCP
+registry configuration. They are resolved immediately before an outbound request and are sent only
+to the declared MCP resource origin.
+
+## Provider requirements
+
+The MCP server must implement the MCP authorization challenge and publish OAuth protected-resource
+metadata. Its authorization server must support authorization code with PKCE S256 and one of:
+
+- client ID metadata documents for a node with a stable HTTPS callback;
+- a public client ID registered for the plugin; or
+- dynamic client registration.
+
+Providers that advertise none of those registration paths cannot be connected without adding a
+provider-specific secret, so Ryu reports an unsupported-registration error.
