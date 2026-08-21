@@ -3,33 +3,52 @@ title: "Auto-update"
 description: "One Core-computed update verdict, a shared toggle, and a native install mechanism per surface."
 ---
 
-Ryu ships one consistent update experience across every surface (desktop, CLI, gateway, island, extension,
-mobile). The pieces that are *shared* are the verdict, the toggle, and the toast UX. The install *mechanism*
-is each platform's own native updater. Per the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)
-rule, deciding *what runs* (including which build of the binaries runs) is Core's job, so the update verdict
-and the shared toggle live in Core (`apps/core/src/update/`). The Gateway governs what is allowed, measured,
-and paid, never the install lifecycle.
+Ryu keeps the update decision understandable across every surface (desktop, web app, CLI, gateway, island,
+extension, and mobile). The release verdict is shared where a surface talks to Core; the install *mechanism*
+remains platform-specific. Per the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule,
+deciding *what runs* (including which build of the binaries runs) is Core's job. The Gateway governs what is
+allowed, measured, and paid, never the install lifecycle.
+
+For the complete Stable, Beta, Nightly, Canary, and local Dev comparison, including local data roots and
+sharing boundaries, see [Ryu Release Channels](/docs/start-here/release-channels). This page focuses on
+the update verdict and install mechanisms.
 
 ## One verdict, native install
 
-Ryu uses a **single release train**: one git tag (`vX.Y.Z`) builds and publishes every binary together, so
-`core`, `gateway`, `cli`, and `desktop` always share a version. Core's own crate version
-(`CARGO_PKG_VERSION`) is therefore the canonical Ryu version, and `current_version()` returns it.
+Each Stable Ryu release uses a **single release train**: one git tag (`vX.Y.Z`) builds and publishes every
+binary together, so `core`, `gateway`, `cli`, and `desktop` share a version. Canary and Nightly are separate
+prerelease trains with versioned suffixes and their own feeds. Beta is currently backed by the signed Stable
+feed, and Dev is a local build rather than a published train. Core's own crate version (`CARGO_PKG_VERSION`)
+is therefore the canonical version for the build that is answering an update check, and `current_version()`
+returns it.
 
 Every client reads Core's one verdict instead of each re-implementing GitHub-release polling. What differs is
 only how the bytes land:
 
 | Surface | Mechanism | On launch |
 |---|---|---|
-| Desktop (Tauri) | `tauri-plugin-updater` (signed `latest.json` feed) | Checks Core; if auto-updates on (or forced) it downloads, installs, and relaunches, else a persistent "update available" toast with an install action (`apps/desktop/src/components/updater/AutoUpdater.tsx`). |
+| Desktop (Tauri) | `tauri-plugin-updater` (signed `latest.json` feed) | After sign-in, the first onboarding screen checks the desktop bundle and lets the user update or continue. Later launches use the same verdict and settings update tab; automatic updates install when enabled, otherwise a persistent "update available" toast offers an install action. |
+| Web app (browser) | Deployment refresh | Does not show a native-app update step or claim that a desktop bundle is current. A new web deployment is picked up through the browser's normal refresh/reload path. |
 | CLI (Rust) | Manual download (prints the release URL) | Prints a one-line notice when an update is available; `ryu version` / `ryu update` show details. |
-| Extension (Chrome) | Chrome Web Store (auto) | Notify-only toast, deduped per release. |
-| Island (Electron) | `electron-updater` (GitHub feed) | Reads the shared `auto-updates` pref; auto-downloads when enabled; "Restart to update" in Settings. |
-| Mobile (Expo) | `expo-updates` (EAS OTA) | Checks on launch when enabled; a Settings tab toggles it. |
+| Extension (Chrome) | Chrome Web Store (auto) | Mounted notify-only toast, deduped per release; the extension does not try to install its own package. |
+| Island (Electron) | `electron-updater` (GitHub feed) | Reads the shared `auto-updates` pref; when enabled it downloads, silently installs, and relaunches; when disabled it reports availability without downloading or installing. |
+| Mobile (Expo) | `expo-updates` (EAS OTA) | Checks on launch when enabled; Settings can check manually and offers an available OTA for explicit installation. |
 | Gateway (Rust) | Updated with Core (managed sidecar) | Ships in the same release, replaced when Core is. |
 
 The headless binaries (core, gateway, cli) have no native updater of their own, so Core also owns the binary
 self-update for them (see [Applying an update](#applying-an-update)).
+
+## Desktop first-run check
+
+After a user presses **Get Started** and completes device sign-in, the desktop app opens onboarding on an
+update step before asking whether to run locally, use Ryu Cloud, or connect to an existing node. The step
+checks the signed-in user's Core verdict, compares the release against the running desktop bundle, and keeps
+**Continue** available even when Core or the release service is unreachable. An unknown result is shown as
+“Couldn't check for updates,” never as a false “up to date” claim.
+
+The step reuses the same `auto-updates` preference as Desktop Settings. **Update now** uses the desktop's
+native install path, so release-channel and updates-window rules remain in one place. Browser builds reuse
+the onboarding code but skip this step because a web deployment cannot install a Tauri bundle.
 
 ## Checking for an update
 
@@ -42,8 +61,8 @@ API reference page.
 | [`GET /api/update/check`](/docs/extend/develop/api-reference/core/health/update_check) | Compares the installed version against the latest GitHub release and returns the verdict. |
 | [`POST /api/update/apply`](/docs/extend/develop/api-reference/core/health/update_apply) | Downloads and installs an update for the headless binaries. |
 
-`GET /api/update/check` queries the latest release of `amajorai/ryu`, compares semver (a malformed tag parses
-to `(0,0,0)`, so it never claims to be newer than a real version), picks the best release asset for the
+`GET /api/update/check` queries the latest release on the requested channel, compares semver (a malformed tag
+parses to `(0,0,0)`, so it never claims to be newer than a real version), picks the best release asset for the
 running platform, and returns an `UpdateCheck`:
 
 | Field | Meaning |
@@ -60,10 +79,19 @@ The asset matcher gates by OS first (filename and extension heuristics), then sc
 is inferred from the extension (`msi`, `exe`, `dmg`, `appimage`, `deb`, `archive`, or `unknown`).
 
 <Callout type="info">
-  The check **fails open**: a network or API error is treated by callers as "no update known" rather than
-  blocking launch. The desktop client mirrors this, returning a "no update" verdict on any error so a flaky
-  check never stalls the UI.
+  The check **fails open** for launch safety: a network or API error never blocks the app. Surface clients
+  still distinguish “unknown” from a genuine no-update verdict so they do not tell users that they are
+  current when the service could not answer.
 </Callout>
+
+## Keep working through GitHub outages
+
+GitHub-backed skill taps and Marketplace listings keep the last successful browse result in a short-lived
+memory cache and, for the default catalog view, a disk cache. If GitHub or the Marketplace endpoint is
+temporarily unavailable, Ryu labels the result as cached and keeps browsing possible. An already-installed
+skill can also be retried from its local copy when its recorded catalog identity matches the requested skill.
+A first install still fails closed when the bytes cannot be verified or downloaded, so stale data never
+turns into an unverified install or silently substitutes a same-named skill from another repository.
 
 ## Applying an update
 
@@ -78,20 +106,25 @@ back (`apps/core/src/update/apply.rs`):
 
 The download stages atomically: write to a `.part` file in `~/.ryu/updates/`, then rename into place.
 
-## The shared auto-update toggle
+The Electron companion completes its enabled-update path automatically after the signed download: on
+Windows it invokes the NSIS updater in silent mode and relaunches the companion, so users do not have to
+step through an installer wizard. Windows security policy can still show a UAC consent prompt when the
+installation location requires administrator approval; an application cannot safely bypass that OS decision.
 
-The on/off switch is a single key in the cross-surface [preferences KV](/docs/core/observability#preferences),
-`auto-updates`, stored as `{"enabled": bool}` and defaulting to enabled when unset. Every surface reads and
-writes the *same* key (Core's `AUTO_UPDATE_PREF_KEY`), so flipping it on the desktop changes it everywhere.
-This is the same publish/subscribe seam the rest of Ryu uses to keep separate processes aligned.
+## Update settings by surface
+
+Desktop and other Core-backed surfaces use one `auto-updates` key in the cross-surface
+[preferences KV](/docs/core/observability#preferences), stored as `{"enabled": bool}` and defaulting to
+enabled when unset. The desktop onboarding step and the App Settings → Updates tab write that same key.
+The Chrome extension is notify-only because Chrome owns package installation. Mobile uses its own secure
+device setting for Expo OTA because that updater is independent of a Core node. The web app has no bundled
+binary toggle because deployments are refreshed by the browser.
 
 <Callout>
-  The toggle is the **only** thing that decides whether an update installs itself. The desktop used to carry a
-  build-time `FORCE_AUTO_UPDATE = true` policy that installed on every launch regardless, so that nobody could
-  sit on an old build across the free beta's paid cutover; that constant is gone and user control is restored.
-  With the toggle off the desktop shows a persistent "update available" toast with an explicit install action
-  instead. Either way the shell is never hard-blocked: if the signed feed is unreachable (an unsigned dev
-  build), the installer degrades to a manual-download toast.
+  For Core-backed desktop installs, the toggle is the **only** thing that decides whether an update installs
+  itself. With it off, the desktop shows a persistent "update available" toast with an explicit install action
+  instead. Either way the shell is never hard-blocked: if the signed feed is unreachable (for example, an
+  unsigned dev build), the installer degrades to a manual-download toast.
 </Callout>
 
 ## Desktop signing
@@ -116,10 +149,10 @@ To exercise the toast, toggle, and notice paths without a published release, set
 Never set it in production.
 
 <Callout type="warn">
-  Status: code-complete across all surfaces, but the actual **install** steps (signed desktop updates, electron
-  auto-update, EAS OTA, and the headless self-replace) cannot be exercised until a real signed release exists
-  and the CI signing secrets are configured. The system is verified today only at the verdict, toggle, and toast
-  layer via the fake-latest hook, not yet at the binary-install layer.
+  Status: the desktop first-run check, desktop Settings path, extension notify-only path, and mobile manual
+  availability path are implemented. The actual **install** steps (signed desktop updates, electron
+  auto-update, EAS OTA, and the headless self-replace) still require their respective signed release feeds and
+  CI secrets, so those binary-install paths cannot be exercised from a development checkout.
 </Callout>
 
 <Cards>

@@ -1,38 +1,51 @@
 ---
-title: "Sandbox"
-description: "Ephemeral, isolated WASI code execution with wasmtime, and where Docker fits"
+title: "Execution backends"
+description: "Explicit, deny-by-default execution backends for WASM, containers, microVMs, and remote workspaces"
 ---
 
-Core can run untrusted code in an ephemeral, in-process sandbox. The default backend is
-[wasmtime](https://wasmtime.dev) running WASIp1 modules: no daemon, no external process, no
-network or filesystem access unless explicitly preopened. It is fast and Windows-native, which is
-why it is the M6 default. The implementation lives in `apps/core/src/sandbox/mod.rs`.
+Core can run untrusted code through an explicit execution backend. The default secure backend is
+[wasmtime](https://wasmtime.dev) running WASIp1 modules: no daemon, no external process, no network
+or filesystem access unless explicitly preopened. A backend is a runtime choice, not a promise that
+the host has that runtime installed.
 
 Placement follows the Core-vs-Gateway rule (see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)).
 Deciding *what runs* - which module, which capabilities - is Core. Deciding *what is allowed* -
 DLP on the module's stdout, network egress - is the Gateway. The sandbox module enforces only the
 structural default-deny; policy belongs upstream.
 
-## Two backends
+## Backend vocabulary
 
-The `Sandbox` trait (`apps/core/src/sandbox/mod.rs`) abstracts two kinds of isolation. Only the
-first is wired today.
+The public configuration term is **backend**. The historical MCP server name remains `sandbox` so
+existing tool ids and allowlists keep working. `sandbox.sandbox_exec` is the one-shot entry point;
+the persistent `sandbox_create`, `sandbox_run`, and `sandbox_destroy` tools are the Daytona workspace
+path.
 
-| Backend | Isolation | What it runs | Status |
-|---|---|---|---|
-| **Ephemeral** (wasmtime + WASIp1) | In-process, default-deny, no FS or sockets | A single WASM module, run to completion | Built (feature `sandbox-wasmtime`) |
-| **Workspace** (Docker) | Long-lived container, persistent FS, native binaries, sockets | Multi-process POSIX workloads | Future, detect-only |
+| Backend | Shape | Current status |
+|---|---|---|
+| `wasmtime` | In-process WASI module, default-deny | Implemented when the Wasmtime feature is compiled |
+| `docker` | Local container command execution | Implemented when the Docker daemon is reachable |
+| `microsandbox` | Local microVM command execution | Implemented when its CLI/runtime is reachable; rejects unexpressible FS/network grants |
+| `opensandbox` | Local isolated command execution | Implemented when its CLI/runtime is reachable; rejects unexpressible FS/network grants |
+| `daytona` | Remote persistent workspace and command execution | Implemented through the metered Daytona path |
+| `local` | Host-local provider slot | Recognized but deliberately not an isolation implementation |
+| `ssh` | Remote provider slot | Recognized; provider wiring is not bundled in Core |
+| `modal` | Remote provider slot | Recognized; provider wiring is not bundled in Core |
+| `vercel_sandbox` | Remote provider slot | Recognized; provider wiring is not bundled in Core |
+| `singularity` | Local provider slot | Recognized; provider wiring is not bundled in Core |
 
 <Callout type="warn">
-  The wasmtime ephemeral path is the only backend wired today. A Docker-backed workspace sandbox
-  (for full filesystem and network isolation of long-running work) is **detected and reported but
-  not yet executed**. The `GET /api/mcp/sandbox/status` route probes the Docker daemon for
-  availability; it never installs Docker and never runs a container.
+  A recognized backend is not automatically available, and availability is not authorization. Core
+  probes only what it can safely identify, then returns an explicit unavailable/error result when a
+  selected backend is missing or not wired. It never silently falls back from an explicit backend to
+  another runtime. This makes a Daytona, SSH, Modal, Vercel Sandbox, or Singularity plugin a valid
+  extension point: it can own provider credentials and implementation while Core keeps the stable
+  backend vocabulary and approval boundary.
 </Callout>
 
 ## The execution contract
 
-`Sandbox::run` takes a `SandboxRequest` and returns a `SandboxOutput`.
+The execution contract takes a backend plus a request and returns a bounded output. The request
+shape is intentionally shared across one-shot runtimes and command backends.
 
 | `SandboxRequest` field | Type | Meaning |
 |---|---|---|
@@ -49,7 +62,7 @@ first is wired today.
 
 ## How the wasmtime backend behaves
 
-`WasmtimeSandbox` (behind the `sandbox-wasmtime` cargo feature) holds a shared `Engine`, so the
+`WasmtimeSandbox` (behind the host's WASM runtime feature) holds a shared `Engine`, so the
 Cranelift JIT initialization (roughly 10 to 30 ms) is paid once and reused across calls.
 
 Each `run` then:
@@ -62,6 +75,11 @@ Each `run` then:
 3. Passes `args` (after the synthetic `argv[0]`) and `env` into the WASI context.
 4. Invokes the module's default `_start` export.
 
+When `timeout_secs` is set, Core enables Wasmtime epoch interruption and advances a shared epoch
+clock. The store receives its own deadline, so a non-yielding module is interrupted and reported as
+a timeout rather than running indefinitely. A missing timeout keeps the existing explicit
+no-deadline behavior.
+
 A clean exit, including `proc_exit(0)` (which WASI surfaces as a trap wrapping `I32Exit(0)`), is
 treated as success. A non-zero exit code surfaces as an error carrying the captured stderr. Total
 cold start is roughly 10 to 120 ms.
@@ -70,12 +88,16 @@ The default-deny posture is structural: no filesystem preopens and no socket WAS
 so a module cannot reach the host disk or network. Granting either is a deliberate, future
 capability decision.
 
+The `microsandbox` and `opensandbox` command surfaces currently do not document equivalent
+filesystem or network flags. They accept the deny-all capability set, but fail closed when a caller
+requests a path or network grant instead of silently ignoring it; use Wasmtime or Docker for a
+verified capability mapping.
+
 ## The `sandbox_exec` tool
 
-The backend is exposed to agents as a single built-in MCP tool, `sandbox__sandbox_exec`
-(`apps/core/src/sidecar/mcp/sandbox.rs`), reachable through the same registry call surface as
-every other tool. See the [MCP registry](/docs/core/mcp-registry) for how built-in tools are
-listed and dispatched.
+The backend is exposed to agents as a single built-in MCP tool, `sandbox.sandbox_exec`, reachable
+through the same registry call surface as every other tool. See the [MCP registry](/docs/core/mcp-registry)
+for how built-in tools are listed and dispatched.
 
 The tool receives WASM bytecode as a base-64 string (`wasm_b64`) plus optional `args` and `env`
 arrays, and returns stdout, stderr, and the exit code. It is registered through the normal tool
@@ -86,9 +108,8 @@ new approval UI of its own.
 
 Two declarative capability fields on `SandboxCapabilities` let an agent narrow how a sandbox run is
 isolated and what it may do to the workspace. Both default to today's behavior, so a call that sets
-neither is byte-for-byte the historical per-exec run. They are parsed from optional MCP tool args in
-`parse_capabilities` (`apps/core/src/sidecar/mcp/sandbox.rs`); an absent or unknown value falls
-through to the deny-safe default.
+neither is the historical per-exec run. They are parsed from optional tool arguments; an absent or
+unknown value falls through to the deny-safe default.
 
 ### Sandbox scope
 
@@ -120,32 +141,13 @@ Because the default is `ReadWrite`, the clamp is behavior-preserving out of the 
 both the wasmtime backend (preopened dirs) and the Docker backend (`-v` mounts) apply identical
 rules. The network-deny posture is untouched: the clamp only tightens filesystem access.
 
-## Enable, disable, and status
+## Selecting a backend
 
-The sandbox is enabled by default when the `sandbox-wasmtime` feature is compiled in. It is a
-default-on Policy toggle (#448) and can be flipped at runtime.
-
-| Action | Endpoint |
-|---|---|
-| Enable sandboxed tool execution | `POST /api/mcp/sandbox/enable` |
-| Disable it | `POST /api/mcp/sandbox/disable` |
-| Report availability and state | `GET /api/mcp/sandbox/status` |
-
-Under the hood these set or clear the `RYU_SANDBOX_DISABLED` environment variable
-(`RYU_SANDBOX_DISABLED=1` disables it). When disabled, the tool is still listed so the agent knows
-it exists, but a call returns an `{ available: false }` result. The status response reports three
-things:
-
-```json
-{
-  "enabled": true,
-  "available": true,
-  "docker": { "available": false, "reason": "..." }
-}
-```
-
-`enabled` is the runtime toggle, `available` reflects whether the `sandbox-wasmtime` feature was
-compiled in, and `docker` reflects the detect-only Docker probe described above.
+The secure WASM backend is enabled by default when the host includes the WASM runtime. A user or
+operator can choose a different backend in the host's execution settings or in an agent's tool
+configuration. The selected backend, credentials, quota, approval, and runtime availability remain
+separate checks. When a backend is disabled or unavailable, the tool remains discoverable and
+returns an explicit unavailable result; it does not silently change runtimes.
 
 ## Sandbox vs programmatic tool calling
 
@@ -156,7 +158,19 @@ default (with a rivet secure-exec V8 isolate behind an off-by-default feature), 
 WASM workload to run in isolation; reach for PTC when an agent needs to orchestrate many tool
 calls in code.
 
-## Where this sits on the roadmap
+## Building a backend plugin
 
-The wasmtime ephemeral path is the M6 deliverable. The Docker-backed workspace sandbox is the
-remaining M6 work, currently detect-only. See [Core](/docs/core) for the full module map.
+Use a plugin when a backend needs a provider SDK, credentials, quota model, or a sidecar that should
+not be compiled into Core. The plugin should:
+
+- declare the backend name and required grants;
+- expose a typed tool or app contribution that accepts the shared execution request;
+- report availability separately from authorization;
+- preserve default-deny filesystem/network capabilities and bounded output;
+- return an explicit unavailable result when its provider is not configured.
+
+Do not register an arbitrary name and quietly route it to host execution. The backend selector is
+strict so a typo, an unsupported Hermes-compatible name, or a disabled provider is visible to the
+caller. See [built-in tools](/docs/core/built-in-tools) for the stable tool ids and the
+[Hermes terminal backend configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration#terminal-backend-configuration)
+for the comparative backend vocabulary this contract is designed to accommodate.

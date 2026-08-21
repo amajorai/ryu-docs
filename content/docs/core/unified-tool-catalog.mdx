@@ -29,6 +29,8 @@ tool's server segment (`classify_kind` in `catalog.rs`) and serializes lowercase
 | `app` | A plugin tool exposed as a Runnable | The synthetic `app` server segment |
 | `core-api` | A Core HTTP endpoint exposed as an agent-drivable tool | Derived from Core's own OpenAPI document, so an agent can drive Ryu itself. Serialized hyphenated (`core-api`, not `coreapi`) |
 | `command` | A declarative app tool that execs an allowlisted local CLI | Runs through the governed tool-exec path. Its own kind so `?kind=command` selects these; the other app backends (http, inline Deno, alias) stay `app` |
+| `skill` | An Agent Skill discovered from the enabled skill registry | Discoverable instructions, not a callable tool; describe it to get the `skills.load` invocation |
+| `ext-api` | A derived route exposed by an app's generic extension proxy | Searchable and describable, but not included in the registry's default tool listing |
 
 <Callout type="info">
 Clients are expected to tolerate a `kind` they do not recognize rather than reject the whole
@@ -49,9 +51,9 @@ Searches the unified catalog and returns a ranked list. Handler `tools_search` i
 | Parameter | Default | Meaning |
 |---|---|---|
 | `q` | empty | The free-text query. An empty query ranks nothing meaningfully |
-| `kind` | `any` | One of `mcp`, `builtin`, `composio`, `app`, `core-api`, `command`, `any`. Unknown values fall back to `any` |
+| `kind` | `any` | One of `mcp`, `builtin`, `composio`, `app`, `core-api`, `command`, `skill`, `ext-api`, `any`. Unknown values fall back to `any` |
 | `limit` | `8` | Result cap, clamped to a maximum of `25` |
-| `agent` | none | Narrows results to the agent's allowlist (search is not a grant; see below) |
+| `agent` | none | Narrows results to the agent's saved capability scope (new agents default to all registered tools; search is not a grant; see below) |
 
 The response is an OpenAI-style list envelope:
 
@@ -60,7 +62,7 @@ The response is an OpenAI-style list envelope:
   "object": "list",
   "data": [
     {
-      "id": "spider__crawl",
+      "id": "spider.crawl",
       "name": "crawl",
       "description": "Crawl a URL and return extracted content.",
       "kind": "builtin",
@@ -72,8 +74,13 @@ The response is an OpenAI-style list envelope:
 }
 ```
 
-The `id` is the fully-qualified `<server>__<tool>` (or `composio__<slug>` for a Composio action)
+The `id` is the fully-qualified `<server>.<tool>` (or `composio.<slug>` for a Composio action)
 and is the allowlist key end to end.
+
+The Library view uses this same registry and passes the requested `kind` instead of maintaining a
+second list. A client should preserve unknown kinds and treat search results as discovery data:
+`skill` rows are instructions to load, while `ext-api` rows are derived app routes. Neither search
+nor describe grants execution permission.
 
 ### Ranking
 
@@ -89,7 +96,7 @@ Nothing about the ranker is hardcoded: it is one pref key (`RANKER_PREF_KEY`) mi
 catalog source selector. The semantic ranker degrades to BM25 rather than erroring when no
 embedder is reachable.
 
-**Skill search shares this ranker.** `skills__search` runs each candidate skill through the same
+**Skill search shares this ranker.** `skills.search` runs each candidate skill through the same
 ranking pass as tools, so one preference governs both surfaces and a semantic-ranking setup
 improves skill discovery for free. What is *not* shared is the injected skill index, which stays
 query-independent by design — see [Skills catalog](/docs/core/skills-catalog).
@@ -99,7 +106,8 @@ query-independent by design — see [Skills catalog](/docs/core/skills-catalog).
 Passing `?agent=` retains only descriptors that match that agent's allowlist, using the same
 match logic as the execution gate (`ToolDescriptor::matches_allowlist`): an MCP, built-in, or app
 tool matches on the fully-qualified id, the bare tool name, or the server segment; a Composio tool
-matches on the fully-qualified id only. The handler over-fetches before narrowing so allowed tools
+matches on the fully-qualified id only. A newly created agent uses the live all-tools scope until its
+card is customized. The handler over-fetches before narrowing so allowed tools
 ranked below the top `limit` are not lost to truncation. This is a view filter for UIs. It is not
 the security boundary: search is open, execution is allowlist-gated on the call path.
 
@@ -123,8 +131,8 @@ default tool set. They are pulled into `search` live and capped at 50 per query,
 Composio key is configured (`composio::is_configured`) and the `kind` filter includes Composio.
 See `apps/core/src/sidecar/mcp/composio.rs`.
 
-- A search result for a Composio action has id `composio__<slug>`.
-- `describe` on a `composio__*` id returns a `shallow: true` result with a single freeform
+- A search result for a Composio action has id `composio.<slug>`.
+- `describe` on a `composio.*` id returns a `shallow: true` result with a single freeform
   `arguments` object argument, because the action's full schema is not enumerated.
 - On the call path, Composio dispatch uses a per-`user_id` Composio entity, and a connection that
   is not yet linked returns a `__ryu_elicitation__` envelope so the client can prompt the user to

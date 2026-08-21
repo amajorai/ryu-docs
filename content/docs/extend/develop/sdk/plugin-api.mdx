@@ -3,9 +3,11 @@ title: "Plugin API Reference"
 description: "The canonical manifest.json schema, the install/enable lifecycle, grant validation, signing, and activation"
 ---
 
-This is the canonical reference for the `manifest.json` manifest: every field, the **eight**
-Runnable kinds and their required config, the install/enable lifecycle and its endpoints, Gateway
-grant validation, ed25519 manifest signing, and the activation runtime.
+This is the canonical reference for the native `manifest.json` identity/runtime contract: the
+**eight** Runnable kinds and their required config, the install/enable lifecycle and its endpoints,
+Gateway grant validation, ed25519 manifest signing, and the activation runtime. The companion
+[Extension schemas & folder layouts](/docs/extend/develop/extensions/schemas-and-layouts) page maps
+the complete package envelope, interop files, source trees, and file-to-wire boundaries.
 
 This page **owns** the manifest schema (the 8-kind table lives only here). For the conceptual model
 see [Runnable / Session / App](/docs/start-here/architecture/runnable-model); for a guided worked
@@ -15,10 +17,13 @@ example see the [Plugin manifests tutorial](/docs/extend/develop/extensions/plug
   The VS-Code-style runtime is **partly live, not purely design-only**. The manifest carries a
   `contributes` block, `activation_events`, and an `engines.ryu` version pin
   (`apps/core/src/plugin_manifest/mod.rs`), and an activation runtime (`apps/core/src/runnable/mod.rs`)
-  wakes a plugin's runnables when its events fire - but only the `onStartup` event is fired today.
-  Still design-only: the desktop extension host, the in-process plugin API, and live UI/Core
-  modification by a plugin. See [activation runtime](#plugin-activation-runtime) and
-  [planned runtime](#planned-runtime) below (`docs/rfc-plugin-runtime.md`).
+  wakes a plugin's runnables when its events fire - including startup, chat, command, route, and
+  capability cold-start events.
+  Still bounded: a plugin does not receive an arbitrary in-process Core API or permission to mutate
+  Core routes. UI uses pre-built widget/Companion/extension-host seams, and each declarative
+  contribution is only as live as its owning surface. Safe declarative message actions are live on
+  desktop. See [activation runtime](#plugin-activation-runtime) and [remaining runtime boundaries](#remaining-runtime-boundaries)
+  below.
 </Callout>
 
 ## What a plugin is
@@ -52,7 +57,7 @@ in Rust at [`crates/sdk/core/src/manifest.rs`](/docs/extend/develop/sdk/rust) an
 | `id` | string | yes | Reverse-domain id; must contain a `.`, only `a-z A-Z 0-9 . - _`, no `..`, no leading/trailing `.`, no leading `-`, max 128 bytes. Doubles as a filesystem directory name. |
 | `name` | string | yes | Human-readable display name. |
 | `version` | string | yes | Valid semver (`MAJOR.MINOR.PATCH`). A non-semver version is rejected. |
-| `runnables` | `RunnableEntry[]` | no (default `[]`) | The Runnables this plugin bundles. May be empty for a surface-only plugin. |
+| `runnables` | `RunnableEntry[]` | yes | The Runnables this plugin bundles. It may be an empty array for a surface-only plugin. |
 | `permission_grants` | `string[]` | no (default `[]`) | Grant scopes the plugin declares it needs. Declarations only - the Gateway enforces. |
 | `companion` | `CompanionSurface \| null` | no | Optional in-desktop overlay or sidebar panel. |
 
@@ -121,8 +126,9 @@ contract enforced by `validate_runnable` (`apps/core/src/plugin_manifest/schema.
 { "label": "Research Panel", "icon": "search", "shortcut": "ctrl+shift+r" }
 ```
 
-`label` is required; `icon` and `shortcut` are optional and resolved by the desktop shell. Rendering
-the panel is part of the [planned runtime](#planned-runtime), not yet executed.
+`label` is required; `icon` and `shortcut` are optional and resolved by the desktop shell. Core
+registers the descriptor when the plugin is enabled; the desktop host renders it through the
+sandboxed Companion surface described in [Build a Desktop Companion](/docs/extend/develop/extensions/desktop-companion).
 
 ## Lifecycle
 
@@ -233,7 +239,7 @@ work** (`apps/core/src/catalog_source/sources.rs`):
 
 ## Plugin activation runtime
 
-The manifest carries three VS-Code-style fields that drive a now-live activation runtime. They live
+The manifest carries VS-Code-style fields that drive a now-live activation runtime. They live
 on `PluginManifest` (`apps/core/src/plugin_manifest/mod.rs`) and are validated by the loader at load
 time.
 
@@ -241,8 +247,8 @@ time.
 
 | Field | Type | Default | Rule |
 |---|---|---|---|
-| `contributes` | `Contributes \| null` | absent | A declare-by-id block naming which of the manifest's `runnables` contribute to each surface (`commands`, `tools`, `agents`, `workflows`, `policies`). Every referenced id **must** exist in `runnables` - the loader cross-validates and rejects a typo at load. |
-| `activation_events` | `string[]` | `[]` | Lazy-activation tokens. Recognised: `"*"` (eager), `"onStartup"`, `"onChat"`, `"onCommand:<id>"`. An **empty** list means **eager** (every existing manifest keeps activating on enable). |
+| `contributes` | `Contributes \| null` | absent | A block containing declare-by-id Runnable surfaces (`commands`, `tools`, `agents`, `workflows`, `policies`) plus self-contained contributions such as hooks, widgets, views, settings, and actions. Every referenced Runnable id **must** exist in `runnables`; the loader cross-validates it. |
+| `activation_events` | `string[]` | `[]` | Lazy-activation tokens: `"*"`, `"onStartup"`, `"onChat"`, `"onCommand:<id>"`, `"onRoute"`, and `"onCapabilityCall"`. An **empty** list means eager. |
 | `engines` | `{ "ryu": string } \| null` | absent | A semver **requirement** the running Core version must satisfy (e.g. `">=0.3.0"`). An unparseable or unsatisfied requirement makes the loader **reject** the manifest. |
 
 A `contributes` entry is declare-by-id, not a second copy of the runnable:
@@ -261,6 +267,41 @@ A `contributes` entry is declare-by-id, not a second copy of the runnable:
 The version pin is gated against `core_version()` (`apps/core/src/plugin_manifest/mod.rs`), derived
 from the Core crate version - the single version of record.
 
+### Message actions
+
+Plugins can contribute per-message controls through `contributes.message_actions`. Core validates
+the required identity fields and serves each declaration only while its plugin is enabled; the
+desktop owns the safe renderer and dispatches the action with the current message id through the
+host's supported seam.
+The `kind` and `args` fields are extensible, so renderer-specific metadata stays opaque to Core and
+is never executed as plugin code.
+
+For example, a plugin can opt into Ryu's native emoji reaction surface with a generic menu action:
+
+```json
+{
+  "contributes": {
+    "message_actions": [
+      {
+        "id": "reactions.picker",
+        "label": "Add reaction",
+        "target": "user",
+        "kind": "menu",
+        "capability": "reactions.toggle",
+        "args": {
+          "renderer": "reaction-picker",
+          "dispatch": "reactions.toggle"
+        }
+      }
+    ]
+  }
+}
+```
+
+The contribution does not contain executable UI code. This keeps plugin enable/disable state as
+the source of truth for whether the control appears, while the shell can preserve accessibility,
+emoji data loading, and message-id validation in one renderer.
+
 ### How activation fires
 
 The activation contract is in `apps/core/src/runnable/mod.rs`:
@@ -273,15 +314,18 @@ The activation contract is in `apps/core/src/runnable/mod.rs`:
 - `fire_activation_event(state, event)` (`apps/core/src/server/mod.rs`) is the live driver: it records
   the event, then runs every **enabled** plugin through `register_active` against the new snapshot.
 - `onStartup` is fired once from `apps/core/src/main.rs` after `ServerState` exists.
+- `onChat` is fired once from the first HTTP chat entry, without blocking the streaming response.
+- `onCommand:<id>` is fired by the desktop command-palette activation seam.
+- `onRoute` and `onCapabilityCall` are fired when a lazy sidecar/provider is cold-started by its
+  first matching request.
 - The `enable` lifecycle path uses the same `register_active` against the live fired set, so enable and
   event-driven activation share one contract (an eager plugin activates immediately on enable; a gated
   plugin is held back until its event fires).
 
 <Callout type="warn">
-  **Only `onStartup` is actually fired today.** The driver, the fired-event set, and the gated
-  dispatch are real and unit-tested, but `onChat` / `onCommand:<id>` / `onRunnable:<id>` are never
-  fired from the chat or command-palette paths yet - that wiring is a documented follow-on. A plugin
-  declaring those events will not wake until it lands.
+  The live activation set is intentionally bounded. `onRunnable:<id>` is not a general-purpose event
+  bus, and is not fired by the current runtime. Use declared hook events or the supported
+  `onStartup`, `onChat`, `onCommand:<id>`, `onRoute`, and `onCapabilityCall` seams.
 </Callout>
 
 ### Gateway policy runnables
@@ -334,27 +378,24 @@ response.
   provisioning is not exercised here; the pure path-derivation and pip-args logic are unit-tested.
 </Callout>
 
-## Planned runtime
+## Remaining runtime boundaries
 
-The activation runtime above is partly live, but the following are **still not implemented**. They
-are design-only; do not build against them as if they exist. The RFC is `docs/rfc-plugin-runtime.md`
-(epic #425 P3, feeding #444 / #446 / #443):
+The activation runtime is live, but these boundaries remain deliberate and should not be inferred
+from the presence of a manifest field:
 
-- **Contribution points that mount real UI.** The `contributes` block declares and cross-validates by
-  id today (see [above](#activation-fields)), but no surface yet consumes a contribution to register a
-  route, command, or panel.
-- **A desktop extension host and an in-process plugin API.** The activation runtime fires events and
-  activates a plugin's Core runnables; there is no host that hands a plugin an in-process API or
-  renders its UI.
-- **Runtime UI/Core modification** by a plugin (route rewrites, panels, in-process hooks, sandboxing
-  of third-party code).
-- **Firing `onChat` / `onCommand` / `onRunnable`.** Only `onStartup` fires today.
+- **Arbitrary in-process Core APIs or route mutation.** Plugins use declared contribution points,
+  the sandbox, MCP, sidecar, and host bridge; they do not patch Core.
+- **Unimplemented contribution consumers.** A manifest can validate a forward-compatible
+  contribution key, but a host surface must implement the renderer/consumer before users see it.
+- **`onRunnable:<id>` activation.** It remains an unimplemented general event; the five live event
+  families above are the supported lazy activation contract.
 
 What exists today is the install-time and activation layer: a validated `manifest.json`, the lifecycle
-above, Gateway grant validation, signing/verification, the `onStartup` activation runtime, and Gateway
-policy runnables. A plugin that wants to govern egress declares a `policy` Runnable that the Gateway
-activates on install; every model call a plugin causes still routes through the Gateway. The runtime
-grants capabilities; the Gateway decides what is allowed, shared, measured, and paid for.
+above, Gateway grant validation, signing/verification, all eight per-kind handlers, the live lazy
+activation seams, and Gateway policy runnables. A plugin that wants to govern egress declares a
+`policy` Runnable; Core coordinates its state while the Gateway enforces the policy. Every model call
+a plugin causes still routes through the Gateway. The runtime grants capabilities; the Gateway
+decides what is allowed, shared, measured, and paid for.
 
 ## Related
 

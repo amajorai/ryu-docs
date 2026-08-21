@@ -42,9 +42,11 @@ A turn hook is server-side logic that runs at a chat turn boundary. You declare 
 }
 ```
 
-The only boundary today is `post_assistant_turn` (the constant `ON_POST_ASSISTANT_TURN` in
-`plugin_host/mod.rs`). The hook runs after the assistant turn has streamed and persisted, so it can
-review the answer the user just received and decide what happens next.
+The primary chat boundary is `post_assistant_turn` (the constant `ON_POST_ASSISTANT_TURN` in
+`plugin_host/mod.rs`). Additional phases are available at the message, tool, session, and workflow
+seams; their maturity and directive support are listed in [Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle).
+The post-assistant hook runs after the assistant turn has streamed and persisted, so it can review the
+answer the user just received and decide what happens next.
 
 Each hook body runs in a fresh sandbox with exactly two globals in scope, the way a Worker body has
 only its message in scope. There is no module system, no captured closure, and no filesystem or
@@ -69,15 +71,29 @@ deliberately small:
 
 | Call | Grant required | Returns |
 |---|---|---|
-| `await host.sideModel({ prompt, system?, model?, model_pref_key?, effort? })` | `hook:side-model` | One non-streaming Gateway completion as text. The model is resolved swappably (explicit `model`, then `model_pref_key` preference, then `RYU_DEFAULT_LLM_MODEL`, then the bundled local default), never hardcoded. |
+| `await host.sideModel({ prompt, system?, model?, model_pref_key?, effort? })` | `hook:side-model` | One non-streaming Gateway completion as text. The model is resolved through the configured model/provider policy; a hook should not assume a particular backend. |
 | `await host.storage.get(key, namespace?)` | `storage:kv` | The stored string, or `null`. |
 | `await host.storage.set(key, value, namespace?)` | `storage:kv` | `true`. Non-string values are JSON-stringified. |
 | `await host.storage.delete(key, namespace?)` | `storage:kv` | `true`. |
 | `await host.storage.keys(namespace?)` | `storage:kv` | The namespace's keys. |
+| `await host.notify({ title, body })` | `notifications:send` | One bounded, informational app notification for the active user. The host sanitizes the text and routes it through the normal notification store. |
 | `host.log(...args)` | none | Captured logs. |
 
 Storage is namespaced per plugin (`namespace` defaults to `"default"`), so one plugin can never read
 another plugin's keys.
+
+`host.notify` is intentionally small: it cannot select another user, address an arbitrary device,
+or bypass the notification store. Keep it for actionable, user-visible events such as “the last
+agent finished” and let the normal notification settings decide where that event is delivered. The
+call is bounded and grant-gated; an unavailable store, missing active user, denied grant, or invalid
+payload is a failure, not a silent success.
+
+The bridge is the native capability seam for the hook runtime. Desktop, web, extension, mobile, CLI,
+TUI, and hardware-facing clients may expose different host adapters, but they do not receive authority
+just because a capability is discoverable. The host advertises what is available on that surface, then
+applies the declared grant and caller policy at invocation time. Unsupported surfaces should hide or
+disable a contribution while keeping it installable and inspectable; a missing permission must fail
+closed.
 
 <Callout type="warn">
   Gating returns an error, it does not silently pass. An ungranted capability call (or an unknown

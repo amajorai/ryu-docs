@@ -5,14 +5,48 @@ description: "Browse paid items, manage licenses, purchase with Stripe, sell you
 
 The Marketplace is the money layer on top of the catalog: buy paid skills, plugins, MCP servers, and
 models, see what your organization owns, sell your own work, and keep a prepaid credits balance. It
-runs in the control-plane server (`:3000`), authed with your Better Auth session, and opens hosted
-checkout pages in your browser.
+runs through Ryu's authenticated marketplace service and opens hosted checkout pages in your browser.
 
 <TryInRyu page="marketplace" />
 
 Free browse and install is a separate, anonymous flow covered in
 [Store](/docs/surfaces/desktop/user-guide/store). This page is only about the paid surface. Publishing your
 own item lives in [Develop: Marketplace](/docs/extend/develop/extensions/marketplace).
+
+## GitHub-backed packages
+
+Ryu is a billing and access bridge over the publisher's GitHub repository. A seller submits a
+repository or package-folder URL; GitHub remains the source of package files and immutable Releases,
+while Ryu stores the repository binding, package identity, offer, Stripe IDs, entitlement, reviews,
+and moderation state. New listings do not require a central `marketplace.json` index.
+
+Standalone repositories are discovered through the `ryu-app` and `ryu-plugin` topics. A repository
+tagged `ryu-marketplace` is treated as a collection and Ryu scans its folders for `ryu.package.json`.
+The release asset is a deterministic `.ryupack`; Ryu validates its manifest and digest, checks the
+Gateway signature, and serves the asset through its own download proxy.
+
+Buyers never connect GitHub or install a GitHub App. For a private release, Ryu uses the seller's
+GitHub App installation and a short-lived installation token only while validating or streaming the
+release. The token and upstream GitHub URL never reach the buyer or desktop.
+
+An installed package remains available on the node after a paid entitlement expires. Expiry blocks a
+new install, update, or release download; it does not remove local bytes, and disable/uninstall
+remain available.
+
+Marketplace installs are package operations, not full-node restores. For a local folder, archive, or
+GitHub package that you want to inspect, import, export, or move between machines, see
+[Portable packages](/docs/extend/develop/extensions/portable-packages). For chat history, sessions,
+memory, and the rest of a node's state, use [Data Folder & Storage](/docs/surfaces/desktop/user-guide/data-and-storage).
+
+The free agent-template catalog includes ready-to-install agents such as **Expiry Date
+Tracker**, **Brand Presence**, **Marketing Studio**, **Security Guard**, **Design Director**, and
+**Codex Quota Reset Watch**. Design Director covers product UI/UX, responsive systems, accessibility,
+interaction design, motion, and programmable explainers. The reset watcher checks
+[willcodexquotareset.com](https://www.willcodexquotareset.com/)
+every 30 minutes, remembers the last public forecast, and sends a desktop notification when a
+meaningful signal changes. Agent templates can carry several schedules, each with its own
+instructions; installing one creates the corresponding independent background jobs on your node.
+See [Scheduler](/docs/core/scheduler) for the schedule model and the built-in template behaviors.
 
 <Callout type="info">
 Buying and selling are **org-level**. Wallets, licenses, and seller accounts all belong to your
@@ -21,12 +55,35 @@ desktop **Marketplace** page and the web `/marketplace` page render the same thr
 endpoints, differing only in auth (browser cookie session vs the desktop bearer).
 </Callout>
 
+## Publisher marks and organization collections
+
+Marketplace listings carry one shared publisher check mark. It answers who stands behind the
+publication; it does not replace the listing's code review, release signature, or permission
+checks.
+
+| Mark | Meaning |
+| --- | --- |
+| **Gold** | Ryu staff officially verified the publisher. |
+| **Blue** | Stripe Connect verified the organization's identity; Ryu has not endorsed the publisher. |
+| **Muted** | The publisher is not verified. Community publishing is still allowed. |
+
+Organizations can also create private Marketplace collections. Members of the owning organization
+can browse those packages, and an administrator can choose **Assign to all nodes** for supported
+plugins, MCP servers, and skills. Ryu records that choice as organization desired state; each
+enrolled node then reconciles the signed package locally. A private collection never enters the
+public catalog.
+
+If a listing has the muted publisher mark, installing it opens a two-step community confirmation.
+First review the publisher health score and its signals, then explicitly choose **I understand the
+risk — install**. The score is a review aid, not a safety guarantee; the normal signature and
+permission checks still decide whether the package can run.
+
 ## The three tabs
 
 | Tab | What it shows | Backing route |
 |---|---|---|
 | **Browse** | Catalog cards; paid items show a price badge plus Buy, owned items show Owned, free items show no price or buy affordance | `GET /api/marketplace/catalog?kind=` |
-| **My licenses** | Every paid item your org owns, newest first, with status (active / refunded / disputed) | `GET /api/marketplace/licenses` |
+| **My licenses** | Every paid item your org owns, newest first, with status (active / expired / refunded / disputed) | `GET /api/marketplace/licenses` |
 | **Sell** | Become a seller: Stripe Connect onboarding and payout status | `GET /api/seller/status`, `POST /api/seller/onboard` |
 
 Free items never carry pricing and never write a license, so they never appear under My licenses. To
@@ -37,8 +94,8 @@ install one, use the free flow in [Store](/docs/surfaces/desktop/user-guide/stor
 1. Open **Browse** and pick a kind (Skills, Plugins, MCP, or Models).
 2. A paid card shows its price. Click **Buy**.
 3. The desktop calls `POST /api/marketplace/purchase` with the item `kind` and `id`. The server reads
-   the price, platform fee, and seller from the **stored** pricing (never the client) and creates a
-   Stripe Checkout session as a destination charge.
+   the price, cadence, platform fee, and seller from the **stored** pricing (never the client) and
+   creates a Stripe Checkout session as a one-time, bounded-update, or recurring Connect charge.
 4. The hosted Stripe page opens in your browser. Complete payment there.
 5. Your license is granted asynchronously by the server webhook once the payment clears, so the app
    re-fetches your licenses on window focus. The new item then shows **Owned** in Browse and appears
@@ -46,6 +103,16 @@ install one, use the free flow in [Store](/docs/surfaces/desktop/user-guide/stor
 
 If your org already holds an active license, Buy is a no-op: the purchase route returns
 `alreadyLicensed: true` and the existing license, with no new charge.
+
+A bounded-update license also shows its remaining update allowance. The initial install does not
+consume that allowance; each later GitHub-backed update consumes one slot atomically. When the
+allowance or a subscription period expires, new downloads and updates are blocked, while an already
+installed package remains usable and can still be disabled or uninstalled.
+
+The server derives whether a GitHub download is an initial install or an update from the licensed
+version and the requested build. The `purpose` query parameter is only a client hint and cannot be
+used to relabel an update as a first install. Entitlement-gated downloads are returned with
+`private, no-store` caching so one buyer's artifact is never served from a shared cache.
 
 <Callout type="info">
 The price you pay is the stored price plus tax. Checkout calculates and collects sales tax / VAT / GST
@@ -59,8 +126,52 @@ account.
 The install handoff (`GET /api/marketplace/catalog/detail`) is the single fail-closed seam. For a
 **free** item it stays anonymous and returns the descriptor and signature. For a **paid** item, if
 your org does not hold an active license the route returns `402` with `requiresPurchase: true` and the
-pricing, so Core can prompt you to buy rather than install. See
+pricing, so Core can prompt you to buy rather than install. GitHub-backed release downloads are
+then proxied through Ryu, never fetched directly by the buyer. See
 [Develop: Marketplace](/docs/extend/develop/extensions/marketplace) for the publish and signing side.
+
+## Listing presentation comes from GitHub
+
+The signed native `manifest.json` is also the source of truth for the listing's presentation. Authors
+can declare `author`, `homepage`, `repository`, `license`, `keywords`, curated `tags[]`, policy links,
+example prompts, `banner`, and `screenshots`. GitHub-compatible `.codex-plugin/plugin.json` and
+`.claude-plugin/plugin.json` descriptors are read for safe discovery metadata as well. Screenshot and
+banner URLs therefore stay reviewable in the repository or its HTTPS asset host; Ryu does not require
+a separate server-side upload for new listings.
+
+The preview dialog renders those fields in its metadata rail and shows declared layers such as
+**Browser toolkit**. `external: true` marks a hosted provider, while a local provider such as Spider
+remains local even when its upstream service is mentioned in the description. The old server-stored
+media columns remain read-only compatibility fallbacks for older listings; new GitHub-backed metadata
+wins whenever the manifest declares it.
+
+## Read the health report before installing
+
+Listing detail pages show a deterministic **Health** score for plugins and skills when the published
+source contains enough evidence to check them. The report groups provenance, maintenance, hygiene,
+disclosures, and listing errors, and explains every pass, warning, failure, and unavailable check.
+Unavailable checks are excluded from the score rather than treated as passes. The score is a review
+starting point, not a security guarantee, and it does not replace the install-time signature and
+permission checks.
+
+Some listings also offer **Scan with agent**. This is an optional read-only narrative review of the
+published listing: its description, README, metadata, package-file snippets, and deterministic
+scorecard. Listing text is treated as untrusted evidence, the report cannot change the grade, and the
+scan does not install packages, edit files, run commands, browse the network, or change settings.
+
+## Node lifecycle access
+
+Install, update, enable, disable, and uninstall are separate node-scoped permissions. Organization
+owners/admins have the default lifecycle access on organization and team nodes; personal-node owners
+have it on their own node. Ordinary members and viewers need an explicit team, member, role, or
+custom-role grant. An individual deny overrides a team grant, and org administration never bypasses
+personal-node ownership.
+
+The desktop reads the server-authoritative capability response at
+`GET /api/plugins/lifecycle-capabilities`. Administrators edit a node ACL with
+`GET`/`PUT /api/acl/resources/node/:nodeId`; the edit requires `roles.manage`, with the personal
+owner and org owner/admin as implicit managers. A denied lifecycle request returns `403` with the
+required permission and node scope, before any local package mutation occurs.
 
 ## Sell your own items
 
@@ -75,8 +186,9 @@ listings need none of this.
 4. Return to the Sell tab. Payout status updates from the `account.updated` webhook, so refresh to see
    **Payouts enabled**.
 
-Once payouts are enabled, publish a paid item with the publish API. The actual publish flow,
-including the per-sale commission and grant signing, is documented in
+Once payouts are enabled, paste the GitHub repository URL into the seller flow and publish a paid
+item with the GitHub bridge. The actual publish flow, including the per-sale commission, recurring
+subscription handling, and grant signing, is documented in
 [Develop: Marketplace](/docs/extend/develop/extensions/marketplace).
 
 <Callout type="warn">
@@ -109,12 +221,21 @@ member or viewer has read-only access to the wallet. Credits are first-party onl
 third-party marketplace items are bought with a card through Stripe (above), not with credits.
 </Callout>
 
+The desktop **Credits** and **Usage** surfaces show the active organization beside the plan and
+wallet. If you switch organizations, the balance, grant pools, and usage statement reload for the
+new organization; they are never personal balances. In **Gateway → Usage & cost**, the account
+rollup is informational and separate from the organization wallet. A provider balance shown for an
+OpenRouter, DeepSeek, or Moonshot key is money held by that provider key on the current node, not
+Ryu credits.
+
+The **Usage** surface also summarizes credit spend with charts by usage type, model, and provider.
+Credits received through top-ups or grants remain in the transaction list and are not counted as
+spend in those breakdowns.
+
 <Callout type="warn">
-The credits **debit loop is dormant by default**. `POST /api/credits/debit` is an internal
-service endpoint the gateway calls with a service secret (`x-ryu-internal-secret` matching
-`RYU_CREDITS_INTERNAL_SECRET`), and that metering hook is not yet wired into the Core-managed gateway
-spawn. Until it is, a top-up credits a wallet that is not yet debited for usage. Top-up, purchase, and
-license flows are independent and work.
+The credits **debit loop is dormant by default**. Usage metering is not yet wired into the
+Core-managed gateway spawn, so a top-up credits a wallet that is not yet debited for usage. Top-up,
+purchase, and license flows are independent and work.
 </Callout>
 
 ## Where each surface lives

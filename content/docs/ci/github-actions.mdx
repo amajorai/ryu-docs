@@ -1,0 +1,99 @@
+---
+title: GitHub Actions
+description: Run Ryu from self-hosted or managed nodes in GitHub CI/CD workflows.
+---
+
+The Ryu GitHub Action connects a workflow to a Ryu Core node. It can validate the
+node and export its connection variables, run a saved Ryu agent/team/workflow, or
+invoke a direct allowlisted tool.
+
+## Node targeting
+
+The action targets Core, not a Gateway-only URL. Provide the URL and bearer token as
+repository or environment secrets:
+
+```yaml
+- uses: amajorai/ryu@v1
+  with:
+    target: self-hosted
+    node-url: ${{ secrets.RYU_NODE_URL }}
+    node-token: ${{ secrets.RYU_NODE_TOKEN }}
+    operation: setup
+```
+
+For a managed node, use `target: managed` and the managed-node inputs:
+
+```yaml
+- uses: amajorai/ryu@v1
+  with:
+    target: managed
+    managed-node-url: ${{ secrets.RYU_MANAGED_NODE_URL }}
+    managed-node-token: ${{ secrets.RYU_MANAGED_NODE_TOKEN }}
+    operation: setup
+```
+
+Managed mode checks `/api/system/info` and fails unless the node reports
+`managed: true`. `target: auto` accepts either node type. Inputs fall back to
+`RYU_CORE_URL`/`RYU_CORE_TOKEN` and `RYU_MANAGED_NODE_URL`/
+`RYU_MANAGED_NODE_TOKEN`, but the pairs stay coupled: a managed URL is never sent
+with a self-hosted token, and a self-hosted URL is never sent with a managed token.
+
+`setup` exports `RYU_CORE_URL`, `RYU_CORE_TOKEN`, `RYU_NODE_URL`, and
+`RYU_NODE_TOKEN` to later steps. `run` and `tool` perform the same validation before
+their operation.
+
+## Run Ryu in a workflow
+
+Run a saved agent:
+
+```yaml
+- uses: amajorai/ryu@v1
+  id: ryu
+  with:
+    target: managed
+    managed-node-url: ${{ secrets.RYU_MANAGED_NODE_URL }}
+    managed-node-token: ${{ secrets.RYU_MANAGED_NODE_TOKEN }}
+    operation: run
+    agent: review-agent
+    prompt: Review this change and return pass or fail with the key evidence.
+
+- run: echo "${{ steps.ryu.outputs.response }}"
+```
+
+Use `team` or `workflow` instead of `agent`. Only one selector may be provided.
+The action consumes Core's streaming chat protocol and collects text, tool events,
+workflow events, and the Core run id. The normalized result is available as
+`result-json`; `response-file` can write the text to the runner workspace.
+
+CI runs do not persist conversations or enable long-term memory by default. Set
+`persist: true` or `enable-long-term: true` when that is intentional. `cwd` and
+`worktree-isolation` are useful only when the Core process can access the selected
+directory; a remote managed node cannot see the GitHub runner's checkout.
+
+## Invoke a direct tool
+
+```yaml
+- uses: amajorai/ryu@v1
+  id: tool
+  with:
+    target: self-hosted
+    node-url: ${{ secrets.RYU_NODE_URL }}
+    node-token: ${{ secrets.RYU_NODE_TOKEN }}
+    operation: tool
+    agent: release-agent
+    tool: exa.search
+    tool-arguments: '{"query":"Ryu GitHub Action"}'
+
+- run: echo '${{ steps.tool.outputs.result-json }}'
+```
+
+Core requires the agent id for a direct call so the configured allowlist and
+approval rules remain in force. A denied or failed call fails the workflow step.
+
+## Security and failure behavior
+
+The action masks the node token before any request and never logs prompts, tool
+arguments, or response text. The optional step summary contains node and operation
+metadata only. Health failures, authentication failures, malformed JSON, timeouts,
+non-success HTTP responses, stream errors, and denied tools fail the action. Chat and
+tool mutations are not retried automatically.

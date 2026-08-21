@@ -1,0 +1,253 @@
+---
+title: "Move Ryu packages between folders, archives, and GitHub"
+description: "Use the portable package format to validate, import, export, publish, and update Ryu agents, workflows, plugins, themes, and other package types."
+tags: ["packages", "import", "export", "github", "marketplace", "agents", "workflows", "themes"]
+---
+
+**TL;DR:** A portable package is a versioned folder with a `ryu.package.json` envelope. The folder,
+the deterministic `.ryupack` archive, and a GitHub package path describe the same manifest and
+artifact tree. Portable packages move definitions and artifacts. They do not contain your chat
+history, session runs, memory indexes, or the rest of a node's app data.
+
+For the relationship between the outer package envelope and the inner plugin/app manifest, plus
+the exact source-tree versus packed-bundle boundaries, see
+[Extension schemas & folder layouts](/docs/extend/develop/extensions/schemas-and-layouts).
+
+## What a portable package contains
+
+The package envelope gives Ryu one contract for local folders, archives, GitHub paths, and
+marketplace releases. It records the package identity, version, kind, artifacts, supported targets,
+requirements, capabilities, export scopes, security flags, and source provenance.
+
+```json title="ryu.package.json"
+{
+  "schemaVersion": 1,
+  "id": "@acme/research-agent",
+  "name": "Research Agent",
+  "version": "1.2.0",
+  "kind": "agent",
+  "artifacts": ["agent.json"],
+  "targets": ["desktop", "node"],
+  "scopes": ["desktop", "node", "agent"],
+  "requires": {},
+  "capabilities": [],
+  "security": {
+    "containsSecrets": false,
+    "permissions": [],
+    "privateContent": false,
+    "redacted": false
+  },
+  "source": {
+    "type": "github",
+    "repository": "acme/research-agent",
+    "ref": "v1.2.0"
+  }
+}
+```
+
+The `source` section is provenance, not a second content store. When a package comes from GitHub,
+Ryu pins the repository, path, ref, commit, and content checksum. When it comes from a local folder
+or archive, the same digest is computed locally.
+
+The package digest covers the package manifest and artifact bytes only. GitHub provenance is kept
+alongside the resolved package and is never injected into the signed content, so moving the same
+package between a local folder, archive, and pinned commit does not silently change its identity.
+When resolving an input, Ryu checks an existing local folder or archive before interpreting a value
+as GitHub shorthand. GitHub source trees are rejected when GitHub marks them as truncated and are
+bounded by file-count, per-file, total-size, and decompressed-archive limits.
+
+Supported kinds include:
+
+| Kind | Typical contents |
+| --- | --- |
+| `app`, `plugin` | An installable extension and its declared contributions |
+| `skill` | Reusable instructions and supporting files |
+| `agent` | Agent instructions, model defaults, and tool policy |
+| `workflow` | A reusable workflow definition |
+| `theme` | Theme metadata and allowlisted appearance values |
+| `output_style` | A reusable output or response style |
+| `space`, `profile` | A reusable workspace or user-facing profile definition |
+| `bundle` | A composition of other packages |
+
+Packages can target the desktop, a node, the Gateway, an agent, a space, or a workflow. The target
+and scope fields let Ryu show what an import can change before it applies anything.
+
+## Declare connections without shipping credentials
+
+Agents and workflows often use integrations such as Google Drive, Gmail, or Slack. Declare those
+dependencies in the package envelope so the installer can show the missing setup before the package
+runs. A declaration is metadata only; it must never contain an access token, API key, cookie, or
+account identifier.
+
+```json title="ryu.package.json"
+{
+  "connectionRequirements": [
+    {
+      "id": "google-drive",
+      "provider": "composio",
+      "toolkit": "GOOGLEDRIVE",
+      "display_name": "Google Drive",
+      "purpose": "Read the customer project folder",
+      "required": true,
+      "consumers": ["workflow:weekly-report"]
+    }
+  ]
+}
+```
+
+When a package is installed, Ryu checks the selected node and shows each requirement as **Connected**,
+**Needs connection**, **Unavailable**, or **Could not check**. Required and optional requirements are
+shown separately. A missing Composio account gets a **Connect** action that opens the provider's OAuth
+flow; if Composio itself is not configured, the action takes the user to Gateway integrations. The
+package can install before authorization, but Ryu leaves a visible **Finish setup** state until every
+required connection is ready.
+
+## Share a private release with a code
+
+For customer handoffs, open the Store and choose **Share package**. Select the live package kind and
+id, then set an expiry and redemption limit. Ryu returns a grouped 12-character code such as
+`7K4M-X2QP-9F6D`. Spaces and hyphens are formatting only; ambiguous letters are rejected rather than
+guessed as another code. A known customer organization can be supplied to bind redemption to that
+organization; without that binding, treat the code like a bearer secret and send it through a secure
+channel.
+
+The customer chooses **Install from code**, previews the package name, version, signature status,
+capabilities, and connection requirements, and then chooses **Install package**. Redeeming a code
+creates a short-lived install session for that release. The code itself is stored as a keyed digest,
+can be revoked by the publisher, and is never included in the package archive. Credentials are always
+created or authorized by the customer on their own node.
+
+The release still goes through the normal signed manifest, package digest, archive digest, version,
+and node lifecycle checks. A share code grants a narrowly scoped handoff; it does not bypass package
+verification or turn the publisher's accounts into the customer's connections.
+
+## Keep the folder canonical
+
+Treat the folder as the source tree. An archive is a deterministic transport form of that same
+tree, so packing the same files produces the same digest and release asset.
+
+```text
+research-agent/
+├── ryu.package.json
+├── agent.json
+├── instructions/
+│   └── research.md
+└── assets/
+    └── examples.json
+```
+
+Existing package artifacts remain valid inside the tree. For example, a plugin may carry its
+`manifest.json`, an Agent Plugin may carry `plugin.json`, and an MCP package may carry `mcp.json`.
+The outer `ryu.package.json` describes how Ryu validates, moves, scopes, and publishes those
+artifacts.
+
+Collection repositories use the same rule for every package folder:
+
+```text
+ryu-marketplace/
+├── agents/research-agent/ryu.package.json
+├── workflows/release-notes/ryu.package.json
+└── themes/midnight/ryu.package.json
+```
+
+The `ryu-marketplace` GitHub topic tells Ryu to scan those folders. There is no generated central
+index to keep in sync.
+
+## Validate and move a package
+
+Use the package command for local folders and archives:
+
+```bash
+ryu package validate ./research-agent
+ryu package inspect ./research-agent
+ryu package pack ./research-agent ./research-agent.ryupack
+ryu package unpack ./research-agent.ryupack ./research-agent-unpacked
+ryu package import ./research-agent.ryupack ./imported/research-agent
+ryu package export ./research-agent ./research-agent-export
+```
+
+`import` accepts a local folder, a `.ryupack` archive, or a GitHub package reference. `export`
+redacts sensitive files and private-content paths by default. An export destination may be a folder
+or an archive path.
+
+The optional local secrets envelope is deliberately separate from the package tree:
+
+```bash
+ryu package export ./research-agent ./research-agent-with-secrets.ryupack --include-secrets
+```
+
+Use `--include-secrets` only for a local, encrypted handoff. Ryu asks for the passphrase when it is
+needed, does not store it, and rejects a wrong passphrase before changing the destination. A
+marketplace package must be publishable without an encrypted secrets envelope or secret-bearing
+files.
+
+`ryu package publish` validates that a package is safe to publish. To submit a GitHub-backed
+Marketplace listing, create the immutable release asset first and then submit the repository or
+package-folder URL with:
+
+```bash
+bunx ryu github-publish https://github.com/your-org/your-package
+```
+
+The Marketplace stores the GitHub binding, package identity, release and offer metadata, Stripe
+references, entitlement, reviews, and moderation state. GitHub remains the package and release
+source of truth, and buyers receive downloads through Ryu without setting up GitHub.
+
+## Update without overwriting local work
+
+Ryu keeps package provenance when it installs a package: the source repository and path, pinned
+commit, package checksum, installed version, and the upstream snapshot used for the install.
+
+When a newer upstream release is available, the update engine compares three trees:
+
+1. the previous upstream snapshot;
+2. the package currently installed locally;
+3. the new upstream package.
+
+Unchanged files update normally. Local-only files are preserved. Changes made by both sides become
+explicit conflicts, including secret changes. Ryu shows the update preview and requires a deliberate
+resolution before applying a conflicting update. New permissions, credential requests, and deletes
+are also surfaced as part of the lifecycle decision.
+
+Marketplace entitlement and node ACL checks happen separately from this content diff. A free
+package needs the node lifecycle permission. A paid package needs that permission and an active
+entitlement. Expiry blocks new downloads and updates, but it does not remove the installed package.
+
+Enabling a package is a lifecycle operation, not just a metadata change. Ryu verifies the installed
+archive, activates the native app, plugin, skill, agent, workflow, theme, or output-style registry
+entry, and records the runtime ids it created. If activation fails, the package remains disabled.
+Updating an enabled package first tears down the old runtime before replacing the verified tree.
+Ryu re-enables the replacement only after installation succeeds; if activation fails, the
+replacement remains disabled and can be retried explicitly. Uninstall also removes the runtime
+entries the package owns.
+
+## Know which export you need
+
+Portable packages and app-data backups solve different problems:
+
+| Export | Includes | Does not include |
+| --- | --- | --- |
+| Portable package | A package manifest, declared artifacts, provenance, digest, and safe package metadata | Chat history, session runs, memory records, search indexes, media, models, and unrelated node state |
+| Agent sync bundle | Agent definitions and, when selected, conversation transcripts for agent-tool interchange | A complete node backup or a Marketplace release |
+| Data-folder backup | The active node's databases, conversations, spaces, memory, media, models, and runtime files | A redacted Marketplace package contract |
+
+Chat and session records stay in Ryu's app-data directory. Long-term memory records are stored with
+the conversation data, while full-text and semantic retrieval use derived SQLite indexes, including
+sqlite-vec storage. Agents, plugin metadata, workflow definitions, and workflow runs use the same
+app-data root but may be stored in separate databases or files. This is why copying a package does
+not copy your personal history or memory index.
+
+To move the complete node between machines, use [Data Folder & Storage](/docs/surfaces/desktop/user-guide/data-and-storage)
+and its full export/import flow. To move an agent definition or transcript between agent tools, use
+[Agent import and export sync](/docs/gateway/agent-sync). To move an installable definition or
+artifact, use this portable package flow.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/extend/develop/extensions/marketplace" />
+  <DocCard href="/docs/extend/develop/extensions/github-topic-discovery" />
+  <DocCard href="/docs/surfaces/desktop/user-guide/marketplace" />
+  <DocCard href="/docs/surfaces/desktop/user-guide/data-and-storage" />
+  <DocCard href="/docs/gateway/agent-sync" />
+</Cards>

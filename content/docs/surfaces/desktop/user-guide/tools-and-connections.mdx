@@ -19,7 +19,12 @@ To scope tools to one agent, use the **agent filter** at the top of the page. Pi
 
 You edit the allowlist itself in the **agent editor** (open an agent, then the Tools section), not on the Tools page. The Tools page is for browsing, testing, and connecting servers.
 
-The allowlist key is the **fully-qualified tool id** - `<server>__<tool>`, for example `spider__crawl` or `ghost__ghost_click`. The same id is what you grant, what you test, and what the agent calls.
+The allowlist key is the **fully-qualified tool id** - `<server>.<tool>`, for example `spider.crawl` or `ghost.ghost_click`. The same id is what you grant, what you test, and what the agent calls.
+
+The default-on **Goal** plugin contributes `goal.set`. Add that fully qualified id to an agent's
+allowlist when the agent should be able to set or replace a goal for its current conversation.
+Core derives the conversation scope from the caller, so the tool cannot write a goal into another
+chat.
 
 <Callout type="info">
 Tool execution is governed on both planes. Whether a tool is invoked by an ACP agent or through the OpenAI-compatible chat path, it is allowlist-gated and emits a Gateway exec-budget plus exec-audit entry. See [unified tool catalog](/docs/core/unified-tool-catalog) for the governance path.
@@ -31,15 +36,33 @@ On the Tools page, pick an agent and a tool, supply JSON arguments, and run it. 
 
 ## Connect an MCP server
 
-To add your own MCP server, use **Add server** on the Tools page. It registers the server via `POST /api/mcp/servers` with a command and arguments:
+To add your own MCP server, use **Add server** on the Tools page. It registers the server via `POST /api/mcp/servers` and lets you choose a local process or a remote endpoint:
 
 | Field | Meaning |
 |---|---|
-| `name` | The server name; becomes the `<server>__` prefix on its tool ids |
-| `command` | The executable Core spawns to run the server |
-| `args` | Arguments passed to the command |
+| `name` | The server name; becomes the `<server>.` prefix on its tool ids |
+| `transport` | `stdio`, Streamable HTTP, or legacy HTTP + SSE |
+| `command` | The executable Core spawns for a local `stdio` server |
+| `args` | Arguments passed to a local process |
+| `url` | The endpoint used by a remote server |
+| `env` | Environment variables passed to a local process; values are kept on the Core node |
+| `headers` | Request headers sent to a remote server; values are kept on the Core node |
 
 Once registered the server and its tools appear immediately in the lists, with no manual refresh. Each server row shows an availability indicator so a missing binary is visible before an agent tries to call it.
+
+### MCP authentication and settings
+
+Every MCP row declares one of three visible authentication states: **No auth required**, **Authentication
+required**, or **Credentials configured**. OAuth-backed servers are marked **OAuth** and expose their
+live connection card in the server detail view. Use **Connect** to start authorization and **Log out**
+to remove the local connection. A disconnected or reauthentication-required OAuth connection never
+falls back to silently sending a stale token.
+
+Open **Settings** on a user-owned server to edit its transport, command or endpoint, arguments,
+environment variables, request headers, description, and enabled state. Existing environment and
+header values are masked. Leave a masked value unchanged to keep it, replace it to rotate it, or
+remove the row to delete it. Built-in and plugin-owned MCP servers remain managed by their owner and
+do not expose destructive local settings.
 
 For installing servers from a catalog (the official MCP registry, Smithery, or the Ryu-hosted marketplace) rather than hand-registering a command, see the [Store](/docs/surfaces/desktop/user-guide/store) and [MCP registry](/docs/core/mcp-registry). Catalog installs land as a **disabled** `~/.ryu/mcp.json` entry that you explicitly enable — Core never auto-launches an installed registry command.
 
@@ -56,9 +79,27 @@ GET /api/tools/describe?id=<tool-id>
 
 ## Connect Composio
 
-Composio gives agents third-party actions across a wide range of apps. It is **searchable, not listed** — it is never registered as an MCP server and never dumped into the full tool list. Instead a capped slice of Composio actions is pulled live into `search()` when a key is configured, and an action is called by its fully-qualified id `composio__<slug>` (for example `composio__GITHUB_CREATE_ISSUE`).
+Composio gives agents third-party actions across a wide range of apps. It is **searchable, not listed** — it is never registered as an MCP server and never dumped into the full tool list. Instead a capped slice of Composio actions is pulled live into `search()` when a key is configured, and an action is called by its fully-qualified id `composio.<slug>` (for example `composio.GITHUB_CREATE_ISSUE`).
 
-To enable it:
+### Use Composio Connect (For You)
+
+Composio's **For You** product is a separate hosted MCP path. Ryu ships it as
+**Composio Connect**, using the remote `composio_connect` server and OAuth. It is an alternative to
+the direct API-key integration above, so it does not require `COMPOSIO_API_KEY`.
+
+To connect it, open **Marketplace → Connections**, choose an identity profile, and select
+**Connect** on **Composio Connect**. Ryu opens Composio's browser authorization flow and stores the
+provider token in the node's encrypted identity storage. The resulting tools use the
+`composio_connect.*` namespace, keeping them separate from direct `composio.<slug>` actions.
+
+The permission groups shown by Composio (read, write, and destructive) are policies on the hosted
+connector. Ryu still applies its own tool allowlist and approval policy. In **Ryu Work** mode,
+**Auto** refers to the selected agent's advertised permission preset; it does not select an
+upstream Composio policy or bypass Ryu approvals.
+
+### Enable direct API-key actions
+
+To enable the direct Composio action backend:
 
 1. Open **Settings → Integrations** and paste your Composio API key. Saving the key makes Composio actions available in search.
 2. In the **agent editor**, add the Composio actions you want to that agent's allowlist.
@@ -70,6 +111,14 @@ Composio actions run against a per-user entity. The first time an agent calls an
 <Callout type="warn">
 Composio actions require a configured API key. With no key, Composio does not appear in search.
 </Callout>
+
+### Connections during onboarding
+
+Paid onboarding can connect read-only Composio sources before the first profile build. Gmail,
+Notion, Slack, and GitHub are shown first, with a searchable **More integrations** list for other
+tools. You may connect more than one account. The profile builder receives source ids and asks the
+selected cloud agent to inspect only the recent 90-day window; external content is untrusted data,
+and recommendations about agents or teams always require later approval.
 
 ## Built-in tool servers
 
@@ -85,13 +134,13 @@ Core ships a set of always-on tool servers that need no registration. They appea
 | `search_conversations` | Semantic search over past chats | See [search and recall](/docs/surfaces/desktop/user-guide/search-and-recall) |
 | `threads` | Spawn and manage worker conversations | Opt-in per agent; see [coordinator threads](/docs/core/coordinator-threads) |
 | `delegate` | Fan out subtasks to sub-agents in parallel (ephemeral) | For durable workers, use `threads` instead |
-| `skills` | Discover and load Agent Skills on demand | Progressive disclosure via `skills__search` / `skills__load` |
+| `skills` | Discover and load Agent Skills on demand | Progressive disclosure via `skills.search` / `skills.load` |
 | `notify` | Show a native desktop notification | |
 | `channel` | Post a message to a Slack or Discord webhook | |
 | `sandbox` | Run WASM/WASI modules with default-deny capabilities | Requires the wasmtime feature; toggle from the Services page |
 
 <Callout type="info">
-Ghost and Shadow are cross-platform and require their respective sidecars. The `threads` tools are allowlist-opt-in — only an agent granted `threads__*` can spawn worker conversations. On a node with a virtual desktop, Ghost drives the display the [Virtual Desktop](/docs/surfaces/desktop/user-guide/virtual-desktop) panel streams, so you can watch and take over.
+Ghost and Shadow are cross-platform and require their respective sidecars. The `threads` tools are allowlist-opt-in — only an agent granted `threads.*` can spawn worker conversations. On a node with a virtual desktop, Ghost drives the display the [Virtual Desktop](/docs/surfaces/desktop/user-guide/virtual-desktop) panel streams, so you can watch and take over.
 </Callout>
 
 ## Where to go next

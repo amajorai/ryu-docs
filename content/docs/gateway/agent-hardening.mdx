@@ -39,8 +39,8 @@ OpenClaw (profile, then allow/deny):
 
 ```toml
 [tools.profiles.messaging]
-allow = ["slack__send_message", "gmail__send"]
-deny  = ["shell__exec"]
+allow = ["slack.send_message", "gmail.send"]
+deny  = ["shell.exec"]
 
 [tools.profiles.full]
 unrestricted = true
@@ -48,11 +48,26 @@ unrestricted = true
 
 ```
 x-ryu-tool-profile: messaging
-x-ryu-tools: spider__crawl
+x-ryu-tools: spider.crawl
 ```
 
-With the request above, the effective allowlist is the messaging grants plus `spider__crawl`, minus
+With the request above, the effective allowlist is the messaging grants plus `spider.crawl`, minus
 anything in `deny`, plus `always_on`.
+
+```mermaid
+flowchart TD
+  PROFILE["Selected profile\nx-ryu-tool-profile"] --> ALLOW["Profile allow set\nor wildcard for full"]
+  HEADER["Explicit request ids\nx-ryu-tools"] --> ALLOW
+  ALLOW --> DENY["Remove profile.deny\ndeny wins for scoped profiles"]
+  DENY --> ALWAYS["Append always_on\nnever deny-stripped"]
+  ALWAYS --> WILDCARD{"Wildcard *?"}
+  WILDCARD -->|"yes"| ANY["Any catalog tool may pass"]
+  WILDCARD -->|"no"| EXACT{"Exact FQ tool id allowed?"}
+  EXACT -->|"yes"| RUN["Run through governed exec path"]
+  EXACT -->|"no"| REJECT["Deny and emit an error result"]
+  ANY --> AUDIT["Exec budget + audit"]
+  RUN --> AUDIT
+```
 
 <Callout type="info">
   Profiles are opt-in and default-safe. `ToolsConfig.profiles` defaults to an empty map, so with no
@@ -108,6 +123,30 @@ The detector runs in two places:
 - **On `GET /v1/config`** - the response carries a `drift: DriftWarning[]` field populated from the
   live firewall config (so a `PUT /v1/config` hot-swap is reflected immediately) plus the
   `tools`, `composio`, and `exec_budget` startup snapshots and the current policy snapshot.
+
+## Doctor: configuration, security, and performance checks
+
+Static drift warnings are useful for contradictions, but an operator also needs to know when a
+node is exposed, missing a provider, has an incomplete firewall, or has unbounded local work. The
+read-only Doctor report combines those checks with the Core-side checks that Gateway cannot see:
+
+- Gateway bind/auth exposure, firewall and audit pipeline stages, inbound/outbound scanning,
+  redaction, and untrusted tool-result wrapping.
+- Rate limits, local-engine concurrency, provider circuit breakers, default-provider reachability,
+  classifier availability, and ineffective execution budgets.
+- Core approval mode, native command scanning, and whether Claude, Codex, or generic agent routes
+  bypass Gateway coverage.
+
+Use `GET /v1/doctor` with the Gateway admin credential, or use Core's authenticated
+`GET /api/gateway/doctor` proxy from the desktop. Findings are structured with `checkId`,
+`category`, `severity`, `settingPath`, and `recommendedAction`; the report never mutates config and
+does not include credentials. The desktop renders the same report under Gateway → Diagnostics and
+on the onboarding safety step.
+
+For an explicit repair preview, call `POST /api/gateway/doctor/fix` with `{ "dryRun": true }` or
+use `ryu doctor --dry-run`. Applying requires the separate `--fix`/**Apply safe fixes** action. The
+repair allowlist covers only protective Gateway flags; decisions involving exposure, credentials,
+agent routing, approvals, providers, budgets, or concurrency are reported for a human to choose.
 
 <Callout type="info">
   The gateway has no literal approval, elevation, or security-level config of its own. Interactive

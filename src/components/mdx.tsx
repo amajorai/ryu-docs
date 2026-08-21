@@ -6,6 +6,7 @@ import type { MDXComponents } from "mdx/types";
 import type { AnchorHTMLAttributes, ComponentProps } from "react";
 
 import { Architecture } from "@/components/mdx/architecture";
+import { ContributionSurfaces } from "@/components/mdx/contribution-surfaces";
 import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
 import { Mermaid } from "@/components/mdx/mermaid";
 import { Quiz } from "@/components/mdx/quiz";
@@ -33,6 +34,7 @@ export function getMDXComponents(components?: MDXComponents) {
     Architecture,
     AutoCards,
     Card: VersionedCard,
+    ContributionSurfaces,
     DocCard,
     File,
     Files,

@@ -43,10 +43,9 @@ function DocsVersionSwitcher() {
   const legacyPath = segments.length ? `/docs/${segments.join("/")}` : "/docs";
 
   const options = DOCS_VERSIONS.map((version) => {
-    // An archived version lives on its OWN deployment (a `docs/<version>` branch),
-    // so its option leaves this site entirely. Keeping the same sub-path means the
-    // reader lands on the page they were already reading, in the docs that match
-    // the release they picked.
+    // Keep the version switcher backed by the one current deployment. The
+    // optional external URL remains supported by the type for compatibility with
+    // older callers, but latest-only mode does not populate it.
     const url = version.externalUrl
       ? `${version.externalUrl}${docsPathForVersion(version.slug, ...targetSegments)}`
       : docsPathForVersion(version.slug, ...targetSegments);
@@ -92,28 +91,26 @@ export function DocsLayoutClient({
             </>
           ),
         }}
-        sidebar={{
-          tabs: {
-            transform(option, node) {
-              const segment = rootSegment(option.url);
-              const color = rootColor(segment);
-              return {
-                ...option,
-                description: undefined,
-                title: realmTabTitle(option.title, segment),
-                icon: (
-                  <div
-                    className="size-full rounded-md p-1 [&_svg]:size-full max-md:p-1.5"
-                    style={{
-                      color,
-                      backgroundColor: `color-mix(in oklab, ${color} 18%, transparent)`,
-                    }}
-                  >
-                    {node.icon}
-                  </div>
-                ),
-              };
-            },
+        tabs={{
+          transform(option, node) {
+            const segment = rootSegment(option.url);
+            const color = rootColor(segment);
+            return {
+              ...option,
+              description: undefined,
+              title: realmTabTitle(option.title, segment),
+              icon: (
+                <div
+                  className="size-full rounded-md p-1 [&_svg]:size-full max-md:p-1.5"
+                  style={{
+                    color,
+                    backgroundColor: `color-mix(in oklab, ${color} 18%, transparent)`,
+                  }}
+                >
+                  {node.icon}
+                </div>
+              ),
+            };
           },
         }}
       >

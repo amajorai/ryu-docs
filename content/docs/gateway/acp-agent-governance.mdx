@@ -38,8 +38,26 @@ constraint throughout is that **the user's subscription must survive**. Full det
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` → `/passthrough/anthropic` | The user's own OAuth bearer, forwarded unchanged. An API key is **never** injected, because either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` would take precedence over Pro/Max OAuth and flip the account onto API-key billing |
 | Codex | Isolated `CODEX_HOME` → `/passthrough/openai-responses` | OAuth bearer plus `ChatGPT-Account-ID`, forwarded unchanged |
-| Pi (managed) | `OPENAI_BASE_URL` + gateway token, plus a `models.json` pin | Gateway token. The pin is required because Pi does not honour `OPENAI_BASE_URL` on its own |
-| BYO OpenAI-compatible | `OPENAI_BASE_URL` + gateway token | Gateway token |
+| Pi (managed) | Agent-scoped `OPENAI_BASE_URL` + gateway token, plus a `models.json` pin | Gateway token. The pin is required because Pi does not honour `OPENAI_BASE_URL` on its own |
+| BYO OpenAI-compatible | Agent-scoped `OPENAI_BASE_URL` + gateway token | Gateway token |
+
+Subscription-preserving routing for Claude Code and Codex is **on by default** for new and
+auto-installed routable agents. An explicit `false` in `claude-gateway-routing` or
+`codex-gateway-routing` keeps that agent's subscription egress direct. Generic BYO ACP egress is
+also **on by default**: an absent `agent-gateway-routing` entry means Gateway-governed traffic, and
+an explicit `false` is the direct-egress opt-out. The managed Pi remains Gateway-routed according
+to its provider setting.
+
+When the routed provider is OpenRouter, the agent-scoped URL lets the Gateway attach the ACP
+agent to the request before it records OpenRouter's response-reported `usage.cost`. That keeps
+ACP model spend in the same per-agent USD cap as ordinary Ryu chat. The Gateway's OpenAI tool loop
+and the in-process ACP MCP bridge also emit one separate charge for each successful Composio
+action; the agent's **Paid tools** budget toggle controls whether those charges count.
+
+Native subscription passthroughs are not OpenRouter calls, so OpenRouter's generation endpoint
+cannot recover their provider cost. Direct-egress ACP traffic is likewise outside Ryu's Gateway
+budget. Local/self-hosted inference has no upstream billing feed and uses the configured estimate
+when a local budget is enabled.
 
 ## Layer 2 — The agent's own native tools
 
@@ -57,7 +75,7 @@ does not install hooks into each agent's own config files, in
 ## Layer 3 — Ryu-injected tools
 
 When the bridge is active the agent also receives Ryu's meta-tools (`tool_search`, `describe`,
-`execute`, `resume`, and the `skills__*` tools) over MCP. These resolve against the
+`execute`, `resume`, and the `skills.*` tools) over MCP. These resolve against the
 [unified tool catalog](/docs/core/unified-tool-catalog) and are gated by the agent's allowlist on
 the call path. Search is open; execution is allowlisted. See
 [Tool governance](/docs/gateway/tools).
@@ -75,8 +93,9 @@ The layers are genuinely independent, and that is the operational point:
 
 - **Layer 1 is per agent family**, each with its own preference: `claude-gateway-routing`,
   `codex-gateway-routing`, the managed-Pi routing mode, and a generic per-agent toggle for BYO
-  agents. They are separate because enabling them changes how a subscription credential flows, and
-  that is a decision per agent, not per node.
+  agents. Claude, Codex, and generic BYO routing default to Gateway governance; they are separate
+  because turning any one off changes how a subscription credential flows, and that is a decision
+  per agent, not per node.
 - **Layer 2 is node-wide**, armed unless explicitly turned off.
 - **Layer 3** follows whether the bridge is injected for that agent.
 - **Layer 4** follows which plugins are installed and enabled.
@@ -88,6 +107,40 @@ subscription agent entirely outside Ryu's egress path) but it is a choice, and i
 When you need a node where nothing is ungoverned, confirm Layer 1 for each installed agent rather
 than assuming a node-level setting covers them.
 </Callout>
+
+## ACP session lifecycle and resource bounds
+
+ACP sessions are pooled per conversation so a follow-up message can reuse the same
+agent process. On a node with many old threads, that resident state can otherwise
+consume memory indefinitely. The Gateway's **Agent runtime** settings put a bound
+around the pool:
+
+- **Stop idle ACP sessions after** — defaults to 10 minutes. When a session has no
+  new turn for that long, Ryu tears down its ACP subprocess. The next message
+  starts it again, so the first reply can take longer.
+- **Maximum parallel ACP agents** — defaults to **Auto**. Core derives a
+  conservative limit from the node's physical CPU cores and RAM, then queues new
+  ACP sessions until a slot is available. A manual limit from 1 to 32 is available
+  when the node's workload is known.
+- **Keep this computer awake while agents run** — on by default for local nodes.
+  Ryu asks the operating system to prevent idle system sleep only while an ACP
+  process is active; the display can still turn off. It does not keep a remote
+  computer awake.
+
+The same settings can be written in `gateway.toml` when managing a node without
+the desktop UI:
+
+```toml
+[acp]
+idle_timeout_minutes = 10
+# Omit max_parallel_agents for Auto; set it to 1..32 for a manual limit.
+max_parallel_agents = 4
+keep_computer_awake = true
+```
+
+This is built-in node enforcement, not a plugin-owned control. Plugins may observe
+or report the resulting runtime state, but disabling a plugin must not remove the
+resource guard that protects the node hosting every ACP agent.
 
 ## What this does not do
 

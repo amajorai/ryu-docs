@@ -5,6 +5,35 @@ description: "Caching, rate limits, concurrency admission control, circuit break
 
 The Gateway keeps model calls fast, bounded, and resilient. Five mechanisms sit on the request path: two caches in front of the provider, a per-key rate limiter, a concurrency admission gate for the local engine, a per-provider circuit breaker that drives the routing fallback chain, and budget enforcement across user, agent, and session scopes.
 
+## Request-path map
+
+This is the conceptual order for a governed model request. Cache hits may short-circuit provider
+dispatch; local concurrency applies only to the local engine; and a post-call credit debit never
+retroactively blocks the call that produced it.
+
+```mermaid
+flowchart TD
+  REQUEST["Request"] --> RATE["Rate limit\nrequests · tokens · burst"]
+  RATE --> FIREWALL["Inbound firewall\nPII · secrets · injection"]
+  FIREWALL --> ROUTE["Model and provider routing"]
+  ROUTE --> CIRCUIT{"Provider healthy?"}
+  CIRCUIT -->|"yes"| BUDGET["Budget and credit gates"]
+  CIRCUIT -->|"no"| FALLBACK["Fallback provider"]
+  FALLBACK --> BUDGET
+  BUDGET -->|"allow"| DISPATCH{"Provider type"}
+  BUDGET -->|"downgrade"| REROUTE["Cheaper model\nthen route again"]
+  BUDGET -->|"restrict"| CLAMP["Strip tools\nand cap tokens"]
+  BUDGET -->|"stop"| BLOCK["402 budget or credit error"]
+  REROUTE --> DISPATCH
+  CLAMP --> DISPATCH
+  DISPATCH -->|"local"| CONCURRENCY["Concurrency gate\npriority queue"]
+  DISPATCH -->|"remote"| PROVIDER["Upstream provider"]
+  CONCURRENCY -->|"admitted"| PROVIDER
+  PROVIDER --> OUTBOUND["Outbound DLP\nand response headers"]
+  OUTBOUND --> AUDIT["Audit record"]
+  OUTBOUND -. "after call" .-> DEBIT["Credit debit\npost-call"]
+```
+
 ## Caching
 
 Two caches sit in front of the provider.
@@ -85,9 +114,26 @@ An open circuit is what drives the fallback chain. In `pipeline/mod.rs` the requ
 
 ## Budgets
 
-Budgets (`apps/gateway/src/budget/`) cap token usage and apply a graduated action when a cap is crossed. `BudgetScope` has three identity dimensions - `User`, `Agent`, and `Session` (`budget/mod.rs`). When more than one scope fires, the most severe action wins (`severity` ordering in `budget/mod.rs`).
+Budgets (`apps/gateway/src/budget/`) cap charged spend and apply a graduated action when a cap is
+crossed. `BudgetRule.limit` is an integer micro-USD amount (`1_000_000` = `$1.00`; `0` is unlimited).
+For model and media calls, the Gateway prefers the provider-reported USD cost, falls back to its
+model/modality estimate, and applies the configured platform markup so the counter matches the amount
+a wallet would debit. Paid Composio actions use the configured per-action estimate. Each rule can
+include or exclude `model`, `media`, and `tools` independently; omitted `include` fields default to
+all three categories.
+`BudgetScope` has three identity dimensions - `User`, `Agent`, and `Session` (`budget/mod.rs`).
+When more than one scope fires, the most severe action wins (`severity` ordering in `budget/mod.rs`).
 
 The four actions, in increasing severity (`BudgetAction`, `apps/gateway/src/config.rs`):
+
+```mermaid
+flowchart LR
+  LIMIT["Budget limit reached"] --> ACTION{"Configured action"}
+  ACTION -->|"notify"| NOTIFY["Allow\nadd budget headers"]
+  ACTION -->|"downgrade"| DOWNGRADE["Use cheaper model"]
+  ACTION -->|"restrict"| RESTRICT["Strip tools\nand cap max_tokens"]
+  ACTION -->|"stop"| STOP["Reject\n402 budget_exceeded"]
+```
 
 | Action | Effect |
 |---|---|
@@ -97,6 +143,17 @@ The four actions, in increasing severity (`BudgetAction`, `apps/gateway/src/conf
 | `stop` | Reject with `402 budget_exceeded` |
 
 Per-user and per-agent rules are configured as maps under `[budgets.users]` and `[budgets.agents]` in `gateway.toml` and are hot-swappable. Every decision is surfaced in the response headers (scope, action, usage, limit).
+
+```toml
+[budgets.agents.my-agent]
+limit = 1_000_000       # $1.00 charged spend
+action = "stop"
+
+[budgets.agents.my-agent.include]
+model = true             # provider/model inference
+media = true             # image, video, speech
+tools = false            # paid Composio actions
+```
 
 <Callout type="info">
   All budget scopes are off unless configured. The counters are in-memory `DashMap`s that reset on a
@@ -111,20 +168,29 @@ Per-user and per-agent budgets key on the `x-ryu-user-id` and `x-ryu-agent-id` h
 
 ### Per-session budget
 
-A single global per-session token cap applies to every session, with the running counter keyed by the `x-ryu-session-id` header. Unlike the `users` and `agents` maps, the session scope is not a per-id rule map: Core mints a fresh conversation id per chat, so a per-id map would be unpopulatable. One rule applies to all sessions.
+A single global per-session charged-cost cap applies to every session, with the running counter keyed by
+the `x-ryu-session-id` header. Unlike the `users` and `agents` maps, the session scope is not a per-id
+rule map: Core mints a fresh conversation id per chat, so a per-id map would be unpopulatable. One rule
+applies to all sessions.
 
 The session scope reuses the same machinery as the user and agent scopes. `evaluate_session` builds a transient `BudgetRule` from the `SessionBudgetConfig` and runs the shared `decide` path, so `notify` / `downgrade` / `restrict` / `stop` all behave identically (`budget/mod.rs`). Configuration:
 
 | Setting | `gateway.toml` | Env var | Default |
 |---|---|---|---|
-| Token cap | `[budgets.session] limit` | `GATEWAY_SESSION_BUDGET_LIMIT` | `0` (off) |
+| Charged-cost cap (micro-USD) | `[budgets.session] limit` | `GATEWAY_SESSION_BUDGET_LIMIT` | `0` (off) |
 | Action | `[budgets.session] action` | `GATEWAY_SESSION_BUDGET_ACTION` | `notify` |
 
 A `limit` of `0` turns the session scope off. Session ids are ephemeral, so the counter map (`session_usage`) is soft-capped at `MAX_SESSION_ENTRIES` and cleared wholesale on overflow (`record_session`, `budget/mod.rs`).
 
 ### Per-key lifetime budget
 
-Each statically configured API key can carry a lifetime token cap, `token_budget_total` (input plus output combined), with an optional `downgrade_to` model (`ApiKeyConfig`, `apps/gateway/src/config.rs`). Enforcement runs before the provider call in `pipeline/mod.rs`: it reads the key's running total from the audit log (`state.audit.token_usage`) and, once the cap is crossed, either downgrades to the configured model or rejects with `402 budget_exceeded`. Because the usage figure comes from the audit log, this cap depends on audit logging being enabled.
+Each statically configured API key can separately carry a legacy lifetime token cap,
+`token_budget_total` (input plus output combined), with an optional `downgrade_to` model
+(`ApiKeyConfig`, `apps/gateway/src/config.rs`). This token-count guard is distinct from the charged
+model-spend budgets above. Enforcement runs before the provider call in `pipeline/mod.rs`: it reads the
+key's running total from the audit log (`state.audit.token_usage`) and, once the cap is crossed, either
+downgrades to the configured model or rejects with `402 budget_exceeded`. Because the usage figure
+comes from the audit log, this legacy cap depends on audit logging being enabled.
 
 ### Exec budget for tools and sandboxes
 

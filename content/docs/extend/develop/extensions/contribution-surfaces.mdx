@@ -1,0 +1,188 @@
+---
+title: "Contribution surfaces"
+description: "Choose the right host-rendered surface for a Ryu plugin or app, and see how each contribution appears in the desktop shell."
+tags: ["plugin", "app", "contributes", "sidebar", "workspace", "theme", "desktop"]
+---
+
+Plugins and apps share one principle for desktop UI: **declare the place you want to
+join; let the host render the chrome**. This keeps extensions composable with the
+sidebar, tabs, summaries, and themes that users already know.
+
+<ContributionSurfaces />
+
+## Pick a surface by the job
+
+| If your extension needs to… | Use | What you own |
+| --- | --- | --- |
+| Show a live list of app-owned records | `contributes.sidebar_sections[]` | The title, icon, data source, row map, target, and optional create/action specs |
+| Add one navigation destination | `contributes.sidebar_buttons[]` | The label, icon, order, and target route |
+| Keep progress visible while work runs | `contributes.live_activities[]` | The activity title, accent, live source, status/progress map, and target |
+| Offer a persistent workspace tool | `contributes.dock_panels[]` | The tab label, icon, placement, and companion/view binding |
+| Add a Library tab with a host-rendered view | `contributes.sidebar_sections[]` with a view spec | The record source, field mapping, view kind, filters, and target |
+| Ship a focused app UI | `runnables[].kind = "companion"` | The sandboxed companion bundle and its host context |
+| Render a result inline in chat | `contributes.widgets[]` plus a widget render tool | A self-contained `ui://widget/...` HTML template and the tool-to-template binding |
+| Suggest a chat result surface | `contributes.chat_widget_templates[]` | The label, examples, triggers, and an optional view/tool backing |
+| Change the product palette | `contributes.themes[]` | Light/dark tokens and the preview palette |
+
+The first four are shell slots. A companion or declarative view supplies the content
+inside a slot; it does not replace the shell's navigation or tab geometry.
+
+### Widgets and app use cases
+
+Use a widget when the result is easier to understand or act on visually: a checklist, a small
+table, a chart, a form, or a preview card. The render tool remains the source of truth for its
+validated input and output; the widget is a presentation surface. A widget may call only tools the
+host exposes to it, and those calls return through the normal governed path.
+
+```json
+{
+  "widgets": [
+    {
+      "tool_id": "app.research_render",
+      "uri": "ui://widget/research.html",
+      "ui_entry": "src/widgets/research.tsx",
+      "mime": "text/html+skybridge",
+      "default_display_mode": "inline"
+    }
+  ]
+}
+```
+
+The template is packaged as a self-contained HTML resource. `inline` is the default display mode;
+`fullscreen` and `pip` are also supported by the widget contract. Widget discovery is not widget
+permission: the host still checks the app's declared grants and the caller's tool allowlist before
+running the render or any follow-up action.
+
+## A small manifest can join several surfaces
+
+This example gives an app a sidebar list, a navigation row, a live status card, and a
+workspace tab. The app owns the data and route names; the desktop owns authentication,
+layout, icons, focus behavior, and theme tokens.
+
+```json
+{
+  "id": "com.example.research",
+  "name": "Research",
+  "version": "0.1.0",
+  "runnables": [],
+  "contributes": {
+    "sidebar_sections": [
+      {
+        "id": "notes",
+        "title": "Research",
+        "icon": "lucide:book-open",
+        "spec": {
+          "source": {
+            "http": { "path": "/api/research/notes" },
+            "map": { "id": "id", "title": "title", "subtitle": "status" }
+          },
+          "itemTarget": "/research/notes/{{item.id}}"
+        }
+      }
+    ],
+    "sidebar_buttons": [
+      {
+        "id": "research",
+        "title": "Research",
+        "icon": "lucide:search",
+        "target": "/research"
+      }
+    ],
+    "live_activities": [
+      {
+        "id": "research-run",
+        "title": "Research pass",
+        "accent": "hsl(26 73% 51%)",
+        "spec": {
+          "source": {
+            "http": { "path": "/api/research/runs" },
+            "map": { "id": "id", "title": "title", "detail": "step", "status": "state", "progress": "progress" }
+          },
+          "target": "/research/runs/{{item.id}}"
+        }
+      }
+    ],
+    "dock_panels": [
+      {
+        "id": "research-panel",
+        "title": "Research",
+        "icon": "lucide:search",
+        "placement": "both",
+        "panel": "companion",
+        "spec": { "companion": "research-companion" }
+      }
+    ]
+  }
+}
+```
+
+`spec` is data, not an escape hatch for arbitrary host markup. Unknown render kinds
+degrade to no contribution on an older shell, while the rest of the manifest can still
+load.
+
+## Library views
+
+Library sections are data-first. The host owns the layout, keyboard behavior, focus management,
+loading state, and theme; the app owns the records and their field mapping. The built-in view
+registry currently recognizes these kinds:
+
+| View kind | Host projection |
+| --- | --- |
+| `board`, `kanban` | Grouped cards by a status or badge field |
+| `table`, `data-table`, `database` | Sortable-looking tabular record projection |
+| `calendar` | Records grouped by their date field |
+| `timeline` | Records arranged by time with status/detail metadata |
+| `feed` | Reverse-chronological activity rows |
+| `list` | Compact title/subtitle rows |
+| `gallery` | Media-first cards with a title and metadata |
+| `card` | One record per readable card |
+| `map` | A map-capable contribution slot; a provider-backed map may replace the fallback |
+| `custom` | A plugin/app-owned renderer selected by the host contract |
+
+`kanban`, `data-table`, and `database` are aliases, not separate permission systems. A plugin can
+declare a custom view id, but the host must either have a renderer for it or show an explicit
+unavailable state. This is what makes new views additive: a plugin can ship a renderer without
+making every existing Library tab understand a new layout.
+
+## Chat widget templates
+
+`contributes.chat_widget_templates[]` is the discovery layer for chat. It lets an app tell the host
+which questions it can answer visually — for example, “show next week's social queue”, “put my
+quests on a board”, or “render the upcoming meetings calendar”. A template may point to exactly one
+`tool_id` or `view_id` when it is available:
+
+```json
+{
+  "id": "next-week",
+  "title": "Next week",
+  "description": "Show the next seven days in a compact calendar",
+  "examples": ["What is happening next week?"],
+  "triggers": ["next week", "upcoming"],
+  "backing": { "view_id": "calendar" }
+}
+```
+
+The template is not permission and it is not an HTML widget by itself. The host still validates the
+backing tool/view and the app's grants. Use `contributes.widgets[]` plus `ui.render` when the result
+needs an interactive inline HTML card; use a view-backed template when the best result is a shared
+Library projection. Apps can publish a coming-soon template without a backing to advertise a future
+surface, but the host must label it unavailable rather than pretending that it renders today.
+
+## The pinned summary is a host-owned layout
+
+The pinned summary rail is deliberately consistent across chats. An app can contribute
+live activity data that the rail or Dynamic Island presents, and it can offer a full
+custom surface through `dock_panels[]`; it does not inject a second summary layout or
+arbitrary React into the chat shell. That boundary keeps focus, dismissal, responsive
+docking, and accessibility predictable.
+
+## Theme behavior
+
+The preview above reads the current docs theme through `next-themes` and uses the host's
+`--color-fd-*` tokens. Desktop companions should follow the same rule: consume the
+provided host theme bridge and semantic design tokens instead of baking in a dark-only
+palette. A contributed theme is safer still: it supplies CSS token values, and the host
+assigns them without evaluating plugin code.
+
+For the full manifest fields, see [Extension schemas & folder layouts](/docs/extend/develop/extensions/schemas-and-layouts).
+For the plugin/app ownership boundary, see [Plugins vs Apps](/docs/extend/develop/extensions/plugins-vs-apps).

@@ -7,13 +7,24 @@ The **Model Context Protocol (MCP)** is an open standard for connecting AI agent
 tools and data. A tool exposed over MCP is callable by any MCP host - including Ryu Core's MCP
 registry. This is the fastest way to add a capability to Ryu: no manifest, no SDK, no restart.
 
-Ryu speaks MCP over stdio (JSON-RPC 2.0, newline-delimited) and matches protocol version
-`2024-11-05`. See the [MCP specification](https://modelcontextprotocol.io) for the full protocol.
+Ryu speaks MCP over stdio, current Streamable HTTP, and legacy HTTP+SSE. Stdio uses newline-delimited
+JSON-RPC; Streamable HTTP uses a POST endpoint whose response may be JSON or request-scoped SSE; the
+legacy transport opens an SSE endpoint first and POSTs messages to the endpoint it announces. See the
+[MCP specification](https://modelcontextprotocol.io) for the full protocol.
 
 This guide uses the **headroom** context-compression engine
 ([`chopratejas/headroom`](https://github.com/chopratejas/headroom)) as the worked example: it
 ships a real MCP server, so you register an *existing* server rather than writing one. To build
 your own server instead, jump to [Build your own](#build-your-own).
+
+<Callout type="info">
+  This page covers a user- or operator-registered MCP server. If you are shipping MCP with a
+  plugin or app, declare it under native `manifest.json` → `mcp_servers` so Core can validate its
+  transport, Gateway grant, allowlist, and lifecycle together. See [Extension schemas & folder
+  layouts](/docs/extend/develop/extensions/schemas-and-layouts#pluginjson-mcpjson-and-skills-interop)
+  for the native-versus-interop boundary; the generated Agent Plugins `mcp.json` projection carries
+  stdio, Streamable HTTP, and legacy SSE entries.
+</Callout>
 
 ## How MCP servers connect to Ryu
 
@@ -22,6 +33,10 @@ flowchart LR
   subgraph "Your MCP Server"
     A[stdio JSON-RPC] --> B[tools/list]
     A --> C[tools/call]
+    D[Streamable HTTP POST] --> B
+    D --> C
+    E[legacy SSE GET + POST endpoint] --> B
+    E --> C
   end
 
   subgraph "Core MCP Registry"
@@ -38,12 +53,45 @@ flowchart LR
   end
 
   D -.->|register| E
-  F -.->|dispatch| A
+  F -.->|dispatch by configured transport| A
+  F -.->|dispatch by configured transport| D
+  F -.->|dispatch by configured transport| E
 ```
 
 When an agent emits a tool call for a registered MCP tool, Core's MCP bridge dispatches it through
-the registry, routes it to the server process over stdio, and feeds the result back into the chat
-loop.
+the registry, uses the configured transport, and feeds the result back into the chat loop.
+
+## Configure each transport
+
+The shared `mcpServers` shape accepts the same three transport forms when used in `~/.ryu/mcp.json`,
+in a native manifest, or through the registration API:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "headroom",
+      "args": ["mcp", "serve"]
+    },
+    "hosted": {
+      "type": "streamable-http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    },
+    "legacy": {
+      "type": "sse",
+      "url": "https://legacy.example.com/sse"
+    }
+  }
+}
+```
+
+`http` is accepted as a compatibility alias for Streamable HTTP. If `type` is omitted, Ryu infers
+stdio from `command` and Streamable HTTP from `url`. Remote headers are sent on every request;
+Core reserves protocol headers, screens remote URLs before connecting, does not follow redirects,
+and withholds configured credentials if a legacy SSE server announces a different-origin message
+endpoint.
 
 ## Step 1 - Install the engine (serena-free)
 
@@ -78,14 +126,14 @@ curl -X POST http://localhost:7980/api/mcp/servers \
 `headroom mcp serve` speaks the stdio MCP transport and needs no environment variables. (The
 optional `--proxy-url` flag only matters if you run a separate headroom proxy.) Two rules:
 
-- `name` must be non-empty and must **not** contain `__` - Core uses `__` as the tool-id
-  separator when routing calls.
+- `name` must be non-empty and must **not** contain `.` - Core uses dotted tool ids when routing
+  calls.
 - `headroom` must be on Core's `PATH` (handled by `pipx ensurepath`); otherwise point `command`
   at the absolute path to the binary in your virtualenv.
 
 Once registered, the tools are listed by `GET /api/mcp/servers` and callable via
 `POST /api/mcp/tools/call`. Tool ids are namespaced by server name, e.g.
-`headroom__headroom_compress`.
+`headroom.headroom_compress`.
 
 The built-in **Ghost** and **Shadow** servers are registered the same way, but as built-ins:
 they are wired directly into the MCP registry (`apps/core/src/sidecar/mcp/mod.rs`) rather than

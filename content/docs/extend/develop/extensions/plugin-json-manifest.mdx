@@ -12,6 +12,10 @@ walks you through assembling that file and installing it to Core. It is modeled 
 The full field-by-field schema (all eight Runnable kinds, per-kind `config`, `contributes`,
 `activation_events`, `engines.ryu`) lives in the reference. This page does not re-state it.
 
+For the relationship between the native manifest, generated Agent Plugins files, `skills/`,
+portable `ryu.package.json`, and app/plugin folder layouts, see
+[Extension schemas & folder layouts](/docs/extend/develop/extensions/schemas-and-layouts).
+
 <Cards>
   <DocCard href="/docs/extend/develop/sdk/plugin-api" />
   <DocCard href="/docs/start-here/architecture/runnable-model" />
@@ -36,6 +40,57 @@ label shown in the plugin store.
 The loader (`apps/core/src/plugin_manifest/mod.rs`) rejects a manifest whose `version` is not valid
 semver. The canonical file name is `manifest.json`; the legacy `ryu.json` is still read for plugins
 installed before the apps-to-plugins rename.
+
+## 1a. Add Store presentation metadata
+
+The native manifest also owns the safe, user-facing fields shown by the Marketplace and Library:
+`tagline`, `author`, `homepage`, `repository`, `keywords`, `tags`, `category`, `license`, `icon` /
+`iconUrl`, `iconDither`, `iconBackground`, `banner`, `screenshots`, `examplePrompts`, and policy
+links. `tags` is the curated `string[]` used by the Store's tag filter; `keywords` remains the
+broader search vocabulary. `external: true` marks a provider whose runtime lives outside the local
+Ryu process. It is a provenance label, not permission; the remote endpoint still needs an explicit
+`mcp_servers` entry and Gateway grants.
+
+```json
+{
+  "id": "@example/research-assistant",
+  "name": "Research Assistant",
+  "version": "1.0.0",
+  "description": "Drafts a literature review from a folder of PDFs.",
+  "tagline": "Turn a reading pile into a cited outline",
+  "author": { "name": "Example Labs", "url": "https://example.com" },
+  "homepage": "https://example.com/research-assistant",
+  "repository": "https://github.com/example/research-assistant",
+  "privacyPolicyUrl": "https://example.com/privacy",
+  "termsOfServiceUrl": "https://example.com/terms",
+  "license": "MIT",
+  "keywords": ["research", "writing"],
+  "tags": ["research", "writing", "citations"],
+  "screenshots": ["https://cdn.example.com/research-assistant.png"],
+  "banner": { "style": "gradient", "colors": ["#1d4ed8", "#7c3aed"] },
+  "examplePrompts": ["Compare these papers and group their methods."],
+  "runnables": [],
+  "permission_grants": []
+}
+```
+
+Ryu also reads compatible GitHub descriptors at `.codex-plugin/plugin.json` and
+`.claude-plugin/plugin.json`. Codex-style nested `interface` fields such as `displayName`,
+`shortDescription`, `longDescription`, `websiteURL`, `composerIcon`, `logo`, `screenshots`, and
+`defaultPrompt` map to the same presentation contract. This is GitHub discovery metadata: the
+server hydrates and scrubs it for cards and detail views, but it never imports executable code,
+permission grants, MCP endpoints, or install artifacts from an unsigned descriptor. A compatible
+descriptor does not replace a Ryu `manifest.json` when you want to install and run the plugin.
+
+Screenshots and banners are declared URLs, so the GitHub repository (or another HTTPS asset host)
+is the source of truth for listing art. Ryu does not need a new server-side image upload for a new
+listing. Existing hosted marketplace media remains a compatibility fallback for older records; the
+legacy upload endpoint and database columns are still present for older publisher clients, but
+manifest-declared presentation wins whenever it is available.
+
+`provides` is also summarized as a non-executable **swappable layer** on cards and detail views.
+Declare the capability and its canonical verbs there; the binding and adapter code remain in the
+native signed manifest.
 
 ## 2. Add your Runnables
 
@@ -77,13 +132,11 @@ slug. For the exact `config` shape of every kind, see the
 [plugin-api reference](/docs/extend/develop/sdk/plugin-api).
 
 <Callout type="warn">
-  Only `agent`, `workflow`, and `tool` Runnables activate on enable today. Core validates all
-  eight kinds, but `build_runnable_registry` (`apps/core/src/server/mod.rs`) registers only those
-  three (an enabled agent gets an `app__`-namespaced id in the agent store, a workflow is saved as
-  a skeleton, a tool is registered into the MCP registry). A `skill`, `companion`, `channel`,
-  `engine`, or `policy` entry parses and validates but returns a per-Runnable "no handler" outcome,
-  so enabling a plugin that ships them is a partial enable, not a hard failure. Ship
-  agents/workflows/tools; treat the other five as declared-but-inert.
+  All eight Runnable kinds now have an activation handler. Agents, workflows, tools, skills,
+  engines, channels, and companions register into their corresponding Core contribution/store
+  surface. A `policy` entry is validated by Core and coordinated through the policy pass; the
+  Gateway remains the authority for policy enforcement. Enable still reports per-Runnable errors,
+  so a bad entry is visible without aborting unrelated entries.
 </Callout>
 
 ## 3. Declare permission grants
@@ -141,16 +194,16 @@ model never spends a round-trip discovering it is unavailable.
 {
   "contributes": {
     "tool_filters": [
-      { "tool": "shell__exec", "reason": "Shell execution is disabled while this policy is on" },
-      { "tool": "shadow__*", "reason": "Removes the entire shadow server namespace" }
+      { "tool": "shell.exec", "reason": "Shell execution is disabled while this policy is on" },
+      { "tool": "shadow.*", "reason": "Removes the entire shadow server namespace" }
     ]
   }
 }
 ```
 
-The `tool` id is fully-qualified: `<server>__<tool>` (e.g. `browser__navigate`). The namespace is
+The `tool` id is fully-qualified: `<server>.<tool>` (e.g. `browser.navigate`). The namespace is
 mandatory — a bare `navigate` is ambiguous across servers and is rejected at import. A trailing `*`
-is the only wildcard position allowed and hides every tool with that prefix (`shadow__*` hides a
+is the only wildcard position allowed and hides every tool with that prefix (`shadow.*` hides a
 whole server); an interior or leading `*` is rejected because it would silently match far more than
 the author pictured. An exact pattern (no `*`) matches exactly one tool id and does not behave as a
 prefix. `reason` is optional and surfaces in the plugin's listing, so a user can see what a plugin
@@ -160,7 +213,7 @@ removes before installing it.
 
 Optionally, a manifest can declare `sidecars[]` - long-running child processes Core downloads or
 provisions, spawns, and health-checks. Reach for this when your app wraps a binary or a Python
-service (a TTS engine, a capture daemon) rather than a stdio MCP server. The field is `SidecarSpec` in
+service (an Audio engine, a capture daemon) rather than a stdio MCP server. The field is `SidecarSpec` in
 `apps/core/src/plugin_manifest/schema.rs`.
 
 ```json

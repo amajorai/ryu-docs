@@ -48,13 +48,23 @@ When a plugin is enabled, Core runs `build_runnable_registry` (`apps/core/src/se
 1. **Agent runnables** get an `app__`-namespaced id in the agent store and appear in the agent picker.
 2. **Workflow runnables** are saved as skeleton definitions and appear in the workflow list.
 3. **Tool runnables** are registered into the MCP registry and appear in tool search on both planes.
-4. **Turn hooks** are collected by `collect_enabled_hooks` and will fire on the next assistant turn.
-5. **Declarative contributions** (composer controls, settings tabs, slash commands) are stored and served at `GET /api/plugins/contributions`.
+4. **Skill runnables** register an app-skill reference; bundled `skills/<slug>/SKILL.md` files are materialized from the package tree when present.
+5. **Engine, channel, and companion runnables** register into the corresponding contribution registries.
+6. **Policy runnables** are validated by Core and applied through the Gateway/Core policy coordinator.
+7. **Turn hooks** are collected by `collect_enabled_hooks` and will fire on the next matching turn boundary.
+8. **Declarative contributions** (composer controls, settings tabs, slash commands) are stored and served at `GET /api/plugins/contributions`.
+
+The same generic registration path feeds every client surface. A manifest may target desktop, web,
+extension, mobile, CLI, the terminal UI, Core, Gateway, Island, or a hardware-facing host. An empty
+target declaration means “all surfaces”; an explicit surface map is authoritative. Surface support
+controls discoverability and rendering, not authorization: the host still checks the contribution's
+declared grants and the caller's permissions before executing a sidecar, tool, or bridge method.
 
 <Callout type="warn">
-  Only `agent`, `workflow`, and `tool` Runnables activate on enable today. A `skill`, `companion`,
-  `channel`, `engine`, or `policy` entry parses and validates but returns a per-Runnable "no handler"
-  outcome. Ship agents, workflows, and tools; treat the other five as declared-but-inert.
+  Every Runnable kind has a handler now. The important security distinction remains: Core activates
+  the declared contribution, but the Gateway decides whether its requested capabilities and policy
+  effects are allowed. A `policy` handler coordinates state; it does not move firewall, routing, or
+  budget enforcement into Core.
 </Callout>
 
 ## Hook phases
@@ -106,6 +116,7 @@ flowchart LR
 | **Before compact** | `session_before_compact` | Before Ryu drops older turns to fit the context window | Observation only — sees what is about to be dropped |
 | **Session compact** | `session_compact` | After dropped turns have been summarized | `replace` (the summary text) |
 | **Sub-agent stop** | `subagent_stop` | When a delegated sub-agent finishes | Observation only (v1) |
+| **Delegation lifecycle** | `delegation_lifecycle` | When the global active-delegation count changes | Observation only (v1) |
 | **Session end** | `session_end` | When a conversation is deleted | Observation only (v1) |
 | **Notification** | `notification` | When a notification is fanned out | Observation only (v1) |
 | **Model select** | `model_select` | When the active model or thinking/effort level changes | Observation only |
@@ -140,11 +151,10 @@ as though the call succeeded.
 
 Two rules make `transform` trustworthy as a security boundary:
 
-- **No chaining.** The first hook in plugin order to return `transform` wins, and its rewrite is
-  *not* re-fed through the remaining `tool_result` hooks. With chaining, the value each hook
-  inspected would depend on install order, so a redaction hook could be silently defeated by
-  another plugin installed ahead of it.
-- **Downstream observers see the rewrite, not the original.** The detached `post_tool_use`
+- **Transforms chain in priority order.** Each `tool_result` hook receives the latest transformed
+  value, never the original raw result. A later redaction or narrowing policy therefore cannot
+  accidentally restore a secret removed by an earlier hook.
+- **Downstream observers see the final rewrite, not the original.** The detached `post_tool_use`
   observers receive the transformed output, so a redaction is not undone by handing the raw value
   to every other installed plugin.
 
@@ -206,6 +216,35 @@ The matcher (`glob_match`) is deliberately tiny:
 | `exact_name` | Exact match only |
 
 A hook whose gate does not match the current tool never spawns the Deno sandbox.
+
+### Tokenmaxxing: notify when delegation becomes idle
+
+The `delegation_lifecycle` event is the smallest useful primitive for an “always keep work moving”
+plugin. It carries a run id, the agent id, a monotonic transition id, and the process-global
+`active_count`. A plugin can watch the `1 → 0` transition and send one notification without polling:
+
+```json
+{
+  "id": "@ryu/tokenmaxxing",
+  "name": "Tokenmaxxing",
+  "version": "0.1.0",
+  "permission_grants": ["notifications:send", "storage:kv"],
+  "contributes": {
+    "turn_hooks": [
+      {
+        "id": "tokenmaxxing.delegation-idle",
+        "on": "delegation_lifecycle",
+        "code_file": "hooks/delegation-complete.js"
+      }
+    ]
+  }
+}
+```
+
+The shipped hook stores the last transition id, ignores duplicate or out-of-order events, and
+notifies only when the global count reaches zero. It is failure-closed: a notification failure does
+not start a timer, create a new agent, or claim that work is still active. Disable the plugin if you
+do not want an idle notification; it does not change delegation scheduling or model budgets.
 
 ## Building a turn hook
 
@@ -285,6 +324,7 @@ Each hook body runs in a fresh Deno sandbox with exactly two globals:
 | `host.storage.set(key, value, namespace?)` | `storage:kv` | `true` |
 | `host.storage.delete(key, namespace?)` | `storage:kv` | `true` |
 | `host.storage.keys(namespace?)` | `storage:kv` | Namespace's keys |
+| `host.notify({ title, body })` | `notifications:send` | A bounded notification for the active user |
 | `host.log(...args)` | none | Captured logs |
 
 Storage is namespaced per plugin. An ungranted capability call rejects with `is_error: true`; an
@@ -350,6 +390,19 @@ plugin is actually loaded.
   The observation-only phases fire (detached, fail-open) but their directives are not applied to
   the result in v1. Treat them as telemetry, not control points, until that changes.
 </Callout>
+
+## Opt-in token-maxxing and duplicate work
+
+Extensions that deliberately spend extra context or model budget may expose a user-controlled
+“token-maxxing” mode through a contribution or setting. It must be opt-in, scoped to the current
+turn or conversation, and explicit about cost. The runtime does not enable it merely because a
+plugin is installed.
+
+Hooks should deduplicate work at the narrowest durable scope they own. Use the conversation id and a
+stable event or turn key for per-conversation state; use the plugin namespace for storage. Duplicate
+hook delivery must be harmless, and a dedupe record must not be shared across users, plugins, or
+unrelated conversations. Dedupe prevents repeated work; it does not grant permission or turn an
+observation-only phase into a control point.
 
 ## Related
 

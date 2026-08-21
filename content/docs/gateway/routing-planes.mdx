@@ -54,7 +54,7 @@ flowchart TB
 | Plane | Owns | Surface | Model lifetime | Governed how |
 |---|---|---|---|---|
 | Plane A - Model routing | Gateway | Picks the LLM for one OpenAI-compat `/v1/chat/completions` request | Model is fixed for the whole turn (and its tool loop) once routed | Full Gateway plane: allowlist + inbound firewall + budget + audit |
-| Plane B - Agent routing | Core (ACP / catalog) | Picks the agent that serves the turn; the agent brings its own model | Model is owned by the agent/subprocess, not by a single Gateway route | Only tool egress is governed (MCP bridge); ACP chat egress bypasses the Gateway unless the agent honours `OPENAI_BASE_URL` |
+| Plane B - Agent routing | Core (ACP / catalog) | Picks the agent that serves the turn; the agent brings its own model | Model is owned by the agent/subprocess, not by a single Gateway route | Routable ACP chat egress is Gateway-governed by default; non-wirable agents bypass it. Tool egress is governed through the MCP bridge |
 
 The crisp distinction: Plane A rewrites `body["model"]` inside one completion request. Plane B
 chooses a backend (`AgentRoute`) and, for ACP agents, hands the whole turn to a subprocess that Ryu
@@ -109,7 +109,7 @@ in `agent_route` (`apps/core/src/sidecar/adapters/mod.rs`), which then matches t
 there is one interception point: `acp::openai_gateway_cmd` (`apps/core/src/sidecar/adapters/acp.rs`)
 prefixes the spawn command with `OPENAI_BASE_URL` (the local gateway `/v1`) and `OPENAI_API_KEY` (the
 gateway token), so the agent's chat calls flow through the Gateway. It is gated by the per-agent
-toggle `agent-gateway-routing` (`apps/core/src/agent_routing/mod.rs`), which defaults OFF. The full
+toggle `agent-gateway-routing` (`apps/core/src/agent_routing/mod.rs`), which defaults ON for new and auto-installed routable ACP agents. A missing entry remains Gateway-governed; an explicit `false` is the direct-egress opt-out. The full
 mechanism - base-URL injection, the subscription-preserving passthrough proxy for Claude Code and
 Codex, and the bypass list - is documented in
 [Gateway for any agent](/docs/gateway/gateway-for-any-agent).
@@ -125,6 +125,12 @@ that preserves their subscription billing.
 call dispatches through the bridge into `McpRegistry` allowlist enforcement - no direct-egress
 bypass. The same governance is exposed over HTTP at `POST /api/mcp/tools/call`, which requires a known
 agent id so the allowlist cannot fail open.
+
+The same defaults apply when an ACP runtime is installed from the catalog or discovered during
+onboarding: its new agent card starts with the live MCP, plugin/app tool scope and enabled skills,
+and routable model traffic starts through the Gateway. Customize the card or turn off its routing
+switch when that agent needs a narrower tool scope or direct provider egress. Existing explicit
+choices are preserved.
 
 <Callout type="info">
   Plane B *backend resolution* (the `OpenAiCompat` / `Acp` split above) is shipped. The **agent-auto

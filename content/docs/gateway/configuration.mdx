@@ -22,6 +22,39 @@ gateway.toml          base config (TOML)
   + PUT /v1/config      runtime edits, persisted back to the file
 ```
 
+## Read the governance boundary
+
+The setting you change and the agent path you use determine what the Gateway can enforce. An
+OpenAI-compatible request, or an ACP agent with gateway routing enabled, crosses the Gateway policy
+chain. An ACP agent whose routing switch is off (or whose client does not support the injected base
+URL) can send its own model calls directly to a provider. Its Ryu MCP and exec tool path is still a
+separate governed surface.
+
+```mermaid
+flowchart LR
+  subgraph Governed["Gateway-governed request"]
+    direction TB
+    IN["OpenAI-compatible request\nor ACP routing is on"] --> AUTH["Authentication\nkey and trusted forwarder"]
+    AUTH --> POLICY["Gateway policy\nrate limit · firewall · routing"]
+    POLICY --> BUDGET["Budget and credit gates"]
+    BUDGET --> PROVIDER["Provider or local engine"]
+    PROVIDER --> AUDIT["Audit record\nand response headers"]
+  end
+
+  subgraph Outside["Outside this Gateway's chat path"]
+    direction TB
+    ACP["ACP chat\nrouting off or unsupported"] --> DIRECT["Agent calls provider directly"]
+    DIRECT --> GAP["No Gateway chat firewall,\nbudget, or audit"]
+  end
+
+  ACP -. "Ryu tool path is separate" .-> TOOLS["MCP / exec governance\nallowlist · exec budget · audit"]
+  TOOLS --> TOOL_AUDIT["Governed tool result"]
+```
+
+Use the per-agent routing switch to choose whether model egress enters the left branch. Do not
+interpret that switch as a master off-switch for Ryu tool governance: ACP tool calls still use the
+MCP bridge or governed exec front.
+
 ## The config sections
 
 `gateway.toml` has one section per subsystem.
@@ -32,7 +65,7 @@ gateway.toml          base config (TOML)
 | `[providers.*]` | Per-provider API keys and base URLs | [Routing](/docs/gateway/routing) |
 | `[routing]` | Model map, fallback chain, smart routing | [Routing](/docs/gateway/routing) |
 | `[firewall]` | Detection toggles and policy | [Security](/docs/gateway/security) |
-| `[budgets]` | Per-user, per-agent, and per-session token budgets | [Reliability](/docs/gateway/reliability) |
+| `[budgets]` | Per-user, per-agent, and per-session charged-cost budgets (micro-USD) | [Reliability](/docs/gateway/reliability) |
 | `[rate_limit]` | Request, token, and burst limits | [Reliability](/docs/gateway/reliability) |
 | `[cache]`, `[semantic_cache]` | Exact and semantic caching | [Reliability](/docs/gateway/reliability) |
 | `[circuit_breaker]` | Per-provider failure thresholds and reset timeout | [Reliability](/docs/gateway/reliability) |
@@ -42,9 +75,27 @@ gateway.toml          base config (TOML)
 | `[concurrency]` | Local-engine admission control | this page |
 | `[exec_budget]` | Sandbox / tool execution rate caps | this page |
 | `[tools]` | Unified tool loop (search-based) | this page |
+| `[computer_use]` | Node-wide Ghost computer-use permissions, including locked use | this page |
 | `[composio]` | Composio integration and action allowlist | this page |
 | `[credits]` | Platform-credits wallet debit hook | this page |
 | `[control_plane]` | Control-plane relay, shared budgets, reporting | this page |
+
+## Computer settings
+
+The `[computer_use]` section is the node-wide policy for Ghost, Ryu's computer-use
+provider. In the desktop, it appears as **Computer settings** for the selected computer
+(advanced interfaces may still use the internal name Gateway settings).
+
+```toml
+[computer_use]
+locked_use = false
+```
+
+`locked_use` is off by default. Turning it on grants Ghost permission to request the
+platform's locked-session execution path; it does not unlock the operating system or
+bypass its local safety and privacy controls. Ghost still needs the operating system
+permissions and a provider path that supports locked use. If that path is unavailable,
+computer actions remain foreground-only.
 
 ## Auth and API keys
 
@@ -62,7 +113,7 @@ org_id = "org_abc"
 team_id = "team_xyz"
 requests_per_minute = 10000        # per-key override of the global rate limit
 tokens_per_minute = 500000         # per-key override
-token_budget_total = 1000000000    # lifetime token cap (0 = unlimited)
+token_budget_total = 1000000000    # legacy lifetime token cap (0 = unlimited)
 downgrade_to = "gpt-4o-mini"       # model used once the lifetime cap is hit
 trusted_forwarder = false          # honor x-ryu-user-id / x-ryu-agent-id for budgets
 ```
@@ -87,7 +138,7 @@ curl http://localhost:7981/v1/chat/completions \
 | `api_keys[].org_id` / `team_id` / `project_id` | string | Tenancy tags carried through to budgets and audit |
 | `api_keys[].requests_per_minute` | int | Per-key override of the global request rate limit |
 | `api_keys[].tokens_per_minute` | int | Per-key override of the global token rate limit |
-| `api_keys[].token_budget_total` | int | Lifetime token cap (input + output). `0` is unlimited |
+| `api_keys[].token_budget_total` | int | Legacy lifetime token cap (input + output). `0` is unlimited; per-agent/user/session spend caps use `[budgets]` |
 | `api_keys[].downgrade_to` | string | Model swapped in once `token_budget_total` is exceeded. If unset, the request is rejected with `BudgetExceeded` |
 | `api_keys[].trusted_forwarder` | bool | See below. Default `false` |
 
@@ -132,7 +183,7 @@ Interactive requests are served ahead of background fan-out (delegate calls, thr
 ## Exec budget
 
 `[exec_budget]` limits sandbox runs and MCP tool invocations over a rolling time window. Unlike
-token budgets, this counts executions and wall-clock time, not tokens. Counters reset at each window
+model-spend budgets, this counts executions and wall-clock time, not tokens. Counters reset at each window
 boundary.
 
 ```toml
@@ -172,8 +223,11 @@ describe_top_n = 5
 
 ## Composio
 
-`[composio]` wires in the Composio action-execution backend. Disabled unless `api_key` is set (or
-`COMPOSIO_API_KEY` is in the environment).
+`[composio]` wires in the direct Composio action-execution backend. This is separate from the
+OAuth-backed **Composio Connect** remote MCP plugin, which does not use `api_key` or
+`COMPOSIO_API_KEY`.
+
+The direct backend is disabled unless `api_key` is set (or `COMPOSIO_API_KEY` is in the environment).
 
 ```toml
 [composio]
@@ -240,7 +294,7 @@ Image and video are metered from the provider's **reported** compute time. Repli
 `metrics.predict_time` and fal returns `metrics.inference_time`; both are normalized to
 `usage.compute_seconds` and priced at `cost_per_gpu_second_micro_usd`. Neither includes queue
 wait, which neither provider charges for. The flat image and video rates are only a fallback for a
-response that carries no timing at all. TTS and STT have no metered path, so their flat rate is the
+response that carries no timing at all. Audio and Voice Recognition have no metered path, so their flat rate is the
 actual price rather than a fallback.
 
 <Callout type="warn">
@@ -358,6 +412,46 @@ These override `gateway.toml` keys at load time. Setting `GATEWAY_MASTER_KEY` al
 | `RYU_DIAGNOSTICS_EXPORT_ENABLED` | OpenTelemetry diagnostics export (default off). Core sets this to `1` when the user enables telemetry |
 | `TELEGRAM_BOT_TOKEN`, `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `WHATSAPP_ACCESS_TOKEN` | Channel bot credentials (see [Channels](/docs/gateway/channels)) |
 
+## Safety posture and Doctor
+
+The desktop Gateway page and first-run onboarding expose one three-position safety posture slider.
+It coordinates the controls that belong to Gateway and Core without changing provider credentials,
+billing, or agent routing silently:
+
+| Posture | Gateway | Core |
+|---|---|---|
+| **Guarded** | Firewall `Block`, inbound/outbound scans, redaction, and tool-result wrapping on | Command scan on, approval mode `Manual` |
+| **Balanced** (default) | Same safety baseline with `Block` | Command scan on, approval mode `Smart` |
+| **Autonomous** | Scans, redaction, and wrapping stay on; detections use `Sanitize` | Command scan on, approval mode `Off` |
+
+Changing the slider shows a preview and requires an explicit **Apply**. If individual settings no
+longer match a preset, the UI reports **Custom** rather than overwriting the operator's choices.
+Claude Code, Codex, and other native agent traffic remain direct unless their Gateway routing is
+explicitly enabled in the same card; posture changes do not opt those agents in or change which
+credentials they use.
+
+The Doctor checks configuration, security, performance, connectivity, and agent coverage. The
+read-only audit is available to local admins at `GET /v1/doctor`; Core aggregates it with its
+approval preferences and agent-routing coverage at `GET /api/gateway/doctor`. A report includes
+stable check IDs, severity, the affected setting path, and a recommended action. It also identifies
+`schemaVersion`, `rulesetVersion`, `profile: "lint"`, and `readOnly: true` so CI and integrations
+can identify the contract they consumed. Existing drift warnings remain included in `GET /v1/config`
+for compatibility.
+
+The CLI exposes the same audit and an explicit safe-repair flow:
+
+```bash
+ryu doctor                 # read-only audit
+ryu doctor --dry-run       # preview protective changes; writes nothing
+ryu doctor --fix           # apply only the allowlisted protective changes
+```
+
+Desktop uses the same contract: **Run audit** → **Preview safe fixes** → **Apply safe fixes**.
+Automatic repairs are intentionally narrow and idempotent: firewall activation/scanning,
+redaction, and untrusted tool-result wrapping. Bind/auth choices, routing, approvals, providers,
+budgets, and performance limits remain operator decisions. The fix response returns the planned and
+applied setting paths so an automation system can audit exactly what changed.
+
 ## Runtime config over the API
 
 Read and edit config without restarting the process:
@@ -404,6 +498,20 @@ leave the process (`ConfigView` / `redact_providers` / `redact_auth`, `apps/gate
 the running config untouched.
 
 ### What applies live vs on restart
+
+```mermaid
+flowchart TD
+  CHANGE["A Gateway setting changes"] --> SURFACE{"Where is it controlled?"}
+  SURFACE -->|"PUT /v1/config"| PATCH{"Which patch field?"}
+  PATCH -->|"firewall · budgets · auth.api_keys"| LIVE["Hot-swapped\nnext request sees it"]
+  PATCH -->|"routing · concurrency · tools"| RESTART["Persisted, then\nrestart or refresh"]
+  SURFACE -->|"gateway.toml or environment"| STARTUP["Startup snapshot\nrestart required"]
+  SURFACE -->|"Managed control plane"| LOCKED["Resolved policy\nlocked fields cannot be loosened locally"]
+  LIVE --> RESULT["Gateway enforces the result"]
+  RESTART --> RESULT
+  STARTUP --> RESULT
+  LOCKED --> RESULT
+```
 
 | Patch field | Effect |
 |---|---|

@@ -9,6 +9,56 @@ The same Gateway binary that Core runs locally can be deployed once and shared b
 This is a **hosted-only** path and runs as a **single replica**. Every counter (budgets, rate limits, the resolve cache) is an in-process map, so N replicas each grant a full quota. Shared cross-replica state is not built. Deploy one instance per fleet. When there is no `CONTROL_PLANE_URL`, the dynamic path is a no-op and the Gateway behaves as the ordinary single-org process documented in [Configuration and auth](/docs/gateway/configuration).
 </Callout>
 
+## Fleet provider-key custody
+
+Hosted provider keys are owned by the control plane, not by customer nodes or
+the Gateway deployment environment. This includes the ordinary providers and
+the Cloudflare/Bedrock/Vertex/OpenAI-credit pool credentials. The server stores
+each key sealed in the provider vault. At startup the Gateway calls:
+
+```
+GET {CONTROL_PLANE_URL}/api/key-vault/keys
+x-ryu-internal-secret: <RYU_VAULT_INTERNAL_SECRET>
+```
+
+The response is applied only to the Gateway's in-memory provider registry. Set
+`RYU_PROVIDER_VAULT_REQUIRED=1` on production fleet replicas so a missing or
+empty vault cannot silently fall back to a raw provider env key. A successful
+required-mode response is authoritative: an omitted supported key disables that
+provider instead of using a stale gateway env/file key. Rotate keys through the
+platform-admin vault route and restart/redeploy the Gateway to rebuild its
+registry. Local standalone Gateways can omit the vault variables and continue
+using their normal local provider configuration.
+
+## Dedicated managed-channel inventory
+
+Managed-node checkout claims one dedicated company-owned Telegram bot and one
+dedicated company-owned Discord bot per node when an available allocation
+exists. The control plane stores each provider token sealed in
+`ManagedBotAllocation`; a customer node receives only its own channel
+credential. There is no shared bot identity across customers.
+
+Platform operators import inventory through the admin-only API:
+
+```http
+POST /api/managed-bot-inventory
+Content-Type: application/json
+
+{"provider":"discord","externalId":"<application-id>","username":"<name>","token":"<bot-token>"}
+```
+
+The route requires the platform-admin allowlist and step-up verification.
+`GET /api/managed-bot-inventory` returns metadata only and never returns
+tokens. Assigned identities are immutable; use
+`POST /api/managed-bot-inventory/retire` for an available identity that must
+never be assigned. A managed allocation is also retired when its managed node
+is destroyed, so its provider identity is never recycled. For an older
+deployment, import the legacy env once with
+`POST /api/managed-bot-inventory/import-bootstrap`; it returns metadata and
+skip reasons but never tokens. Normal provisioning never reads
+`RYU_MANAGED_BOT_POOL`, so remove it after the import and keep MongoDB as the
+source of truth.
+
 ## Per-request org identity
 
 A standalone Gateway authenticates one org at startup with its own `rgw_` key. The multi-tenant path instead resolves the org **per request** from whatever `rgw_` bearer the client sent. Any valid, non-revoked token resolves to its own org.
@@ -34,6 +84,18 @@ The response maps to a `ResolvedOrg` carrying the fields the pipeline needs to a
 | `policy` | The org's effective policy - `approved_models` allowlist, `locked_guardrails`, `allowed_regions`, and the cascaded firewall overlays |
 
 The control plane has already cascaded org/team/project/user layers and honoured admin locks, so the data plane receives one resolved policy and enforces it - it never re-derives the cascade.
+
+```mermaid
+flowchart TD
+  TOKEN["rgw_ organization token"] --> RESOLVE["Resolve org and policy"]
+  RESOLVE --> POLICY["Approved models\nallowed regions · locked guardrails"]
+  RESOLVE --> BALANCE["Remaining credit balance"]
+  POLICY --> GATE["Pre-flight request gate"]
+  BALANCE --> GATE
+  GATE -->|"policy or balance denies"| ERROR["401 / 402\nno provider call"]
+  GATE -->|"allowed"| DISPATCH["Gateway dispatch"]
+  DISPATCH --> DEBIT["Post-call usage\nand credit debit"]
+```
 
 ### Hard-401 on an unresolved token
 
@@ -72,16 +134,16 @@ The gate reads the freshly-resolved balance (bounded by the 60s cache), so it **
 | Error code | HTTP | Meaning |
 |---|---|---|
 | `insufficient_credits` | 402 | A managed org's credit wallet is exhausted (the pre-flight gate) |
-| `budget_exceeded` | 402 | A per-user / per-agent / per-session token budget period cap was hit ([Reliability](/docs/gateway/reliability)) |
+| `budget_exceeded` | 402 | A per-user / per-agent / per-session charged-cost cap was hit ([Reliability](/docs/gateway/reliability)) |
 
 The post-call credit debit (which subtracts the served call's cost from the org wallet) is documented under `[credits]` in [Configuration and auth](/docs/gateway/configuration).
 
 ## Per-tool-call debits
 
-The token debit above bills the model call. On the managed plan a request can also run **Composio**
+The model-call debit above bills the model call. On the managed plan a request can also run **Composio**
 tool actions, and Composio charges per action execution, so those are billed separately. Each tool
 loop returns `(value, billable_count)`; `run_tool_loop` (`apps/gateway/src/tools/mod.rs`) counts the
-executed `composio__*` calls (prefix `COMPOSIO_TOOL_PREFIX`) that pass the allowlist gate. Denied,
+executed `composio.*` calls (prefix `COMPOSIO_TOOL_PREFIX`) that pass the allowlist gate. Denied,
 builtin, MCP, and app tool calls are free and never counted.
 
 At request end, `spawn_tool_call_debit` (`apps/gateway/src/pipeline/mod.rs`) fires one debit for the
@@ -89,8 +151,8 @@ whole request - `count × cost_per_tool_call_micro_usd`, at cost - against the o
 
 | Field | Value | Why it matters |
 |---|---|---|
-| `reason` | `composio` | Distinguishes the tool-call ledger row from the `gateway_usage` token row |
-| `refId` | `{request_id}:composio` | A **distinct** ref from the token debit's `{request_id}`. `applyDelta` is idempotent on `refId`, so reusing the request id would dedupe the tool debit against the token debit and silently drop it |
+| `reason` | `composio` | Distinguishes the tool-call ledger row from the `gateway_usage` model-call row |
+| `refId` | `{request_id}:composio` | A **distinct** ref from the model-call debit's `{request_id}`. `applyDelta` is idempotent on `refId`, so reusing the request id would dedupe the tool debit against the model-call debit and silently drop it |
 | Cost source | `[credits] cost_per_tool_call_micro_usd` | Per-executed-call rate; `0` (the default) means tool calls are free until a deployment provisions a rate |
 
 The debit is spawned off the response path so it never adds client latency, and it is a no-op when

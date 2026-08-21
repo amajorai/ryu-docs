@@ -1,11 +1,11 @@
 ---
 title: Routing
 description: How the Gateway picks a provider and model for every request.
-tags: ["routing", "model", "provider", "gateway", "smart-routing", "fallback", "openai", "anthropic"]
+tags: ["routing", "model", "provider", "gateway", "smart-routing", "random", "stage-router", "escalation", "fallback", "openai", "anthropic", "pareto-code"]
 ---
 
 The router (`apps/gateway/src/router/`) decides which provider and model handles each request.
-Routing is per-attribute: an agent's chat, image, and TTS calls can each go to a different provider.
+Routing is per-attribute: an agent's chat, image, and Audio calls can each go to a different provider.
 
 ## Provider selection
 
@@ -34,25 +34,47 @@ On top of the prefix rules, several strategies layer in, all driven by `gateway.
 - **Eval-driven routing** (`routing.eval_routing`) splits traffic across candidate providers using
   their rolling eval scores: explore unscored candidates, then exploit the leader while reserving a
   slice for others. Selection is deterministic (a counter, not a random number).
-- **Modality routing** (`routing.modality_map`) sends chat, image, TTS, and STT to different
+- **Modality routing** (`routing.modality_map`) sends chat, image, Audio, and Voice Recognition to different
   providers and models.
 
-## Smart (classifier-driven) routing
+## Smart model routing
 
 The strategies above pick a provider from the *requested* model. Smart routing picks the
-model itself, from plain-language rules. You write rules like *"coding or debugging → claude-sonnet-4-5"*
-and *"simple chit-chat → a local model"*, and a **strategy** decides which rule each request matches.
+model itself before normal provider routing. The default **LLM classifier** uses plain-language
+rules like *"coding or debugging → claude-sonnet-4-5"*, while the other router types split,
+stage, escalate, or explicitly preserve the requested model.
 
 It runs before the normal routing in `apply_smart_routing` (`apps/gateway/src/pipeline/mod.rs`):
-`SmartRouter::resolve` (`apps/gateway/src/router/smart.rs`) reads only the latest user message,
-enumerates the rules, and returns a single rule index. The chosen rule's model rewrites `body["model"]`
-*before* `pre_process` runs, so the rewritten model then resolves its provider through the ordinary
-`ModelRouter`. Nothing about providers is hardcoded: the target is any routable model id, including
-local models and `openrouter/…` slugs.
+`SmartRouter::resolve` (`apps/gateway/src/router/smart.rs`) chooses a target according to the
+configured `router_type`. The chosen model rewrites `body["model"]` *before* `pre_process` runs,
+so it then resolves its provider through the ordinary `ModelRouter`. Nothing about providers is
+hardcoded: the target is any routable model id, including local models and `openrouter/…` slugs.
 
 This is **Plane A** model routing - it rewrites the model inside one completion request. It is one of
 two routing planes; the model-vs-agent split and the ownership rule are on the
 [Routing planes](/docs/gateway/routing-planes) page.
+
+### Router types
+
+`router_type` selects the top-level model-selection algorithm. The existing classifier remains the
+backward-compatible default; `strategy` only applies to `llm_classifier`.
+
+The router families are informed by the provider-agnostic patterns in [NVIDIA NeMo
+Switchyard](https://developer.nvidia.com/blog/route-ai-agent-workloads-across-models-with-nvidia-nemo-switchyard);
+Ryu keeps each decision inside Gateway's existing fail-open and model-to-provider boundaries.
+
+| Router type | What it does | Configuration |
+|---|---|---|
+| `llm_classifier` | Matches the request to a natural-language rule using `llm`, `embedding`, or `keyword`. | `rules`, `strategy`, and the matching strategy's model settings |
+| `passthrough` | Keeps the model requested by the caller. Useful when the routing section is enabled but a deployment wants an explicit no-op. | No target settings |
+| `random` | Chooses a target independently for each request using relative rule weights. | At least two target rules, each with `model` and optional `weight`; `random_seed` is optional |
+| `stage_router` | Chooses a capable or efficient tier from recent tool/result and progress signals. | `stage_capable_model`, `stage_efficient_model`, picker, and confidence settings |
+| `escalation` | Asks a judge about the current trajectory and latches a session to the strong tier after consecutive escalation verdicts. | Weak, strong, and judge models plus confirmation/window settings |
+
+`random` is deliberately not session-sticky: the same conversation can move between weighted targets.
+An optional seed makes the process-local sequence reproducible for tests and benchmarks, but it is
+not a rollout or experiment assignment key. `stage_router` is a bounded local signal heuristic in
+Ryu, so treat it as a pilot until its signals match your workload.
 
 ### Strategies
 
@@ -75,21 +97,82 @@ Smart routing is configured under `routing.smart_routing` in `gateway.toml`
 | Field | Meaning | Default |
 |---|---|---|
 | `enabled` | Master switch | off |
-| `strategy` | `llm` \| `embedding` \| `keyword` (how a rule is matched) | `llm` |
-| `classifier_model` | The cheap model that sorts requests (**`llm` strategy only**) | empty (inert) |
+| `router_type` | `llm_classifier` \| `passthrough` \| `random` \| `stage_router` \| `escalation` | `llm_classifier` |
+| `strategy` | For `llm_classifier`: `llm` \| `embedding` \| `keyword` (how a rule is matched) | `llm` |
+| `classifier_model` | The cheap model that sorts requests (**`llm` strategy only**) | local classify tier |
 | `embedding_model` | Embedder for the `embedding` strategy; empty → `nomic-embed-text-v1.5` on the local sidecar | empty (falls back to the semantic-cache embedder) |
 | `similarity_threshold` | Min cosine similarity for `embedding` to accept a rule | 0.35 |
-| `rules` | Ordered list of `{ description, model }` entries | empty (inert) |
-| `default_model` | Model to use when no rule matches | none (keep requested model) |
-| `cache_by_session` | Classify once per `x-ryu-session-id` and reuse the decision | on |
-| `timeout_ms` | Per-classification timeout | 4000 |
+| `random_seed` | Optional seed for a reproducible process-local `random` sequence | unset |
+| `rules` | Ordered list of `{ description, model, weight }` entries; `description` and `weight` are used by `llm_classifier` and `weight` by `random` | empty (inert) |
+| `default_model` | Model to use when `llm_classifier` matches no rule | none (keep requested model) |
+| `stage_capable_model` / `stage_efficient_model` | The two targets for `stage_router` | empty |
+| `stage_picker` | `capable_first` or `efficient_first` when signals are ambiguous | `capable_first` |
+| `stage_confidence_threshold` | Signal confidence required to override the ambiguous-turn picker | 0.5 |
+| `stage_recent_message_window` | Recent request messages considered by `stage_router` | 3 |
+| `escalation_weak_model` / `escalation_strong_model` / `escalation_judge_model` | The routine, escalated, and judge targets for `escalation` | empty |
+| `escalation_confirmations` | Consecutive `ESCALATE` verdicts before a session latches to strong | 2 |
+| `escalation_recent_message_window` / `escalation_message_chars` | Transcript window and per-message cap shown to the judge | 28 / 500 |
+| `cache_by_session` | Cache `llm_classifier` decisions by `x-ryu-session-id`; other router types have their own per-request or escalation state | on |
+| `timeout_ms` | Classifier or escalation-judge timeout | 4000 |
 
-Smart routing only runs when `enabled` is set with at least one rule (`is_active` in
-`apps/gateway/src/config.rs`). The `llm` strategy *additionally* requires a non-empty
-`classifier_model`; `embedding` and `keyword` need only `enabled` + rules. Two env vars set the basics
-for a standalone Gateway: `GATEWAY_SMART_ROUTING_ENABLED` and `GATEWAY_SMART_ROUTING_MODEL`. The rules
+Smart routing only runs when `enabled` is set and the selected type has the targets it needs
+(`is_active` in `apps/gateway/src/config.rs`). `llm_classifier` needs rules and, for `llm`, a
+classifier model; `random` needs at least two weighted targets; `stage_router` needs both tiers;
+`escalation` needs weak, strong, and judge models. `passthrough` needs no targets. The rules
 themselves are config-file-only. Like all routing config, changes are a startup snapshot and take
 effect on the next Gateway refresh/restart.
+
+For example, a reproducible 3:1 traffic split is:
+
+```toml
+[routing.smart_routing]
+enabled = true
+router_type = "random"
+random_seed = 42
+rules = [
+  { description = "primary", model = "claude-sonnet-4-5", weight = 3.0 },
+  { description = "candidate", model = "gpt-4o-mini", weight = 1.0 },
+]
+```
+
+### Routing decision map
+
+The router has several layers, but only one model should reach the provider for a turn. An explicit
+per-agent pin wins first; smart routing can rewrite an unpinned request; deterministic provider
+mapping and circuit fallback then resolve the destination. Budget `downgrade` is the deliberate
+exception that can select a cheaper model after the initial decision.
+
+```mermaid
+flowchart TD
+  REQUEST["Incoming chat request"] --> PIN{"Per-agent model pinned?"}
+  PIN -->|"yes"| KEEP["Keep pinned model"]
+  PIN -->|"no"| SMART{"Smart routing active?"}
+  SMART -->|"yes"| ROUTER["Choose configured router type"]
+  SMART -->|"no"| ORIGINAL["Keep requested model"]
+  ROUTER --> CLASSIFY["LLM classifier\n(rule, meaning, or word)"]
+  ROUTER --> RANDOM["Weighted random\n(per request)"]
+  ROUTER --> STAGE["Stage router\n(recent signals)"]
+  ROUTER --> ESCALATION["Escalation\n(judge + session streak)"]
+  ROUTER -->|"passthrough"| ORIGINAL
+  CLASSIFY -->|"match"| REWRITE["Rewrite body.model"]
+  CLASSIFY -->|"miss · timeout · error"| ORIGINAL
+  RANDOM --> REWRITE
+  STAGE --> REWRITE
+  ESCALATION --> REWRITE
+  KEEP --> MAP["Exact map → longest prefix →\nbuilt-in prefix → default provider"]
+  REWRITE --> MAP
+  ORIGINAL --> MAP
+  MAP --> HEALTH{"Provider circuit open?"}
+  HEALTH -->|"no"| BUDGET["Apply spend and credit gates"]
+  HEALTH -->|"yes"| FALLBACK["Try configured fallback chain"]
+  FALLBACK --> BUDGET
+  BUDGET -->|"allow"| SERVE["Serve one fixed model\nfor the turn"]
+  BUDGET -->|"downgrade"| CHEAPER["Select cheaper model\nand route again"]
+  BUDGET -->|"restrict"| CLAMP["Strip tools and cap tokens"]
+  BUDGET -->|"stop"| REJECT["Reject with 402"]
+  CHEAPER --> SERVE
+  CLAMP --> SERVE
+```
 
 ### Per-agent override (`ryu_smart_route`)
 
@@ -111,16 +194,28 @@ writes the routing config through the same config endpoint the rest of the dialo
 ### Behavior and guarantees
 
 - **Fails open everywhere.** An inactive config, an unparseable classifier reply, a classifier
-  error, or a timeout all keep the originally requested model, so a misconfiguration can never
-  break chat.
+  or judge error, an unusable target, or a timeout all keep the originally requested model, so a
+  misconfiguration can never break chat.
 - **Explicit pinning wins.** When Core forwards a carded agent's chat slot, that pinned model
   is an explicit user choice and smart routing never overrides it.
 - **Eval routing is skipped** for a smart-routed request, so eval/A-B routing does not reassign
   the classifier's chosen provider.
-- **Per-session cache.** With `cache_by_session` on (the default), the decision is cached against
-  `x-ryu-session-id` so a conversation is classified once rather than every turn.
+- **Per-request versus per-session state.** `random` and `stage_router` decide independently for
+  each request. With `cache_by_session` on (the default), `llm_classifier` caches against
+  `x-ryu-session-id`; `escalation` uses that id only for its consecutive-verdict streak.
 - **Observability.** The model that actually handled the request is returned in the
   `x-routed-model` response header (`apps/gateway/src/api/chat.rs`).
+
+<Callout type="info">
+  Ryu's `escalation` type is a trajectory-aware preflight: the judge reads the accumulated
+  transcript before the current model call. It does not buffer a completed weak response and
+  replay that response through the strong model, because the current Gateway routing hook chooses
+  the model before provider execution. This keeps the behavior explicit instead of implying the
+  full post-response Switchyard loop is already available.
+</Callout>
+
+The NVIDIA Switchyard **prefill** router is not exposed as a Ryu type yet. It requires access to
+provider residual-stream activations, which the provider-neutral Gateway contract does not receive.
 
 ## Agent-auto (Plane B): picking the agent
 
@@ -138,7 +233,7 @@ preference:
 {
   "enabled": true,
   "strategy": "embedding",          // llm | embedding | keyword - same vocabulary as Plane A
-  "classifier_model": "gemma-local",// for the llm strategy; resolved via Core's chat path
+  "classifier_model": "gemma-3-270m-it-qat-Q4_0", // optional; blank uses the local classify tier
   "embedding_model": "",            // for embedding; empty -> default local embedder
   "similarity_threshold": 0.35,
   "rules": [
@@ -153,9 +248,11 @@ preference:
 
 <Callout type="info">
   The Plane B backend split (an OpenAI-compat agent's chat is governed by the Gateway; an ACP agent
-  self-routes) is shipped - see [Routing planes](/docs/gateway/routing-planes). The **agent-auto
-  picker** that resolves the `auto` sentinel per turn is the planned Core feature described here; the
-  config shape above is the contract it builds against.
+  self-routes) and the **agent-auto** picker are shipped - see
+  [Routing planes](/docs/gateway/routing-planes). Agent-auto's default LLM classifier is the local
+  270M Gemma classify tier, so it adds a small local classification step rather than sending the
+  user's turn to a second hosted model. If the classifier is unavailable or returns an unusable
+  result, Core fails open to the configured default agent.
 </Callout>
 
 **Cross-harness session caveat.** Auto may pick a *different harness* than last turn (Ryu/Pi → Claude
@@ -166,19 +263,26 @@ agent had open, its working buffers, and so on are lost across a harness switch;
 carries over. To avoid swinging harness every turn, `cache_by_session` classifies once per
 conversation and reuses that pick, which prevents flapping.
 
-### The three "auto"s, disambiguated
+### The auto routes, disambiguated
 
-"Auto" is overloaded. These are three different things:
+"Auto" is overloaded. These are four different things:
 
 | Name | Plane | Picks | Config | Where it runs |
 |---|---|---|---|---|
 | Ryu smart-route | A | A **model** (rewrites `body["model"]`) | Gateway `smart_routing` (+ per-agent `ryu_smart_route`) | Gateway pipeline |
 | Ryu agent-auto | B | An **agent id** | Core `agent-auto-routing` preference | Core, before backend dispatch |
 | `openrouter/auto` | (neither) | An upstream model, chosen by OpenRouter | Just a model id in the request | OpenRouter, after the Gateway forwards |
+| `openrouter/pareto-code` | (neither) | A coding model chosen by OpenRouter's Pareto Router | Just a model id in the request; optionally add the `pareto-router` plugin | OpenRouter, after the Gateway forwards |
 
 `openrouter/auto` is not a Ryu router at all - it is a model id (it appears in `GET /v1/models`) that
 the Gateway routes to the OpenRouter provider, which then selects an upstream model. It has no rules
 and no Ryu-side classifier.
+
+For coding tasks, `openrouter/pareto-code` uses OpenRouter's current coding shortlist and picks a
+model from the requested quality tier, favoring the cheapest available model in that tier. It is
+also a model id, so Ryu's firewall, budgets, routing, and usage accounting still run before the
+request leaves the Gateway. OpenRouter documents the optional `pareto-router` plugin and its
+`min_coding_score` setting in the [Pareto Router guide](https://openrouter.ai/docs/guides/routing/routers/pareto-router).
 
 <Callout type="info">
 Managed inference is not one undifferentiated supply. Which model you pick decides
@@ -210,7 +314,7 @@ returns the routable models. The built-in list (`builtin_model_list` in `apps/ga
 - OpenAI: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`, `o3-mini`
 - Anthropic: `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`
 - Core agents: `zeroclaw`, `openclaw`
-- OpenRouter: `openrouter/auto`
+- OpenRouter: `openrouter/auto`, `openrouter/pareto-code`
 - Local: `llama3.2:latest`, `mistral:latest`, `phi4:latest`, `deepseek-r1:latest`
 
 Add your own with `routing.model_map`.

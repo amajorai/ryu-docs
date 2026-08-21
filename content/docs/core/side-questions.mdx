@@ -10,6 +10,11 @@ and answers once. When the question is asked over a stored conversation, Core ke
 as a lightweight "side chat" entry tied to that conversation; when the client holds its own
 transcript (no Core `conversation_id`), nothing is persisted.
 
+The feature is owned by the built-in `@ryu/side-chats` plugin. The plugin contributes the `/btw`
+command and the desktop side-chat feature, and gates the HTTP surface below. Core provides the
+generic side-model bridge and conversation-store implementation; disabling the plugin removes the
+command and makes these routes unavailable.
+
 Core owns one side-question primitive, `POST /api/btw`, handled by `btw_handler` in
 `apps/core/src/server/mod.rs`. It reuses the same single non-streaming gateway call as
 [double-check](/docs/core/double-check) (`call_side_model`), so the model call still routes
@@ -26,6 +31,7 @@ For how to fire a side question from the composer, see
 | Handler | `btw_handler`, `apps/core/src/server/mod.rs` |
 | Backing call | `call_side_model` - one non-streaming gateway call |
 | Tools | None. The system prompt tells the model it has no tools and cannot run commands, read files, or browse |
+| Owner | `@ryu/side-chats` (Core-tier, default-on, disableable) |
 | Persistence | A `btw_entries` row keyed to the parent conversation, when a `conversation_id` is supplied. The exchange never becomes chat history |
 | Returns | `{ answer, model, id }` |
 
@@ -39,12 +45,14 @@ The body is a `question` plus a transcript, supplied one of two ways.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `question` | string | yes | The side question. An empty/whitespace-only value returns `400` |
-| `messages` | array of `{ role, content }` | no | A client-held transcript (CLI, mobile) |
-| `conversation_id` | string | no | A stored Core conversation. The last `BTW_TRANSCRIPT_LIMIT` (30) messages are loaded |
+| `messages` | array of `{ role, content }` | no | A client-held transcript. The server uses at most the most recent 30 messages |
+| `conversation_id` | string | no | A stored Core conversation used when `messages` is absent; the last 30 messages are loaded |
 
 If `messages` is present and non-empty it wins; otherwise Core loads the transcript from
 `conversation_id`. If neither is supplied, the side question still answers, it just has no prior
-context to draw on.
+context to draw on. The desktop sends the visible main-chat transcript with the request, including
+the latest in-flight user/assistant text, so a side question has the same context the user is
+looking at rather than a stale server snapshot.
 
 ```json
 POST /api/btw
@@ -80,10 +88,11 @@ in the conversation timeline, but it can be listed and deleted like one:
 | `GET /api/conversations/:id/btw` | List a conversation's side chats, newest first |
 | `DELETE /api/btw/:id` | Delete one side chat |
 
-The desktop Context rail and sidebar both show a conversation's persisted side chats and can
-re-open them; the rail's "New side chat" action and the sidebar rows round-trip through these
-endpoints (`apps/desktop/src/lib/api/btw.ts`). A `conversation_id` supplied only for context
-still answers — it just also leaves a recoverable entry behind.
+When the `@ryu/side-chats` plugin is enabled, the desktop Context rail and sidebar both show a
+conversation's persisted side chats and can re-open them; the rail's "New side chat" action and
+the sidebar rows round-trip through these endpoints (`apps/desktop/src/lib/api/btw.ts`). A
+`conversation_id` supplied only for context still answers — it just also leaves a recoverable
+entry behind.
 
 ## Model and effort resolution
 
@@ -104,8 +113,8 @@ matching the rest of Core's side-model surfaces.
   to say so briefly rather than guess when the answer is not there.
 - **Single answer.** One gateway call in, one `{ answer, model, id }` out. There is no streaming and no
   follow-up turn.
-- **Context-bounded.** When loading from `conversation_id`, only the most recent 30 messages
-  (`BTW_TRANSCRIPT_LIMIT`) are included.
+- **Context-bounded.** Only the most recent 30 messages (`BTW_TRANSCRIPT_LIMIT`) are included,
+  whether the transcript came from the desktop/client or from `conversation_id`.
 - **Fails loud on the model.** If the gateway model is unreachable the route returns `502` with
   `side-question model unavailable: ...`.
 

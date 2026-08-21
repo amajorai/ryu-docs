@@ -1,42 +1,18 @@
-export const DOCS_VERSION = "0.1.15" as const;
+export const DOCS_VERSION = "0.2.0" as const;
 
 /**
- * Versions served from their OWN deployment, cut as a `docs/<version>` branch at
- * release time (`scripts/release/cut-docs-branch.sh`).
+ * Ryu's public docs intentionally serve one current version.
  *
- * This is the only honest way to serve old docs: a build of this repo contains
- * exactly one copy of the content, so an "older version" rendered from it would
- * describe today's software under yesterday's number. A branch freezes the
- * content with the release, and the switcher links out to where that branch is
- * deployed.
- *
- * Entries are absolute URLs for that reason — they leave this deployment. Add one
- * when a version's branch is deployed; never add a version that has no site, or
- * the switcher offers a dead link.
+ * The version segment remains in the URL so links can identify the release that
+ * produced them, but it is a label for this deployment rather than a selector
+ * for a fleet of historical sites. Keeping archives live would require one
+ * separately built deployment per release and would grow the production surface
+ * without a bounded retention policy.
  */
 export const ARCHIVED_DOCS_VERSIONS: readonly {
   readonly slug: string;
   readonly url: string;
-}[] = [
-  // Each entry is a `docs/<version>` branch of ryu-closed deployed as its own
-  // Dokploy app — the branch-per-version model Fumadocs itself recommends, so an
-  // archive keeps its own content AND its own dependencies rather than
-  // relabelling today's tree.
-  //
-  // This list stayed EMPTY for four releases while the branches were being cut
-  // and pushed, which is why the switcher only ever showed one version: nothing
-  // renders a version that is not in here, and `archivedDocsUrl` returns
-  // undefined so a stale `/docs/<old>/…` link falls back to current instead of
-  // landing on the release it was written for.
-  //
-  // Add an entry only AFTER the site answers 200 — the switcher renders whatever
-  // is in this list, so an unbacked entry is a dead dropdown row.
-  //
-  // Newest first: the switcher renders in array order.
-  { slug: "0.1.4", url: "https://docs-0-1-4.ryuhq.com" },
-  { slug: "0.1.3", url: "https://docs-0-1-3.ryuhq.com" },
-  { slug: "0.1.2", url: "https://docs-0-1-2.ryuhq.com" },
-];
+}[] = [];
 
 /** Matches a bare semver-ish version segment, e.g. `0.1.1`. */
 const VERSION_SEGMENT_RE = /^\d+\.\d+\.\d+$/;
@@ -54,57 +30,29 @@ export function isVersionSegment(slug: string | undefined): boolean {
 }
 
 /**
- * The archived deployment for a version slug, if there is one.
- *
- * A stale link should land on the same page in the docs that actually match its
- * version when that site exists, and fall back to the current version otherwise —
- * losing the version but never the reader.
+ * Compatibility seam for stale-link routing. Latest-only mode intentionally
+ * returns `undefined` for every historical version.
  */
 export function archivedDocsUrl(slug: string): string | undefined {
   return ARCHIVED_DOCS_VERSIONS.find((v) => v.slug === slug)?.url;
 }
 
 /**
- * Every version the switcher offers: the one THIS deployment serves, plus each
- * archived release that has its own deployment.
- *
- * # How multi-version actually works here
- *
- * A build serves exactly one version's content. `stripDocsVersion` drops the
- * version segment before resolving, so `/docs/<current>/foo` and `/docs/foo` are
- * the same page — within a deployment, the version in the URL is a label.
- *
- * History therefore does not come from this tree; it comes from
- * {@link ARCHIVED_DOCS_VERSIONS}, each entry a `docs/<version>` branch deployed
- * as its own site (`scripts/release/cut-docs-branch.sh`). That is the only
- * arrangement in which an old version's docs describe the old software, which is
- * the entire point of versioning them.
- *
- * # Stale links do not 404 any more
- *
- * They used to, and worse: the catch-all redirect carried the stale version
- * segment along, turning `/docs/0.1.1/start-here` into
- * `/docs/<current>/0.1.1/start-here`, which resolves to nothing. Every deep link
- * published under a release died at the next bump. The segment is now stripped
- * and the reader is sent to that version's archive when one exists, or to the
- * same page on the current version when it does not.
+ * The one version the switcher offers. `stripDocsVersion` still drops a version
+ * segment before resolving, so `/docs/<current>/foo` and `/docs/foo` are the
+ * same page. A stale version-shaped URL is redirected to that current page.
  */
 export const DOCS_VERSIONS: readonly {
   readonly slug: string;
   readonly title: string;
-  /** Set for archived versions: the switcher links OUT to that deployment. */
+  /** Reserved for compatibility with older callers; archives are disabled. */
   readonly externalUrl?: string;
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.1.15", not "v0.1.15".
+    // Bare number, no "v" prefix — the switcher reads "0.2.0", not "v0.2.0".
     title: DOCS_VERSION,
   },
-  ...ARCHIVED_DOCS_VERSIONS.map((v) => ({
-    slug: v.slug,
-    title: v.slug,
-    externalUrl: v.url,
-  })),
 ];
 
 export function docsPathForVersion(
