@@ -1,0 +1,231 @@
+---
+title: "Build Actions in Code"
+description: "Define one governed business operation with typed input, output, effect, and approval metadata"
+tags: ["actions", "runnables", "tools", "governance", "mcp", "sdk"]
+---
+
+An **Action** is Ryu's public contract for a business operation. It keeps the operation's
+description, input schema, output schema, implementation, effect, and approval requirement together.
+The SDK lowers it into Ryu's existing governed Tool/Runnable path, so this is an authoring seam, not a
+second execution runtime.
+
+<Callout type="info">
+  Actions are represented at runtime as `kind: "tool"` entries for backward compatibility with the
+  Core registry. The semantic `action: true` marker and the extra metadata are carried in the tool
+  config. Existing tools and manifests continue to work unchanged.
+</Callout>
+
+## Define an Action
+
+```ts
+import { defineAction } from "@ryuhq/sdk";
+
+export const createTicket = defineAction({
+  id: "action-create-ticket",
+  name: "Create Ticket",
+  description: "Create a support ticket for a customer.",
+  schema: {
+    type: "object",
+    properties: {
+      customer: { type: "string", description: "Customer name" },
+      summary: { type: "string", description: "Problem summary" },
+    },
+    required: ["customer", "summary"],
+  },
+  outputSchema: {
+    type: "object",
+    properties: { id: { type: "string" } },
+    required: ["id"],
+  },
+  effect: "mutate",
+  needsApproval: true,
+  async run({ customer, summary }, _ctx) {
+    // Use your domain implementation here.
+    return { id: `${customer}:${summary}` };
+  },
+});
+```
+
+The `schema` is checked before the implementation runs. `outputSchema` describes the structured
+result to Core and MCP consumers. The `description` is the model-facing explanation used during
+tool discovery.
+
+## Effect and approval metadata
+
+Every Action declares an effect so Ryu can make the existing agent posture checks explicit instead of
+guessing from the action name.
+
+| Field | Meaning | Core metadata |
+|---|---|---|
+| `effect: "read"` | Does not change external or durable state | `readOnlyHint: true` |
+| `effect: "mutate"` | Creates, changes, deletes, sends, or otherwise acts | `destructiveHint: true` |
+| `needsApproval: true` | Requires a human before a governed agent call dispatches | `needs_approval: true` |
+
+The effect-derived hints can be extended with `annotations` (`idempotentHint`, `openWorldHint`, or
+provider-specific boolean hints). Ryu rejects contradictory `readOnlyHint` and `destructiveHint`
+declarations at authoring time.
+
+`needsApproval` uses Core's existing approval inbox. The request is queued before tool dispatch, and
+the approved retry enters the existing no-gate execution path so the Action is not run twice. Core
+reads this requirement from the registered manifest tool, including dotted/native ids such as
+`crm.save`; an innocuous action name does not remove the explicit approval step.
+
+## Use the same Action on each Ryu path
+
+### Run it in TypeScript
+
+```ts
+const result = await createTicket.run(
+  { customer: "Acme", summary: "Login failure" },
+  context
+);
+```
+
+`context.gateway` remains the only model-call path. If an Action needs a model, call
+`context.gateway.chat()`; never import a provider directly.
+
+### Expose it through the SDK MCP server
+
+```ts
+import { McpServer } from "@ryuhq/sdk/mcp/server";
+
+const server = new McpServer().register(createTicket.toMcpTool(context));
+await server.serve();
+```
+
+`toMcpTool()` is an adapter over the same `run` implementation. It does not copy or reimplement the
+business logic.
+
+### Install it into Core
+
+```ts
+const manifest = createTicket.toManifest({
+  id: "com.example.support",
+  version: "1.0.0",
+});
+```
+
+The manifest contains a grant-gated `inline_deno` tool with the input/output schemas, effect
+annotations, and approval requirement. Pack and install it with the normal SDK flow:
+
+```bash
+bunx ryu pack .
+```
+
+Once enabled, the Action is present in Core's unified tool catalog and can be reached by the normal
+governed tool-call path. Workflow tool nodes and agent tool loops use that same registered entry.
+
+## Call one Action over HTTP
+
+The Core HTTP projection is protected by the node bearer and requires an explicit registered agent.
+That explicit principal lets Core apply the agent's tool allowlist, Identity Vault bindings, approval
+policy, budget, DLP, and audit behavior instead of treating a script as an unscoped caller.
+
+```bash
+curl -X POST "http://127.0.0.1:7980/api/actions/action-create-ticket" \
+  -H "Authorization: Bearer $RYU_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "agent_id": "support-agent",
+    "arguments": { "customer": "Acme", "summary": "Login failure" }
+  }'
+```
+
+Use the raw action slug when it is unique, `app.<slug>` for the registered Core id, or
+`<plugin-id>/<slug>` when a workspace needs an explicit owner. The response keeps Core's
+`{ ok, output, error }` envelope, including an approval-required result.
+
+The matching TypeScript client is available from `@ryuhq/core-client/actions`:
+
+```ts
+import { callAction } from "@ryuhq/core-client/actions";
+
+const result = await callAction(target, "action-create-ticket", {
+  agentId: "support-agent",
+  arguments: { customer: "Acme", summary: "Login failure" },
+});
+```
+
+## Call one Action from the CLI
+
+The Ryu CLI is the script/cron adapter for the same HTTP projection. It keeps the agent principal
+explicit and accepts the same JSON argument object:
+
+```bash
+ryu action action-create-ticket \
+  '{"customer":"Acme","summary":"Login failure"}' \
+  --agent support-agent --json
+```
+
+`RYU_CORE_URL` and `RYU_CORE_TOKEN` select the node. Use `--node <url>` to target another node.
+The CLI does not load or execute the Action implementation locally, so it cannot bypass Core's
+approval or Gateway governance.
+
+## Discover an Action through A2A
+
+Enabled Actions are also projected into Ryu's A2A agent card at
+`/.well-known/agent-card.json` as skills. An A2A peer sends a normal `message/send` request and
+the receiving published agent reasons over the request and selects its Action tool. This preserves
+the protocol distinction: use A2A when another agent should think and delegate, HTTP when code
+already knows the operation, and MCP when an external model host should discover tools.
+
+## Durable Action state
+
+An Action can use the app-owned durable KV primitive when its manifest requests `storage:kv`:
+
+```ts
+export const rememberTicket = defineAction({
+  // ...id, name, description, schema, effect...
+  async run({ ticketId }, context) {
+    await context.storage?.set({
+      namespace: "tickets",
+      key: ticketId,
+      value: "open",
+    });
+    return { ticketId };
+  },
+});
+```
+
+Add `storage:kv` to `toManifest({ grants: [...] })`. The primitive is app-owned and namespaced,
+grant-gated, and available through the packaged `host.storage` bridge. Ryu does not impose a
+cross-app SQL schema: an app that owns relational domain data should keep that database in its
+sidecar and expose a narrow Action or app route over the normal extension boundary.
+
+## Packaged-code boundary
+
+When Core executes the packaged `inline_deno` body, it invokes the serialized `run` function with
+`input` and the grant-gated `host` bridge. The packaged function must be self-contained: it cannot
+capture imports, closures, or outer variables. In-process TypeScript calls still receive the normal
+`RunnableContext`.
+
+For an out-of-process app with its own database and routes, use the `app` template from
+`create-ryu-app` instead. That satellite owns its sidecar and reaches Ryu through the generic
+extension proxy.
+
+## Scaffold an Action
+
+```bash
+bunx create-ryu-app my-action --template action
+cd my-action
+bun install
+bun dev
+bun run pack
+```
+
+The starter includes `defineAction`, a valid manifest, a structured result schema, and an explicit
+approval requirement. Replace the example implementation with the operation your plugin owns.
+
+<Callout type="info">
+  The Action contract now has the HTTP, CLI, MCP, and A2A discovery projections. A2A remains
+  agent delegation rather than a direct function-call protocol. Durable state is intentionally
+  app-owned KV or sidecar-owned SQL; Core does not centralize application tables across plugins.
+</Callout>
+
+<Cards>
+  <DocCard href="/docs/extend/develop/sdk" />
+  <DocCard href="/docs/extend/develop/extensions/author-workflows" />
+  <DocCard href="/docs/core/unified-tool-catalog" />
+  <DocCard href="/docs/core/approvals" />
+  <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
+</Cards>

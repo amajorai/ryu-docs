@@ -45,7 +45,10 @@ type ToolConfig = {
   method?: string;
   input_schema?: {
     type?: string;
-    properties?: Record<string, { type?: string; description?: string; enum?: unknown[] }>;
+    properties?: Record<
+      string,
+      { type?: string; description?: string; enum?: unknown[] }
+    >;
     required?: string[];
   };
 };
@@ -112,7 +115,10 @@ type Manifest = {
   provides?: Provide[];
   mcp_servers?: Record<string, { description?: string }>;
   sidecars?: { name?: string }[];
-  requires?: { apps?: { id?: string; min_version?: string }[]; grants?: string[] };
+  requires?: {
+    apps?: { id?: string; min_version?: string }[];
+    grants?: string[];
+  };
   activation_events?: string[];
   contributes?: Record<string, ContributesItem[]>;
 };
@@ -132,13 +138,14 @@ function esc(text: string): string {
 
 /** Collapse whitespace for use inside a table cell (no pipes/newlines). */
 function cell(text: string): string {
-  return esc(text)
-    .replace(/\s+/g, " ")
-    .replace(/\|/g, "&#124;")
-    .trim();
+  return esc(text).replace(/\s+/g, " ").replace(/\|/g, "&#124;").trim();
 }
 
-function frontmatter(title: string, description: string, tags: string[]): string {
+function frontmatter(
+  title: string,
+  description: string,
+  tags: string[],
+): string {
   return [
     "---",
     `title: ${JSON.stringify(title)}`,
@@ -165,12 +172,16 @@ function toolSection(runnable: Runnable): string {
   const cfg = runnable.config ?? {};
   const slug = cfg.slug ?? runnable.id ?? "";
   const lines: string[] = [];
-  lines.push(`### \`${cell(slug)}\`${runnable.name ? ` - ${cell(runnable.name)}` : ""}`);
+  lines.push(
+    `### \`${cell(slug)}\`${runnable.name ? ` - ${cell(runnable.name)}` : ""}`,
+  );
   if (cfg.description) {
     lines.push("", esc(cell(cfg.description)));
   }
   const meta = [
-    cfg.backend ? `Backend: ${TOOL_BACKEND_LABEL.get(cfg.backend) ?? cfg.backend}` : "",
+    cfg.backend
+      ? `Backend: ${TOOL_BACKEND_LABEL.get(cfg.backend) ?? cfg.backend}`
+      : "",
     cfg.method ? `Method: ${cfg.method.toUpperCase()}` : "",
   ].filter(Boolean);
   if (meta.length > 0) {
@@ -180,9 +191,15 @@ function toolSection(runnable: Runnable): string {
   const props = schema?.properties;
   if (props && Object.keys(props).length > 0) {
     const required = new Set(schema?.required ?? []);
-    lines.push("", "| Parameter | Type | Required | Description |", "|---|---|---|---|");
+    lines.push(
+      "",
+      "| Parameter | Type | Required | Description |",
+      "|---|---|---|---|",
+    );
     for (const [name, prop] of Object.entries(props)) {
-      const type = prop.enum ? `${prop.type ?? "string"} (one of: ${prop.enum.join(", ")})` : (prop.type ?? "string");
+      const type = prop.enum
+        ? `${prop.type ?? "string"} (one of: ${prop.enum.join(", ")})`
+        : (prop.type ?? "string");
       lines.push(
         `| \`${cell(name)}\` | ${cell(type)} | ${required.has(name) ? "yes" : "no"} | ${cell(prop.description ?? "")} |`,
       );
@@ -201,7 +218,9 @@ function runnablesSection(runnables: Runnable[] | undefined): string {
   const tools = runnables.filter((r) => r.kind === "tool");
   const companions = runnables.filter((r) => r.kind === "companion");
   const policies = runnables.filter((r) => r.kind === "policy");
-  const others = runnables.filter((r) => !["tool", "companion", "policy"].includes(r.kind ?? ""));
+  const others = runnables.filter(
+    (r) => !["tool", "companion", "policy"].includes(r.kind ?? ""),
+  );
 
   const lines: string[] = [];
   lines.push("", "## What it exposes");
@@ -241,7 +260,10 @@ function runnablesSection(runnables: Runnable[] | undefined): string {
       lines.push("", `Model: \`${cell(cfg.model)}\``);
     }
     if (cfg.tools && cfg.tools.length > 0) {
-      lines.push("", `Tools: ${cfg.tools.map((t) => `\`${cell(t)}\``).join(", ")}`);
+      lines.push(
+        "",
+        `Tools: ${cfg.tools.map((t) => `\`${cell(t)}\``).join(", ")}`,
+      );
     }
     if (cfg.skill_id) {
       lines.push("", `Skill: \`${cell(cfg.skill_id)}\``);
@@ -257,7 +279,9 @@ function providesSection(provides: Provide[] | undefined): string {
   }
   const lines: string[] = ["", "### Capabilities", ""];
   for (const p of provides) {
-    lines.push(`- **${cell(p.title ?? p.capability ?? "")}** - capability \`${cell(p.capability ?? "")}\``);
+    lines.push(
+      `- **${cell(p.title ?? p.capability ?? "")}** - capability \`${cell(p.capability ?? "")}\``,
+    );
     if (p.grant) {
       lines.push(`  - Grant: \`${cell(p.grant)}\``);
     }
@@ -268,7 +292,9 @@ function providesSection(provides: Provide[] | undefined): string {
     if (verbs.length > 0) {
       lines.push("  - Verbs:");
       for (const [verb, { tool }] of verbs) {
-        lines.push(`    - \`${cell(verb)}\`${tool ? ` -> \`${cell(tool)}\`` : ""}`);
+        lines.push(
+          `    - \`${cell(verb)}\`${tool ? ` -> \`${cell(tool)}\`` : ""}`,
+        );
       }
     }
   }
@@ -281,9 +307,17 @@ function mcpSection(mcp: Manifest["mcp_servers"]): string {
   if (entries.length === 0) {
     return "";
   }
-  const lines: string[] = ["", "### MCP server", ""];
+  const lines: string[] = [
+    "",
+    "### MCP server",
+    "",
+    "MCP (Model Context Protocol) is a standard way for an AI host to find and call tools. An MCP server provides those tools.",
+    "",
+  ];
   for (const [name, { description }] of entries) {
-    lines.push(`- **\`${cell(name)}\`**${description ? ` - ${esc(cell(description))}` : ""}`);
+    lines.push(
+      `- **\`${cell(name)}\`**${description ? ` - ${esc(cell(description))}` : ""}`,
+    );
   }
   lines.push("");
   return lines.join("\n");
@@ -297,13 +331,20 @@ function permissionsSection(m: Manifest): string {
     lines.push("", "## Permissions");
   }
   if (grants.length > 0) {
-    lines.push("", "**Grants:** " + grants.map((g) => `\`${cell(g)}\``).join(", "));
+    lines.push(
+      "",
+      `**Grants:** ${grants.map((g) => `\`${cell(g)}\``).join(", ")}`,
+    );
   }
   if (levels.length > 0) {
     lines.push("", "| Level | Description | Implies |", "|---|---|---|");
     for (const level of levels) {
-      const implies = (level.implies ?? []).map((i) => `\`${cell(i)}\``).join(", ");
-      lines.push(`| **${cell(level.label ?? level.id ?? "")}** | ${cell(level.description ?? "")} | ${implies} |`);
+      const implies = (level.implies ?? [])
+        .map((i) => `\`${cell(i)}\``)
+        .join(", ");
+      lines.push(
+        `| **${cell(level.label ?? level.id ?? "")}** | ${cell(level.description ?? "")} | ${implies} |`,
+      );
     }
     lines.push("");
   }
@@ -331,7 +372,9 @@ const CONTRIBUTE_TITLES: Record<string, string> = {
   pi_extensions: "Pi extensions",
 };
 
-function contributesSection(contributes: Manifest["contributes"] | undefined): string {
+function contributesSection(
+  contributes: Manifest["contributes"] | undefined,
+): string {
   const entries = Object.entries(contributes ?? {}).filter(
     ([, items]) => Array.isArray(items) && items.length > 0,
   );
@@ -344,9 +387,7 @@ function contributesSection(contributes: Manifest["contributes"] | undefined): s
     lines.push("", `### ${title}`, "");
     for (const item of items) {
       const label = item.command ?? item.title ?? item.label ?? item.id;
-      const desc = item.description
-        ? ` - ${esc(cell(item.description))}`
-        : "";
+      const desc = item.description ? ` - ${esc(cell(item.description))}` : "";
       const extra: string[] = [];
       if (item.type) {
         extra.push(`type: ${cell(item.type)}`);
@@ -371,7 +412,9 @@ function contributesSection(contributes: Manifest["contributes"] | undefined): s
               .join(", "),
         );
       }
-      lines.push(`- ${label ? `**${cell(String(label))}**` : ""}${desc}${extra.length > 0 ? ` (${extra.join(", ")})` : ""}`);
+      lines.push(
+        `- ${label ? `**${cell(String(label))}**` : ""}${desc}${extra.length > 0 ? ` (${extra.join(", ")})` : ""}`,
+      );
     }
   }
   lines.push("");
@@ -389,12 +432,17 @@ function requiresSection(m: Manifest): string {
   if (apps.length > 0) {
     lines.push("", "Requires these apps:");
     for (const app of apps) {
-      const version = app.min_version ? ` (min \`${cell(app.min_version)}\`)` : "";
+      const version = app.min_version
+        ? ` (min \`${cell(app.min_version)}\`)`
+        : "";
       lines.push(`- \`${cell(app.id ?? "")}\`${version}`);
     }
   }
   if (grants.length > 0) {
-    lines.push("", "Needs these grants: " + grants.map((g) => `\`${cell(g)}\``).join(", "));
+    lines.push(
+      "",
+      `Needs these grants: ${grants.map((g) => `\`${cell(g)}\``).join(", ")}`,
+    );
   }
   lines.push("");
   return lines.join("\n");
@@ -405,7 +453,13 @@ function engineSection(m: Manifest): string {
   if (!ryu) {
     return "";
   }
-  return ["", "## Engine requirement", "", `Requires Ryu ${cell(ryu)}.`, ""].join("\n");
+  return [
+    "",
+    "## Engine requirement",
+    "",
+    `Requires Ryu ${cell(ryu)}.`,
+    "",
+  ].join("\n");
 }
 
 function activationSection(m: Manifest): string {
@@ -417,7 +471,7 @@ function activationSection(m: Manifest): string {
     "",
     "## Activation",
     "",
-    "Activates on: " + events.map((e) => `\`${cell(e)}\``).join(", "),
+    `Activates on: ${events.map((e) => `\`${cell(e)}\``).join(", ")}`,
     "",
   ].join("\n");
 }
@@ -444,7 +498,8 @@ function buildPage(m: Manifest): string {
   body.push(surfacesSection(m.surfaces));
 
   const runnables = runnablesSection(m.runnables);
-  const capabilitySection = providesSection(m.provides) + mcpSection(m.mcp_servers);
+  const capabilitySection =
+    providesSection(m.provides) + mcpSection(m.mcp_servers);
 
   if (runnables) {
     body.push(runnables);
@@ -474,7 +529,10 @@ function buildPage(m: Manifest): string {
     );
   }
 
-  return body.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  return `${body
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()}\n`;
 }
 
 function groupByCategory(
@@ -508,7 +566,7 @@ function realmMeta(
       pages.push(entry.dir);
     }
   }
-  return JSON.stringify(
+  return `${JSON.stringify(
     {
       root: true,
       title,
@@ -518,10 +576,15 @@ function realmMeta(
     },
     null,
     2,
-  ) + "\n";
+  )}\n`;
 }
 
-function realmIndex(title: string, description: string, groups: ReturnType<typeof groupByCategory>, base: string): string {
+function realmIndex(
+  title: string,
+  description: string,
+  groups: ReturnType<typeof groupByCategory>,
+  base: string,
+): string {
   const lines: string[] = [];
   lines.push(frontmatter(title, description, [title]));
   lines.push("", description, "");
@@ -536,7 +599,9 @@ function realmIndex(title: string, description: string, groups: ReturnType<typeo
   return lines.join("\n");
 }
 
-function readManifests(storeDirs: string | string[]): { dir: string; manifest: Manifest }[] {
+function readManifests(
+  storeDirs: string | string[],
+): { dir: string; manifest: Manifest }[] {
   const entries: { dir: string; manifest: Manifest }[] = [];
   for (const storeDir of Array.isArray(storeDirs) ? storeDirs : [storeDirs]) {
     for (const dir of readdirSync(storeDir, { withFileTypes: true })) {
@@ -545,7 +610,9 @@ function readManifests(storeDirs: string | string[]): { dir: string; manifest: M
       }
       const manifestPath = path.join(storeDir, dir.name, "manifest.json");
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
+        const manifest = JSON.parse(
+          readFileSync(manifestPath, "utf8"),
+        ) as Manifest;
         entries.push({ dir: dir.name, manifest });
       } catch {
         // Skip directories without a parseable manifest.json.
@@ -567,8 +634,14 @@ async function writeRealm(opts: {
   await mkdir(opts.outDir, { recursive: true });
 
   const groups = groupByCategory(opts.manifests);
-  await writeFile(path.join(opts.outDir, "meta.json"), realmMeta(opts.title, opts.description, opts.icon, groups));
-  await writeFile(path.join(opts.outDir, "index.mdx"), realmIndex(opts.title, opts.description, groups, opts.base));
+  await writeFile(
+    path.join(opts.outDir, "meta.json"),
+    realmMeta(opts.title, opts.description, opts.icon, groups),
+  );
+  await writeFile(
+    path.join(opts.outDir, "index.mdx"),
+    realmIndex(opts.title, opts.description, groups, opts.base),
+  );
 
   for (const entry of opts.manifests) {
     const page = buildPage(entry.manifest);

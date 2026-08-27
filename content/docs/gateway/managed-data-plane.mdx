@@ -22,56 +22,6 @@ authority or an omitted operation is rejected instead of falling back to broader
 This is a **hosted-only** path and runs as a **single replica**. Every counter (budgets, rate limits, the resolve cache) is an in-process map, so N replicas each grant a full quota. Shared cross-replica state is not built. Deploy one instance per fleet. When there is no `CONTROL_PLANE_URL`, the dynamic path is a no-op and the Gateway behaves as the ordinary single-org process documented in [Configuration and auth](/docs/gateway/configuration).
 </Callout>
 
-## Fleet provider-key custody
-
-Hosted provider keys are owned by the control plane, not by customer nodes or
-the Gateway deployment environment. This includes the ordinary providers and
-the Cloudflare/Bedrock/Vertex/OpenAI-credit pool credentials. The server stores
-each key sealed in the provider vault. At startup the Gateway calls:
-
-```
-GET {CONTROL_PLANE_URL}/api/key-vault/keys
-x-ryu-internal-secret: <RYU_VAULT_INTERNAL_SECRET>
-```
-
-The response is applied only to the Gateway's in-memory provider registry. Set
-`RYU_PROVIDER_VAULT_REQUIRED=1` on production fleet replicas so a missing or
-empty vault cannot silently fall back to a raw provider env key. A successful
-required-mode response is authoritative: an omitted supported key disables that
-provider instead of using a stale gateway env/file key. Rotate keys through the
-platform-admin vault route and restart/redeploy the Gateway to rebuild its
-registry. Local standalone Gateways can omit the vault variables and continue
-using their normal local provider configuration.
-
-## Dedicated managed-channel inventory
-
-Managed-node checkout claims one dedicated company-owned Telegram bot and one
-dedicated company-owned Discord bot per node when an available allocation
-exists. The control plane stores each provider token sealed in
-`ManagedBotAllocation`; a customer node receives only its own channel
-credential. There is no shared bot identity across customers.
-
-Platform operators import inventory through the admin-only API:
-
-```http
-POST /api/managed-bot-inventory
-Content-Type: application/json
-
-{"provider":"discord","externalId":"<application-id>","username":"<name>","token":"<bot-token>"}
-```
-
-The route requires the platform-admin allowlist and step-up verification.
-`GET /api/managed-bot-inventory` returns metadata only and never returns
-tokens. Assigned identities are immutable; use
-`POST /api/managed-bot-inventory/retire` for an available identity that must
-never be assigned. A managed allocation is also retired when its managed node
-is destroyed, so its provider identity is never recycled. For an older
-deployment, import the legacy env once with
-`POST /api/managed-bot-inventory/import-bootstrap`; it returns metadata and
-skip reasons but never tokens. Normal provisioning never reads
-`RYU_MANAGED_BOT_POOL`, so remove it after the import and keep MongoDB as the
-source of truth.
-
 ## Per-request org identity
 
 A standalone Gateway authenticates one org at startup with its own `rgw_` key. The multi-tenant path instead resolves the org **per request** from whatever `rgw_` bearer the client sent. Any valid, non-revoked token resolves to its own org.
@@ -183,15 +133,12 @@ Managed nodes provision the rate through the `GATEWAY_CREDITS_COST_PER_TOOL_CALL
 Do not set `GATEWAY_CREDITS_FAIL_CLOSED=1` together with the default `wallet_empty_action = stop`. A transient control-plane blip flips the sticky wallet-empty flag, the next request is stopped before dispatch, and the debit that would clear the flag never runs - stranding the org until a process restart. Pair fail-closed with a self-healing action (`downgrade` / `restrict`), or leave it off.
 </Callout>
 
-## Deploying the fleet Gateway
+## Deploying a managed Gateway
 
-`apps/gateway/Dockerfile` builds and runs **only** the Gateway (AGPL-3.0, port 7981), so a fleet deploy never compiles Core. The build context is the repo root, but it copies only the self-contained `apps/gateway` crate (its own `Cargo.lock`, zero path dependencies); the rest of the monorepo is never transferred.
-
-Boot requirements baked into the image and enforced by the binary:
-
-- On a non-loopback bind, the Gateway **hard-refuses to start** without `GATEWAY_MASTER_KEY` (which also flips `require_auth` on).
-- Behind a load balancer, also set `RYU_GATEWAY_FLEET=1` so co-located proxy peers that appear as `127.0.0.1` cannot reach the admin surface (`/v1/config`, `/v1/audit`) without the master key.
-- The entrypoint binds `0.0.0.0:7981`; `/health` is an unauthenticated liveness endpoint. Mount a volume at `/data` and set `GATEWAY_CONFIG=/data/gateway.toml` if you want static per-tenant `api_keys` and the audit store to survive redeploys.
+A managed Gateway is a long-running service. Run one instance for the deployment and keep its
+configuration and audit data on durable storage. On a non-loopback bind, set `GATEWAY_MASTER_KEY`
+before the service starts. Keep the health endpoint public only when your deployment needs an
+external liveness check; protect all model and admin routes with Gateway auth.
 
 ## Related
 

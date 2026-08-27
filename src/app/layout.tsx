@@ -1,5 +1,5 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
-import { RyuAssistantWidget } from "@ryu/assistant-widget";
+import { RyuAssistantWidget } from "@ryu/assistant-widget/docs-assistant";
 
 import "./global.css";
 import { Geist, Inter } from "next/font/google";

@@ -36,7 +36,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.2.1/start-here",
+        destination: "/docs/0.2.2/start-here",
         permanent: false,
       },
       // The recipes gallery became its own "Cookbook" root. Keep the old

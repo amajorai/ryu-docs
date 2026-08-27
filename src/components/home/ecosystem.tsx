@@ -18,10 +18,10 @@ import { docsPath } from "@/lib/docs-version";
  */
 
 const REACH: { label: string; value: string }[] = [
-	{ value: "900k", label: "skills available out of the box" },
-	{ value: "400+", label: "models reachable on one subscription" },
-	{ value: "250+", label: "MCP tools in the registry" },
-	{ value: "2.8M+", label: "local models in the Hugging Face catalog" },
+	{ value: "900k", label: "skills in the catalog" },
+	{ value: "400+", label: "models available" },
+	{ value: "250+", label: "MCP tools" },
+	{ value: "2.8M+", label: "local models in Hugging Face" },
 ];
 
 const AGENTS: { logo?: string; name: string }[] = [
@@ -60,10 +60,10 @@ const OPEN_UNITS: { license: string; name: string }[] = [
 ];
 
 const OPEN_POINTS = [
-	"Core and Gateway are self-hostable. Read, fork, and deploy them yourself.",
-	"Point any OpenAI-compatible client at your own gateway, no Ryu Cloud required",
-	"Inspect routing, firewall rules, budgets and tool allowlists in code",
-	"Bring your own agent, key and subscription; swap models through one config",
+	"Self-host Core and Gateway.",
+	"Use any OpenAI-compatible client.",
+	"Inspect routing, firewall, budgets, and tool allowlists.",
+	"Bring your own agent, keys, and models.",
 ];
 
 const PLACES: { Icon: typeof Laptop; note: string; place: string }[] = [
@@ -71,15 +71,15 @@ const PLACES: { Icon: typeof Laptop; note: string; place: string }[] = [
 	{
 		Icon: HardDrive,
 		place: "Mac mini",
-		note: "A private node for background work.",
+		note: "Run background work on a private node.",
 	},
-	{ Icon: Cpu, place: "Raspberry Pi", note: "Lightweight always-on tasks." },
+	{ Icon: Cpu, place: "Raspberry Pi", note: "Run lightweight always-on tasks." },
 	{
 		Icon: Server,
 		place: "Home server",
-		note: "Monitoring and jobs on your own network.",
+		note: "Run jobs on your own network.",
 	},
-	{ Icon: Cloud, place: "Cloud", note: "Managed, when the team needs shared." },
+	{ Icon: Cloud, place: "Cloud", note: "Use managed cloud for shared workloads." },
 ];
 
 /**
@@ -132,9 +132,9 @@ function SectionShell({
 export function Reach() {
 	return (
 		<SectionShell
-			description="What is reachable from a fresh install, before you wire anything up yourself."
+			description="Start with Ryu's built-in skills, models, and MCP tools."
 			id="reach"
-			title="What it reaches"
+			title="Built-in access"
 		>
 			<dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
 				{REACH.map((stat) => (
@@ -157,7 +157,7 @@ export function WorksWith() {
 		<SectionShell
 			description="Ryu runs alongside the agents you already use."
 			id="agents"
-			title="Agents it runs"
+			title="Agents and runtimes"
 		>
 			<ul className="flex flex-wrap gap-2">
 				{AGENTS.map((agent) => (
@@ -183,9 +183,9 @@ export function WorksWith() {
 export function Integrations() {
 	return (
 		<SectionShell
-			description="MCP, ACP, OpenAI-compatible endpoints and Composio connect agents to the tools your team already uses."
+			description="Connect agents to the tools your product already uses."
 			id="integrations"
-			title="Tools it connects to"
+			title="Tools and integrations"
 		>
 			<ul className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
 				{INTEGRATIONS.map((tool) => (
@@ -236,9 +236,9 @@ export function Integrations() {
 export function OpenSource() {
 	return (
 		<SectionShell
-			description="Open core: the runtime you audit and extend stays open, while the desktop app, managed cloud and business features are commercial."
+			description="Core, Gateway, SDK, and CLI are open and self-hostable."
 			id="open-source"
-			title="What is open"
+			title="Open core"
 		>
 			<div className="grid gap-6 md:grid-cols-2">
 				<ul className="space-y-2">
@@ -277,9 +277,9 @@ export function OpenSource() {
 export function RunItAnywhere() {
 	return (
 		<SectionShell
-			description="The same setup follows the work from a laptop to a rack. Nothing is rearchitected on the way."
+			description="Run Ryu locally, on your own server, or in the cloud."
 			id="run-anywhere"
-			title="Where it runs"
+			title="Run Ryu anywhere"
 		>
 			<ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
 				{PLACES.map((place) => (
@@ -303,15 +303,14 @@ export function RunItAnywhere() {
 				))}
 			</ul>
 			<p className="mt-6 text-fd-muted-foreground text-sm">
-				How a request travels from any surface through the Gateway and Core to
-				an engine is drawn out in{" "}
+				See the{" "}
 				<Link
 					className="text-fd-foreground underline underline-offset-4"
 					href={docsPath("start-here", "architecture")}
 				>
-					the architecture guide
+					architecture guide
 				</Link>
-				.
+				{" "}for the request path through the Gateway, Core, and an engine.
 			</p>
 		</SectionShell>
 	);

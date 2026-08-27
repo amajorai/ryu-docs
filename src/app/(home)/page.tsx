@@ -6,11 +6,13 @@ import {
   WorksWith,
 } from "@/components/home/ecosystem";
 import { FeaturedRail, Hero, Realms } from "@/components/home/hero";
+import { PlatformMap } from "@/components/home/platform-map";
 
 export default function HomePage() {
   return (
     <main className="flex flex-1 flex-col pb-16">
       <Hero />
+      <PlatformMap />
       <Realms />
       {/* Moved off the marketing landing page rather than dropped: model and
           skill counts, agent runtimes, MCP integrations, SPDX licences and

@@ -6,11 +6,7 @@ tags: ["Developer Tools"]
 
 ## What it does
 
-Blueprint lets you review an agent's plan before it edits a file. The agent publishes the plan over MCP; Blueprint parses the markdown into addressable blocks and builds a dependency graph from each step's `depends_on` edges. You can see what must happen first and which step blocks the rest.
-
-Annotate a block or step with a comment, redline, question, or blocker, then approve or request changes. A requested-change verdict is stored as deterministic text and returned through `blueprint.plan_status`. Each finding names the block or step it belongs to; a redline includes the exact replacement text.
-
-Republishing with the same plan id adds a revision instead of creating a new plan. Block ids stay stable across revisions, so the next draft arrives as a diff against the first.
+Review an agent's plan before it touches a file. The agent publishes its plan over MCP; Blueprint parses the markdown into addressable blocks and renders it next to a dependency graph derived from the steps' own `depends_on` edges - so the two questions a wall of markdown cannot answer become visible at a glance: what actually has to happen first, and which step is the one everything else is waiting on. A plan reads as a sequence because prose is a sequence; the work almost never is. You annotate what you object to, anchored to the block or step it belongs to - a comment, a redline carrying the replacement text you want, a question, or a blocker - and then approve or request changes. The verdict is not a mood: it is a document. Requesting changes serializes every annotation into deterministic text the agent reads back through `blueprint.plan_status`, each finding naming the step or block it attaches to and, for a redline, the exact substitution proposed, so a revision answers what was actually written rather than what a summary of it sounded like. Re-publishing under the same plan id appends a revision instead of creating a new plan, and block ids are content-stable across revisions, so the second draft arrives as a diff against the first - the paragraphs you already read are still the paragraphs you already read.
 
 ## Surfaces
 
@@ -31,10 +27,6 @@ Republishing with the same plan id adds a revision instead of creating a new pla
 
 - **Blueprint** (html)
 
-The desktop sidebar owns the plan picker. Its **Plans** section is populated from the
-app's live plan feed, and selecting a row opens Blueprint directly on that plan; the
-companion is the review surface, not a second plan sidebar.
-
 ### Capabilities
 
 - **plan.review** - capability `plan.review`
@@ -42,25 +34,35 @@ companion is the review surface, not a second plan sidebar.
 
 ### MCP server
 
-- **`blueprint`** - Publish a plan for review and read the verdict back as text. Use it before work that is expensive to undo, such as a migration or a refactor across many files. `plan_publish` posts numbered steps with their `depends_on` edges and returns a review URL. `plan_status` polls with a bounded wait and returns the reviewer's annotations as readable findings. `plan_get` fetches the plan and its annotations. `step_update` marks steps done as the work lands.
+MCP (Model Context Protocol) is a standard way for an AI host to find and call tools. An MCP server provides those tools.
+
+- **`blueprint`** - Publish a plan for a human to review, and read the verdict back as text. Reach for this before a change that is expensive to undo - a migration, a refactor across many files, anything where the wrong first step wastes the rest. `plan_publish` posts numbered steps with their `depends_on` edges and returns a review url; `plan_status` polls for the verdict with a bounded wait and returns the reviewer's annotations already serialized into readable findings; `plan_get` fetches the whole plan with its annotations; `step_update` marks a step done as the work lands, so the reviewer watching the graph sees progress without being asked.
 
 ## Permissions
 
-**Grants:** `blueprint:review`, `mcp:blueprint`
+**Grants:** `blueprint:review`, `mcp:blueprint`, `ui:declarative-http`
 
 | Level | Description | Implies |
 |---|---|---|
 | **Can view** | Read the plans published on this node, their revisions, and the annotations other people left on them. |  |
-| **Can review** | Annotate plans and decide them. Approving a plan releases the agent to edit files. | `blueprint.view` |
+| **Can review** | Annotate plans and decide them - approving a plan is what releases the agent to start editing files, so this is the level that changes what happens on the machine. | `blueprint.view` |
 
 ## UI it contributes
 
+### chat widget templates
+
+- **Blueprint widget** - Open Blueprint data in a host-rendered chat widget.
+
+### Sidebar sections
+
+- **Plans**
+
 ### Hook events
 
-- **A plan was published for review** - A revision was written and the plan is now `in_review`. Fires on every publish, including a republish under an existing `plan_id`; that creates a new revision of the same plan. Use `revision` to distinguish the first draft (1) from later responses to a verdict (2 and up). It does not fire when someone annotates a plan or changes a step's status.
-- **A plan was approved** - A reviewer recorded an `approved` verdict against a specific revision. The event fires only when the verdict is posted. Resolving annotations is not a verdict, and a plan with no annotations is not approved by default. `note` is optional and never controls approval. Unresolved `comment` annotations may remain on an approved plan and are included in the feedback as advisory text.
-- **A reviewer asked for changes** - A reviewer recorded a `changes_requested` verdict. `annotation_count` reports how many annotations were open when the verdict landed. It is a count, not the annotations themselves; read those through `blueprint.plan_status`. The event does not fire when someone creates an unsubmitted `blocker` annotation.
-- **A plan step was marked done** - A step's status changed to `done`, normally through `blueprint.step_update`. Fires once per transition into `done`. Changes to `in_progress` or `blocked` are silent, and later updates that leave a step at `done` do not fire it again.
+- **A plan was published for review** - A revision was written and the plan is now `in_review`. Fires on EVERY publish, including a re-publish under an existing `plan_id` - that is a new revision of the same plan, not a new plan, so a listener sees one event per revision and not one per plan. Use `revision` to tell a first draft (1) from a response to a verdict (2 and up). Does NOT fire when someone annotates a plan or when a step's status changes; annotations and step progress do not create revisions.
+- **A plan was approved** - A reviewer recorded an `approved` verdict against a specific revision. This is the signal that an agent blocked on review may begin editing. Fires only when a verdict is posted - resolving every annotation on a plan is not a verdict, and a plan with no annotations at all is not approved by default. `note` is the reviewer's free text and is often absent; approval never depends on it. Unresolved `comment` annotations may still exist on an approved plan, and are carried into the feedback text as advisory.
+- **A reviewer asked for changes** - A reviewer recorded a `changes_requested` verdict. `annotation_count` is how many annotations were open on that revision when the verdict landed - it is a size hint for a router deciding where to send this, not a list, and the annotations themselves are read back through `blueprint.plan_status`. Does NOT fire when a single `blocker` annotation is created: an unsubmitted blocker is one reviewer's opinion mid-read, and firing on it would page someone before the reviewer had finished forming a view.
+- **A plan step was marked done** - A step's status was set to `done`, normally by the agent calling `blueprint.step_update` as the work lands. Fires once per transition into `done`; the other statuses do not fire it, so moving a step to `in_progress` or `blocked` is silent and a step that goes `done` is not reported again by later updates that leave it there. This is the event to hang progress notifications on - it is the only one that means work actually happened, as opposed to work being agreed.
 
 ### Data categories
 

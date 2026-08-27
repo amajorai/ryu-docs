@@ -4,9 +4,8 @@ How every page under `content/docs/` is written. The goal: a newcomer finds the 
 one click, every page is exactly one kind of document, no fact appears twice, and sibling pages
 sit at the same depth. This guide is the contract for anyone (human or agent) editing the docs.
 
-> Scope: the five reference realms - `start-here`, `using-ryu`, `gateway`, `core`, `develop`.
-> The `academy/` realm is a separate learning/certification track and is NOT governed by this
-> guide. Do not edit it.
+> Scope: every page under `content/docs/`. The `learn/academy/` realm has its own
+> learning and certification structure, but it follows the language rules below.
 
 ## Hard rules (non-negotiable)
 
@@ -22,6 +21,48 @@ sit at the same depth. This guide is the contract for anyone (human or agent) ed
   `AGENTS.md` flags these; carry the caveat forward, never sand it off.
 - **One source of truth.** A fact lives on exactly one page. Everywhere else, link to it. If you
   feel the urge to re-explain something, link instead.
+
+## Language by audience
+
+Fumadocs serves both developers and people who use the Desktop app. Choose the voice from the
+page's job.
+
+### Developer, operator, and reference pages
+
+Use Simplified Technical English (STE) as a writing method, not as a replacement for technical
+terms:
+
+- Keep the exact product, protocol, API, route, file, and setting names.
+- Define a term the first time it matters. Write `MCP (Model Context Protocol) is a protocol that
+  lets an AI host call tools from an MCP server`, not `MCP is a connection`.
+- Keep related terms separate. An MCP server provides tools. An MCP host uses those tools. A
+  connection usually means an account sign-in or a link to an external service.
+- Use one action or fact per sentence. Prefer active verbs and concrete nouns. Remove filler,
+  metaphors, and abstract words when they do not add meaning.
+- Put code, routes, file paths, and exact behavior in the reference section. Start with one plain
+  sentence that tells the reader what the thing does.
+
+### Everyday product pages
+
+Use short, direct sentences that a general reader can scan:
+
+A roughly third-grade, Hemingway-style reading level is a useful target for simple product tasks,
+not a score to force onto every sentence.
+
+- Say who the page is for and what the reader can do.
+- Use common verbs such as **open**, **choose**, **type**, **save**, and **send**.
+- Give one instruction per step. Keep the UI label exactly as it appears in the product.
+- Do not make readers learn internal names to complete a normal task. If a name appears in the UI,
+  explain it in the same sentence or link to its technical reference.
+- Prefer `Connect your Google account` over `Configure the Google integration` when the user is
+  signing in. Prefer `Choose a tool for the agent` over `Set the agent capability allowlist`.
+- Do not force a low reading level onto safety, billing, or API details. Keep the exact detail and
+  use shorter sentences around it.
+
+The main everyday pages are under `surfaces/desktop/user-guide`, `surfaces/mobile`, and
+`learn/academy/essentials`. `core`, `gateway`, `extend`, `reference`, and app catalog pages are
+developer or operator references. A mixed page should lead with the plain summary, then mark the
+deeper implementation detail.
 
 ## Page types (Diataxis) - pick exactly one per page
 

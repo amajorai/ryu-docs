@@ -6,22 +6,31 @@ import {
   ArrowRight,
   Blocks,
   BookOpen,
+  CircuitBoard,
   Code2,
   Cpu,
   CreditCard,
   GraduationCap,
   type LucideIcon,
   Monitor,
+  Puzzle,
   Rocket,
   Route,
   Search,
   Shield,
   ShieldCheck,
+  Smartphone,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AlphaBadge, isAlphaRealm } from "@/components/realm-alpha-badge";
 import { docsPath } from "@/lib/docs-version";
+
+export const DOCS_HOME_COPY = {
+  description:
+    "Build and run AI agents without starting from scratch. Extend capability with plugins, or turn agents into apps.",
+  title: "The composable integration layer for AI.",
+} as const;
 
 /**
  * `track` is the documentation split.
@@ -50,8 +59,7 @@ const REALMS: Realm[] = [
   {
     slug: "start-here",
     title: "Start Here",
-    description:
-      "Install Ryu, understand how the pieces fit together, and send your first message.",
+    description: "Install Ryu and run your first agent.",
     icon: Rocket,
     accent: "var(--start-here-color)",
     track: "use",
@@ -60,16 +68,40 @@ const REALMS: Realm[] = [
     slug: "surfaces",
     title: "Surfaces",
     description:
-      "The desktop app, the Island overlay, Raycast, and the CLI. Each is a thin client over the same Core.",
+      "Run the same Core context from desktop, browser, companions, and terminal.",
     icon: Monitor,
     accent: "var(--surfaces-color)",
     track: "use",
   },
   {
+    slug: "mobile",
+    title: "Mobile",
+    description: "Use the same Core from iOS and Android.",
+    icon: Smartphone,
+    accent: "var(--mobile-color)",
+    track: "use",
+  },
+  {
+    slug: "browser-extension",
+    title: "Browser extension",
+    description: "Run local models and permissioned browser tools.",
+    icon: Puzzle,
+    accent: "var(--browser-extension-color)",
+    track: "use",
+  },
+  {
+    slug: "hardware",
+    title: "Hardware",
+    description: "Connect ESP32-S3 devices to a Ryu node.",
+    icon: CircuitBoard,
+    accent: "var(--hardware-color)",
+    track: "build",
+  },
+  {
     slug: "core",
     title: "Core",
     description:
-      "Local backend internals: sessions, memory, RAG, workflows, sandboxes, and MCP.",
+      "Run agents, sessions, memory, RAG, workflows, sandboxes, and MCP.",
     icon: Cpu,
     accent: "var(--core-color)",
     track: "build",
@@ -77,8 +109,7 @@ const REALMS: Realm[] = [
   {
     slug: "gateway",
     title: "Gateway",
-    description:
-      "The LLM control plane: routing, firewall, budgets, evals, and audit.",
+    description: "Control model routing, firewall, budgets, evals, and audit.",
     icon: Shield,
     accent: "var(--gateway-color)",
     track: "build",
@@ -86,8 +117,7 @@ const REALMS: Realm[] = [
   {
     slug: "extend",
     title: "Extend",
-    description:
-      "Build on Ryu: plugins, apps, skills, MCP servers, the SDKs, and the full API reference.",
+    description: "Build plugins and apps with skills, MCP, SDKs, and APIs.",
     icon: Code2,
     accent: "var(--extend-color)",
     track: "build",
@@ -95,8 +125,7 @@ const REALMS: Realm[] = [
   {
     slug: "apps",
     title: "Apps",
-    description:
-      "The apps Ryu ships in the store are self-contained products with a sidecar and a surface.",
+    description: "Use Ryu apps packaged with a sidecar and a product surface.",
     icon: AppWindow,
     accent: "var(--apps-color)",
     track: "use",
@@ -104,8 +133,7 @@ const REALMS: Realm[] = [
   {
     slug: "plugins",
     title: "Plugins",
-    description:
-      "manifest.json bundles that extend capabilities with net-new tools, agents, workflows, and skills.",
+    description: "Add tools, agents, workflows, and skills from a manifest.",
     icon: Blocks,
     accent: "var(--plugins-color)",
     track: "use",
@@ -114,7 +142,7 @@ const REALMS: Realm[] = [
     slug: "security",
     title: "Security",
     description:
-      "Ryu's security model: trust boundary, sandboxing, command approval and HITL, credential scrubbing, outbound DLP, SSRF protection, and deployment hardening.",
+      "Configure trust boundaries, sandboxing, approvals, DLP, and hardening.",
     icon: ShieldCheck,
     accent: "var(--security-color)",
     track: "build",
@@ -122,8 +150,7 @@ const REALMS: Realm[] = [
   {
     slug: "billing",
     title: "Billing & Plans",
-    description:
-      "Plans, limits, credits, AI pools, Agent Inboxes, and the free tier baseline.",
+    description: "Plans, limits, credits, and organization access.",
     icon: CreditCard,
     accent: "var(--billing-color)",
     track: "use",
@@ -131,8 +158,7 @@ const REALMS: Realm[] = [
   {
     slug: "reference",
     title: "Reference",
-    description:
-      "The defaults Ryu ships with, the swappable building blocks (primitives), and the RyuBench benchmark.",
+    description: "Defaults, swappable building blocks, and benchmarks.",
     icon: BookOpen,
     accent: "var(--reference-color)",
     track: "build",
@@ -140,8 +166,7 @@ const REALMS: Realm[] = [
   {
     slug: "learn",
     title: "Learn",
-    description:
-      "Structured courses from first chat to certified builder, plus end-to-end recipes.",
+    description: "Courses and recipes for using and building with Ryu.",
     icon: GraduationCap,
     accent: "var(--learn-color)",
     track: "use",
@@ -149,8 +174,7 @@ const REALMS: Realm[] = [
   {
     slug: "roadmap",
     title: "Roadmap",
-    description:
-      "What is in flight but not finished: the browser extension, the hardware line, and the mobile app.",
+    description: "Planned and in-progress Ryu surfaces.",
     icon: Route,
     accent: "var(--roadmap-color)",
     track: "use",
@@ -174,6 +198,11 @@ const QUICK_LINKS: QuickLink[] = [
     label: "Architecture",
     href: docsPath("start-here", "architecture"),
   },
+  {
+    id: "showcase",
+    label: "Showcase",
+    href: docsPath("showcase"),
+  },
   { id: "cookbook", label: "Cookbook", href: docsPath("learn", "cookbook") },
   {
     id: "api",
@@ -181,7 +210,11 @@ const QUICK_LINKS: QuickLink[] = [
     href: docsPath("extend", "develop", "api-reference"),
   },
   { id: "security", label: "Security", href: docsPath("security") },
-  { id: "benchmark", label: "Benchmarks", href: docsPath("reference", "benchmark") },
+  {
+    id: "benchmark",
+    label: "Benchmarks",
+    href: docsPath("reference", "benchmark"),
+  },
 ];
 
 // The hero used to close with a strip of hardcoded document counts (API
@@ -206,36 +239,36 @@ const FEATURED: Featured[] = [
     id: "architecture",
     href: docsPath("start-here", "architecture"),
     eyebrow: "Start Here",
-    title: "The architecture, end to end",
+    title: "Architecture",
     description:
-      "How a request travels from any surface through the Gateway and Core to an engine, and back.",
+      "How a request moves through the Gateway, Core, and an engine.",
     accent: "var(--start-here-color)",
   },
   {
     id: "gateway",
     href: docsPath("gateway"),
     eyebrow: "Gateway",
-    title: "The Gateway: routing, firewall, and budgets",
+    title: "Gateway controls",
     description:
-      "Every model call passes through: routing picks the provider, the firewall blocks what shouldn't leave, budgets cap spend.",
+      "How the Gateway routes calls and applies firewall, budget, and audit controls.",
     accent: "var(--gateway-color)",
   },
   {
     id: "workflows",
     href: docsPath("core", "workflows"),
     eyebrow: "Core",
-    title: "Workflows and the DAG engine",
+    title: "Workflows",
     description:
-      "Chain agents, tools, and sub-workflows into durable runs that survive crashes and wait for human approval.",
+      "Chain agents and tools into durable runs that can wait for approval.",
     accent: "var(--core-color)",
   },
   {
     id: "cookbook",
     href: docsPath("learn", "cookbook"),
     eyebrow: "Cookbook",
-    title: "Recipes: real flows, start to finish",
+    title: "Cookbook recipes",
     description:
-      "Monitor a price and alert Slack, give a model a tool, route coding to Claude, ship an SDK agent.",
+      "Working recipes for tools, Slack, model routing, and SDK agents.",
     accent: "var(--learn-color)",
   },
 ];
@@ -295,14 +328,11 @@ export function Hero() {
   return (
     <section className="mx-auto flex w-full max-w-4xl flex-col items-center px-4 pt-16 pb-8 text-center sm:pt-24">
       <h1 className="text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
-        The universal agent interface.
+        {DOCS_HOME_COPY.title}
       </h1>
 
       <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
-        An open, composable platform for agent orchestration and knowledge
-        sharing. Build plugins that extend capabilities and apps that use
-        pre-built primitives. Ryu provides the infrastructure layer around
-        agents.
+        {DOCS_HOME_COPY.description}
       </p>
 
       <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">
@@ -359,14 +389,13 @@ const TRACKS: {
   {
     id: "use",
     title: "Use Ryu",
-    description:
-      "You want Ryu to do the work. The desktop app and its surfaces, what to ask them, and how to check what they did.",
+    description: "Use Ryu to run agents and workflows.",
   },
   {
     id: "build",
     title: "Build on Ryu",
     description:
-      "You want to run it yourself. The gateway and Core internals, how to extend it, security, and hands-on recipes.",
+      "Build on Ryu with Core, Gateway, plugins, apps, SDKs, and APIs.",
   },
 ];
 
@@ -410,8 +439,7 @@ export function Realms() {
         Documentation
       </h2>
       <p className="mt-1 text-fd-muted-foreground text-sm">
-        Choose the path that matches your goal. Both tracks contain the full
-        documentation. The difference is whether reading it needs a terminal.
+        Use these docs to run Ryu or build on its integration layer.
       </p>
       <div className="mt-8">
         {TRACKS.map((track) => (
@@ -470,7 +498,7 @@ export function FeaturedRail() {
         Featured
       </h2>
       <p className="mt-1 text-fd-muted-foreground text-sm">
-        Deep dives to get you oriented quickly.
+        Start with a working example or a system reference.
       </p>
       <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
         {FEATURED.map((item) => (

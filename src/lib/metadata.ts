@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 export const siteConfig = {
   name: "Ryu Docs",
   description:
-    "Ryu documentation for building, securing, and operating AI agents with Core, Gateway, tools, plugins, apps, and APIs.",
+    "The composable integration layer for AI. Build and run AI agents without starting from scratch. Extend capability with plugins, or turn agents into apps.",
   keywords: [
     "Ryu",
     "AI agents",

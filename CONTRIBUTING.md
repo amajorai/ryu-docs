@@ -16,6 +16,9 @@ This unit is developed in Ryu's monorepo, which is the canonical source. The pub
 generated one-way from the monorepo, so it is read-only at the file level: open issues and pull
 requests here and a maintainer will land accepted changes upstream, then sync them back out.
 
+Read [STYLE_GUIDE.md](./STYLE_GUIDE.md) before editing. It defines the page types, the audience
+split, and how to keep technical terms clear without replacing them with vague synonyms.
+
 ## This site is public — internal content does not belong here
 
 Everything under `content/` ships to the live public docs site and into `llms.txt` /
