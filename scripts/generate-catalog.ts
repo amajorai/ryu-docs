@@ -20,7 +20,11 @@ import * as path from "node:path";
  */
 const CONTENT_ROOT = path.join("content", "docs");
 const APPS_STORE = path.join("..", "..", "apps-store");
-const PLUGINS_STORE = path.join("..", "..", "plugins-store");
+const PLUGIN_STORES = [
+  path.join("..", "..", "plugins-store", "plugins"),
+  path.join("..", "..", "plugins-store", "lsp"),
+  path.join("..", "..", "plugins-store", "external_plugins"),
+];
 
 const CATEGORY_LABELS = new Map([
   ["Knowledge & Memory", "Knowledge & Memory"],
@@ -532,18 +536,20 @@ function realmIndex(title: string, description: string, groups: ReturnType<typeo
   return lines.join("\n");
 }
 
-function readManifests(storeDir: string): { dir: string; manifest: Manifest }[] {
+function readManifests(storeDirs: string | string[]): { dir: string; manifest: Manifest }[] {
   const entries: { dir: string; manifest: Manifest }[] = [];
-  for (const dir of readdirSync(storeDir, { withFileTypes: true })) {
-    if (!dir.isDirectory()) {
-      continue;
-    }
-    const manifestPath = path.join(storeDir, dir.name, "manifest.json");
-    try {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
-      entries.push({ dir: dir.name, manifest });
-    } catch {
-      // Skip directories without a parseable manifest.json.
+  for (const storeDir of Array.isArray(storeDirs) ? storeDirs : [storeDirs]) {
+    for (const dir of readdirSync(storeDir, { withFileTypes: true })) {
+      if (!dir.isDirectory()) {
+        continue;
+      }
+      const manifestPath = path.join(storeDir, dir.name, "manifest.json");
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
+        entries.push({ dir: dir.name, manifest });
+      } catch {
+        // Skip directories without a parseable manifest.json.
+      }
     }
   }
   return entries.sort((a, b) => a.dir.localeCompare(b.dir));
@@ -576,7 +582,7 @@ async function writeRealm(opts: {
 
 async function main() {
   const apps = readManifests(APPS_STORE);
-  const plugins = readManifests(PLUGINS_STORE);
+  const plugins = readManifests(PLUGIN_STORES);
 
   await writeRealm({
     outDir: path.join(CONTENT_ROOT, "apps"),

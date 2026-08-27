@@ -30,8 +30,8 @@ import { docsPath } from "@/lib/docs-version";
  * copy: a firm hires it to do work and lives in the app; a developer runs it
  * themselves and wires it into their own stack. The business site is written
  * entirely for the first reader. These docs serve BOTH, so rather than pick a
- * voice they separate by track — "use" answers "how do I get my work done with
- * this", "build" answers "how do I run and extend it".
+ * voice they separate by track. "use" answers "how do I get my work done with
+ * this", while "build" answers "how do I run and extend it".
  *
  * A realm belongs in "build" if reading it requires a terminal.
  */
@@ -60,7 +60,7 @@ const REALMS: Realm[] = [
     slug: "surfaces",
     title: "Surfaces",
     description:
-      "The desktop app, the Island overlay, Raycast, and the CLI — each a thin client over the same Core.",
+      "The desktop app, the Island overlay, Raycast, and the CLI. Each is a thin client over the same Core.",
     icon: Monitor,
     accent: "var(--surfaces-color)",
     track: "use",
@@ -96,7 +96,7 @@ const REALMS: Realm[] = [
     slug: "apps",
     title: "Apps",
     description:
-      "The apps Ryu ships in the store: each a self-contained product — a sidecar plus a surface.",
+      "The apps Ryu ships in the store are self-contained products with a sidecar and a surface.",
     icon: AppWindow,
     accent: "var(--apps-color)",
     track: "use",
@@ -300,9 +300,9 @@ export function Hero() {
 
       <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
         An open, composable platform for agent orchestration and knowledge
-        sharing. Build plugins that extend capabilities and apps that leverage
-        pre-built primitives. Ryu is not another agent — it is a whole
-        infrastructure layer.
+        sharing. Build plugins that extend capabilities and apps that use
+        pre-built primitives. Ryu provides the infrastructure layer around
+        agents.
       </p>
 
       <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">
@@ -410,8 +410,8 @@ export function Realms() {
         Documentation
       </h2>
       <p className="mt-1 text-fd-muted-foreground text-sm">
-        Split by what you came here to do. Nothing is hidden from either track —
-        the line is simply whether reading it needs a terminal.
+        Choose the path that matches your goal. Both tracks contain the full
+        documentation. The difference is whether reading it needs a terminal.
       </p>
       <div className="mt-8">
         {TRACKS.map((track) => (

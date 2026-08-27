@@ -18,6 +18,13 @@ Model tokens are metered **at cost**. Ryu applies no per-token markup. You pay w
 provider charges, and the platform's margin is taken once at deposit instead (see
 [deposit fees](/docs/billing/credits#deposit-fees)).
 
+The Gateway also supports an explicit provider-level billing policy. A provider configured with
+`[credits.provider_billing.<provider>] mode = "pass_through"` is charged from its raw upstream cost;
+providers without that entry inherit the Gateway's global `markup_bps` setting. The raw provider
+amount remains available for audit and reconciliation, while the charged amount is what budgets,
+wallet debits, and usage statements use. This billing setting is separate from
+[subscription credential passthrough](/docs/gateway/gateway-for-any-agent#subscription-preserving-passthrough-claude-code-codex).
+
 Model prices vary per model and change when providers change theirs, so they are not reproduced
 here. The model picker shows the current rate for each entry, and every charge appears on your
 usage statement with the model that produced it.
@@ -25,15 +32,25 @@ usage statement with the model that produced it.
 For models routed through Ryu's managed OpenRouter path, the picker uses OpenRouter's current
 transaction price. That price already includes an active provider promotion, so a temporary
 discount appears as a lower input or output rate and flows through to the wallet debit, usage
-statement, daily rollups, and shared-budget accounting. The price is refreshed periodically because
-OpenRouter promotions can change. OpenRouter BYOK traffic remains your provider account's spend;
-it is not converted into Ryu managed credit usage.
+statement, and shared-budget accounting after the provider billing policy is applied. Daily
+rollups retain the raw transaction price for audit and reconciliation. The price is refreshed
+periodically because OpenRouter promotions can change. OpenRouter BYOK traffic remains your
+provider account's spend; it is not converted into Ryu managed credit usage.
+If either balance is exhausted, chat identifies whether the stopped turn needs
+Ryu organization credits or OpenRouter BYOK credits and keeps that error in the
+conversation with a Retry action. See [When credits run out in
+chat](/docs/billing/credits#when-credits-run-out-in-chat).
 
 Per-agent budget caps use **USD**, represented on the wire as integer micro-USD (`1_000_000 = $1`),
 not tokens. For OpenRouter responses, the inline `usage.cost` is the source used for the immediate
 charge. OpenRouter generation metadata can be reconciled later using the stable external-user
 identity Ryu sends for the agent. A generation lookup should reconcile history, not charge the same
 request a second time.
+
+The WhatsApp channel is a delivery transport, not a model provider. A successful Meta `POST
+/messages` response currently returns message identifiers rather than a billable fee, so Ryu does
+not infer a WhatsApp/Twilio/Sent charge from that response. A future adapter may supply an explicit
+provider cost or configured rate through the Gateway billing seam.
 
 Model inference, media generation, and paid Composio actions are separate budget categories. Each
 agent can choose which categories count. Subscription ACP passthroughs and direct-egress agents do
@@ -49,6 +66,18 @@ pretending Ryu knows the operator's electricity or GPU bill.
 Billed at cost; this is the integration provider's own rate, passed through. A "tool call" is one
 executed action against a connected integration, not a step of the model's reasoning.
 
+### Treg-routed tool calls
+
+Outpost can route an operation through Ryu's managed Treg connection when Treg has the capability
+and Composio does not. Provider credentials stay in Gateway; Outpost only receives the operation
+result. Ryu debits the active organization's wallet and writes a `treg` usage statement row for
+each call.
+
+Ryu uses Treg's `X-Treg-Cost-Micro` response header when it is present. If the provider does not
+return that header, Ryu uses the selected catalog endpoint's published USD price and marks the
+ledger row as estimated. An endpoint without either price is not routed. Treg's
+`X-Treg-Call-Id` becomes the transaction reference, so retries remain idempotent.
+
 ## Image and video generation
 
 Image and video use the provider's reported `usage.cost` when it is available. If the provider does
@@ -61,9 +90,9 @@ available, Ryu uses the configured flat fallback estimate.
 
 Time spent queued before a machine picks the job up is **not** billed. Only the run itself is.
 
-This is why the same model can cost very different amounts per image: a fast 2-second render and a
-slow 30-second one are charged for what they used, not averaged. A short clip costs a fraction of
-a long one.
+The cost difference comes from the measured run time. A fast 2-second render and a slow 30-second
+render are charged for what they use rather than averaged, so a short clip costs a fraction of a
+long one.
 
 <Callout type="info">
 If a provider returns no cost or timing for a completed job, Ryu falls back to a flat per-call rate:
@@ -84,6 +113,13 @@ Speech has no per-second measurement available from the providers, so it is bill
 
 A sandbox is a real machine running your agent's code. It is metered **per second, only while it
 is running**. A stopped sandbox costs nothing.
+
+Ryu Box has two settlement paths. A Box backed by Ryu-owned capacity registers with the existing
+Gateway sandbox heartbeat and follows the rates below. A Box configured as a subscription
+passthrough uses the upstream Box subscription as its billing authority, so Core does not debit
+the same machine time from the Ryu wallet. The passthrough flag is explicit because it changes
+who owns the spend decision; it never turns a local development filesystem driver into an
+isolation boundary. See [Persistent Boxes](/docs/core/boxes#subscription-passthrough).
 
 Charges are the sum of every resource the sandbox holds, per second:
 
@@ -117,11 +153,16 @@ looping agent cannot drain the wallet, and stop sandboxes you are not using.
 ## Managed cloud nodes
 
 A managed node is a monthly subscription rather than metered usage, so it does not draw on
-credits at all. For Teams includes one managed node; larger or dedicated instances are priced through
-month from the live catalog when you pick one.
+credits at all. Teams starts with one included managed node and adds a second at 50 billed seats;
+larger or dedicated instances are priced by the month from the live catalog when you pick one.
 
-The hosted-node picker starts with three workload presets — Starter, Balanced, and Power — so
-most buyers can choose by the amount of headroom they need. Open **Advanced selection** to browse
+An organization's node capacity is additive: plan-included nodes plus each active cloud-instance
+subscription. A node transfer carries its own subscription entitlement and takes the lowest free
+destination slot. If that slot was consumed before payment completes, Ryu refuses the handover
+rather than orphaning either managed node.
+
+The hosted-node picker starts with three workload presets: Starter, Balanced, and Power. Choose a
+preset by the headroom you need, or open **Advanced selection** to browse
 every available instance with its exact CPU, RAM, SSD, price, and regional availability.
 
 ## What is never billed

@@ -1,18 +1,11 @@
 "use client";
 
-import { SidebarTabsDropdown } from "fumadocs-ui/components/sidebar/tabs/dropdown";
 import { DocsLayout } from "fumadocs-ui/layouts/docs";
-import type { LayoutTab } from "fumadocs-ui/layouts/shared";
 import { usePathname } from "next/navigation";
 import type { ComponentProps, ReactNode } from "react";
 
 import { realmTabTitle } from "@/components/realm-alpha-badge";
-import {
-  DOCS_VERSION,
-  DOCS_VERSIONS,
-  docsPathForVersion,
-  docsSegmentsFromPathname,
-} from "@/lib/docs-version";
+import { docsSegmentsFromPathname } from "@/lib/docs-version";
 
 /*
  * Per-root theming, matching the official Fumadocs docs site.
@@ -36,38 +29,6 @@ type DocsLayoutClientProps = ComponentProps<typeof DocsLayout> & {
   children: ReactNode;
 };
 
-function DocsVersionSwitcher() {
-  const pathname = usePathname();
-  const segments = docsSegmentsFromPathname(pathname);
-  const targetSegments = segments.length > 0 ? segments : ["start-here"];
-  const legacyPath = segments.length ? `/docs/${segments.join("/")}` : "/docs";
-
-  const options = DOCS_VERSIONS.map((version) => {
-    // Keep the version switcher backed by the one current deployment. The
-    // optional external URL remains supported by the type for compatibility with
-    // older callers, but latest-only mode does not populate it.
-    const url = version.externalUrl
-      ? `${version.externalUrl}${docsPathForVersion(version.slug, ...targetSegments)}`
-      : docsPathForVersion(version.slug, ...targetSegments);
-    const urls =
-      version.slug === DOCS_VERSION ? new Set([url, legacyPath]) : undefined;
-
-    return {
-      title: version.title,
-      url,
-      urls,
-    };
-  }) satisfies LayoutTab[];
-
-  return (
-    <SidebarTabsDropdown
-      aria-label="Documentation version"
-      options={options}
-      placeholder={<span>Docs version</span>}
-    />
-  );
-}
-
 export function DocsLayoutClient({
   children,
   ...props
@@ -82,15 +43,6 @@ export function DocsLayoutClient({
     <div data-docs-root={activeRoot} style={{ display: "contents" }}>
       <DocsLayout
         {...props}
-        nav={{
-          ...props.nav,
-          children: (
-            <>
-              {props.nav?.children}
-              <DocsVersionSwitcher />
-            </>
-          ),
-        }}
         tabs={{
           transform(option, node) {
             const segment = rootSegment(option.url);

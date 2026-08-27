@@ -1,8 +1,11 @@
 import { notFound } from "next/navigation";
 
-import { generateDocsParams, getLLMText, getPage } from "@/lib/source";
+import { getLLMText, getPage } from "@/lib/source";
 
 export const revalidate = false;
+
+// Keep the Markdown projection on demand instead of compiling the full docs
+// corpus a second time during every production build.
 
 export async function GET(
   _req: Request,
@@ -17,8 +20,4 @@ export async function GET(
       "Content-Type": "text/markdown",
     },
   });
-}
-
-export function generateStaticParams() {
-  return generateDocsParams();
 }

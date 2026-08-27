@@ -3,7 +3,7 @@ import Link from "next/link";
 import { docsPath } from "@/lib/docs-version";
 
 /**
- * What Ryu runs, connects to, and runs on — plus what of it is open.
+ * What Ryu runs, connects to, and runs on, plus what of it is open.
  *
  * This content used to sit on the marketing landing page. It moved here rather
  * than being dropped, because it is Motion A material: model counts, MCP, agent
@@ -12,7 +12,7 @@ import { docsPath } from "@/lib/docs-version";
  * who has no use for any of it.
  *
  * Ported natively rather than imported. `apps/fumadocs` deliberately carries no
- * `@ryu/*` dependency — even the logo is re-implemented locally — so these are
+ * `@ryu/*` dependency. Even the logo is re-implemented locally, so these are
  * plain fumadocs components on `fd-*` tokens, and the logo SVGs are vendored
  * into this app's own `public/logos`.
  */
@@ -60,7 +60,7 @@ const OPEN_UNITS: { license: string; name: string }[] = [
 ];
 
 const OPEN_POINTS = [
-	"Core and Gateway are self-hostable — read, fork and deploy them yourself",
+	"Core and Gateway are self-hostable. Read, fork, and deploy them yourself.",
 	"Point any OpenAI-compatible client at your own gateway, no Ryu Cloud required",
 	"Inspect routing, firewall rules, budgets and tool allowlists in code",
 	"Bring your own agent, key and subscription; swap models through one config",
@@ -155,7 +155,7 @@ export function Reach() {
 export function WorksWith() {
 	return (
 		<SectionShell
-			description="Ryu is the runtime around the agents you already run, not a replacement for them."
+			description="Ryu runs alongside the agents you already use."
 			id="agents"
 			title="Agents it runs"
 		>

@@ -5,6 +5,9 @@ import { getLLMText, source } from "@/lib/source";
 
 export const revalidate = false;
 
+// Section projections can contain most of the docs corpus; generate them only
+// when requested so a cold deployment remains bounded.
+
 // Section slugs accepted by /llms-sections/{section}. Values are the URL prefix
 // that section owns (relative to /docs/{version}/). Legacy slugs from the
 // pre-reorg layout map onto the realm they now live in, so old clients that
@@ -79,8 +82,4 @@ Each page below starts with a Source/Title header followed by its full Markdown 
       "Cache-Control": "public, max-age=86400",
     },
   });
-}
-
-export function generateStaticParams() {
-  return Object.keys(VALID_SECTIONS).map((section) => ({ section }));
 }

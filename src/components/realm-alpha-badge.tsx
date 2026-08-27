@@ -10,7 +10,7 @@ export function AlphaBadge(): ReactNode {
   return (
     <span
       className="inline-flex shrink-0 items-center rounded-full bg-violet-500/15 px-1.5 py-0.5 font-medium text-[0.625rem] uppercase tracking-wide text-violet-700 ring-1 ring-violet-500/30 ring-inset dark:text-violet-300"
-      title="Early preview — APIs and UX may change"
+      title="Early preview. APIs and UX may change"
     >
       Alpha
     </span>

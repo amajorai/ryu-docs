@@ -19,7 +19,7 @@ for the credential boundaries.
 | Key | Grants |
 |---|---|
 | `gateway.view` | Read gateway config and status |
-| `gateway.configure` | Edit gateway config (firewall, budgets, auth, routing) |
+| `gateway.configure` | Edit gateway config and bind a self-hosted node to an organization |
 | `workflow.view` | List and read workflows |
 | `workflow.run` | Execute a workflow |
 | `workflow.edit` | Create or edit a workflow |
@@ -60,6 +60,27 @@ Four built-in roles map from a caller's Better Auth org role (`permissions_for_r
 
 A member's **effective** permissions are the built-in set of their role UNION every permission granted by a custom role assigned to them in the org. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
 
+### Self-hosted node binding
+
+Binding a self-hosted node to an organization requires the caller's current
+`gateway.configure` permission. Owners and admins receive it through their
+built-in role. A custom organization role can grant it to another member.
+Team-scoped grants authorize only enrollment for the matching team; they do not
+widen to organization, personal, or another team's nodes.
+
+Desktop and the web Fleet page use the same effective-permission result to show
+or disable the action, but the organization service remains authoritative. It
+checks the permission when it issues the ten-minute enrollment code and again
+on first redemption. Losing membership, removing the custom role, or revoking
+the grant therefore stops a code from creating a binding even if an older page
+still has its form open.
+
+The code owns the organization scope. A node cannot submit an organization ID,
+plan, tier, wallet, or owner override. Once activated, the enrolled relay
+credential resolves the organization's live subscription and policy for each
+managed inference connection. Rebinding to another organization requires an
+explicit revoke-and-rebind flow.
+
 By default, only organization owners and admins can delete agents or Spaces. A custom role may grant
 the corresponding delete permission explicitly, but Core still checks that effective permission on
 the server. The desktop surfaces the same boundary and requires a deliberate slide confirmation for
@@ -72,7 +93,15 @@ Only `channel.delete` removes a shared channel record.
 
 ## How Core gates a request
 
-Every request may carry a signed user identity in the `x-ryu-user-jwt` header (`USER_JWT_HEADER`, `apps/core/src/server/mod.rs`). Middleware verifies it offline (EdDSA against the control plane's JWKS) and attaches an optional `VerifiedCaller`. A handler then calls `enforce_permission(state, caller, perm)`.
+An already authenticated node request may also carry a signed user identity. Middleware verifies it
+offline with the control plane's signing keys and attaches an optional verified caller. The identity
+token is context, not node admission: an account JWT by itself never replaces an owner, paired, or
+delegated Core credential. A handler then intersects the caller's node capability with
+`enforce_permission(state, caller, perm)`.
+
+Hosted MCP delegations carry the verified subject, organization, team, exact node, exact agent,
+scopes, audience, issuer, unique ID, and a short expiry in one signed envelope. Core verifies all of
+those fields locally. A destination path cannot select a different agent than the signed binding.
 
 Enforcement branches on whether **this node** is bound to an org (`registered_org()`), because per-user RBAC only makes sense on a shared node and the single-user local flow must never be degraded.
 
@@ -133,6 +162,17 @@ edited with `GET`/`PUT /api/acl/resources/node/:nodeId`; editing requires `roles
 personal-node owner and an organization owner/admin receiving implicit management authority. A
 denied lifecycle request returns a structured `403` with `required_permission` and `node_scope`,
 before filesystem or package state changes.
+
+### App-owned sidecar routes
+
+Apps can publish a separate `permission_levels` vocabulary for their own proxied sidecar routes.
+Core validates that every protected non-health route is annotated, matches the incoming HTTP method,
+and checks the caller's effective app level before waking the sidecar or buffering the request body.
+When one path serves both reads and writes, the manifest declares separate method rows (for example,
+`GET /drafts` with `drafts.view` and `POST /drafts` with `drafts.edit`). Missing levels and method
+overlaps are rejected at manifest load; an org-bound caller without the required level receives
+`403`. These app levels govern access to the app surface, not the OS capabilities of its sidecar
+process; native sidecars remain publisher-trust boundaries as described in [Plugin isolation](/docs/security/plugin-isolation).
 
 ## Custom-role resolution and caching
 

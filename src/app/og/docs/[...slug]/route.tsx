@@ -2,9 +2,12 @@ import { ImageResponse } from "@takumi-rs/image-response";
 import { generate as DefaultImage } from "fumadocs-ui/og/takumi";
 import { notFound } from "next/navigation";
 
-import { getPage, getPageImage, source } from "@/lib/source";
+import { getPage } from "@/lib/source";
 
 export const revalidate = false;
+
+// OG images are cheap to generate on demand; pre-rendering one for every doc
+// page needlessly triples the cold production build.
 
 export async function GET(
   _req: Request,
@@ -26,11 +29,4 @@ export async function GET(
       format: "webp",
     },
   );
-}
-
-export function generateStaticParams() {
-  return source.getPages().map((page) => ({
-    lang: page.locale,
-    slug: getPageImage(page).segments,
-  }));
 }

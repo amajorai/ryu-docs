@@ -6,16 +6,18 @@ tags: ["Browsers"]
 
 ## What it does
 
-Ryu Browser is a local Chromium session that both the user and the agent can
-see. The desktop Browser panel follows a real embedded tab, while the
-browser.control capability gives the agent structured access to that same
-session: tabs, screenshots, accessibility snapshots, DOM context, visual
-annotations, and computer-use input.
+Ryu Browser is a real Chromium sidecar. On an ordinary local node, the desktop
+Browser panel and the agent can use the same embedded session: tabs, screenshots,
+accessibility snapshots, DOM context, visual annotations, and computer-use input
+all refer to the same tab id.
 
-The important boundary is shared state: an agent reading browser.context sees
-the embedded tab the user is looking at, not a separate external browser. A
-snapshot, annotation, click, key press, or navigation is applied to the same
-tab id shown in the Browser panel.
+On a managed cloud node with the managed computer enabled, all Bots use one
+persistent managed Chromium context for shared cookies, logins, downloads, and
+history. Each Bot still gets its own hidden browser window and tab manager, and
+the Browser panel follows the selected Bot's tab lane, so concurrent Bots do not
+navigate one another's active tab. The human's normal browser window remains a
+separate session. This is an execution boundary, not a replacement for tenant
+isolation.
 
 ### Alternative provider: Ego Browser
 
@@ -51,8 +53,9 @@ cookies into the hosted session.
 
 A real-Chromium browser (Electron) Ryu runs as a local sidecar and exposes the
 grant-gated browser.control capability. Core spawns the sidecar lazily and
-idle-stops it; the desktop Browser panel and agents reach it through the same
-ext-proxy.
+idle-stops it. For managed cloud Bots, Core supplies the Bot identity to the
+sidecar, which selects the corresponding hidden tab lane inside the shared
+managed-Bot browser context and denies unconfigured browser permission prompts.
 
 ### Browser shell
 
@@ -72,7 +75,7 @@ protected control surface even when a session token is available.
 Passwords and autofill remain a deliberate privacy boundary: the browser can
 open the credential-manager surface and import cookies from a user-selected
 export, but raw saved passwords are not returned to Core or agents. Full CDP is
-off by default; enabling it is marked elevated risk in Developer mode and takes
+off by default; enabling it is marked high risk in Developer mode and takes
 effect after the browser restarts.
 
 ## Embedded browser context and annotations
@@ -84,7 +87,8 @@ browser.context returns a live context bundle for a tab:
 - page URL and title;
 - viewport size and scroll position;
 - a fresh accessibility snapshot with stable refs;
-- the tab's saved annotations; and
+- the tab's saved annotations;
+- the bounded list of WebMCP tools declared by the active page; and
 - an optional PNG screenshot.
 
 Pass CSS-pixel selections to resolve what the user pointed at. Each selected
@@ -93,6 +97,32 @@ CSS selector, XPath, bounding rectangle, safe computed styles, React component
 hint, and the matching accessibility ref. This makes a visual request
 actionable without exposing arbitrary JavaScript evaluation to the canonical
 agent surface.
+
+### WebMCP page tools
+
+The Browser sidecar installs WebMCP at document start. It preserves native
+`document.modelContext` when the Chromium engine provides it and supplies the
+current imperative API plus the deprecated `navigator.modelContext` alias on
+older engines. Declarative forms using `toolname` and `tooldescription` are also
+recognized; their fields become a JSON input schema and `toolautosubmit` forms
+receive the agent-aware submit event.
+
+The page callbacks stay inside the page's JavaScript realm. The sidecar observes
+the selected tab's top-level document; cross-origin iframe tools remain outside
+this browser-context surface. Use
+`chromium.list_webmcp_tools` to discover the current tab's bounded metadata, then
+`chromium.execute_webmcp_tool` with the exact `tool_name` and a JSON object in
+`arguments`. The response includes the page origin and the tool's
+`untrustedContentHint`; Ryu always marks returned web content as untrusted.
+WebMCP execution is protected by `browser:control`, can change the visible page
+or cause an external effect, and should follow the same user-confirmation rules
+as an ordinary browser click or form submission. It does not expose arbitrary
+JavaScript evaluation.
+
+WebMCP is still an evolving W3C Community Group draft. Ryu follows the current
+[`document.modelContext` API](https://developer.chrome.com/docs/ai/webmcp/imperative-api)
+and its [draft specification](https://webmachinelearning.github.io/webmcp/), so
+page tool contracts may evolve with the platform.
 
 ### Annotation mode
 
@@ -141,7 +171,7 @@ Backend: HTTP · Method: GET
 _No parameters_ (empty schema).
 ### `chromium.open_tab` - Open Browser Tab
 
-Open a NEW tab in the local Chromium browser at `url` and return `&#123;tab:&#123;id,url,title&#125;&#125;`. Use the returned `id` with the other browser tools. To move an EXISTING tab, use chromium.navigate_tab instead.
+Open a new tab in the local Chromium browser at `url` and return `&#123;tab:&#123;id,url,title&#125;&#125;`. Use the returned `id` with the other browser tools. To move an existing tab, use `chromium.navigate_tab` instead.
 
 Backend: HTTP · Method: POST
 
@@ -161,7 +191,7 @@ Backend: HTTP · Method: GET
 
 ### `chromium.navigate_tab` - Navigate Browser Tab
 
-Navigate an EXISTING tab to `url` and return `&#123;tab:&#123;id,url,title&#125;&#125;`. Requires a tab id from chromium.list_tabs or chromium.open_tab; 404s once the tab has been closed.
+Navigate an existing tab to `url` and return `&#123;tab:&#123;id,url,title&#125;&#125;`. Requires a tab id from `chromium.list_tabs` or `chromium.open_tab`; returns 404 once the tab has been closed.
 
 Backend: HTTP · Method: POST
 
@@ -213,7 +243,7 @@ Backend: HTTP · Method: POST
 
 ### `chromium.type` - Type Into Browser Element
 
-Focus the element a chromium.snapshot_tab `ref` names and insert `text` at its caret, optionally pressing Enter. Text is APPENDED by default - set `replace` to overwrite a field that already has a value. A `ref` that is focusable but cannot accept text (a link, a read-only or disabled input, a checkbox) is a 400 rather than a silent no-op. Returns `&#123;ok,tab&#125;`.
+Focus the element named by a `chromium.snapshot_tab` `ref` and insert `text` at its caret, optionally pressing Enter. Text is appended by default; set `replace` to overwrite a field that already has a value. A focusable `ref` that cannot accept text, such as a link, read-only or disabled input, or checkbox, returns 400 instead of silently doing nothing. Returns `&#123;ok,tab&#125;`.
 
 Backend: HTTP · Method: POST
 
@@ -263,6 +293,36 @@ Backend: HTTP · Method: POST
 | `id` | string | yes | Tab id. |
 | `selections` | array of rectangles | no | Up to eight `{x,y,width,height}` CSS-pixel selections. A zero-size rectangle resolves the element at a point. |
 | `include_screenshot` | boolean | no | Include a PNG screenshot; defaults to true. |
+
+### `chromium.list_webmcp_tools` - List WebMCP Tools
+
+List the structured tools currently registered by the page in one browser tab.
+Each item includes `name`, `title`, `description`, the JSON `input_schema`, the
+registering `origin`, and `annotations` containing `readOnlyHint` and
+`untrustedContentHint`. The list is bounded and excludes page callbacks and
+`Window` objects.
+
+Backend: HTTP · Method: GET
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Tab id. |
+
+### `chromium.execute_webmcp_tool` - Execute WebMCP Tool
+
+Execute one tool registered by the page in the selected tab. Call the list tool
+first and use its exact name and input schema. The result is returned with the
+tool name, page origin, and an `untrusted_content` flag. Because the result
+originates in web content, Ryu always marks it as untrusted and also returns the
+raw page-provided `untrustedContentHint` as `untrusted_content_hint`.
+
+Backend: HTTP · Method: POST
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Tab id. |
+| `tool_name` | string | yes | Exact WebMCP tool name from `chromium.list_webmcp_tools`. |
+| `arguments` | object | no | JSON object matching the tool's `input_schema`. |
 
 ### `chromium.annotate` - Annotate Browser Tab
 
@@ -343,8 +403,8 @@ canvas controls, drawing surfaces, and area-selection interactions.
 
 | Level | Description | Implies |
 |---|---|---|
-| **Can view** | Read the browser's open tabs, titles, screenshots, accessibility snapshots, DOM context, and saved annotations. |  |
-| **Can control** | Open, navigate, and close tabs; create or clear annotations; and drive pages with element or coordinate mouse and keyboard input, using whatever the browser is already signed in to. | `browser.view` |
+| **Can view** | Read the browser's open tabs, titles, screenshots, accessibility snapshots, DOM context, saved annotations, and page-declared WebMCP tool metadata. |  |
+| **Can control** | Open, navigate, and close tabs; create or clear annotations; drive pages with element or coordinate mouse and keyboard input; and execute page-declared WebMCP tools, using whatever the browser is already signed in to. | `browser.view` |
 
 ## UI it contributes
 
@@ -365,6 +425,8 @@ screenshots.
 Requires Ryu >=0.1.0.
 
 ## Browser extension runtime
+
+For the surface-level guide, see [Browser extension](/docs/surfaces/browser-extension).
 
 The browser extension reuses the desktop application interfaces for its main dashboard and chat, while keeping browser-owned surfaces such as New Tab, Ask Ryu, page saving, screenshots, downloads, and the in-page copilot.
 

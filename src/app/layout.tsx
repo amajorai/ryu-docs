@@ -1,9 +1,11 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
+import { RyuAssistantWidget } from "@ryu/assistant-widget";
 
 import "./global.css";
 import { Geist, Inter } from "next/font/google";
 
 import { generateMetadata } from "@/lib/metadata";
+import { HorizontalWheelScroll } from "./horizontal-wheel-scroll";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -34,7 +36,11 @@ export default function Layout({ children }: LayoutProps<"/">) {
         />
       </head>
       <body className="flex flex-col min-h-screen">
-        <RootProvider>{children}</RootProvider>
+        <RootProvider>
+          <HorizontalWheelScroll />
+          {children}
+          <RyuAssistantWidget />
+        </RootProvider>
       </body>
     </html>
   );

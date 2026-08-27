@@ -1,0 +1,121 @@
+---
+title: "A2A Integration"
+description: "Connect Ryu to remote agents, or publish selected Ryu agents, with authenticated A2A v1 JSON-RPC and HTTP+JSON."
+tags: ["a2a", "agent", "json-rpc", "sse", "interoperability"]
+---
+
+Ryu can be both sides of an [Agent2Agent Protocol](https://a2a-protocol.org/latest/specification)
+connection:
+
+- **Client:** discover a remote Agent Card, trust the peer, and use it as a Ryu agent.
+- **Server:** publish selected local agents and accept authenticated tasks from another A2A host.
+
+Ryu implements the A2A v1 JSON-RPC and HTTP+JSON bindings, including streaming,
+task lookup and listing, cancellation, subscription, push-notification configuration,
+and authenticated extended Agent Cards.
+
+## A2A, ACP, and MCP
+
+| Protocol | Connects | Best for |
+|---|---|---|
+| **A2A** | One independent agent host to another over HTTPS | Delegating tasks to a remote agent, streaming its reply, and tracking durable task state |
+| **ACP** | Ryu to a local agent subprocess | Running an installed coding or general-purpose agent on the same machine |
+| **MCP** | An agent or application to tools and resources | Giving an agent governed capabilities; MCP does not make the tool server a peer agent |
+
+Use A2A when both sides own an agent lifecycle. Use MCP when the remote system exposes
+capabilities rather than an autonomous agent. Use ACP for a local executable that Ryu starts and
+controls.
+
+## Publish Ryu agents
+
+Open **Settings → Agent networking**.
+
+1. Add one or more agents under **Published agents**. Only these agents appear in the Agent Card
+   and can receive inbound work.
+2. Set a public HTTPS base URL. It must route the well-known Agent Card and `/a2a` paths to Core.
+3. Issue a token under **Inbound peer access**. Give each peer a separate token and only the scopes
+   it needs.
+4. Enable **Accept inbound A2A tasks**.
+
+The public Agent Card is available at:
+
+```text
+https://agent.example.com/.well-known/agent-card.json
+```
+
+The card advertises both `JSONRPC` and `HTTP+JSON` interfaces. If more than one local agent is
+published, callers select one by adding `metadata.ryuAgentId` to `SendMessage` or
+`SendStreamingMessage`.
+
+### Inbound authentication
+
+Send the issued token as an HTTP bearer:
+
+```http
+Authorization: Bearer ryu_a2a_...
+A2A-Version: 1.0
+Content-Type: application/a2a+json
+```
+
+Tokens are shown once. Ryu stores only a one-way hash, so a lost token must be revoked and
+reissued. Available scopes are `send`, `read`, `cancel`, `subscribe`, `push_config`, and
+`extended_card`.
+
+## Connect a remote peer
+
+Under **Peer agents**, enter the peer's base URL or full Agent Card URL and any credential it
+requires. Ryu supports bearer tokens, named API-key headers, Basic authentication, and OAuth 2
+client credentials. Discovery validates the v1 card but leaves the peer in `pending` state.
+
+Review the name, URL, interfaces, and skills before selecting **Trust**. Ryu will not send a task
+to a pending or revoked peer. Once trusted, add the peer to the agent roster; chats, teams, and
+delegation use the normal Ryu routing path while the remote exchange remains a durable A2A task.
+
+Credentials are write-only. The settings API reports whether a credential exists and which kind
+it is, but never returns the secret.
+
+## Protocol surface
+
+The HTTP+JSON interface is rooted at `/a2a`:
+
+| Operation | Method and path |
+|---|---|
+| Send message | `POST /a2a/message:send` |
+| Stream message | `POST /a2a/message:stream` |
+| Get or list tasks | `GET /a2a/tasks/{id}`, `GET /a2a/tasks` |
+| Cancel or subscribe | `POST /a2a/tasks/{id}:cancel`, `POST /a2a/tasks/{id}:subscribe` |
+| Push configurations | `/a2a/tasks/{id}/pushNotificationConfigs` |
+| Extended Agent Card | `GET /a2a/extendedAgentCard` |
+
+The JSON-RPC interface is `POST /a2a` and supports the corresponding A2A v1 method names.
+Streaming responses use server-sent events. Task state, messages, artifacts, and replay events are
+persisted, so task inspection survives a Core restart.
+
+## Push notifications
+
+An inbound caller can attach a push configuration to a message or manage it through the task push
+configuration operations. Ryu sends the A2A `StreamResponse` payload to the configured HTTPS
+callback, applies the declared HTTP authorization scheme, and includes an opaque notification
+token in `X-A2A-Notification-Token` when one was supplied.
+
+Callback credentials are encrypted at rest and omitted from reads. Deliveries use bounded retries;
+receivers should process duplicate notifications idempotently.
+
+## Security model
+
+- Inbound A2A is disabled until explicitly enabled.
+- Published-agent selection and per-token scopes limit what a peer can reach.
+- Peer cards are untrusted until explicitly approved.
+- Internet endpoints and push callbacks must use HTTPS. Private, loopback, link-local, metadata,
+  and other special-address destinations are rejected for normal outbound traffic.
+- DNS answers are validated and pinned for each request. Redirects are revalidated and cannot cross
+  origins.
+- Remote message content is framed as untrusted data before it reaches a local agent. URL parts are
+  not fetched automatically, and remote text cannot invoke Ryu operator commands.
+- Payload, stream-event, redirect, hop, callback, rate, and concurrency limits are enforced at the
+  protocol boundaries.
+- Task reads and mutations are isolated to the authenticated caller. The local settings view uses a
+  separate protected management surface to show both inbound and outbound tasks.
+
+Ryu does not currently advertise the optional gRPC or SLIMRPC bindings. A peer must offer A2A v1
+JSON-RPC or HTTP+JSON over HTTP(S).

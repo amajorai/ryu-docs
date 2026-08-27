@@ -1,0 +1,151 @@
+---
+title: "Persistent Boxes"
+description: "Durable, tenant-scoped workspaces with a full Box-compatible subscription passthrough"
+---
+
+<Callout type="info">
+  Ryu Box has two deliberate modes. Local mode runs the development Docker or filesystem driver.
+  Subscription passthrough mode forwards the documented Box Public API v1 to an upstream Box
+  subscription while keeping the upstream credential server-side.
+</Callout>
+
+## What a Box is
+
+A Box is a persistent Linux workspace for agent work, previews, and long-running development
+tasks. Its filesystem survives commands, stop/resume cycles, and forks. The Box API owns the
+provider resource contract. A driver or upstream subscription owns the actual machine.
+
+The public reference product documents lifecycle, prompts, events, commands, files, artifacts,
+desktop streaming, interrupts, SSH access, snapshots, deletion operations, account and limits,
+environments, repositories, secrets, and webhooks. In subscription passthrough mode Ryu forwards
+the complete API-key-automatable `/v1` surface, including opaque file, artifact, snapshot-download, and token-bearing
+desktop responses. See the upstream [Box Public API v1](https://docs.ascii.dev/box/api/v1).
+
+## Modes
+
+| Mode | Provider | API coverage | Billing |
+| --- | --- | --- | --- |
+| `local` | Docker or explicitly unsafe development filesystem | Ryu's lifecycle, command, event, prompt queue, fork, stop/resume, delete, and TTL subset | Uses Ryu's normal sandbox metering when Core registers the run |
+| `subscription_passthrough` | Configured upstream Box subscription | Complete upstream `/v1` API, forwarded without a local resource model | Set `RYU_SANDBOX_BOX_SUBSCRIPTION_PASSTHROUGH=true` for Core; Ryu does not debit the same machine time again |
+
+The local mode health response reports its smaller feature list. It does not claim to provide
+upstream account, environment, file, desktop, SSH, or webhook semantics. The subscription mode
+is the parity path because it preserves upstream HTTP status, response envelopes, binary bodies,
+safe response headers, and newly added upstream routes without requiring a second implementation.
+
+## Subscription passthrough
+
+Run the Box service in front of the upstream API:
+
+```sh
+RYU_BOX_API_TOKEN=ryu-box-client-secret \
+RYU_BOX_UPSTREAM_URL=https://ascii.dev/api/box/v1 \
+RYU_BOX_UPSTREAM_API_KEY=ascii-subscription-key \
+bun run apps/box/src/index.ts
+```
+
+For more than one Ryu tenant, use one upstream subscription key per tenant:
+
+```sh
+RYU_BOX_API_TOKENS='{"acme":"ryu-acme-secret","beta":"ryu-beta-secret"}' \
+RYU_BOX_UPSTREAM_URL=https://ascii.dev/api/box/v1 \
+RYU_BOX_UPSTREAM_API_KEYS='{"acme":"ascii-acme-key","beta":"ascii-beta-key"}' \
+bun run apps/box/src/index.ts
+```
+
+The incoming Ryu bearer authenticates the tenant. The service replaces it with the tenant's
+upstream subscription bearer. Cookies, incoming credentials, host headers, and request bodies are
+not written to SQLite or logs. File and artifact request/response bodies remain streaming/opaque,
+with a bounded declared request size for the proxy. A shared upstream account must not be presented
+as several unrelated tenants because account-wide routes such as `/me`, `/limits`, `/repos`,
+`/secrets`, and API-key management would otherwise cross the tenant boundary. When more than one
+upstream tenant key is configured, Ryu verifies each binding through the upstream `/me` identity and
+rejects keys that resolve to the same account.
+
+The service forwards `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` requests under `/v1` for the
+API-key-automatable Box contract. Interactive-only operations, such as changing data-retention
+policy from a browser session, keep the upstream provider's refusal when called with an API key;
+Ryu does not impersonate a browser session. It preserves the `Idempotency-Key` used by Box create
+and fork operations and the delete confirmation header.
+The upstream API remains authoritative for creation, readiness, billing, snapshots, deletion
+operations, and account limits.
+
+## Ryu Core integration
+
+Core stays provider-neutral. It uses the generic persistent workspace contract and the Box-compatible
+HTTP API:
+
+```text
+Core persistent session
+        │  RYU_SANDBOX_BOX_URL + scoped RYU_SANDBOX_BOX_TOKEN
+        ▼
+Ryu Box API or upstream Box Public API v1
+        │
+        ▼
+create → poll until ready → command → destroy
+```
+
+Configure the direct Box-compatible endpoint with:
+
+```sh
+RYU_PERSISTENT_SANDBOX_BACKEND=box
+RYU_SANDBOX_BOX_URL=http://127.0.0.1:8090/v1
+RYU_SANDBOX_BOX_TOKEN=ryu-box-client-secret
+```
+
+When the token represents an upstream subscription rather than Ryu-owned metered capacity, also
+set:
+
+```sh
+RYU_SANDBOX_BOX_SUBSCRIPTION_PASSTHROUGH=true
+```
+
+That flag is only honored when the configured Ryu Box endpoint's `/health` response confirms
+`mode: "subscription_passthrough"`. A local Box service or a direct upstream endpoint fails closed
+to normal Ryu metering. The flag does not remove the upstream provider's own subscription limits or
+stop timer. Leave it off when Ryu owns the Box capacity and should enforce Ryu budgets through
+Gateway.
+
+Core sends `type`, `ttlSeconds`, `noEnv`, and `timeoutSeconds` using the public contract. It polls
+asynchronous upstream creation before the first command and sends the exact Box id as the delete
+confirmation. It does not import Box account, repository, secret, webhook, or desktop types.
+
+## Local driver lifecycle
+
+The local service keeps a smaller, provider-neutral lifecycle:
+
+| State | Meaning |
+| --- | --- |
+| `provisioning` | The driver is creating the workspace. |
+| `ready` | Commands, prompts, and interactive work may start. |
+| `running` | A command is using the Box. One command is admitted per Box. |
+| `stopped` | The driver stopped the workspace while its disk remains. |
+| `error` | Provisioning or execution failed and needs recovery. |
+| `deleted` | The driver resource was destroyed; the audit row remains. |
+
+Local create and fork requests require an `Idempotency-Key`. TTL deadlines are measured from
+creation, are restored after a service restart, and destroy the local resource at expiry. Commands
+use an argv array internally, keep `cwd` inside the workspace, and bound combined stdout/stderr
+to 1 MiB.
+
+The filesystem driver runs host processes and is disabled unless
+`RYU_BOX_ALLOW_UNSAFE_LOCAL=true`. It is for development and contract tests only. Use Docker or
+the upstream subscription path for untrusted agent work.
+
+## Security and ownership
+
+- Keep the Box service behind TLS and a Ryu-authenticated network boundary.
+- Use one Ryu bearer and one upstream subscription binding per tenant.
+- Default network access to off and allowlist local Docker images.
+- Treat desktop, VNC, SSH, artifact, and snapshot URLs as secrets. Do not log or persist them.
+- Keep model and provider credentials in the worker's secret mechanism. Do not put long-lived
+  credentials in prompt or command bodies.
+- Stop or delete Boxes according to the retention policy. Stopping is not permanent deletion in
+  upstream Box.
+
+<Cards>
+  <DocCard href="/docs/core/sandbox" />
+  <DocCard href="/docs/billing/metering" />
+  <DocCard href="/docs/security/sandboxing-isolation" />
+  <DocCard href="/docs/security/credential-scrubbing" />
+</Cards>

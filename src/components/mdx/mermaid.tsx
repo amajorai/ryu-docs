@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { installMermaidWheelZoom } from "./mermaid-wheel";
 
 /**
  * Renders a Mermaid diagram. Used both directly as `<Mermaid chart="..." />`
@@ -208,6 +209,24 @@ function MermaidDialog({
     setMeasured(true);
   }, [computeFit]);
 
+  useEffect(() => {
+    const body = document.body;
+    const overflow = body.style.overflow;
+    const padding = body.style.paddingRight;
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    const base = Number.parseFloat(getComputedStyle(body).paddingRight) || 0;
+
+    body.style.overflow = "hidden";
+    if (gap > 0) {
+      body.style.paddingRight = `${base + gap}px`;
+    }
+
+    return () => {
+      body.style.overflow = overflow;
+      body.style.paddingRight = padding;
+    };
+  }, []);
+
   // Keep the Fit target current on resize, but never override the zoom the
   // reader has chosen since opening.
   useEffect(() => {
@@ -223,14 +242,16 @@ function MermaidDialog({
 
   const zoomMin = Math.min(ZOOM_MIN, fitScaleRef.current);
 
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      setScale((prev) => Math.min(ZOOM_MAX, Math.max(zoomMin, prev * delta)));
-    },
-    [zoomMin],
-  );
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    return installMermaidWheelZoom(viewport, (factor) => {
+      setScale((prev) => Math.min(ZOOM_MAX, Math.max(zoomMin, prev * factor)));
+    });
+  }, [zoomMin]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -341,7 +362,6 @@ function MermaidDialog({
         {/* Viewport */}
         <div
           className="flex-1 overflow-hidden"
-          onWheel={handleWheel}
           ref={viewportRef}
         >
           <div

@@ -1,6 +1,6 @@
 ---
 title: "Auto-update"
-description: "One Core-computed update verdict, a shared toggle, and a native install mechanism per surface."
+description: "One Core-computed update verdict with native download and install behavior for each surface."
 ---
 
 Ryu keeps the update decision understandable across every surface (desktop, web app, CLI, gateway, island,
@@ -27,11 +27,11 @@ only how the bytes land:
 
 | Surface | Mechanism | On launch |
 |---|---|---|
-| Desktop (Tauri) | `tauri-plugin-updater` (signed `latest.json` feed) | After sign-in, the first onboarding screen checks the desktop bundle and lets the user update or continue. Later launches use the same verdict and settings update tab; automatic updates install when enabled, otherwise a persistent "update available" toast offers an install action. |
+| Desktop (Tauri) | Signed Tauri updater feed with a durable, one-artifact cache | After sign-in, the first onboarding screen checks the desktop bundle and lets the user continue at any time. By default, eligible updates download and verify in the background. Ryu then asks before installing and restarting. |
 | Web app (browser) | Deployment refresh | Does not show a native-app update step or claim that a desktop bundle is current. A new web deployment is picked up through the browser's normal refresh/reload path. |
 | CLI (Rust) | Manual download (prints the release URL) | Prints a one-line notice when an update is available; `ryu version` / `ryu update` show details. |
 | Extension (Chrome) | Chrome Web Store (auto) | Mounted notify-only toast, deduped per release; the extension does not try to install its own package. |
-| Island (Electron) | `electron-updater` (GitHub feed) | Reads the shared `auto-updates` pref; when enabled it downloads, silently installs, and relaunches; when disabled it reports availability without downloading or installing. |
+| Island (Electron) | Core `DownloadCenter` for the managed bundle, plus `electron-updater` when the companion is running | Desktop and one-line setup stage the bundle through the global resumable download path while Island is disabled. Once enabled, the running companion reads the shared `auto-updates` pref; enabled updates install silently and relaunch, while disabled updates remain available without an unattended install. |
 | Mobile (Expo) | `expo-updates` (EAS OTA) | Checks on launch when enabled; Settings can check manually and offers an available OTA for explicit installation. |
 | Gateway (Rust) | Updated with Core (managed sidecar) | Ships in the same release, replaced when Core is. |
 
@@ -46,9 +46,10 @@ checks the signed-in user's Core verdict, compares the release against the runni
 **Continue** available even when Core or the release service is unreachable. An unknown result is shown as
 “Couldn't check for updates,” never as a false “up to date” claim.
 
-The step reuses the same `auto-updates` preference as Desktop Settings. **Update now** uses the desktop's
-native install path, so release-channel and updates-window rules remain in one place. Browser builds reuse
-the onboarding code but skip this step because a web deployment cannot install a Tauri bundle.
+The step uses the same Desktop-local **Download updates automatically** preference as App Settings. It defaults
+to on. When an eligible update is ready, the action changes to **Install and restart**; Ryu never treats the
+download preference itself as permission to install. Browser builds reuse the onboarding code but skip this
+step because a web deployment cannot install a Tauri bundle.
 
 ## Checking for an update
 
@@ -111,48 +112,45 @@ Windows it invokes the NSIS updater in silent mode and relaunches the companion,
 step through an installer wizard. Windows security policy can still show a UAC consent prompt when the
 installation location requires administrator approval; an application cannot safely bypass that OS decision.
 
+The Island bundle itself is also a Core-managed artifact. Its first install and refresh use the global
+Download Center and a release checksum, so progress, pause/resume, retry, cancellation, and durable
+history are shared with models and sidecars. Island remains stopped while the feature is disabled;
+downloading its bundle does not launch it. Desktop does not keep a second direct downloader, so an
+older Core that lacks this verified installer must be updated before Island can be installed.
+
 ## Update settings by surface
 
-Desktop and other Core-backed surfaces use one `auto-updates` key in the cross-surface
-[preferences KV](/docs/core/observability#preferences), stored as `{"enabled": bool}` and defaulting to
-enabled when unset. The desktop onboarding step and the App Settings → Updates tab write that same key.
-The Chrome extension is notify-only because Chrome owns package installation. Mobile uses its own secure
-device setting for Expo OTA because that updater is independent of a Core node. The web app has no bundled
-binary toggle because deployments are refreshed by the browser.
+The Tauri app has a device-local **Download updates automatically** preference. It defaults to on and controls
+only whether that desktop downloads an eligible app bundle in advance. It does not authorize installation.
+After download and signature verification, App Settings and the persistent update notice both offer
+**Install and restart**. Turning the preference off changes the first action to **Download update**.
+
+Core and remote-node automatic updates remain a separate policy. Changing the Tauri download preference does
+not change whether a server updates its Core or Gateway binaries. The Chrome extension is notify-only because
+Chrome owns package installation. Mobile uses its own secure device setting for Expo OTA, and the web app has
+no bundled binary toggle because deployments are refreshed by the browser.
 
 <Callout>
-  For Core-backed desktop installs, the toggle is the **only** thing that decides whether an update installs
-  itself. With it off, the desktop shows a persistent "update available" toast with an explicit install action
-  instead. Either way the shell is never hard-blocked: if the signed feed is unreachable (for example, an
-  unsigned dev build), the installer degrades to a manual-download toast.
+  The Tauri app keeps at most one prepared update. The artifact survives an app restart and its signature is
+  checked again immediately before installation. An interrupted or invalid download is never offered for
+  installation. If a signed feed is unavailable, Ryu keeps working and offers the manual download page.
 </Callout>
 
 ## Desktop signing
 
-The desktop updater verifies a minisign signature on every downloaded artifact. The **public** key is committed
-in `apps/desktop/src-tauri/tauri.conf.json` under `plugins.updater.pubkey`, and the feed endpoint is the
-release's `latest.json`. The matching **private** key is generated locally
-(`apps/desktop/.tauri/ryu-updater.key`), is **gitignored**, and is never committed. It is provided to the
-release workflow only as a CI secret (`TAURI_SIGNING_PRIVATE_KEY`, with its password), so signed artifacts are
-produced in CI and nowhere else.
+The desktop updater verifies a minisign signature on every downloaded artifact using the public verification
+key embedded in the installed app. The private release key stays outside the source repository. A prepared
+artifact is verified again immediately before installation, so changing cached bytes makes the update invalid.
 
 <Callout type="warn">
-  If the private signing key is lost, signed desktop updates can no longer be produced and installed apps stop
-  auto-updating until reinstalled with a new key. It must be backed up in the team secret store.
+  The installed app trusts a specific release key. If a future release must use a different key, existing
+  installations may need a one-time manual reinstall before automatic downloads can continue.
 </Callout>
 
-## Developer note: forcing a verdict
-
-To exercise the toast, toggle, and notice paths without a published release, set
-`RYU_UPDATE_FAKE_LATEST=9.9.9` when running Core. The check short-circuits and returns a simulated
-"update available" verdict (with no asset), so the verdict, toggle, and toast layers can be driven end to end.
-Never set it in production.
-
 <Callout type="warn">
-  Status: the desktop first-run check, desktop Settings path, extension notify-only path, and mobile manual
-  availability path are implemented. The actual **install** steps (signed desktop updates, electron
-  auto-update, EAS OTA, and the headless self-replace) still require their respective signed release feeds and
-  CI secrets, so those binary-install paths cannot be exercised from a development checkout.
+  A development checkout can verify the prepared-update state, cache validation, and user-facing flow, but it
+  cannot install a production desktop bundle. A real installation still requires a newer published artifact
+  signed by the release key trusted by the installed app.
 </Callout>
 
 <Cards>

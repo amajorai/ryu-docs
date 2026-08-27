@@ -15,11 +15,10 @@ other Runnable. For the manifest schema and grant strings, see
 [the manifest.json manifest reference](/docs/extend/develop/extensions/plugin-json-manifest).
 
 <Callout type="warn">
-The desktop extension host is an **MVP** (#446). The pure RPC dispatch and the handshake protocol
-are unit-tested (`apps/desktop/src/contributions/host/rpc.test.ts`,
-`bridge.integration.test.ts`), but the **live in-webview handshake has not been verified** because
-it needs a running display. Treat this as the foundation it is: prove your panel against the
-example plugin, expect to iterate.
+The desktop extension host's RPC dispatch, handshake, and companion document policy are covered by
+unit tests plus Chromium certificates (`e2e/companion-host.spec.ts` and
+`e2e/artifact-csp.spec.ts`). Provider accounts, node permissions, and your own sidecar still need
+an environment-specific end-to-end check.
 </Callout>
 
 ## The three-tier UI model
@@ -46,7 +45,7 @@ tool's arguments and output through `window.openai.toolInput` / `toolOutput`. Se
 
 Companions are sidebar panels or overlays that persist across turns. They use the same null-origin
 iframe and RPC bridge as widgets, but they are not tied to a single tool call. A companion can
-maintain state, poll for updates, and call multiple Core APIs.
+maintain state, subscribe to resource changes, and call multiple Core APIs.
 
 ### Full-page app tier
 
@@ -69,6 +68,9 @@ must design around:
   The plugin never sees the token.
 - Each RPC method is gated by a declared **capability**. A call to a method whose capability the
   plugin was not granted is rejected before any service runs.
+- Full-HTML companions and model-generated artifact documents receive their CSP and bridge shell
+  before any app-controlled HTML is parsed, including scripts placed before a `<head>` element.
+  Keep the frame's `connect-src 'none'` policy; direct network access is not a companion API.
 
 ```mermaid
 sequenceDiagram
@@ -169,37 +171,95 @@ envelope is dropped before it reaches dispatch.
 ## Capabilities
 
 Every callable method is mapped to a required capability in `METHOD_CAPABILITY` (`rpc.ts`). A
-method that is not in that map is **unknown** and always rejected (never default-allow). The MVP
-ships one method:
+method that is not in that map is **unknown** and always rejected (never default-allow).
 
 | Method | Capability | Result |
 |---|---|---|
 | `core.listAgents` | `core.listAgents` | The agents on the active node |
+| `catalog.snapshot` | `core.listAgents` | The shared provider, model, agent, app, and hook catalog |
+| `catalog.models` | `core.listAgents` | Server-side model discovery for one provider lane |
+| `model.complete` | `model.complete` | One Gateway-governed model completion |
+| `agent.run` | `agent.run` | One bounded, Core-mediated agent task |
 
-<Callout type="warn">
-For the MVP the granted-capability set is **host-provided config** passed in at mount time. Reading
-it from the plugin's `manifest.json` grants is the manifest activation work (#443). The gate itself
-is real and enforced today; what is still wired is sourcing the grant set from your manifest. See
-[the manifest.json manifest reference](/docs/extend/develop/extensions/plugin-json-manifest) for how grants
-are declared.
-</Callout>
+### App-owned realtime rooms
 
-### Capability catalog
-
-The full set of RPC methods and their required capabilities:
-
-| Method | Capability | Description |
-|---|---|---|
-| `core.listAgents` | `core.listAgents` | List agents on the active node |
-| `core.getAgent` | `core.getAgent` | Get a specific agent's configuration |
-| `core.listConversations` | `core.listConversations` | List conversations |
-| `core.getConversation` | `core.getConversation` | Get a specific conversation |
-| `core.listSpaces` | `core.listSpaces` | List knowledge spaces |
-| `core.searchTools` | `core.searchTools` | Search the unified tool catalog |
-| `core.callTool` | `core.callTool` | Execute a tool through the Gateway |
-| `core.getNodeStatus` | `core.getNodeStatus` | Get node health and sidecar status |
+An app that needs a live room may request the `app:realtime` capability and use the typed
+`window.ryu.tokenTable` bridge. `connect({ roomId })` returns the room id, access level, member id,
+and initial presence; the returned handle exposes `publish`, `publishPresence`, and `close`, while
+callbacks receive named events, presence snapshots, close notifications, and errors. The host
+keeps the opaque connection handle, node token, and realtime credentials out of the null-origin
+frame. The host also bounds queued events and coalesces replaceable presence snapshots, so a
+stalled companion is closed instead of retaining an unbounded stream.
 
 Unknown methods (not in the capability map) are always rejected — there is no default-allow path.
+
+## The shared runtime catalog
+
+Apps that need a model, provider, or agent choice should consume the same Ryu catalog instead of
+calling a provider API or building a private list. Declare the read-only `core:list_agents` grant,
+then read the catalog through the host bridge:
+
+```ts
+const catalog = await window.ryu.catalog.snapshot();
+
+for (const provider of catalog.providers) {
+  console.log(provider.label, provider.authKind, provider.suggestedModels);
+}
+
+const liveModels = await window.ryu.catalog.models({ providerId: "openai" });
+```
+
+The projection includes provider authentication kind (`subscription`, `api-key`, or another
+host-defined value), configured/managed state, routing hints, model suggestions,
+agents, enabled app summaries, and hook/event declarations with enabled state. Providers whose
+models are discovered dynamically still appear as provider lanes even when their suggestion list
+is empty; `catalog.models` asks Core to discover that lane server-side and returns only model ids
+and display names. It never includes API keys, OAuth tokens, provider endpoints, hook code, or
+plugin grants, provider account identifiers, account labels, or account timestamps.
+The shared Ryu model/agent picker consumes
+this projection and returns a controlled selection value; it does not change provider settings.
+
+Valid plugins held back by an unmet host-version floor also appear as `compatible: false` metadata
+with disabled hook/event rows. They are discoverable for explanation, but never runnable until the
+host can satisfy their declared floor.
+
+Execution remains a separate decision. `model.complete` sends a model intent through Ryu's normal
+Core/Gateway route. `agent.run` asks Core to run a bounded agent and is the lane that can preserve
+an authorized native agent session. BYOK and managed providers are resolved behind Core/Gateway;
+subscription-preserving passthrough is not a URL an app can call. It remains a loopback-only,
+Core-controlled agent transport as described in [the Gateway route guide](/docs/gateway/loopback-routes).
+
+The catalog also exposes safe metadata about enabled apps and hooks so a shared picker or workflow
+surface can discover the ecosystem. Hook execution stays ownership-bound: an app can run its own
+declared hook when separately granted, and an app event can be emitted only by its declaring app.
+The catalog does not turn one app into a caller for another app's code or secrets.
+
+## Realtime app resources
+
+Apps that edit shared resources can use the generic application-room bridge instead of polling. Add
+`app:realtime` to the manifest's `permission_grants`, then join a room whose id is stable for that
+resource. The trusted host owns the node token, user identity, and WebSocket; the sandbox receives
+only the opaque `window.ryu.realtime` connection.
+
+The `@ryu/app-host/realtime` helper keeps your governed API authoritative. A realtime event tells
+peers to refetch, suppresses the exact sender's echo, and automatically refetches after a lag signal:
+
+```tsx
+import { openRealtimeResource } from "@ryu/app-host/realtime";
+
+const channel = await openRealtimeResource({
+  roomId: documentId,
+  onChanged: () => loadDocument(documentId),
+  onPresence: (presence) => showCollaborator(presence),
+});
+
+await saveDocument(documentId, nextDocument);
+await channel.publishChanged();
+```
+
+Call `channel.close()` when the resource unmounts. Use `publishPresence()` only for ephemeral state
+such as the active selection or pointer; durable state still belongs in your app API. Canvas,
+Whiteboard, Workflows, and Dashboards use this same contract.
 
 ## Try it
 

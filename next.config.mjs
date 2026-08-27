@@ -1,11 +1,23 @@
 import { createMDX } from "fumadocs-mdx/next";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 const withMDX = createMDX();
+const require = createRequire(import.meta.url);
+const transformersWebEntry = join(
+  dirname(require.resolve("@huggingface/transformers")),
+  "transformers.web.js",
+);
 
 /** @type {import('next').NextConfig} */
 const config = {
   // Self-contained server bundle for a lean Docker runtime (apps/fumadocs/Dockerfile).
   output: "standalone",
+  transpilePackages: ["@ryu/assistant-widget", "@ryu/browser-local-ai"],
+  webpack(config) {
+    config.resolve.alias["@huggingface/transformers$"] = transformersWebEntry;
+    return config;
+  },
   // Type errors FAIL the deploy build. Do not re-add `ignoreBuildErrors` — it
   // lets a broken docs site ship green.
   serverExternalPackages: ["@takumi-rs/image-response"],
@@ -24,7 +36,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.2.0/start-here",
+        destination: "/docs/0.2.1/start-here",
         permanent: false,
       },
       // The recipes gallery became its own "Cookbook" root. Keep the old
