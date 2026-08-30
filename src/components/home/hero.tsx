@@ -10,16 +10,22 @@ import {
   Code2,
   Cpu,
   CreditCard,
+  GitBranch,
   GraduationCap,
+  Handshake,
   type LucideIcon,
   Monitor,
+  Palette,
   Puzzle,
   Rocket,
   Route,
+  Scale,
   Search,
   Shield,
   ShieldCheck,
   Smartphone,
+  Sparkles,
+  Workflow,
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -28,8 +34,8 @@ import { docsPath } from "@/lib/docs-version";
 
 export const DOCS_HOME_COPY = {
   description:
-    "Build and run AI agents without starting from scratch. Extend capability with plugins, or turn agents into apps.",
-  title: "The composable integration layer for AI.",
+    "Ryu connects models, agents, tools, memory, workflows, policies, and apps. Build and run AI agents without starting from scratch",
+  title: "Universal integration layer for AI",
 } as const;
 
 /**
@@ -48,6 +54,7 @@ type Track = "build" | "use";
 
 type Realm = {
   slug: string;
+  path?: string;
   title: string;
   description: string;
   icon: LucideIcon;
@@ -65,6 +72,14 @@ const REALMS: Realm[] = [
     track: "use",
   },
   {
+    slug: "showcase",
+    title: "Showcase",
+    description: "See products and workflows built with Ryu",
+    icon: Sparkles,
+    accent: "var(--showcase-color)",
+    track: "use",
+  },
+  {
     slug: "surfaces",
     title: "Surfaces",
     description:
@@ -76,7 +91,8 @@ const REALMS: Realm[] = [
   {
     slug: "mobile",
     title: "Mobile",
-    description: "Use the same Core from iOS and Android.",
+    description:
+      "Use Ryu on iOS and Android with on-device models and native capabilities",
     icon: Smartphone,
     accent: "var(--mobile-color)",
     track: "use",
@@ -84,15 +100,50 @@ const REALMS: Realm[] = [
   {
     slug: "browser-extension",
     title: "Browser extension",
-    description: "Run local models and permissioned browser tools.",
+    description:
+      "Run browser-local models and permissioned tools from the toolbar",
     icon: Puzzle,
     accent: "var(--browser-extension-color)",
     track: "use",
   },
   {
+    slug: "surfaces/desktop",
+    title: "Desktop App",
+    description:
+      "Use the full desktop workspace for chat, agents, tools, and local runtimes",
+    icon: Monitor,
+    accent: "var(--surfaces-color)",
+    track: "use",
+  },
+  {
+    slug: "surfaces/desktop/user-guide",
+    title: "Desktop User Guide",
+    description:
+      "Learn the desktop app's layout, chat, tools, spaces, and data flows",
+    icon: BookOpen,
+    accent: "var(--surfaces-color)",
+    track: "use",
+  },
+  {
+    slug: "surfaces/desktop/engines",
+    title: "Engines & Runtimes",
+    description: "Install and manage local engines, models, and runtime health",
+    icon: Cpu,
+    accent: "var(--surfaces-color)",
+    track: "build",
+  },
+  {
+    slug: "surfaces/desktop/productivity",
+    title: "Desktop Productivity",
+    description: "Use meetings, activities, tasks, and other focused tools",
+    icon: Workflow,
+    accent: "var(--surfaces-color)",
+    track: "use",
+  },
+  {
     slug: "hardware",
     title: "Hardware",
-    description: "Connect ESP32-S3 devices to a Ryu node.",
+    description: "Connect ESP32-S3 devices to a Ryu server.",
     icon: CircuitBoard,
     accent: "var(--hardware-color)",
     track: "build",
@@ -115,11 +166,37 @@ const REALMS: Realm[] = [
     track: "build",
   },
   {
+    slug: "providers",
+    title: "Providers",
+    description:
+      "Choose cloud, local, custom, and BYOK backends across every capability layer.",
+    icon: Blocks,
+    accent: "var(--providers-color)",
+    track: "build",
+  },
+  {
+    slug: "ci",
+    path: "ci/github-actions",
+    title: "CI/CD",
+    description: "Run agents, workflows, and tools from GitHub Actions.",
+    icon: GitBranch,
+    accent: "var(--ci-color)",
+    track: "build",
+  },
+  {
     slug: "extend",
     title: "Extend",
     description: "Build plugins and apps with skills, MCP, SDKs, and APIs.",
     icon: Code2,
     accent: "var(--extend-color)",
+    track: "build",
+  },
+  {
+    slug: "ui",
+    title: "UI",
+    description: "Use Ryu's shared components, themes, and hooks.",
+    icon: Palette,
+    accent: "var(--ui-color)",
     track: "build",
   },
   {
@@ -131,12 +208,20 @@ const REALMS: Realm[] = [
     track: "use",
   },
   {
+    slug: "programs",
+    title: "Programs",
+    description: "Partner, build, learn, and earn with Ryu",
+    icon: Handshake,
+    accent: "var(--programs-color)",
+    track: "use",
+  },
+  {
     slug: "plugins",
     title: "Plugins",
     description: "Add tools, agents, workflows, and skills from a manifest.",
     icon: Blocks,
     accent: "var(--plugins-color)",
-    track: "use",
+    track: "build",
   },
   {
     slug: "security",
@@ -146,6 +231,14 @@ const REALMS: Realm[] = [
     icon: ShieldCheck,
     accent: "var(--security-color)",
     track: "build",
+  },
+  {
+    slug: "legal",
+    title: "Legal",
+    description: "Terms, privacy, data processing, and provider disclosures",
+    icon: Scale,
+    accent: "var(--legal-color)",
+    track: "use",
   },
   {
     slug: "billing",
@@ -181,6 +274,10 @@ const REALMS: Realm[] = [
   },
 ];
 
+export const DOCS_HOME_REALM_PATHS = REALMS.map(
+  (realm) => realm.path ?? realm.slug,
+);
+
 type QuickLink = {
   id: string;
   label: string;
@@ -198,6 +295,7 @@ const QUICK_LINKS: QuickLink[] = [
     label: "Architecture",
     href: docsPath("start-here", "architecture"),
   },
+  { id: "products", label: "Products", href: "#products" },
   {
     id: "showcase",
     label: "Showcase",
@@ -228,7 +326,6 @@ const QUICK_LINKS: QuickLink[] = [
 type Featured = {
   id: string;
   href: string;
-  eyebrow: string;
   title: string;
   description: string;
   accent: string;
@@ -238,7 +335,6 @@ const FEATURED: Featured[] = [
   {
     id: "architecture",
     href: docsPath("start-here", "architecture"),
-    eyebrow: "Start Here",
     title: "Architecture",
     description:
       "How a request moves through the Gateway, Core, and an engine.",
@@ -247,7 +343,6 @@ const FEATURED: Featured[] = [
   {
     id: "gateway",
     href: docsPath("gateway"),
-    eyebrow: "Gateway",
     title: "Gateway controls",
     description:
       "How the Gateway routes calls and applies firewall, budget, and audit controls.",
@@ -256,7 +351,6 @@ const FEATURED: Featured[] = [
   {
     id: "workflows",
     href: docsPath("core", "workflows"),
-    eyebrow: "Core",
     title: "Workflows",
     description:
       "Chain agents and tools into durable runs that can wait for approval.",
@@ -265,7 +359,6 @@ const FEATURED: Featured[] = [
   {
     id: "cookbook",
     href: docsPath("learn", "cookbook"),
-    eyebrow: "Cookbook",
     title: "Cookbook recipes",
     description:
       "Working recipes for tools, Slack, model routing, and SDK agents.",
@@ -348,7 +441,7 @@ function RealmCard({ realm }: { realm: Realm }) {
   return (
     <Link
       className="group relative flex flex-col gap-3 rounded-xl bg-fd-secondary p-5 transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
-      href={docsPath(realm.slug)}
+      href={docsPath(realm.path ?? realm.slug)}
     >
       <div className="flex items-center justify-between">
         <span
@@ -464,12 +557,6 @@ function FeaturedCard({ item }: { item: Featured }) {
         }}
       />
       <div className="flex flex-1 flex-col gap-1">
-        <span
-          className="font-heading font-medium text-xs uppercase tracking-wide"
-          style={{ color: item.accent }}
-        >
-          {item.eyebrow}
-        </span>
         <h3 className="font-heading font-medium text-base text-fd-foreground sm:text-lg">
           {item.title}
         </h3>

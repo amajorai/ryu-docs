@@ -11,6 +11,7 @@ import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
 import { Mermaid } from "@/components/mdx/mermaid";
 import { Quiz } from "@/components/mdx/quiz";
 import { TryInRyu } from "@/components/mdx/try-in-ryu";
+import { UiComponentPreview } from "@/components/mdx/ui-component-preview";
 import { versionedDocsHref } from "@/lib/docs-version";
 
 export function VersionedAnchor({
@@ -27,7 +28,11 @@ function VersionedCard({
   return <FumadocsCard {...props} href={versionedDocsHref(href)} />;
 }
 
-export function getMDXComponents(components?: MDXComponents) {
+export function getMDXComponents(components?: MDXComponents): MDXComponents {
+  // Fumadocs' default map still exposes a few components as `Component<never>`
+  // while the current MDX type expects the broader component signature. The
+  // runtime map is the same object shape, so keep the adapter at this boundary
+  // instead of weakening component types throughout the docs pages.
   return {
     ...defaultMdxComponents,
     a: VersionedAnchor,
@@ -44,8 +49,9 @@ export function getMDXComponents(components?: MDXComponents) {
     Step,
     Steps,
     TryInRyu,
+    UiComponentPreview,
     ...components,
-  } satisfies MDXComponents;
+  } as MDXComponents;
 }
 
 export const useMDXComponents = getMDXComponents;

@@ -1,63 +1,58 @@
 ---
-title: "MCP Server"
-description: "Use the Ryu Core MCP server from Claude Desktop, an IDE, or another MCP host."
+title: "Ryu MCP"
+description: "Choose the right Ryu MCP endpoint and understand which credential each one uses."
 ---
 
-MCP (Model Context Protocol) is a protocol for passing tools between an AI host and a server. An
-MCP server provides tools. An MCP host, such as Claude Desktop, an IDE, or another agent, finds
-and calls those tools.
+MCP (Model Context Protocol) is the wire format an AI host uses to discover and call tools. It does not decide who the user is or which Ryu node the host may access.
 
-The Ryu Core MCP server lets an MCP host use your Ryu node. It exposes Core actions as MCP tools,
-so the host can use your models, search your memory, run your agents, and start your workflows
-without calling Core's HTTP API directly.
+Ryu has several MCP-shaped surfaces because Ryu can be a public website, a node, a hosted service, or an MCP client. Choose the row that matches what you are trying to do.
 
-MCP is not a generic word for a connection. A connection usually signs you in to an account or
-links you to a service. MCP describes the protocol used to find and call tools.
+| Surface | Use it for | Credential |
+|---|---|---|
+| `https://ryuhq.com/mcp` | Public website pages and marketplace discovery | None; read-only |
+| `https://docs.ryuhq.com/mcp` | Ryu documentation search and page retrieval | None; read-only |
+| `POST https://<node>/mcp/<agent-id>` | A host calling one local, self-hosted, or directly selected managed Core node | Node bearer/pair; managed user JWT on an org-bound node; or hosted delegation |
+| `https://<ryu-service>/mcp/<node-id>/<agent-id>` | A remote host calling a managed or organization-bound node | Better Auth OAuth with PKCE; the service exchanges it for a short-lived node delegation |
+| Core MCP registry | Ryu calling another MCP server | The configured server header or Identity Vault connection |
 
-The server lives in `apps/mcp`. Core can use external MCP servers as tools. The `apps/mcp` process
-does the reverse: it lets external MCP hosts use Core as a server.
+## The request paths
 
-| Term | Meaning |
-|---|---|
-| **MCP host** | An app that uses MCP tools, such as Claude Desktop or an IDE. |
-| **MCP server** | A program that provides tools to an MCP host. |
-| **Ryu Core MCP server** | The Ryu process that exposes Core actions as MCP tools. |
+```mermaid
+flowchart TD
+  Host["MCP host"] --> Public["Website /mcp\npublic read-only tools"]
+  Host --> Direct["Direct Core /mcp/:agent-id\nnode or paired bearer"]
+  Host --> Hosted["Hosted /mcp/:node-id/:agent-id\nBetter Auth OAuth + PKCE"]
+  Hosted --> Delegate["45-second exact-node delegation"]
+  Direct --> Core["Ryu Core node"]
+  Delegate --> Core
+  Core --> Registry["McpRegistry\nallowlist + approval + dispatch"]
+  Registry --> External["Configured stdio or HTTP MCP server"]
+  Core --> Gateway["Gateway\nmodel routing + policy + budget + audit"]
+```
 
-## The picture
+The direct Core endpoint is the canonical node MCP endpoint. The `apps/mcp` package is a compatibility bridge for hosts that require a stdio process. It exposes a fixed set of `ryu_*` REST wrappers and points them at one Core URL.
 
-An external host speaks MCP over stdio to the `apps/mcp` process. That process speaks HTTP to a Ryu Core, local or remote. Core does the real work and the Gateway governs every model call.
+## Authentication is separate from MCP
 
-<Mermaid chart={`flowchart LR
-  Host["MCP host Claude Desktop"] -->|"MCP stdio"| Bridge["apps/mcp Ryu MCP server"]
-  Bridge -->|"HTTP RYU_CORE_URL"| Core["Ryu Core node"]
-  Core --> Gateway["Gateway routing budget audit"]
-`} />
+Ryu uses different credentials for different boundaries:
 
-The bridge holds no model and runs no inference. It translates MCP tool calls into Core HTTP requests and streams the results back. Point it at a different `RYU_CORE_URL` and the same host now drives a different node, including a remote node over Tailscale.
+- A Better Auth session or device-grant token identifies a person to the Ryu control plane. It is used for website sign-in, account operations, and managed-node discovery.
+- A node bearer admits a caller to one Core node. Local Core mints `node-auth.token`; operators can provide `RYU_TOKEN`; Core can also issue a scoped paired token.
+- Desktop's managed-node discovery also returns a short-lived `userJwt`. A managed Core accepts it as a primary bearer only after verifying the control-plane signature and matching the node's organization, team, or personal owner scope. It is not accepted as a node credential on an unbound local or self-hosted node.
+- A hosted MCP request starts with a Better Auth OAuth grant. The hosted service checks organization membership and scopes, then sends Core a short-lived Ed25519 delegation bound to one node and agent.
+- A third-party MCP server's OAuth or API key is a credential Core uses when it acts as an MCP client. It does not authenticate a caller to Ryu.
 
-<Callout type="info">
-  Core decides what runs; the Gateway decides what is allowed, measured, and paid. Driving Core through MCP changes nothing about that split. A tool call from Claude Desktop is governed exactly like a call from the desktop app.
-</Callout>
+Signing in through the website does not silently grant direct access to every node. The managed-node list is scope-filtered, and Core repeats that check. For local or self-hosted nodes, pairing or a node bearer is still the node-access step; for external managed MCP hosts, use hosted OAuth and delegation.
 
-## Choose the right MCP boundary
+## What Core does after admission
 
-Ryu has three intentional MCP surfaces:
+Core validates the MCP JSON-RPC method, resolves the exact agent named in the URL, applies the agent's tool allowlist and approval policy, and dispatches through the shared registry. Tool discovery is progressive: `tools/list` stays short, while large app and Composio catalogs are reached through `tool_search` and `describe`.
 
-- The website MCP endpoint is anonymous and read-only. Its server card says so explicitly, and it
-  does not grant access to an account or a node.
-- The Core bridge is node-level access. Its node credential is the boundary for the particular Core
-  instance, while Core capability checks and Gateway governance remain in force.
-- The official Ryu authorization service is the OAuth provider for protected remote MCP resources.
-  It uses PKCE and consented Ryu scopes; it does not replace the node credential for a local bridge,
-  and it does not silently turn a plugin's provider connection into an organization-wide grant.
-
-## In this section
+For model calls, Core routes through the Gateway. The Gateway applies model routing, firewall rules, budgets, billing, and audit. MCP changes who starts the call, not those controls.
 
 <Cards>
   <DocCard href="/docs/extend/mcp/quickstart" />
-  <DocCard href="/docs/extend/mcp/tools" />
   <DocCard href="/docs/extend/mcp/configuration" />
   <DocCard href="/docs/extend/mcp/security" />
-  <DocCard href="/docs/extend/mcp/docs-server" />
-  <DocCard href="/docs/extend/mcp/llms" />
+  <DocCard href="/docs/security/authentication-and-pairing" />
 </Cards>

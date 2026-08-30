@@ -6,10 +6,12 @@ description: "The org/team RBAC permission vocabulary, built-in roles, and how C
 Ryu is local-first and single-tenant by default, but a node can be bound to an organization (a shared "company brain"). On such a node, Core enforces org/team role-based access control on its REST surface, keyed to a per-user identity verified from a signed JWT. The permission vocabulary and the built-in role sets are a contract shared byte-for-byte with the TypeScript control plane (`apps/core/src/identity_verify/permissions.rs`), so an effective-permission check agrees on both sides.
 
 <Callout type="warn">
-This is Core-side enforcement of a caller's role. Ryu's scoped Better Auth API keys and
-official MCP OAuth grants are separate control-plane credentials; they do not replace the
-node ACL or silently grant control of every node. See [Authentication and pairing](/docs/security/authentication-and-pairing)
-for the credential boundaries.
+This is Core-side enforcement of a caller's role. Ryu's classic and fine-grained personal access
+tokens, organization API keys, and official MCP OAuth grants are separate control-plane credentials.
+They do not become a node bearer automatically. The one deliberate exception is the short-lived
+`userJwt` returned for an organization-bound managed node; Core verifies it against the control-plane
+JWKS and still applies the node's organization, team, personal-owner, and route checks. See
+[Authentication and pairing](/docs/security/authentication-and-pairing) for the credential boundaries.
 </Callout>
 
 ## The permission vocabulary
@@ -93,11 +95,13 @@ Only `channel.delete` removes a shared channel record.
 
 ## How Core gates a request
 
-An already authenticated node request may also carry a signed user identity. Middleware verifies it
-offline with the control plane's signing keys and attaches an optional verified caller. The identity
-token is context, not node admission: an account JWT by itself never replaces an owner, paired, or
-delegated Core credential. A handler then intersects the caller's node capability with
-`enforce_permission(state, caller, perm)`.
+An already authenticated node request may carry a signed user identity. Middleware verifies it
+offline with the control plane's signing keys and attaches the verified caller. On an unbound
+local/self-hosted node, that JWT is only identity context: the node bearer, paired token, or
+delegation still admits the request. On an organization-bound managed node, the short-lived
+`userJwt` may also be the primary bearer; Core narrows it to this node's organization and then to
+its team or personal owner before applying route capabilities. A handler then intersects the
+caller's node capability with `enforce_permission(state, caller, perm)`.
 
 Hosted MCP delegations carry the verified subject, organization, team, exact node, exact agent,
 scopes, audience, issuer, unique ID, and a short expiry in one signed envelope. Core verifies all of
@@ -107,10 +111,13 @@ Enforcement branches on whether **this node** is bound to an org (`registered_or
 
 | Node state | Caller | Result |
 |---|---|---|
-| Unbound (local/dev) | any (or none) | Allow - the shared `RYU_TOKEN` already implies one trusted operator |
-| Org-bound | No / invalid JWT | Deny (403) - a tokenless caller must not inherit full trust |
+| Unbound (local/dev) | valid node bearer/pair/delegation | Allow according to that credential; a user JWT alone is not admission |
+| Unbound (local/dev) | no valid node credential | Deny - loopback limits exposure but does not disable the node gate |
+| Org-bound | valid managed `userJwt` in node scope | Allow iff its role has the required capability |
+| Org-bound | no / invalid JWT and no other valid credential | Deny - a tokenless caller must not inherit full trust |
 | Org-bound | Valid JWT for a different org | Deny all (403) - a non-member holds nothing here |
-| Org-bound | Member of the node's org | Allow iff `perm` is in their effective set |
+| Org-bound | Member of an organization node | Allow iff `perm` is in their effective set |
+| Org-bound | Member outside the node's team or personal owner | Deny before route capability checks |
 
 For a member, the built-in role tier is checked first (no network on the common path). On a miss, Core resolves the custom-role slice from the control plane and unions it in.
 

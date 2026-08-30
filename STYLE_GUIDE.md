@@ -59,7 +59,7 @@ not a score to force onto every sentence.
 - Do not force a low reading level onto safety, billing, or API details. Keep the exact detail and
   use shorter sentences around it.
 
-The main everyday pages are under `surfaces/desktop/user-guide`, `surfaces/mobile`, and
+The main everyday pages are under `surfaces/desktop/user-guide`, `mobile`, and
 `learn/academy/essentials`. `core`, `gateway`, `extend`, `reference`, and app catalog pages are
 developer or operator references. A mixed page should lead with the plain summary, then mark the
 deeper implementation detail.

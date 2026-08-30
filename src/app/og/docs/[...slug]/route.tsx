@@ -1,7 +1,6 @@
-import { ImageResponse } from "@takumi-rs/image-response";
-import { generate as DefaultImage } from "fumadocs-ui/og/takumi";
 import { notFound } from "next/navigation";
 
+import { renderDocsOgCard } from "@/lib/og-card";
 import { getPage } from "@/lib/source";
 
 export const revalidate = false;
@@ -17,16 +16,8 @@ export async function GET(
   const page = getPage(slug.slice(0, -1));
   if (!page) notFound();
 
-  return new ImageResponse(
-    <DefaultImage
-      title={page.data.title}
-      description={page.data.description}
-      site="Ryu Docs"
-    />,
-    {
-      width: 1200,
-      height: 630,
-      format: "webp",
-    },
-  );
+  return renderDocsOgCard({
+    title: page.data.title,
+    description: page.data.description,
+  });
 }

@@ -13,14 +13,21 @@ const transformersWebEntry = join(
 const config = {
   // Self-contained server bundle for a lean Docker runtime (apps/fumadocs/Dockerfile).
   output: "standalone",
-  transpilePackages: ["@ryu/assistant-widget", "@ryu/browser-local-ai"],
+  transpilePackages: [
+    "@ryu/assistant-widget",
+    "@ryu/browser-local-ai",
+    "@ryu/ui",
+  ],
   webpack(config) {
+    config.module.rules.push({
+      test: /\.glb$/i,
+      type: "asset/resource",
+    });
     config.resolve.alias["@huggingface/transformers$"] = transformersWebEntry;
     return config;
   },
   // Type errors FAIL the deploy build. Do not re-add `ignoreBuildErrors` — it
   // lets a broken docs site ship green.
-  serverExternalPackages: ["@takumi-rs/image-response"],
   reactStrictMode: true,
   async rewrites() {
     return [
@@ -36,8 +43,92 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.2.2/start-here",
+        destination: "/docs/0.2.3/start-here",
         permanent: false,
+      },
+      // Mobile and Browser extension have dedicated roots again. Keep the
+      // grouped Surfaces URLs working as compatibility links.
+      {
+        source: "/docs/surfaces/mobile",
+        destination: "/docs/mobile",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/surfaces/mobile",
+        destination: "/docs/:version/mobile",
+        permanent: true,
+      },
+      {
+        source: "/docs/surfaces/browser-extension",
+        destination: "/docs/browser-extension",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/surfaces/browser-extension",
+        destination: "/docs/:version/browser-extension",
+        permanent: true,
+      },
+      // Retire unreleased campaign, preview-app, and internal reference pages
+      // without leaving old bookmarks at a dead end.
+      {
+        source: "/docs/billing/battle-pass",
+        destination: "/docs/billing",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/billing/battle-pass",
+        destination: "/docs/:version/billing",
+        permanent: true,
+      },
+      {
+        source: "/docs/apps/content",
+        destination: "/docs/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/apps/reelfarm",
+        destination: "/docs/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/apps/token-table",
+        destination: "/docs/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/content",
+        destination: "/docs/:version/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/reelfarm",
+        destination: "/docs/:version/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/token-table",
+        destination: "/docs/:version/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/reference/defaults/apps",
+        destination: "/docs/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/reference/defaults/ports",
+        destination: "/docs/reference/defaults",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/reference/defaults/apps",
+        destination: "/docs/:version/apps",
+        permanent: true,
+      },
+      {
+        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/reference/defaults/ports",
+        destination: "/docs/:version/reference/defaults",
+        permanent: true,
       },
       // The recipes gallery became its own "Cookbook" root. Keep the old
       // /docs/using-ryu/recipes URLs (and every recipe under it) alive. These

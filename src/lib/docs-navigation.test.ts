@@ -12,47 +12,140 @@ async function readMeta(path: string): Promise<Meta> {
 }
 
 describe("docs navigation", () => {
-  test("keeps the roadmap as a navigable root", async () => {
+  test("keeps every top-level realm in the root navigation", async () => {
     const root = await readMeta("meta.json");
-    const roadmap = await readMeta("roadmap/meta.json");
+    const realms = [
+      "start-here",
+      "showcase",
+      "surfaces",
+      "mobile",
+      "browser-extension",
+      "hardware",
+      "core",
+      "gateway",
+      "standalone",
+      "providers",
+      "ci",
+      "extend",
+      "ui",
+      "apps",
+      "programs",
+      "plugins",
+      "security",
+      "legal",
+      "billing",
+      "reference",
+      "learn",
+      "roadmap",
+    ];
 
-    expect(root.pages).toContain("roadmap");
-    expect(roadmap.root).toBe(true);
-    expect(roadmap.pages).toEqual(["index"]);
-  });
-
-  test("keeps the roadmap surface realms visible as top-level roots", async () => {
-    const root = await readMeta("meta.json");
-    const pages = root.pages ?? [];
-    const roadmap = await Bun.file(
-      new URL("roadmap/index.mdx", docsRoot),
-    ).text();
-
-    for (const realm of ["mobile", "browser-extension", "hardware"]) {
-      expect(pages).toContain(realm);
+    expect(root.pages).toEqual(realms);
+    for (const realm of realms) {
       const meta = await readMeta(`${realm}/meta.json`);
       expect(meta.root).toBe(true);
-      expect(meta.pages).toEqual(
-        realm === "hardware"
-          ? [
-              "index",
-              "---Overview---",
-              "architecture",
-              "devices",
-              "---Connectivity---",
-              "protocol",
-              "pairing",
-              "---Capabilities---",
-              "ambient-capture",
-              "dashboard",
-              "---Firmware & Ops---",
-              "firmware",
-              "deployment",
-              "security",
-            ]
-          : ["index"],
-      );
-      expect(roadmap).toContain(`href="/docs/${realm}"`);
+    }
+  });
+
+  test("keeps the Providers root grouped by capability and provider family", async () => {
+    const providers = await readMeta("providers/meta.json");
+
+    expect(providers.root).toBe(true);
+    expect(providers.pages).toEqual([
+      "index",
+      "---Capability layers---",
+      "chat-and-models",
+      "embeddings-and-reranking",
+      "speech",
+      "image-and-video",
+      "document-extraction",
+      "toolkits",
+      "---Provider families---",
+      "cloud",
+      "openrouter",
+      "local",
+      "custom",
+      "---Accounts and routing---",
+      "byok",
+      "routing",
+    ]);
+  });
+
+  test("keeps mobile and browser as dedicated grouped roots", async () => {
+    const root = await readMeta("meta.json");
+    expect(root.pages).toContain("mobile");
+    expect(root.pages).toContain("browser-extension");
+
+    const mobile = await readMeta("mobile/meta.json");
+    expect(mobile.root).toBe(true);
+    expect(mobile.pages).toEqual([
+      "index",
+      "---Account and usage---",
+      "billing-and-marketplace",
+      "---On-device AI---",
+      "models",
+      "---Native capabilities---",
+      "tools-and-privacy",
+      "native-surfaces",
+    ]);
+
+    const browserExtension = await readMeta("browser-extension/meta.json");
+    expect(browserExtension.root).toBe(true);
+    expect(browserExtension.pages).toEqual([
+      "index",
+      "---Local AI---",
+      "local-models",
+      "---Browser capabilities---",
+      "browser-tools",
+    ]);
+  });
+
+  test("keeps standalone service guides together", async () => {
+    const standalone = await readMeta("standalone/meta.json");
+
+    expect(standalone.root).toBe(true);
+    expect(standalone.pages).toEqual(["index", "notify", "mail"]);
+  });
+
+  test("keeps language server plugins in their own section", async () => {
+    const plugins = await readMeta("plugins/meta.json");
+    const pages = plugins.pages ?? [];
+    const languageServerHeader = pages.indexOf("---Language Servers---");
+    const developerToolsHeader = pages.indexOf("---Developer Tools---");
+
+    expect(languageServerHeader).toBeGreaterThan(-1);
+    expect(developerToolsHeader).toBeGreaterThan(languageServerHeader);
+    expect(pages.slice(languageServerHeader + 1, developerToolsHeader)).toEqual(
+      [
+        "clangd-lsp",
+        "csharp-lsp",
+        "gopls-lsp",
+        "jdtls-lsp",
+        "kotlin-lsp",
+        "lua-lsp",
+        "php-lsp",
+        "pyright-lsp",
+        "ruby-lsp",
+        "rust-analyzer-lsp",
+        "swift-lsp",
+        "typescript-lsp",
+      ],
+    );
+    expect(
+      pages
+        .slice(developerToolsHeader + 1)
+        .some((page) => page.endsWith("-lsp")),
+    ).toBe(false);
+  });
+
+  test("keeps the desktop subrealms available to the root selector", async () => {
+    for (const realm of [
+      "desktop",
+      "desktop/user-guide",
+      "desktop/engines",
+      "desktop/productivity",
+    ]) {
+      const meta = await readMeta(`surfaces/${realm}/meta.json`);
+      expect(meta.root).toBe(true);
     }
   });
 
@@ -70,7 +163,6 @@ describe("docs navigation", () => {
       "pricing-changelog",
       "---Credits & usage---",
       "credits",
-      "battle-pass",
       "metering",
       "notifications",
       "---Organizations---",

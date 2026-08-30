@@ -1,45 +1,82 @@
 ---
 title: "Configuration"
-description: "Set the Ryu Core MCP server and point it at a local or remote Ryu node."
+description: "Point the Ryu stdio bridge at one local or remote Core node, or use hosted MCP OAuth."
 ---
 
-Set the MCP (Model Context Protocol) server with environment variables. It has no separate config file. The host passes the
-variables to the process when it starts it.
+The `apps/mcp` compatibility bridge has one target. It does not maintain a node registry or choose between local and managed nodes.
 
 ## Environment variables
 
-- `RYU_CORE_URL` - the base URL of the node to drive, for example `http://127.0.0.1:7980` for a local Core or a Tailscale URL for a remote one. Defaults to `http://127.0.0.1:7980`.
-- `RYU_CORE_TOKEN` - the node-admittance token (`RYU_TOKEN`) the node expects on `Authorization: Bearer`. The bridge sends it on every request to Core. Optional - a local loopback node enforces none.
-- `RYU_AUTH_URL` - the control-plane (Better Auth) base URL, used only by the `login` / `logout` / `whoami` subcommands and the `ryu_whoami` tool. Defaults to `http://localhost:3000`.
+| Variable | Default | Meaning |
+|---|---|---|
+| `RYU_CORE_URL` | `http://127.0.0.1:7980` | The Core node used by the stdio bridge. |
+| `RYU_CORE_TOKEN` | unset | Explicit bearer for the target Core. For a loopback URL, the bridge falls back to that machine's `node-auth.token`. It never sends the local file token to a remote URL. |
+| `RYU_DIR` | unset | Core's relocated data directory; used to find a loopback `node-auth.token`. |
+| `RYU_AUTH_URL` | `http://localhost:3000` | Better Auth control-plane URL used by `ryu-mcp login`, `logout`, and `whoami`. |
+| `RYU_MCP_AUTH_FILE` | `~/.ryu/mcp-auth.json` | Local file for this bridge's Better Auth session. |
+| `RYU_HOME` | `~/.ryu` | Directory used for the bridge's local session when `RYU_MCP_AUTH_FILE` is not set. |
 
-Point `RYU_CORE_URL` and `RYU_CORE_TOKEN` at any reachable Core and the same host now drives that node.
+`RYU_CORE_TOKEN` and the session created by `ryu-mcp login` are different values. The first admits the bridge to Core. The second identifies a person to the control plane.
 
-## Use a remote node
-
-Ryu's interface and Core node can run on different machines. To use a remote node, set
-`RYU_CORE_URL` to its Tailscale URL and set `RYU_CORE_TOKEN` to the matching node token:
+## Local target
 
 ```json
 {
   "mcpServers": {
-    "ryu-remote": {
+    "ryu-local": {
       "command": "bun",
-      "args": ["run", "apps/mcp"],
+      "args": ["run", "apps/mcp/src/index.ts"],
       "env": {
-        "RYU_CORE_URL": "https://my-node.tailnet.ts.net:7980",
-        "RYU_CORE_TOKEN": "remote-node-token"
+        "RYU_CORE_URL": "http://127.0.0.1:7980"
       }
     }
   }
 }
 ```
 
-Nothing else changes. The host sees the same tools; they now act on the remote node, and the remote node's Gateway governs the calls.
+For a current local Core, the bridge reads `node-auth.token` automatically. An explicit `RYU_CORE_TOKEN` wins over the file.
+
+## Self-hosted remote target
+
+Use the remote node's reachable URL and its node or paired token:
+
+```json
+{
+  "mcpServers": {
+    "ryu-self-hosted": {
+      "command": "bun",
+      "args": ["run", "apps/mcp/src/index.ts"],
+      "env": {
+        "RYU_CORE_URL": "https://node.example.com",
+        "RYU_CORE_TOKEN": "<token-for-that-node>"
+      }
+    }
+  }
+}
+```
+
+The URL can be a private Tailscale or Headscale address. The mesh handles reachability, while Core still checks the bearer on every request.
+
+## Managed target
+
+Do not point the stdio bridge at the control-plane URL. The control plane lists managed nodes, but it is not the Core API for those nodes.
+
+For an external MCP host, use the hosted resource:
+
+```text
+https://<ryu-service>/mcp/<node-id>/<agent-id>
+```
+
+The MCP host authenticates with Better Auth OAuth and PKCE. The service resolves the node's registered HTTPS URL and forwards the request with a short-lived, node-and-agent delegation.
+
+The Ryu Desktop node selector performs this discovery itself through `GET /api/control-plane/nodes`. It receives and refreshes a short-lived managed `userJwt`, which Core accepts only for the matching organization, team, or personal node scope. A local, LAN, or self-hosted node is not replaced by this cloud list.
+
+## Multiple nodes
+
+Register one stdio entry per direct node and give each a distinct name. For example, `ryu-local` and `ryu-office`. Each entry has its own URL and bearer. A host cannot switch the bridge's target by changing a tool argument.
+
+If you need a single hosted endpoint that names the destination in its URL, use hosted MCP instead.
 
 <Callout type="info">
-  You can register more than one Ryu server in the same host: a `ryu` pointed at your local Core and a `ryu-remote` pointed at a node on your tailnet, each with its own token. Name them distinctly so the host's tool list stays readable.
+  Core's canonical direct MCP route is `/mcp/<agent-id>`. The stdio bridge exposes a fixed compatibility list of `ryu_*` wrappers, so newly registered Core tools may only appear through the canonical Core route.
 </Callout>
-
-## Multiple nodes, one host
-
-Running several entries side by side is the supported way to switch nodes. The host shows each server's tools under its own name, so `ryu_ask` on `ryu` hits your laptop and `ryu_ask` on `ryu-remote` hits the tailnet node. Keep tokens per node so revoking one does not affect the others. See [security](/docs/extend/mcp/security).

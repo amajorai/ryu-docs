@@ -22,7 +22,7 @@ test("getting-started entry pages use direct setup language", async () => {
   expect(firstChat).toContain("Ryu opens to Chat with the built-in");
   expect(runtimes).toContain("Ryu manages agent runtimes as **sidecars**.");
   expect(selfHost).toContain(
-    "A self-hosted Ryu Node runs **Core** and **Gateway**",
+    "A self-hosted Ryu server runs **Core** and **Gateway**",
   );
 
   for (const page of [entry, firstChat, runtimes, selfHost]) {

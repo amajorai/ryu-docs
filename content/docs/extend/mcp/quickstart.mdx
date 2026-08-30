@@ -1,84 +1,100 @@
 ---
 title: "Quickstart"
-description: "Install the Ryu Core MCP server and wire it into Claude Desktop with an mcpServers snippet that sets RYU_CORE_URL and RYU_CORE_TOKEN."
+description: "Connect an MCP host to a local, self-hosted, or managed Ryu node."
 ---
 
-This guide adds the Ryu Core MCP (Model Context Protocol) server to an MCP host. The host can then call the `ryu_*` tools
-exposed by your node.
+Start with the access path you need:
 
-## 1. Start a Ryu node
+- Use the stdio bridge when your MCP host only accepts a command.
+- Use Core's HTTP endpoint for a direct node connection.
+- Use hosted MCP OAuth for a managed node or an MCP host that must not hold a node secret.
 
-The bridge talks to Ryu Core over HTTP. Start the desktop app or run Core directly. Core listens on
-port 7980 by default, so the local node URL is `http://127.0.0.1:7980`. In Desktop, open node
-access settings and authorize only the tools, files, memory, or workflows this host needs. Pass
-the resulting host token as `RYU_CORE_TOKEN`.
+## Local node with the stdio bridge
 
-## 2. Set the bridge variables
+Start Ryu Desktop or Core. The default local Core URL is `http://127.0.0.1:7980`.
 
-The server reads two environment variables:
-
-- `RYU_CORE_URL` - the base URL of the node, for example `http://127.0.0.1:7980`.
-- `RYU_CORE_TOKEN` - the access token the node expects.
-
-You can run it directly to confirm it starts and completes an MCP handshake over stdio:
-
-```bash
-RYU_CORE_URL="http://127.0.0.1:7980" \
-RYU_CORE_TOKEN="your-node-token" \
-bun run apps/mcp
-```
-
-## 3. Add it to Claude Desktop
-
-Add the server to your `claude_desktop_config.json` under `mcpServers`. On macOS this file is at `~/Library/Application Support/Claude/claude_desktop_config.json`.
+The bridge reads the local node credential automatically when `RYU_CORE_URL` is loopback. You can also set `RYU_CORE_TOKEN` explicitly.
 
 ```json
 {
   "mcpServers": {
     "ryu": {
       "command": "bun",
-      "args": ["run", "apps/mcp"],
+      "args": ["run", "apps/mcp/src/index.ts"],
       "env": {
-        "RYU_CORE_URL": "http://127.0.0.1:7980",
-        "RYU_CORE_TOKEN": "your-node-token"
+        "RYU_CORE_URL": "http://127.0.0.1:7980"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The Ryu tools appear in the host's tool list, and a prompt like "ask my Ryu node to summarize this" routes through the bridge to your Core.
+The host speaks MCP over stdio to `apps/mcp`. The bridge speaks HTTP to Core and returns the result. It does not run a model itself.
 
-## 4. (Optional) Sign in
+## Direct HTTP MCP
 
-Use this only when the host needs your Ryu user identity, for `ryu_whoami` or a multi-tenant node.
-Sign in with the device-authorization flow. It shares `~/.ryu/auth.json` with Desktop and the CLI,
-so you can skip it if you already signed in elsewhere.
-
-```bash
-bun run apps/mcp login     # opens your browser, then stores the bearer
-bun run apps/mcp whoami    # confirms who you are signed in as
-```
-
-See [security](/docs/extend/mcp/security) for how this user token differs from the node token.
-
-<Callout type="warn">
-  The token grants only the approved capability set and bindings. Keep it out of source control and out of chat. Use one pairing per host so you can revoke one host without disturbing the others. See [security](/docs/extend/mcp/security).
-</Callout>
-
-## Hosted remote MCP
-
-The official hosted endpoint uses OAuth instead of placing a node token in a remote client:
+Configure an MCP host with the Core URL plus a known agent id:
 
 ```text
-https://<your-ryu-service>/mcp/<node-id>/<agent-id>
+https://<node>/mcp/<agent-id>
 ```
 
-After consent, the service validates the live OAuth grant and exchanges it for a short-lived signed
-delegation bound to that exact node and agent. Core checks both the route capability and the MCP
-JSON-RPC method. Use the local bridge for direct local control and hosted OAuth for remote clients.
+Send the node credential as:
+
+```text
+Authorization: Bearer <node-or-paired-token>
+```
+
+Core checks the token, the exact agent id, the MCP method capability, and the agent's allowlist before it runs a tool.
+
+Desktop's managed-node picker is a separate direct path: the control plane
+returns a short-lived `userJwt`, and Desktop sends it as the bearer plus
+`x-ryu-user-jwt`. A managed Core accepts that JWT only for the user's matching
+organization, team, or personal node scope. Local and self-hosted nodes do not
+use this shortcut.
+
+## Self-hosted remote node
+
+Expose Core through a private LAN address, Tailscale, Headscale, or an HTTPS reverse proxy. Give the host the node URL and a token issued for that node.
+
+If the client cannot read the node's local token, pair it:
+
+1. The client calls `POST /api/pair/code` and displays the short user code.
+2. An already trusted client approves the request in Gateway → Connections.
+3. The client polls `POST /api/pair/token` and receives its scoped bearer.
+4. The client uses that bearer for `/mcp/<agent-id>`.
+
+Pairing is verified by Core itself. It does not require a Ryu account or a control-plane round trip. Tailscale supplies the network path; it does not replace Core authentication.
+
+## Managed or organization-bound node
+
+Use the hosted MCP URL:
+
+```text
+https://<ryu-service>/mcp/<node-id>/<agent-id>
+```
+
+The MCP host completes Better Auth OAuth 2.1 with PKCE. The hosted service checks the live OAuth grant, the user's organization membership, node ownership or team membership, and the requested MCP scopes. It then signs a short-lived delegation for that exact node and agent and forwards the JSON-RPC request to Core.
+
+The original Better Auth token never goes to the node. Core verifies the delegation locally with the public key it received during node enrollment.
+
+## Optional account sign-in for the stdio bridge
+
+`ryu-mcp login` uses the same Ryu `/device` approval page and Better Auth device grant as Desktop and CLI. It is only for the bridge's account tools such as `ryu_whoami`. It does not replace `RYU_CORE_TOKEN` for direct node calls.
+
+```bash
+bun run apps/mcp/src/index.ts login
+bun run apps/mcp/src/index.ts whoami
+```
+
+The bridge stores this session in `~/.ryu/mcp-auth.json`. That file is separate from Desktop's encrypted credential store and from Core's node token.
+
+<Callout type="warn">
+  Treat a node or paired token like a password. Use a separate pairing for each host so one integration can be revoked without rotating the node owner credential.
+</Callout>
 
 ## Next
 
-- The [tool list](/docs/extend/mcp/tools) for what the host can do.
-- [Configuration](/docs/extend/mcp/configuration) for pointing at a remote node and the full set of environment variables.
+- [Configuration](/docs/extend/mcp/configuration) for target selection and environment variables.
+- [Security](/docs/extend/mcp/security) for credential boundaries and revocation.
+- [Authentication and pairing](/docs/security/authentication-and-pairing) for the complete identity map.

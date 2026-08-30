@@ -1,12 +1,12 @@
 ---
 title: Memory
-description: Encrypted, per-agent long-term memory stored locally.
+description: Encrypted long-term memory with typed GraphRAG facets and explicit sensitive-topic consent.
 ---
 
 Ryu gives agents two kinds of recall. **Short-term memory** is the recent turns of the current
 conversation, assembled from the conversation store. **Long-term memory** is durable facts carried
 across conversations for a given user and agent. This page covers long-term memory
-(`apps/core/src/server/memory.rs`); for short-term context see
+(`crates/core/memory`); for short-term context see
 [Conversations and sessions](/docs/core/conversations-sessions).
 
 ## How it works
@@ -20,11 +20,34 @@ Long-term memory is stored encrypted in the same SQLite database as conversation
   is adopted as that master key on first run. Each entry gets its own random nonce, and entries
   that fail to decrypt are skipped rather than crashing recall. See
   [Encryption at rest](/docs/core/encryption-at-rest) for the full model.
-- **Per-agent** - one agent's memory does not bleed into another's. Memory is keyed by the user and
-  agent pair.
+- **Typed scopes and facets** - a fact can be scoped to one agent, the user, this node, a project,
+  or an organization. GraphRAG keeps Topic, Person, Category, Scope, and Agent nodes distinct; a
+  person mentioned in a fact is not an access-control principal.
+- Agent-, project-, and organization-scoped facts require their matching scope id. An explicit
+  sensitive fact cannot be stored outside user scope; automatic chat capture keeps sensitive content
+  at user scope instead.
 - **Opt-in on the chat path** - long-term memory is recorded and recalled when the chat request
   enables it. By default Core recalls a small number of the most recent entries to prefix the model
   context.
+
+The memory graph is a bounded derived projection rebuilt from active source facts. It combines direct
+facet matches with a small number of shared-topic hops before the existing vector/reranker path
+assembles context. It does not reuse the separate Space GraphRAG graph: Space GraphRAG remains a
+chunk-term graph owned by each Space.
+
+Sensitive topics are a separate privacy dimension from the memory category. The built-in detector
+covers health conditions, religious beliefs, and several other special categories. **Include
+sensitive topics in memory** is off by default and is stored per verified user on the local node.
+Without consent, sensitive facts are not captured or returned by recency recall, semantic search,
+GraphRAG, or the graph view. Explicit shared sensitive writes are rejected rather than silently
+down-scoped.
+
+Temporary chats are a separate read-only case. They do not recall personalized memory or inject
+user personalization unless the user turns on **Use memory in temporary chat** from the Memory
+plugin's composer **+** menu. That control can read existing long-term facts, auto-recall results,
+and user personalization for the current temporary turn, but it cannot write a new fact, sync a raw
+turn to an external memory provider, or save the conversation. The temporary chat can still be
+promoted to a saved conversation with its **Save chat** bookmark action.
 
 The defaults are conservative: a short-term limit of the last 10 turns and a long-term recall limit
 of 5 entries, both configurable on the request.
@@ -38,6 +61,8 @@ endpoint.
 
 ```
 GET/POST /api/memory
+GET/PUT /api/memory/settings
+GET /api/memory/graph
 POST /api/retrieval/search
 ```
 
@@ -48,6 +73,14 @@ retrieval path the desktop uses to surface relevant context. See the
 The desktop Memory Library also provides a local, authenticated management surface at
 `/library/memory`. It is where you can add, edit, filter, and remove durable memories without
 putting their plaintext into a public service.
+
+The built-in model-facing `memorystore.*` tools use Core's node-token loopback and are therefore
+available on an unbound personal node. On an organization-bound node, use kernel auto-recall or
+the Memory Library's verified-user surface; the loopback cannot safely impersonate a human caller.
+
+The Library's **Graph** view is an access-filtered snapshot of the typed memory graph. It shows
+which visible facts connect to topics, people, categories, agents, and scope levels. It is a view of
+derived relationships, not a place to edit graph edges or bypass a memory access check.
 
 The Library's optional **Git-backed memory** card is a separate source projection. It writes one
 Markdown file per selected memory below `memory/<scope>/<id>.md`, plus an index file. The projection
@@ -100,6 +133,13 @@ desktop surface and are only persisted when the node supports the corresponding 
   escrow. Treat that key as a secret: lose it and the encrypted entries become unreadable.
 </Callout>
 
+<Callout type="warn">
+  The encrypted memory database is the authority, but the existing semantic retrieval mirror keeps
+  decrypted memory text in the local retrieval index so vector search can run. Sensitive rows are
+  read-gated and their derived retrieval rows are removed when consent is revoked; this does not
+  make the pre-existing standard-memory retrieval mirror encrypted.
+</Callout>
+
 ## Searchable chat history and auto-recall
 
 Long-term memory is one source of recall. The other is your **past chat messages**, made
@@ -138,11 +178,21 @@ skills use, so both the ACP and openai-compat planes inherit it. Two sources are
 - relevant **long-term memory facts**, lazy-backfilled into the retrieval index and then deduped
   **by fact id** against what the recency window already injected, so a fact never appears twice
 
+The memory half also uses the typed GraphRAG projection as an additional bounded candidate source.
+Chat recall carries the active agent id, so `agent`-scope facts only match that agent; user, node,
+project, and explicitly allowed organization scopes keep their existing access rules. Graph edges
+never grant access by themselves.
+
 Auto-recall is **on by default**, gated by the `auto-recall-enabled` preference (env
 `RYU_AUTO_RECALL_ENABLED`). The number of recalled snippets injected per turn, across both sources
 combined, is the `auto-recall-top-k` preference, defaulting to 5. The desktop toggle lives in
 Settings, Memory (`apps/desktop/src/components/settings/MemoryTab.tsx`). Auto-recall is orthogonal to
 the memory record toggle: it controls what is recalled, not what is written.
+
+The same Memory settings page contains **Include sensitive topics in memory**. It is a separate
+per-user consent from the general long-term-memory switch. Turning it off hides existing sensitive
+facts from built-in recall, search, and graph results and stops future capture; it does not delete
+the encrypted source row.
 
 ### Memories cited in chat
 

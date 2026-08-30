@@ -1,159 +1,156 @@
 ---
-title: Language bindings (UniFFI)
-description: One shared Rust kernel bound out to Python, Swift, Kotlin, C#, and Go via UniFFI. What ships today (Python) and what is planned.
+title: Language bindings
+description: Bind the shared Ryu SDK kernel to Python, Swift, Kotlin, C#, and Go, with an example project and contract tests for each language.
 ---
 
-Ryu's SDK has one shared Rust kernel. The SDK is split by **layer, not language**. The kernel owns
-the `manifest.json` model, validation, Gateway egress rules, and Gateway-required model and
-embedding clients.
+Ryu's SDK has one shared Rust kernel. It owns the `manifest.json` model,
+validation, Gateway egress rules, and Gateway-required model and embedding
+clients. Language bindings wrap that kernel instead of reimplementing those
+rules in each language.
 
-Each language binding wraps the same kernel. This keeps manifest rules, the egress blocklist, and
-the transport consistent across languages.
+This page covers the native binding projects under `bindings/` and their shared
+source at `crates/sdk/uniffi/` or `crates/sdk/ffi/`. For TypeScript authoring,
+see [TypeScript SDK](/docs/extend/develop/sdk); for calling a running Core node,
+see [Client SDK](/docs/extend/develop/sdk/client) and
+[Core client](/docs/extend/develop/sdk/core-client).
 
-This page covers the **UniFFI** binding path (`crates/sdk/uniffi/`), which generates idiomatic
-packages for Python, Swift, Kotlin, and (via third-party generators) C# and Go from one Rust
-surface. For the kernel itself see [Rust SDK](/docs/extend/develop/sdk/rust); for the TypeScript client
-see [Client SDK](/docs/extend/develop/sdk/client).
-
-<Callout type="warn">
-  Only the **Python** binding is generated and smoke-tested today. The UniFFI crate
-  (`crates/sdk/uniffi`) and the Python packaging shell (`bindings/python/`) are shipped, and CI
-  builds the cdylib, generates the Python module, and runs an exit-0 smoke test against the real
-  kernel. **Swift, Kotlin, C#, and Go via UniFFI are planned** - the same pipeline, not yet wired or
-  verified. Go ships today through a separate C-ABI path (`bindings/go/`), not UniFFI.
+<Callout type="info">
+  Every language project contains a no-network example and contract tests. The
+  examples validate a plugin id, enforce Gateway-only egress, and construct a
+  Gateway-pointed client. They do not require provider credentials. The Rust
+  SDK transport tests use a local one-shot HTTP server for chat and embeddings.
 </Callout>
 
 ## Architecture
 
-There is one Rust kernel and three binding shells around it. They all wrap the **same** `ryu_sdk::*`
-functions, which is what keeps the rules identical everywhere.
+There are three binding mechanisms around the same `ryu-sdk` kernel:
 
-| Crate | Mechanism | Targets | Status |
+| Binding | Languages | Surface | Status |
 |---|---|---|---|
-| `crates/sdk/napi` | napi-rs native addon | TypeScript / JS | Shipped (keeps the streaming closure via `ThreadsafeFunction`) |
-| `crates/sdk/ffi` | raw C-ABI | raw C, Go (cgo) | Shipped (`bindings/go/ryusdk/ryusdk.go`) |
-| `crates/sdk/uniffi` | `uniffi-bindgen` generated | Python (shipped), Swift / Kotlin / C# / Go (planned) | Python shipped |
+| `crates/sdk/napi` | TypeScript / JavaScript | Manifest rules, egress, chat, streaming, embeddings | Shipped; smoke-tested through the package loader |
+| `crates/sdk/ffi` | C and Go through cgo | Blocking manifest, egress, chat, and embeddings | Shipped; Go has unit tests and an example |
+| `crates/sdk/uniffi` | Python, Swift, Kotlin | Manifest rules, egress, blocking chat/embeddings, streaming through `ChatSink` | Generated and tested in the language projects |
+| `crates/sdk/uniffi` + `uniffi-bindgen-cs` | C# | The same UniFFI surface, including `ChatSink` | Generated and smoke-tested in the example project |
 
-UniFFI uses **proc-macro mode** (`uniffi::setup_scaffolding!("ryu_sdk")` plus `#[uniffi::export]`),
-not a `.udl` IDL. This matches the codebase's "derive the schema from the Rust types" philosophy, so
-there is no second source of truth to drift from the Rust signatures. The foreign package is emitted
-on demand from the compiled cdylib by the `uniffi-bindgen` driver
-(`crates/sdk/uniffi/src/bin/uniffi-bindgen.rs`).
+The Rust implementation is the source of truth. `uniffi::setup_scaffolding!`
+and `#[uniffi::export]` define the foreign surface; the generated files are
+build outputs and are not hand-edited.
 
-The namespace passed to `setup_scaffolding!` is `ryu_sdk` (not the crate name `ryu_sdk_uniffi`), so
-the generated Python package imports as `import ryu_sdk` and the Swift / Kotlin equivalents follow
-the same name.
+## Shared API
 
-### Blocking surface only
+The generated bindings expose these operations:
 
-Every UniFFI export is **blocking, value-in / value-out**. UniFFI has no closure type, so streaming
-chat (`ModelClient::stream`) is deliberately omitted - it needs a `ChatSink` callback interface,
-which is a named future slice. The blocking `chat` and `embed` calls cover Python, Swift, and Kotlin
-the same way they cover Go today. The streaming binding is a future extension because it needs a
-callback interface that UniFFI can expose safely.
+- `validatePluginId` / `validate_plugin_id`
+- `parseAndValidateManifest` / `parse_and_validate_manifest`
+- `pluginManifestJsonSchema` / `plugin_manifest_json_schema`
+- `resolveGatewayUrl` and `resolveGatewayToken`
+- `assertAllowedEgress` / `assert_allowed_egress`
+- `ModelClient` with `chat` and `stream`
+- `EmbeddingClient` with `embed`
 
-The exported surface (`crates/sdk/uniffi/src/lib.rs`):
+The exact naming follows each language's generator. `ModelClient` and
+`EmbeddingClient` reject direct provider URLs during construction. Provider
+credentials belong in the Gateway; a binding token is a Gateway token.
 
-- `validate_plugin_id(id)`
-- `parse_and_validate_manifest(json)`
-- `plugin_manifest_json_schema()`
-- `resolve_gateway_url()` / `resolve_gateway_token()`
-- `assert_allowed_egress(url)`
-- `ModelClient(model, base_url?, token?)` with `.chat(messages)`
-- `EmbeddingClient(model, base_url?, token?)` with `.embed(inputs)`
+Streaming uses the UniFFI `ChatSink` callback interface. A sink receives zero or
+more deltas and then exactly one `onDone` or `onError` callback. A callback must
+return before it calls another blocking SDK method; this avoids re-entering the
+binding's Tokio runtime.
 
-All fallible calls raise a single `RyuError` carrying the kernel's human-readable message.
+## Python
 
-## Python (shipped)
-
-The Python binding lives in `bindings/python/`. What is committed is the packaging shell
-(`pyproject.toml`), the `smoke_test.py` pipeline proof, and a tracked `ryu_sdk/__init__.py`. The
-importable `ryu_sdk/` module and the matching compiled library are **generated** by `uniffi-bindgen`
-and gitignored.
-
-<Callout type="info">
-  The distribution name is `ryu-sdk` (importable as `ryu_sdk`, version `0.1.0`), but it is **not yet
-  published to PyPI**. Today you generate it locally or consume the CI artifact; there is no
-  `pip install ryu-sdk` yet.
-</Callout>
-
-### Generate locally
-
-`sdk/uniffi` is a standalone crate (its own `Cargo.lock`, no workspace), so `cargo` runs from
-inside it. From `crates/sdk/uniffi/`:
+The Python project is under `bindings/python/`. Its generated `ryu_sdk/`
+package is loaded by `__init__.py`; the generated module and native library are
+created by the test command.
 
 ```sh
-# 1. Build the cdylib.
-cargo build --release
-
-# 2. Generate the Python module from the compiled library.
-cargo run --release --bin uniffi-bindgen -- \
-  generate --library target/release/libryu_sdk_uniffi.so \
-  --language python --out-dir ../../bindings/python/ryu_sdk
-
-# 3. Copy the compiled library next to the generated module so it loads.
-cp target/release/libryu_sdk_uniffi.so ../../bindings/python/ryu_sdk/
-
-# 4. Prove it.
-cd ../../bindings/python && PYTHONPATH=. python smoke_test.py
+bash bindings/python/test.sh
 ```
 
-On Windows the artifact is `target/release/ryu_sdk_uniffi.dll` (no `lib` prefix, not `.so`); swap the
-two `libryu_sdk_uniffi.so` paths for it.
+This runs `test_sdk.py`, `smoke_test.py`, and `example.py`. The import name is
+`ryu_sdk` and the distribution shell is named `ryu-sdk`.
 
-### Minimal usage
+## Go
 
-```python
-import ryu_sdk
+The Go project is under `bindings/go/`. It uses the hand-written C ABI in
+`crates/sdk/ffi`, which keeps Go independent of third-party UniFFI generator
+version lag. The binding includes lifecycle methods and JSON-returning
+`ModelClient` / `EmbeddingClient` methods.
 
-# Manifest validation (shared kernel rules - path-traversal-safe ids).
-ryu_sdk.validate_plugin_id("io.ryu.ok")          # ok
-ryu_sdk.validate_plugin_id("../evil")            # raises ryu_sdk.RyuError
-
-# Gateway-governed egress: direct providers are blocked, loopback is allowed.
-ryu_sdk.assert_allowed_egress("http://127.0.0.1:7981")    # ok
-ryu_sdk.assert_allowed_egress("https://api.openai.com")   # raises ryu_sdk.RyuError
-
-# A gateway-mandatory model client. The egress check runs at construction, so a
-# direct-provider base URL fails before any request.
-client = ryu_sdk.ModelClient("gemma4", "http://127.0.0.1:7981", None)
-result = client.chat([
-    ryu_sdk.ChatMessage(role="user", content="Write a haiku about Rust."),
-])
-print(result.content)
-if result.usage:
-    print("tokens:", result.usage.total_tokens)
+```sh
+bash bindings/go/test.sh
 ```
 
-`ModelClient` and `EmbeddingClient` default `base_url` and `token` to `RYU_GATEWAY_URL` and
-`RYU_GATEWAY_TOKEN` when passed `None`. Streaming is not exposed (see [Blocking surface
-only](#blocking-surface-only)); for token-by-token output today, use the
-[TypeScript](/docs/extend/develop/sdk/client) path or call the gateway's `/v1/chat/completions` directly.
+The command builds the Rust FFI, runs `ryusdk_test.go`, and runs
+`example/main.go`.
 
-## Swift, Kotlin, C#, and Go (planned)
+## C#
 
-These targets are the same pipeline as Python - one cdylib, regenerated per language - and are not
-yet wired or verified:
+The C# project is under `bindings/csharp/`. The generated source is produced by
+the version-matched `uniffi-bindgen-cs` generator. The pinned generator version
+is `v0.9.2+v0.28.3` for the UniFFI `0.28.3` dependency.
 
-| Language | Generator | Provenance | Status |
-|---|---|---|---|
-| Swift | `uniffi-bindgen --language swift` | built into UniFFI | Planned (needs an Apple CI runner + xcframework packaging) |
-| Kotlin | `uniffi-bindgen --language kotlin` | built into UniFFI | Planned (needs JNA + a JVM packaging story) |
-| C# | `uniffi-bindgen-cs` | third-party | Planned (generator lags UniFFI minors) |
-| Go | `uniffi-bindgen-go` | third-party | Planned; Go ships today via the cgo C-ABI path instead |
+```sh
+cargo install uniffi-bindgen-cs \
+  --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+  --tag v0.9.2+v0.28.3
+bash bindings/csharp/test.sh
+```
 
-Python, Swift, and Kotlin generators are first-party to UniFFI, so they move in lockstep with the
-`uniffi` pin in `crates/sdk/uniffi/Cargo.toml`. The C# and Go generators are maintained
-out-of-tree and pinned to specific UniFFI minors, so bumping the `uniffi` dependency is a coordinated
-cross-language event rather than a routine update.
+`Program.cs` is the no-network example and smoke test. The generated source and
+native library remain ignored build outputs.
 
-Go already works today through cgo over `crates/sdk/ffi` (`bindings/go/`), with no
-generator-lag risk. A migration to `uniffi-bindgen-go` would buy one source surface at the cost of
-inheriting that lag, so the cgo path stays as-is for now.
+## Swift
 
-For any language without a binding, validate manifests against the exported JSON Schema
-(`plugin_manifest_json_schema()`) and call Core's [HTTP API](/docs/extend/develop/api-reference) and the
-gateway's `/v1/chat/completions` directly - both are plain JSON.
+The Swift Package example is under `bindings/swift/`. It includes an executable
+target and XCTest target. The generated `RyuSdk.swift` file is produced from the
+same UniFFI library.
+
+```sh
+bash bindings/swift/test.sh
+```
+
+The current script targets macOS because it links the macOS Rust dynamic
+library. The package exposes `ChatSink` for streaming and the same manifest,
+egress, model, and embedding operations as Python and Kotlin.
+
+## Kotlin
+
+The Gradle/JVM example is under `bindings/kotlin/`. UniFFI generates the Kotlin
+source and JNA provides the JVM bridge.
+
+```sh
+bash bindings/kotlin/test.sh
+```
+
+The command runs the JUnit tests and the no-network example with JDK 17 or
+newer. The example targets the JVM; Android packaging and native ABI delivery
+remain host integration work, not a second Ryu contract.
+
+## TypeScript and NAPI
+
+The authoring package (`@ryuhq/sdk`) and the Core client (`@ryuhq/client`) have
+their own Bun test suites. The NAPI addon smoke uses the same `index.js` loader
+that consumers use, so platform-specific `.node` filenames are tested through
+the normal resolution path:
+
+```sh
+(cd crates/sdk/napi && bun test)
+(cd packages/sdk && bun test)
+(cd packages/client && bun test)
+```
+
+The NAPI binding retains callback streaming because Node-API can bridge a
+per-invocation callback directly. The UniFFI bindings use `ChatSink` so Swift,
+Kotlin, Python, and C# have an explicit cross-thread lifetime contract.
+
+## CI coverage
+
+`.github/workflows/sdk-bindings.yml` runs the structural matrix check and
+language jobs for Python, Swift, Kotlin, Go, C#, and NAPI. The main CI workflow
+also runs the Core, Gateway, Web, Fumadocs, Native, Desktop, CLI, server, and
+package test tasks. The matrix is a test gate; it does not claim a provider
+round-trip or a store publication.
 
 <Cards>
   <DocCard href="/docs/extend/develop/sdk/rust" />

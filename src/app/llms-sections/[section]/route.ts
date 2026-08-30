@@ -15,8 +15,11 @@ export const revalidate = false;
 const VALID_SECTIONS: Record<string, string> = {
   "start-here": "start-here",
   surfaces: "surfaces",
+  mobile: "mobile",
+  "browser-extension": "browser-extension",
   core: "core",
   gateway: "gateway",
+  providers: "providers",
   extend: "extend",
   apps: "apps",
   plugins: "plugins",

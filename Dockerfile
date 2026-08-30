@@ -22,9 +22,9 @@ RUN bun run generate:docs \
  && bun x next build \
  && mkdir -p public
 
-# Lean runtime. node:22-slim (glibc, NOT alpine/musl) so the native
+# Lean runtime. node:22-trixie-slim (glibc, NOT alpine/musl) so the native
 # @takumi-rs/image-response OG-image binary loads at runtime.
-FROM node:22-slim AS runner
+FROM node:22-trixie-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3002

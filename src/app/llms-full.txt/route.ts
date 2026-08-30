@@ -20,10 +20,10 @@ Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
 - GET /llms-full.txt               — This file (all pages concatenated)
 - GET /llms.mdx/docs/{version}/{slug} — Single page as processed Markdown
 - GET /docs/{version}/{path}.mdx   — Processed Markdown (rewrite to /llms.mdx/)
-- GET /llms-sections/{section}     — All pages in a section (start-here, surfaces, core, etc.)
+- GET /llms-sections/{section}     — All pages in a section (start-here, surfaces, mobile, browser-extension, core, etc.)
 - GET /schemas/plugin.json         — JSON Schema for manifest.json manifests
 
-Valid sections: start-here, surfaces, core, gateway, extend, apps, plugins, security, billing, reference, learn (legacy names like desktop, develop, mcp, cookbook, and academy still work)
+Valid sections: start-here, surfaces, mobile, browser-extension, core, gateway, providers, extend, apps, plugins, security, billing, reference, learn (legacy names like desktop, develop, mcp, cookbook, and academy still work)
 
 ---
 

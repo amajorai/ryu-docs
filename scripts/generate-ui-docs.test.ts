@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { buildUiCatalog } from "./generate-ui-docs";
+import { buildUiCatalog, componentNavigationPages } from "./generate-ui-docs";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const COMPONENTS_ROOT = path.join(
@@ -23,7 +23,9 @@ async function readPackageJson(): Promise<PackageJson> {
 function isExported(importPath: string, packageJson: PackageJson): boolean {
   const key = `./${importPath}`;
   return Object.keys(packageJson.exports ?? {}).some(
-    (exportPath) => exportPath === key || (exportPath === "./components/*" && importPath.startsWith("components/")),
+    (exportPath) =>
+      exportPath === key ||
+      (exportPath === "./components/*" && importPath.startsWith("components/")),
   );
 }
 
@@ -49,14 +51,59 @@ describe("Ryu UI documentation catalog", () => {
     const metadata = JSON.parse(
       await readFile(path.join(COMPONENTS_ROOT, "meta.json"), "utf8"),
     ) as { pages?: string[] };
-    const expectedPages = ["index", ...catalog.map((component) => component.pageSlug)];
+    const expectedPages = componentNavigationPages(catalog);
     expect(metadata.pages).toEqual(expectedPages);
 
     const files = (await readdir(COMPONENTS_ROOT))
       .filter((file) => file.endsWith(".mdx"))
       .map((file) => file.replace(/\.mdx$/, ""))
       .sort();
-    expect(files).toEqual([...expectedPages].sort());
+    expect(files).toEqual(
+      expectedPages.filter((page) => !page.startsWith("---")).sort(),
+    );
+  });
+
+  test("every component page has previews, variants, settings, and a lazy loader", async () => {
+    const [catalog, previewSource, metadataSource] = await Promise.all([
+      buildUiCatalog(),
+      readFile(
+        path.join(
+          REPO_ROOT,
+          "apps/fumadocs/src/components/mdx/ui-component-modules.generated.ts",
+        ),
+        "utf8",
+      ),
+      readFile(
+        path.join(
+          REPO_ROOT,
+          "apps/fumadocs/src/components/mdx/ui-component-preview-metadata.generated.ts",
+        ),
+        "utf8",
+      ),
+    ]);
+
+    for (const component of catalog) {
+      const page = await readFile(
+        path.join(COMPONENTS_ROOT, `${component.pageSlug}.mdx`),
+        "utf8",
+      );
+      expect(page).toMatch(
+        /<UiComponentPreview component="components\/[^"]+" exportName="[^"]+" \/>/,
+      );
+      expect(page).toContain(
+        `<UiComponentPreview component="${component.importPath}" exportName=`,
+      );
+      expect(page).toContain('mode="variants" />');
+      expect(page).toContain('mode="settings" />');
+      expect(previewSource).toContain(`"${component.importPath}": async () =>`);
+      expect(metadataSource).toContain(`"${component.importPath}":`);
+    }
+
+    const button = catalog.find(
+      (component) => component.importPath === "components/button",
+    );
+    expect(button?.preview.props.variant).toContain("progress");
+    expect(button?.preview.props.size).toContain("icon-lg");
   });
 
   test("the UI realm contains no external source-comparison copy", async () => {

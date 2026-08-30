@@ -71,7 +71,7 @@ const PLACES: { Icon: typeof Laptop; note: string; place: string }[] = [
 	{
 		Icon: HardDrive,
 		place: "Mac mini",
-		note: "Run background work on a private node.",
+		note: "Run background work on a private server.",
 	},
 	{ Icon: Cpu, place: "Raspberry Pi", note: "Run lightweight always-on tasks." },
 	{

@@ -3,15 +3,21 @@ import type { Metadata } from "next";
 export const siteConfig = {
   name: "Ryu Docs",
   description:
-    "The composable integration layer for AI. Build and run AI agents without starting from scratch. Extend capability with plugins, or turn agents into apps.",
+    "Technical documentation for Ryu, an AI agent deployment platform for startups. Deploy, govern, and extend autonomous agents with Core, Gateway, tools, and SDKs.",
   keywords: [
     "Ryu",
-    "AI agents",
+    "AI agent deployment platform",
     "AI agent infrastructure",
+    "autonomous AI agents",
+    "AI agent hosting",
+    "managed AI agents",
+    "cloud AI agents",
     "AI agent gateway",
     "MCP",
     "agent tools",
     "AI agent SDK",
+    "AI tool integrations",
+    "AI agents for startups",
   ],
   url: process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com",
 };
@@ -30,6 +36,12 @@ export function generateMetadata(): Metadata {
     authors: [{ name: "Ryu" }],
     creator: "Ryu",
     publisher: "Ryu",
+    category: "technology",
+    formatDetection: {
+      address: false,
+      email: false,
+      telephone: false,
+    },
     keywords: siteConfig.keywords,
     alternates: {
       canonical: "/",

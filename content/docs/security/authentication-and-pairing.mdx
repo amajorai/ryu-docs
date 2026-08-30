@@ -23,14 +23,17 @@ This page is the map for every supported authentication journey. Each flow has f
 | **Device-grant bearer** | Desktop, mobile, CLI, extension fallback | A client session without a browser cookie | Better Auth's device authorization endpoint |
 | **App handoff token** | Explicit website → extension or mobile handoff | One exchange for a client session bearer | Better Auth One-Time Token plugin |
 | **Node bearer** | Core clients, remote desktop, local MCP bridge | One particular Core node | Core's node-auth and pairing layer |
+| **Managed user JWT** | Desktop on an organization-bound managed node | The user's role plus organization, team, or personal-node scope | Core's JWKS verifier and route capabilities |
 | **Hardware device token** | Paired Ryu hardware | One hardware device's relay connection | Core's hardware registry and relay |
 | **Organization and team policy** | Cloud services and organization-bound nodes | Membership, roles, scopes, entitlements, budgets | Ryu control plane, Core ACLs, and Gateway |
-| **Personal or organization API key** | Scripts, integrations, and service clients | The Ryu scopes minted onto that key | Better Auth API-key storage plus Ryu resource policy |
-| **Official MCP grant** | Remote MCP clients | Consented scopes for the official Ryu resource | Better Auth OAuth and Ryu/Gateway policy |
+| **Personal access token (classic or fine-grained)** | Scripts, integrations, and service clients | The Ryu capabilities minted onto that token | Better Auth API-key storage plus Ryu resource policy |
+| **OAuth app or Ryu App grant** | User-owned OAuth clients or marketplace apps | The consented OAuth scopes or approved app grants | Better Auth OAuth plus Core app permissions |
+| **Official MCP grant** | Remote MCP clients | Consented scopes for the official Ryu resource | Better Auth OAuth, hosted MCP, and Core delegation |
 | **Plugin provider grant** | A plugin's remote MCP connection | One declared provider resource | Core OAuth broker and Identity Vault |
 
 These credentials are deliberately not interchangeable. Signing in to Ryu does not silently pair a
-node, and pairing a node does not grant access to every organization or every other node.
+local node, and pairing a node does not grant access to every organization or every other node. The
+MCP endpoint choice and its credential are documented in [Ryu MCP](/docs/extend/mcp).
 
 ## The authorization chain
 
@@ -38,7 +41,7 @@ Ryu uses one human identity system and several deliberately separate workload cr
 
 ```mermaid
 flowchart LR
-  Human["Human sign-in"] --> BA["Better Auth\nsession, OAuth, API key"]
+  Human["Human sign-in"] --> BA["Better Auth\nsession, OAuth, scoped credential"]
   BA --> Pair["Explicit node pairing\nowner narrows requested scopes"]
   BA --> Hosted["Hosted MCP OAuth\nlive grant validation"]
   Pair --> Core["One Core node\ncapability + binding checks"]
@@ -49,10 +52,12 @@ flowchart LR
   Plugin["Random per-plugin credential"] --> Core
 ```
 
-Better Auth is the authority for people, memberships, consented OAuth grants, and API keys. It is
+Better Auth is the authority for people, memberships, consented OAuth grants, and scoped credentials. It is
 not a universal bearer for Core. A normal account session or OAuth access token cannot directly
-control a node. The user must pair that client, or a hosted MCP request must exchange its live OAuth
-grant for a short-lived delegation bound to the exact destination.
+control an unbound local or self-hosted node. A direct client must use the node's bearer or pair the
+client. For an organization-bound managed node, Core also accepts the short-lived user JWT minted
+from the current Better Auth session. A hosted MCP request instead exchanges its live OAuth grant
+for a short-lived delegation bound to the exact destination.
 
 Core then applies two independent filters: the credential's capability grant and the destination's
 ACL or organization role. Effective access is their intersection. A broad organization role does
@@ -173,9 +178,13 @@ deletion endpoint.
 ## 2. Device authorization for desktop, mobile, CLI, and extension fallback
 
 Device authorization is the shared sign-in path for clients that cannot use the website's cookie.
-The desktop and extension can call the Ryu auth service directly. Mobile can start the same flow
-through its connected Core node. In every case, the browser is where the human signs in and approves
-the client; the client polls for its own bearer and stores it locally.
+The desktop, MCP bridge, and extension can call the Ryu auth service directly. Mobile can start the
+same flow through its connected Core node. In every case, the browser is where the human signs in
+and approves the client; the client polls for its own bearer and stores it locally. This bearer
+identifies the user to Better Auth. It does not replace the node bearer used by direct Core MCP.
+Desktop may then exchange that signed-in session for the short-lived managed
+`userJwt` returned by the control-plane node list; that derived credential is a
+separate, scope-checked managed-node path.
 
 ```mermaid
 flowchart TD
@@ -308,7 +317,7 @@ flowchart TD
   MCPClient["MCP client or host"] --> Surface{"Which MCP surface is it using?"}
   Surface -->|"Website /mcp"| Public["Anonymous, read-only website MCP"]
   Surface -->|"Official Ryu remote resource"| Official["Better Auth OAuth, PKCE, scopes, consent"]
-  Surface -->|"Local Core bridge"| Local["Node bearer, Core capabilities, Gateway policy"]
+  Surface -->|"Direct Core MCP"| Local["Node bearer, paired token, or managed user JWT"]
   Surface -->|"Plugin's remote MCP server"| Plugin["Core OAuth broker and Identity Vault"]
   Public --> NoAccount["No account or node access is granted"]
   Official --> OrgPolicy["Organization and Gateway policy still apply"]
@@ -340,11 +349,13 @@ flowchart TD
   Resource --> Policy["Organization membership and Gateway policy enforce each call"]
 ```
 
-This OAuth grant does not replace the node bearer required by the local Core MCP bridge. Current
-Better Auth documentation describes the newer standalone MCP package and JWT integration; Ryu's
-installed Better Auth version already provides the official server-side MCP integration through its
-existing auth service. See [MCP security](/docs/extend/mcp/security) and the [Better Auth MCP plugin
-documentation](https://better-auth.com/docs/plugins/mcp).
+For a local or self-hosted direct Core MCP connection, use that node's bearer
+or pairing flow. For a managed node selected by Desktop, Core accepts the
+short-lived managed `userJwt` after checking organization, team, or personal
+ownership. External MCP hosts should use this OAuth path; the hosted service
+exchanges the grant for a short-lived exact-node delegation and does not forward
+the original OAuth token to Core. See [MCP security](/docs/extend/mcp/security)
+and the [Better Auth MCP plugin documentation](https://better-auth.com/docs/plugins/mcp).
 
 ## 9. Plugin remote MCP OAuth
 
@@ -412,30 +423,57 @@ Auth's built-in sensitive-route limits. The service resolves request IPs from `x
 default; deployments behind a proxy should set `BETTER_AUTH_TRUSTED_PROXIES` only to the proxy
 addresses that they control. Never trust arbitrary forwarded headers from the public internet.
 
-## 11. Personal and organization API keys
+## 11. Personal access tokens, OAuth apps, and Ryu Apps
 
-API keys are scoped bearer credentials for scripts and integrations. A personal key belongs to one
-account; an organization key belongs to the organization and continues working when the person who
-created it leaves. Organization members can view key metadata, while owners and admins create or
-revoke organization keys.
+Ryu follows the useful part of GitHub's credential split:
 
-Ryu returns the plaintext key only at creation time. Store it in the integration's secret store and
-do not paste it into chat, an issue, a browser URL, or a client-visible log. List and audit views
-show only safe metadata such as the name, prefix, scopes, creation time, expiry, and last use.
+- **Classic tokens** have the full Ryu capability set available to the account's role. They are
+  meant for trusted scripts and local tooling. They never become a browser session and do not
+  bypass organization roles or billing checks.
+- **Fine-grained tokens** let you choose the exact Ryu capabilities a token can use. Ryu clamps
+  every selection to the creator's server-side role ceiling.
+- **OAuth apps** are user-owned OAuth 2.1 clients. Their owner chooses the web or native client
+  type, redirect URIs, and the scopes the client may request. Ryu uses Better Auth's PKCE-first
+  authorization-code flow, and a confidential client secret is shown only when the app is created
+  or its secret is rotated. Revoking consent immediately invalidates that app's access and refresh
+  tokens.
+- **Ryu Apps** are marketplace apps installed on a particular Core node. Their permission grants
+  and external OAuth connections belong to that node, so the desktop app shows them under
+  **Settings → Ryu apps**. Installing a Ryu App and authorizing an OAuth app are separate actions.
+
+Account settings keeps **Connections**, **Sessions & devices**, **Ryu apps**, and **OAuth apps**
+separate. The OAuth apps view also contains the developer view for apps you registered and the
+authorized OAuth grants you can revoke.
+
+Organization API keys remain organization-owned credentials. Organization members can view their
+metadata, while owners and admins create or revoke them. They continue working when the person who
+created them leaves.
+
+Ryu returns a personal or organization token's plaintext only at creation time. Store it in the
+integration's secret store and do not paste it into chat, an issue, a browser URL, or a
+client-visible log. List and audit views show only safe metadata such as the name, prefix, scopes,
+creation time, expiry, and last use.
 
 ```mermaid
 flowchart TD
-  Caller["Signed-in account"] --> Choose{"Personal or organization key?"}
-  Choose -->|"Personal"| Personal["Key references the user"]
-  Choose -->|"Organization"| Org["Key references the organization"]
-  Personal --> Narrow["Ryu clamps requested scopes to the caller's role"]
+  Caller["Signed-in account"] --> Choose{"Which credential?"}
+  Choose -->|"Classic token"| Classic["All capabilities available to the role"]
+  Choose -->|"Fine-grained token"| Fine["Explicit Ryu capability scopes"]
+  Choose -->|"Organization API key"| Org["Credential references the organization"]
+  Choose -->|"OAuth app"| OAuth["Consent + OAuth scopes"]
+  Choose -->|"Ryu App"| RyuApp["Marketplace grants on one node"]
+  Classic --> Narrow["Role ceiling still applies"]
+  Fine --> Narrow
+  OAuth --> Narrow
   Org --> Admin["Owner/admin creates; members may view metadata"]
   Admin --> Narrow
-  Narrow --> Once["Return plaintext once"]
+  RyuApp --> AppPolicy["Core checks approved grants"]
+  Narrow --> Once["Return token secret once"]
   Once --> Store["Store in an integration secret store"]
-  Store --> Verify["Verify key, expiry, rate limit, and scopes per request"]
+  Store --> Verify["Verify token, expiry, rate limit, and scopes per request"]
   Verify --> Policy["Apply organization, node, Gateway, and billing policy"]
   Revoke["Owner/admin revokes organization key"] --> Verify
+  AppPolicy --> Policy
 ```
 
 Ryu's organization roles can manage the Better Auth key record, but they do not grant Ryu
@@ -476,8 +514,11 @@ flowchart TD
 |---|---|---|
 | Sign out or revoke an account session | That account bearer | A separately paired local node client |
 | Change the account password | Other active account sessions | The current security-session flow or a separately paired local node client |
-| Revoke a personal API key | That personal integration | Other keys or the account session |
+| Revoke a classic or fine-grained personal token | That personal integration | Other tokens or the account session |
 | Revoke an organization API key | Every integration using that organization key | Other keys, sessions, or paired nodes |
+| Revoke OAuth app consent | That app's access and issued tokens | The app registration itself |
+| Delete an OAuth app | That app and its issued credentials | Other apps or the account session |
+| Disable or uninstall a Ryu App | That app on the selected Core node | Its install on another node |
 | Redeem or wait for an OTT to expire | That one app handoff | The browser session that created it |
 | Remove a paired client | That client's access to one node | The user's cloud account |
 | Remove hardware | That device's relay access | Other devices or the account session |
@@ -496,8 +537,10 @@ risk verdict.
   app; a hardware QR bootstraps a device-specific token.
 - **Account session and node bearer:** the account belongs to the control plane; the node bearer
   admits a client to one Core instance.
-- **Official MCP OAuth and local MCP bridge:** the former grants remote, consented Ryu scopes; the
-  latter controls a particular node and still needs node access.
+- **Official MCP OAuth, direct Core MCP, and the stdio bridge:** hosted OAuth is
+  exchanged for an exact-node delegation; direct managed Desktop requests use a
+  short-lived `userJwt`; local/self-hosted direct MCP and the stdio bridge use a
+  node bearer or pairing.
 - **Plugin provider token and Ryu account session:** the provider token is sealed and sent only to
   its declared provider resource.
 - **Organization membership and resource permission:** membership supplies context, while roles,

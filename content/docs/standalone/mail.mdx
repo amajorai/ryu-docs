@@ -1,0 +1,89 @@
+---
+title: "Standalone Ryu Mail"
+description: "Run Agent Inboxes as an independently authenticated Mail service."
+tags: ["mail", "email", "standalone", "api"]
+---
+
+The Ryu Mail backend can run in two deployment shapes:
+
+| Shape | Credential | API ownership |
+|---|---|---|
+| Ryu node app | Core-issued sidecar bearer | Core proxies the node-local `/api/mail/*` contract |
+| Standalone process | `RYU_MAIL_API_TOKEN` | Mail serves the same `/api/mail/*` contract directly for one process/data directory |
+
+The standalone process is intentionally one tenant per service instance. Run a
+separate process and data directory when tenants must be isolated. Do not use a
+Core-issued `RYU_EXT_TOKEN` as a public API credential.
+
+## Start the service
+
+```sh
+RYU_MAIL_MODE=standalone \
+RYU_MAIL_API_TOKEN=replace-me \
+RYU_MAIL_HOSTNAME=127.0.0.1 \
+RYU_MAIL_PORT=7996 \
+RYU_DIR=/var/lib/ryu-mail \
+cargo run --manifest-path apps-store/mail/backend/Cargo.toml
+```
+
+To expose the process beyond the host, set an explicit standalone token and put
+TLS and rate limiting in front of it. A non-loopback bind without
+`RYU_MAIL_API_TOKEN` is refused. The Mail database and attachment blobs remain
+owned by this process.
+
+## API
+
+The standalone process uses the existing `/api/mail/*` route spelling so the
+Core companion and direct service call the same backend contract:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/mail/status` | Read Mail configuration status |
+| `GET/POST` | `/api/mail/inboxes` | List or create an inbox |
+| `GET/PATCH/DELETE` | `/api/mail/inboxes/:id` | Read, rename, or delete an inbox |
+| `POST` | `/api/mail/inboxes/:id/rotate-secret` | Replace its inbound HMAC secret |
+| `GET` | `/api/mail/inboxes/:id/messages` | List messages |
+| `GET` | `/api/mail/messages/:id` | Read one message |
+| `POST` | `/api/mail/inboxes/:id/send` | Hand real mail to the configured transport |
+| `POST` | `/api/mail/inbound/:id` | Receive signed raw mail through the per-inbox HMAC path |
+
+Protected routes require:
+
+```text
+Authorization: Bearer <RYU_MAIL_API_TOKEN>
+```
+
+The inbound route does not use the bearer. It requires
+`X-Ryu-Signature: sha256=<hex>` computed over the raw body with the inbox's
+inbound secret. Create an inbox or rotate its secret through the protected API,
+then keep that secret in the mail provider's webhook configuration.
+
+The existing sidecar response fields are retained for compatibility with the
+Ryu companion, including `created_at`, `inbox_id`, and `provider_message_id`.
+The create and rotate-secret responses return `inbound_secret` once; list and
+get inbox responses omit it. Treat the inbound secret as sensitive. Store the
+full message body and attachments only in the Mail API's protected path.
+
+Sending is an external side effect and cannot be recalled. A successful Mail
+response means the configured transport accepted the hand-off; it does not prove
+that the recipient received the message. Without a configured transport,
+receive/list/read still work but sending is unavailable.
+
+## Mail with Notify
+
+Use the [Agent Mail example](/docs/standalone/notify#box-and-agent-mail-examples)
+to send a Mail message and publish a small metadata event to Notify. The
+credentials are separate:
+
+```text
+Mail API bearer   -> read/create/send Mail resources
+Notify API bearer -> publish the event to one Notify tenant
+```
+
+The example sends the Mail message id, inbox id, sender/recipient, and subject
+as event metadata. It does not send the message body, HTML, raw MIME,
+attachments, SMTP credentials, or the HMAC secret to Notify.
+
+For the hosted control-plane Agent Inboxes API, see [Agent Inboxes](/docs/extend/develop/agent-inboxes).
+It has different ownership, storage, entitlements, and request fields from this
+self-host service.

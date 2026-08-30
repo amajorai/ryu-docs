@@ -1,72 +1,74 @@
 ---
 title: "Security"
-description: "What the Ryu MCP server can do on your behalf: token handling, the reach of the write tools, and why the Gateway still governs every model call."
+description: "Understand the separate user, node, hosted MCP, and third-party MCP credentials."
 ---
 
-The MCP (Model Context Protocol) server is a bridge with real reach. It can drive your node as fully as the token you give it allows, so treat it like any other credentialed client.
+An MCP request crosses more than one boundary. Each boundary has its own credential and its own check.
 
-The public website MCP endpoint is a separate, read-only surface. It accepts at most 64 KiB per
-request and eight JSON-RPC messages per batch; batch messages count individually against the
-short-window rate limit. It does not accept credentials or expose node tools, and oversized or
-untrusted requests are rejected before any page rendering or marketplace lookup begins.
+## Credential map
 
-## Credentials stay separate
+| Credential | Where it is checked | What it grants |
+|---|---|---|
+| Better Auth session or device token | Ryu control plane | A signed-in user and their organization memberships |
+| Node bearer or paired token | Core | Access to one Core node, with paired capabilities and bindings |
+| Managed user JWT | An organization-bound Core node | The user's role plus organization, team, or personal-node scope for direct managed-node requests |
+| Hosted MCP OAuth grant | Hosted MCP service | Consent, resource audience, and requested MCP scopes |
+| Ed25519 node delegation | Core | One hosted request, one node, one agent, and a short expiry |
+| Third-party provider credential | Core MCP registry / Identity Vault | Core's request to one configured external MCP server |
 
-The bridge deals with two distinct credentials:
+These values are not interchangeable. Website sign-in does not pair a node. A node token does not sign a user into the website. A plugin's provider credential does not grant access to Ryu.
 
-- **The paired node token** (`RYU_CORE_TOKEN`) authenticates a local bridge to one Core. It carries the approved capabilities and optional bindings for this host; it is not the owner recovery credential.
-- **The user session token** comes from signing in (see below). It identifies the human to the control plane and powers `ryu_whoami`. It is **not** a Core node bearer, so it does not widen what the node tools can do.
+## Direct local or self-hosted MCP
 
-Keep the node token out of source control and out of chat. It lives in the host's config (for example `claude_desktop_config.json`), which should be treated as a secret file. Prefer a per-host, per-node token where your node supports issuing them, so a compromised or retired host is one revocation rather than a node-wide rotation.
+The direct endpoint is:
 
-The two credentials travel to different owners and are checked for different purposes:
-
-```mermaid
-flowchart TD
-  Host["MCP host"] --> Bridge["apps/mcp bridge"]
-  Bridge -->|"node bearer"| Core["One Ryu Core node"]
-  Bridge -->|"user session bearer"| Control["Ryu control plane"]
-  Core --> Gateway["Gateway capability, budget, firewall, and audit"]
-  Control --> WhoAmI["Identity, organization, and session operations"]
-  Core --> Tools["Node tools"]
-  Gateway --> Tools
+```text
+POST https://<node>/mcp/<agent-id>
+Authorization: Bearer <node-or-paired-token>
 ```
 
-The node bearer admits the bridge to one Core instance. The user session bearer identifies the
-human to the control plane. Neither credential silently replaces the other.
+Core checks the bearer before it reads the JSON-RPC message. For `tools/list`, the caller needs `tools:read`. For `tools/call`, it needs `tools:exec`. Core then requires an exact known agent id and checks that agent's allowlist.
 
-This is deliberately separate from the official Ryu MCP authorization service. A remote MCP client
-connecting to that service uses OAuth 2.1, PKCE, organization-aware scopes, and a consent screen.
-For each request, the hosted service validates the opaque grant and mints a short-lived Ed25519
-delegation for one node and one agent. The delegation cannot be redirected to a sibling node or
-agent, and Core applies method-level capabilities before dispatch. An account session alone does
-not silently grant control of every node.
+For a managed node selected by Desktop, the bearer can instead be the short-lived
+`userJwt` returned by `GET /api/control-plane/nodes`. Desktop also sends it as
+`x-ryu-user-jwt`; Core verifies the signature, matches the organization, and
+checks team or personal ownership before applying the route capability. This
+managed shortcut is not available on an unbound local or self-hosted node.
 
-For the complete account, device, node, hardware, official MCP, plugin OAuth, organization, and
-revocation map, see [Authentication and pairing](/docs/security/authentication-and-pairing).
+Local Core creates `node-auth.token` on first boot. A local stdio bridge can read it when the target URL is loopback. A browser or another machine cannot read that file, so it uses the node pairing flow instead. Pairing approval happens on the node and can work without a control-plane account.
 
-## Signing in (device authorization)
+## Managed or organization-bound MCP
 
-`ryu-mcp login` runs the **OAuth 2.0 Device Authorization Grant (RFC 8628)** - the same flow the desktop, mobile, and CLI clients use - through Core's proxy. It opens your browser, you approve, and the resulting bearer is written to the shared `~/.ryu/auth.json`, so one sign-in covers every local Ryu client (single sign-on). `ryu-mcp logout` clears it.
+The hosted endpoint is:
 
-The stored credential is a standard OAuth 2.0 Bearer token, which is the format MCP's own auth model expects. For a stdio server the host launches the process, so this user credential is carried out-of-band (the shared file), never over the MCP wire.
+```text
+POST https://<ryu-service>/mcp/<node-id>/<agent-id>
+Authorization: Bearer <Better-Auth-OAuth-token>
+```
 
-## The write tools have real effects
+The hosted service:
 
-Most tools read. A few write, and they are the ones to think about before you let a host call them unattended:
+1. Validates the OAuth token, client, session, resource audience, and expiry.
+2. Checks organization membership, personal or team ownership, and requested scopes.
+3. Intersects the OAuth grant with the user's organization role.
+4. Signs a short-lived Ed25519 delegation bound to the exact node and agent.
+5. Forwards the JSON-RPC request to the node's `/mcp/<agent-id>` endpoint.
 
-- `ryu_ask` consumes model budget on the node's side-question model.
-- `ryu_set_active_model` switches which model the local stack serves.
-- `ryu_install_skill` installs a skill and hot-reloads Core's registry.
-- `ryu_run_workflow` triggers a workflow, which can itself call agents, tools, and sub-workflows.
-- `ryu_call_mcp_tool` invokes a tool on any MCP server the node has registered, scoped to a registered agent's allowlist.
+The hosted service never forwards the original OAuth token to Core. Core verifies the delegation locally using the public key pinned during node enrollment. It also checks the node id, organization, team, agent, issuer, scope, and expiry.
 
-A host that can call these can spend budget and change state on the node. That is the point of the bridge, but it means an over-eager or compromised host has the same reach. Scope the token, watch the audit log, and do not point an untrusted host at a node you care about.
+The Desktop node selector uses a related direct path. It asks the control plane for reachable nodes with the user's Better Auth session, receives a short-lived managed user JWT, and sends that credential to the selected organization-bound Core node. It refreshes the JWT before it expires; the JWT is kept in memory and is not written into `nodes.json` as a node secret.
 
-<Callout type="warn">
-  The bridge does not add a second layer of permission on top of the token. If you need finer control than the token gives, enforce it on the node: the Gateway's firewall, budgets, and audit apply to every model call a tool makes, including calls that originate from an MCP host.
-</Callout>
+## Tool execution after authentication
 
-## The Gateway still governs everything
+Authentication only admits the request. Core still applies the MCP method capability, agent allowlist, approval policy, app lifecycle checks, tenancy rules, and Identity Vault bindings before dispatch.
 
-Driving Core through MCP does not bypass the control plane. A `ryu_ask` from Claude Desktop is routed, budgeted, and audited exactly like a message from the desktop app, because the call still flows through the node's Gateway. The bridge changes who initiates a call, not who governs it. See [Gateway](/docs/gateway) for the controls that apply.
+The Gateway is not the node-discovery service. For model calls, Core sends traffic through the Gateway, where routing, firewall rules, budgets, billing, and audit apply. Core's MCP registry then connects to the configured external MCP server over stdio, Streamable HTTP, or legacy SSE.
+
+## Revocation and storage
+
+- Revoke a paired client from the node's Connections settings. This does not rotate the node owner's credential.
+- Revoke a managed node or organization membership in the control plane. Future hosted delegations stop, and existing delegations expire quickly.
+- Keep direct node tokens out of source control and MCP host prompts.
+- `ryu-mcp login` stores its user session in `~/.ryu/mcp-auth.json`. It is separate from Desktop's encrypted credential store and does not replace the node bearer used for Core calls.
+
+The public website MCP endpoint is a separate anonymous, read-only service. It has no account session and no node access.
