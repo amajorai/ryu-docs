@@ -519,6 +519,48 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
         {view(module, "RadioGroupItem", { value: "custom" }, "Custom surface")}
       </>,
     ),
+  "components/run-status-timeline": (module) => {
+    const endAt = Date.parse("2026-08-30T12:00:00.000Z");
+    const startAt = endAt - 24 * 60 * 60 * 1000;
+    return (
+      <div className="flex w-full max-w-xl flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="font-medium text-sm">Last 24 hours</span>
+          {view(module, "RunStatusTimelineLegend", {
+            statuses: ["success", "failure", "scheduled"],
+          })}
+        </div>
+        {view(module, "RunStatusTimeline", {
+          ariaLabel: "Example run status for the last 24 hours",
+          endAt,
+          entries: [
+            {
+              endAt: startAt + 5 * 60 * 60 * 1000 + 12 * 60 * 1000,
+              id: "preview-success",
+              label: "Morning digest · Succeeded · 05:00",
+              startAt: startAt + 5 * 60 * 60 * 1000,
+              status: "success",
+            },
+            {
+              endAt: startAt + 13 * 60 * 60 * 1000 + 6 * 60 * 1000,
+              id: "preview-failure",
+              label: "Health check · Failed · 13:00",
+              startAt: startAt + 13 * 60 * 60 * 1000,
+              status: "failure",
+            },
+            {
+              id: "preview-scheduled",
+              label: "Weekly report · Scheduled · next run",
+              startAt: startAt + 19 * 60 * 60 * 1000,
+              status: "scheduled",
+            },
+          ],
+          showScale: true,
+          startAt,
+        })}
+      </div>
+    );
+  },
   "components/scroll-area": (module) =>
     view(
       module,

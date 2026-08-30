@@ -113,6 +113,8 @@ const DEFAULT_DESCRIPTIONS: Record<string, string> = {
     "Animated text transition that scrambles characters before settling.",
   "components/motion/text-shimmer":
     "Animated shimmer treatment for text content.",
+  "components/run-status-timeline":
+    "Maps scheduled run outcomes onto a compact 24-hour status strip.",
 };
 
 const EXAMPLES: Record<string, string> = {
@@ -137,6 +139,8 @@ const EXAMPLES: Record<string, string> = {
   "components/avatar": `<Avatar />`,
   "components/bubble": `<Bubble>Message</Bubble>`,
   "components/message": `<Message>Message content</Message>`,
+  "components/run-status-timeline":
+    `<RunStatusTimeline ariaLabel="Run status" endAt={Date.now()} entries={[]} startAt={Date.now() - 86400000} />`,
   "components/logo": `<Logo />`,
   "components/data-grid/data-grid": `<DataGrid />`,
 };

@@ -41,6 +41,10 @@ export const UI_COMPONENT_MODULE_LOADERS: Record<
     (await import("@ryu/ui/components/progress")) as UiComponentModule,
   "components/radio-group": async () =>
     (await import("@ryu/ui/components/radio-group")) as UiComponentModule,
+  "components/run-status-timeline": async () =>
+    (await import(
+      "@ryu/ui/components/run-status-timeline"
+    )) as UiComponentModule,
   "components/scroll-area": async () =>
     (await import("@ryu/ui/components/scroll-area")) as UiComponentModule,
   "components/select": async () =>

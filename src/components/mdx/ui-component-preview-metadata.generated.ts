@@ -26,6 +26,7 @@ export const UI_COMPONENT_PREVIEW_METADATA: Record<
   "components/profile-charts": {"props":{},"targetExport":"ActivityArea"},
   "components/progress": {"props":{},"targetExport":"Progress"},
   "components/radio-group": {"props":{"disabled":["false","true"]},"targetExport":"RadioGroup"},
+  "components/run-status-timeline": {"props":{},"targetExport":"RunStatusTimeline"},
   "components/scroll-area": {"props":{},"targetExport":"ScrollArea"},
   "components/select": {"props":{"size":["default","sm"],"variant":["default","ghost"]},"targetExport":"Select"},
   "components/separator": {"props":{},"targetExport":"Separator"},

@@ -106,6 +106,12 @@ describe("docs navigation", () => {
     expect(standalone.pages).toEqual(["index", "notify", "mail"]);
   });
 
+  test("publishes the browser WebMCP guide with the MCP server docs", async () => {
+    const mcp = await readMeta("extend/mcp/meta.json");
+
+    expect(mcp.pages).toContain("webmcp");
+  });
+
   test("keeps language server plugins in their own section", async () => {
     const plugins = await readMeta("plugins/meta.json");
     const pages = plugins.pages ?? [];
