@@ -1,6 +1,7 @@
-import { RootProvider } from "fumadocs-ui/provider/next";
 import { RyuAssistantWidget } from "@ryu/assistant-widget/docs-assistant";
+import { RootProvider } from "fumadocs-ui/provider/next";
 
+import { WebMcpProvider } from "@/components/webmcp-provider";
 import "./global.css";
 import { Geist, Inter } from "next/font/google";
 
@@ -39,6 +40,7 @@ export default function Layout({ children }: LayoutProps<"/">) {
         <RootProvider>
           <HorizontalWheelScroll />
           {children}
+          <WebMcpProvider />
           <RyuAssistantWidget />
         </RootProvider>
       </body>

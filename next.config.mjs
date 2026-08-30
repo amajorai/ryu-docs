@@ -1,9 +1,12 @@
 import { createMDX } from "fumadocs-mdx/next";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const withMDX = createMDX();
 const require = createRequire(import.meta.url);
+const appRoot = dirname(fileURLToPath(import.meta.url));
+const turbopackAssetLoader = join(appRoot, "turbopack-asset-loader.mjs");
 const transformersWebEntry = join(
   dirname(require.resolve("@huggingface/transformers")),
   "transformers.web.js",
@@ -18,6 +21,14 @@ const config = {
     "@ryu/browser-local-ai",
     "@ryu/ui",
   ],
+  turbopack: {
+    rules: {
+      "*.glb": {
+        as: "*.js",
+        loaders: [turbopackAssetLoader],
+      },
+    },
+  },
   webpack(config) {
     config.module.rules.push({
       test: /\.glb$/i,
@@ -43,7 +54,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.2.3/start-here",
+        destination: "/docs/0.2.4/start-here",
         permanent: false,
       },
       // Mobile and Browser extension have dedicated roots again. Keep the
