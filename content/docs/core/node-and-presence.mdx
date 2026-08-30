@@ -1,13 +1,13 @@
 ---
-title: "Nodes, Presence & Mesh"
-description: "See which clients are connected to a node, sample engine resources, and mesh nodes privately"
+title: "Nodes, Presence & Private Networking"
+description: "See which clients are connected to a node, sample engine resources, and connect nodes privately"
 ---
 
 A Ryu node is one running Core instance. See [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)
 for the ownership boundary.
-This page covers connected-client **presence**, realtime collaboration, the optional **mesh** that links
-nodes privately, and public webhook ingress. The desktop surfaces node health and connected clients in the
-node selector.
+This page covers connected-client **presence**, realtime collaboration, optional private networking, and public
+webhook ingress. Tailscale and Headscale provide a persistent mesh; Tailcat provides a short-lived point-to-point
+connection. The desktop surfaces node health and connected clients in the node selector.
 
 The node selector chooses a URL and a credential; it does not turn a website
 session into universal node access. Local and self-hosted entries use a node or
@@ -128,12 +128,16 @@ so queued local changes and the node's durable CRDT state converge without repla
 Comments use the signed-in person's name and avatar and are stored as granular shared entries, so concurrent
 replies merge instead of replacing an entire discussion.
 
-## Mesh (Tailscale / Headscale)
+## Private network (Tailscale / Headscale / Tailcat)
 
-The mesh links nodes over a private tailnet so a client can reach a remote node by its MagicDNS name instead of
-a LAN IP. Core owns **what runs** here: the daemon is an opt-in Sidecar (`apps/core/src/sidecar/tailscale.rs`,
-`TailscaleManager`), never in `startup_order`, using userspace networking plus a SOCKS5 proxy. The read side
-(`apps/core/src/mesh/mod.rs`) shells out to `tailscale status --json` and shapes it into one contract.
+Tailscale and Headscale link nodes over a private tailnet so a client can reach a remote node by its MagicDNS
+name instead of a LAN IP. [Tailcat](https://tailscale.com/tailcat) is the point-to-point alternative: Core runs
+a short-lived listener for its own HTTP port and gives you one address to pass to a Tailcat client. Tailcat has
+no account, control server, tailnet, or peer discovery.
+
+Core owns **what runs** here: the selected backend is an opt-in Sidecar using userspace networking. The
+Tailscale/Headscale adapter uses the official `tailscale` + `tailscaled` pair and a SOCKS5 proxy; the Tailcat
+adapter uses the separately installed `tailcat` CLI. The read side shapes both providers into one contract.
 
 ```
 GET /api/mesh/status
@@ -141,25 +145,48 @@ GET /api/mesh/status
 
 | Field | Meaning |
 |---|---|
-| `enabled` | Whether the mesh is enabled on this node (reflects `RYU_MESH_ENABLED`, not the daemon). |
+| `enabled` | Whether the private network is enabled on this node (reflects `RYU_MESH_ENABLED`, not the provider process). |
 | `reachable` / `up` | Both present and equal; `true` only when `backend_state == "Running"`. |
-| `backend` | `tailscale`, `headscale`, or `null` (classified from the control server URL). |
+| `backend` | `tailscale`, `headscale`, `tailcat`, or `null`. |
 | `backend_state` | Raw `BackendState` string, for example `Running`, `NeedsLogin`, `Stopped`. |
 | `control_server` | Coordination/login server URL, or `null` when unknown. |
 | `magic_dns_name` | This node's MagicDNS name (trailing dot stripped). |
 | `tailscale_ips` | This node's tailnet IPs. |
+| `tailcat_address` | The active short-lived Tailcat connection address, or `null` for Tailscale/Headscale. It is a bearer for this connection. |
 | `peers` | Peer nodes, each with `name`, `host_or_dns`, `magic_dns_name`, `tailscale_ips`, `online`, `os`. |
 
-When the mesh is disabled, `query_status` returns the all-default object with HTTP 200 (never 500), so a
-vanilla install reports `enabled:false` cleanly. When enabled but the daemon is absent or erroring, it returns
-an enabled-but-unreachable object so the desktop can render an amber "configured but down" state.
+When the private network is disabled, `query_status` returns the all-default object with HTTP 200 (never 500),
+so a vanilla install reports `enabled:false` cleanly. When enabled but the provider is absent or erroring, it
+returns an enabled-but-unreachable object so the desktop can render an amber "configured but down" state.
 
 <Callout type="warn">
-The mesh is **opt-in and off by default**. Enable it with `RYU_MESH_ENABLED` (truthy is anything but empty,
-`0`, `false`, or `no`). It is **fail-closed**: Core refuses to start tokenless under mesh
-(`enforce_remote_auth`), the gateway admin/exec gates apply `&& !mesh_enabled()`, and the authkey is removed
-from the env after the `0600` keyfile write.
+The private network is **opt-in and off by default**. Enable it with `RYU_MESH_ENABLED` (truthy is anything
+but empty, `0`, `false`, or `no`). It is **fail-closed**: Core refuses to start tokenless when a backend can
+reach it (`enforce_remote_auth`), and the gateway admin/exec gates do not trust loopback traffic from the
+network listener. Treat a Tailcat address like a password; stopping or restarting its listener replaces it.
 </Callout>
+
+### Use Tailcat for one connection
+
+Tailcat is selected from the node selector's **Tunnel** menu. When it is enabled, Core starts a Tailcat
+listener for its own HTTP port and shows a fresh address in **Gateway → Network**. Install the upstream CLI
+first:
+
+```bash
+go install github.com/tailscale/tailcat/cmd/tailcat@latest
+```
+
+From another machine, use the copied address with the Core port:
+
+```bash
+tailcat <address> <core-port>
+tailcat socks <address> curl http://server.tailcat:<core-port>/api/health \
+  -H 'Authorization: Bearer <RYU_TOKEN>'
+```
+
+The Tailcat address is a connection bearer, separate from Ryu's `RYU_TOKEN`. Do not put it in source control,
+logs, or a public issue. Tailcat does not provide persistent peer discovery or Tailscale Funnel; use Tailscale
+or Headscale when the node needs an ongoing governed tailnet.
 
 ## Webhook ingress
 
