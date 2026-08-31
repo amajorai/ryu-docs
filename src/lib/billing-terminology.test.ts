@@ -18,5 +18,7 @@ test("billing docs describe hosted capacity as servers", async () => {
 
 	expect(content).toContain("managed server");
 	expect(content).toContain("Cloud server changes and downtime");
+	expect(content).toContain("$200/year");
+	expect(content).toContain("two months free");
 	expect(content).not.toMatch(/managed node|cloud nodes|Remote nodes/i);
 });

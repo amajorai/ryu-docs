@@ -1,6 +1,6 @@
 ---
 title: "Command approval and HITL"
-description: "How Ryu scans shell commands before execution, when it stops for human approval, and the hardline blocklist that never yields."
+description: "How Ryu scans shell commands before execution, blocks permanent file deletion, and stops for human approval."
 ---
 
 Before Core runs any shell command a tool produced, it sends the command to the Gateway's exec-governance scanner. The scanner classifies the command and returns a verdict - allow, deny, or approval required. This is the human-in-the-loop gate that sits between untrusted model output and your shell.
@@ -19,13 +19,25 @@ operator can force the gate on regardless of what the desktop has saved.
 |---|---|---|
 | Manual | `manual` | Every matched pattern requires human approval |
 | Smart | `smart` | A cheap classifier auto-allows low-risk commands, auto-denies clearly dangerous ones, and escalates the uncertain to human approval — see [Local classifier tier](/docs/core/classifier-tier) |
-| Off | `off` | Pattern approval is disabled; the hardline blocklist below still always denies |
+| Off | `off` | Pattern approval is disabled; the permanent-deletion and hardline blocks below still always deny |
 
 A session or global YOLO bypass, where one exists, can skip pattern approval - but the hardline blocklist ignores mode and YOLO entirely.
 
-## The hardline blocklist
+## Permanent deletion and the hardline blocklist
 
-These always return `deny`, regardless of mode, YOLO, or any override. They are catastrophic and have no legitimate agent use.
+Ryu has a permanent-deletion guard above ordinary approval modes. It returns `deny` before a
+command reaches a shell, even when pattern approval is `off`, the Gateway is unreachable, or a
+managed rule would otherwise allow the command. The guard covers:
+
+- `rm`, `unlink`, `rmdir`, `shred`, Windows `del`/`erase`/`rd`, and PowerShell removal commands
+- `find -delete` and `rsync --delete`
+- `git clean`, `git reset --hard`, and bulk `git checkout`/`git restore`
+- common Python, Node, Ruby, and Perl deletion APIs
+- explicit file-deletion patches and filesystem-shaped MCP delete tools
+- literal nested deletion commands inside `bash -c`, `bash -lc`, `sh -c`, `zsh -c`, `cmd /c`, and PowerShell wrappers
+
+The existing catastrophic hardline cases also always return `deny`, regardless of mode, YOLO, or
+any ordinary approval rule. They are catastrophic and have no legitimate agent use.
 
 - `rm -rf /` and its variants
 - `rm -rf --no-preserve-root`
@@ -33,6 +45,26 @@ These always return `deny`, regardless of mode, YOLO, or any override. They are 
 - `mkfs.*` targeting a root or mounted device
 - `dd if=/dev/zero of=/dev/sd*` (disk zeroing)
 - piping an untrusted URL straight to a shell at the filesystem root
+
+Ryu never silently rewrites a blocked command. Use the verified recoverable mechanism instead:
+
+- macOS: `/usr/bin/trash <absolute-path>`; do not add `--`
+- Linux: the installed `gio trash` or `trash-put` command
+- Windows: the verified PowerShell helper, using .NET's `Microsoft.VisualBasic.FileIO`
+  `DeleteFile`/`DeleteDirectory` APIs with `RecycleOption.SendToRecycleBin`
+
+These are host-side recovery actions. A confined agent may be unable to execute the Trash helper
+because the OS deletion boundary intentionally denies unlink/removal to the agent itself; ask the
+user or host broker to perform the recoverable move.
+
+If the host has no reliable recoverable mechanism, Ryu refuses to launch its managed Codex route
+until one is configured. A deliberate operator policy change can be made with
+`RYU_ALLOW_PERMANENT_DELETE=1`; that is an opt-out from this protection, not a normal approval.
+
+On Windows, Ryu probes PowerShell and the .NET Recycle Bin API before starting a managed Codex
+route. The helper uses `Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile` or
+`DeleteDirectory` with `RecycleOption.SendToRecycleBin`; if that API is unavailable, Ryu fails
+closed instead of offering a permanent-delete fallback. See the [Microsoft API reference](https://learn.microsoft.com/en-us/dotnet/api/microsoft.visualbasic.fileio.filesystem.deletefile).
 
 ## Pattern categories
 
@@ -98,6 +130,10 @@ How `approval_required` resolves depends on where the command originated:
 
 If the scanner is unreachable, Core default-denies. The only escape hatch is `RYU_ALLOW_GATEWAY_FALLBACK=1`, which mirrors the exec-budget fallback semantics exactly. Do not set it in a shared or server deployment.
 
+That fallback does not bypass the permanent-deletion guard. Only the explicit
+`RYU_ALLOW_PERMANENT_DELETE=1` policy change can allow those commands to proceed to the ordinary
+scanner and approval rules.
+
 ## ACP seam
 
 ACP agents (Claude Code, Codex, and the flagship Pi engine) run their own shell, so Ryu gates them at the ACP permission-request seam. When an agent asks to run a tool and `RYU_EXEC_APPROVAL_MODE` is not `off`, Core extracts the command from the request and runs it through the same scanner before granting: a `deny` verdict rejects the permission outright - even in a headless session that would otherwise auto-approve - and `approval_required` rejects in headless mode or surfaces to the user in interactive mode.
@@ -114,14 +150,25 @@ tool call from which neither a command nor a write target is recoverable is not 
 agents are first-party binaries that legitimately need their own credentials, so Ryu gates their
 commands rather than scrubbing their environment - see [Credential and environment scrubbing](/docs/security/credential-scrubbing).
 
-Ryu deliberately does **not** install filesystem hooks into each agent's own config (Claude
-`settings.json`, Codex `config.toml`). That would re-implement the gate the ACP permission seam
-already provides, and it would cost either a folder-trust supply-chain hole (enabling
-project-local settings sources) or a subscription-credential migration (relocating the agent's
-config directory). One seam governs every ACP agent uniformly with neither cost. Command approval also composes with each agent's permission mode; see [ACP session controls](/docs/extend/develop).
+For the Ryu-managed Codex entry, Ryu also materializes an isolated Codex home with a durable global
+deletion instruction, user-level `forbidden` command rules, `workspace-write` and `on-request`
+defaults when those settings are absent, and a `PreToolUse` hook. The hook is intentionally
+defense in depth: Codex requires the user to review and trust non-managed hooks, and Core's local
+guard still denies permanent deletion if the hook is skipped, disabled, or bypassed. Ryu never
+edits the user's normal `~/.codex` configuration.
+
+Managed Codex also starts through Ryu's OS-aware child runner. Linux installs a Landlock rule that
+denies unlink, directory removal, and rename; macOS uses its available Seatbelt runner; Windows
+fails closed until a native AppContainer runner is available. This protects the removal operation
+itself, but does not prevent every destructive write such as truncation or overwrite. Without
+backups, a disposable copy-on-write workspace or VM remains the appropriate containment layer.
+
+Other Codex processes launched outside Ryu, and ACP agents Ryu does not manage, are not covered by
+Ryu's isolated Codex home. Use their own system or user policy layer for those processes. Command
+approval also composes with each agent's permission mode; see [ACP session controls](/docs/extend/develop).
 
 <Callout type="warn">
-Smart mode's classifier may be heuristic or a stub at ship - if so, prefer `manual` anywhere the blast radius matters. The hardline blocklist is the only layer guaranteed to deny unconditionally; everything else depends on the configured mode. In shared or server deployments keep `RYU_EXEC_APPROVAL_MODE=manual` and never set `RYU_ALLOW_GATEWAY_FALLBACK=1`.
+Smart mode's classifier may be heuristic or a stub at ship - if so, prefer `manual` anywhere the blast radius matters. The permanent-deletion and catastrophic hardline blocks deny unconditionally by default; ordinary risk patterns still depend on the configured mode. In shared or server deployments keep `RYU_EXEC_APPROVAL_MODE=manual`, never set `RYU_ALLOW_GATEWAY_FALLBACK=1`, and do not set `RYU_ALLOW_PERMANENT_DELETE=1`.
 </Callout>
 
 ## Related

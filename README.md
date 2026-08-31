@@ -9,9 +9,6 @@
 A Next.js + Fumadocs app: the deep "state of everything" reference for Ryu, organized into
 18 sidebar realms and kept honest with file citations.
 
-> **Read-only mirror.** This repo is generated from the Ryu monorepo — see
-> [Contributing](#contributing) before opening a PR.
-
 ## Stack
 
 - Next.js (App Router) + `fumadocs-ui` / `fumadocs-core` / `fumadocs-mdx`
@@ -44,11 +41,11 @@ Container: `docker build -t ryu-docs . && docker run -p 3002:3002 ryu-docs`.
 
 ## Contributing
 
-Content and code changes land in the [Ryu monorepo](https://github.com/amajorai/ryu) and are
-mirrored here; this repo is not the source of truth, and direct pushes are overwritten on the
-next mirror run. PRs opened here are ported back to the mono by the maintainers, so they are
-welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) and [STYLE_GUIDE.md](./STYLE_GUIDE.md) for the
-docs voice and page conventions.
+Content and code changes are welcome. Open a pull request in this repository; maintainers review
+accepted changes, land them in the [Ryu monorepo](https://github.com/amajorai/ryu), and include
+them in a later sync. Generated files and the public `main` branch may be rewritten during a sync.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and [STYLE_GUIDE.md](./STYLE_GUIDE.md) for the docs voice
+and page conventions.
 
 ## License
 

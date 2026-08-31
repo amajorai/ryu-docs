@@ -10,11 +10,12 @@ provided under that same license and that you have the right to submit it. We ma
 sign off your commits (`git commit -s`) under the
 [Developer Certificate of Origin](https://developercertificate.org/).
 
-## Source of truth
+## Public contributions
 
-This unit is developed in Ryu's monorepo, which is the canonical source. The public repository is
-generated one-way from the monorepo, so it is read-only at the file level: open issues and pull
-requests here and a maintainer will land accepted changes upstream, then sync them back out.
+This unit is assembled in Ryu's monorepo, and this public repository is an active contribution
+surface. Open issues and pull requests here. A maintainer lands accepted changes in the monorepo
+and syncs them back out. A sync may rewrite generated files and the public `main` branch, so do not
+base a long-lived fork on a particular sync commit.
 
 Read [STYLE_GUIDE.md](./STYLE_GUIDE.md) before editing. It defines the page types, the audience
 split, and how to keep technical terms clear without replacing them with vague synonyms.
