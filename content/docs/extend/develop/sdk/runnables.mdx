@@ -1,0 +1,197 @@
+---
+title: "SDK runnables and model clients"
+description: "Build runnable agents, workflows, tools, actions, and skills, then connect them to models and gateway policy."
+---
+
+Part of the [Ryu SDKs and libraries](/docs/extend/develop/sdk) guide.
+
+## Runnable factories
+
+The four kind factories take an options object and return a `Runnable` with a fixed `kind`. The
+semantic `defineAction` facade is also exported from `.` (`packages/sdk/src/runnable/`).
+
+| Factory | `kind` | Distinct option | Returns |
+|---|---|---|---|
+| `defineAction` | `tool` | description, input/output schema, effect, approval | `ActionRunnable<TInput, TOutput>` |
+| `defineAgent` | `agent` | `tools?: readonly Runnable[]` | `Runnable<TInput, TOutput>` |
+| `defineWorkflow` | `workflow` | `steps?: readonly Runnable[]` | `Runnable<TInput, TOutput>` |
+| `defineTool` | `tool` | `schema: ToolSchema` (required) | `ToolRunnable<TInput, TOutput>` |
+| `defineSkill` | `skill` | none | `Runnable<TInput, TOutput>` |
+
+Every options object shares `id`, `name`, and `run(input, ctx)`.
+
+### defineAgent
+
+```typescript
+function defineAgent<TInput, TOutput>(options: {
+  id: string;
+  name: string;
+  run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
+  tools?: readonly Runnable[];
+}): Runnable<TInput, TOutput>;
+```
+
+Creates a `kind: "agent"` Runnable. The optional `tools` array lists other Runnables (including
+workflows) the agent can invoke as named tools.
+
+```typescript
+const myAgent = defineAgent({
+  id: "agent-researcher",
+  name: "Researcher",
+  async run({ query }, ctx) {
+    const result = await ctx.gateway.chat([{ role: "user", content: query }]);
+    return { answer: result.content };
+  },
+});
+```
+
+### defineWorkflow
+
+```typescript
+function defineWorkflow<TInput, TOutput>(options: {
+  id: string;
+  name: string;
+  run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
+  steps?: readonly Runnable[];
+}): Runnable<TInput, TOutput>;
+```
+
+Creates a `kind: "workflow"` Runnable that orchestrates other Runnables as steps. A step is any
+`Runnable` (`WorkflowStep` is an alias), invoked directly with `step.run(input, ctx)`.
+
+### defineTool
+
+```typescript
+function defineTool<TInput extends Record<string, unknown>, TOutput>(options: {
+  id: string;
+  name: string;
+  schema: ToolSchema;        // JSON Schema, type: "object"
+  run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
+}): ToolRunnable<TInput, TOutput>;
+```
+
+Creates a `kind: "tool"` Runnable with a JSON Schema. The input is validated against the schema at
+`run` time, so a missing required field or a primitive-type mismatch throws a descriptive `Error`
+naming the failing field before the body executes. Tools do not require a model call, but if one is
+needed it must use `ctx.gateway`.
+
+`ToolRunnable` extends `Runnable` with a public `schema` field. The schema types are:
+
+```typescript
+interface ToolSchema {
+  type: "object";
+  properties: Record<string, JsonSchemaProperty>;
+  required?: string[];
+}
+
+interface JsonSchemaProperty {
+  type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+  description?: string;
+  enum?: unknown[];
+  items?: JsonSchemaProperty;
+  properties?: Record<string, JsonSchemaProperty>;
+  required?: string[];
+}
+```
+
+### defineAction
+
+```typescript
+function defineAction<TInput extends Record<string, unknown>, TOutput>(options: {
+  id: string;
+  name: string;
+  description: string;
+  schema: ToolSchema;
+  outputSchema?: Record<string, unknown>;
+  effect: "read" | "mutate";
+  needsApproval?: boolean;
+  run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
+}): ActionRunnable<TInput, TOutput>;
+```
+
+`defineAction` is the canonical authoring contract for a business operation. It returns a Tool
+Runnable for compatibility with Core, but adds the metadata that makes the operation explicit to
+Ryu's governed runtime:
+
+- `effect: "read"` lowers to `readOnlyHint: true`.
+- `effect: "mutate"` lowers to `destructiveHint: true`.
+- `needsApproval: true` makes the existing Core approval gate queue the call before dispatch.
+- `outputSchema` is preserved for structured MCP/Core results.
+
+The Action can run in-process through `action.run(input, ctx)`, adapt to the SDK MCP server with
+`action.toMcpTool(ctx)`, or lower to an installable manifest with
+`action.toManifest({ id, version })`. See [Build Actions](/docs/extend/develop/extensions/author-actions)
+for the complete example and the packaged-code boundary.
+
+### defineSkill
+
+```typescript
+function defineSkill<TInput, TOutput>(options: {
+  id: string;
+  name: string;
+  run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
+}): Runnable<TInput, TOutput>;
+```
+
+Creates a `kind: "skill"` Runnable that encapsulates a reusable prompt pattern. Like a tool it is
+stateless, but its job is a reusable prompt rather than a side-effectful function.
+
+## The model client
+
+`defineModel` builds a gateway-mandatory `ModelClient` (`packages/sdk/src/model/client.ts`). The
+client is a thin TypeScript wrapper over the `@ryuhq/sdk-native` addon, whose `ModelClient` is the
+`crates/sdk/core` Rust core.
+
+```typescript
+function defineModel(modelId: string, options?: {
+  baseUrl?: string;   // defaults to RYU_GATEWAY_URL, then the Rust core default
+  token?: string;     // defaults to RYU_GATEWAY_TOKEN; the gateway token, never a provider key
+}): ModelClient;
+
+const model = defineModel("gemma4");
+const reply = await model.chat([{ role: "user", content: "hello" }]);
+console.log(reply.content);
+
+for await (const delta of model.stream(messages)) {
+  if (delta.content) process.stdout.write(delta.content);
+}
+```
+
+Constructing a `ModelClient` validates egress in the Rust core, so a direct-provider base URL throws
+immediately rather than at request time. The wire types are an OpenAI-compatible subset:
+
+```typescript
+interface ChatMessage { role: "system" | "user" | "assistant"; content: string }
+interface ChatDelta   { content: string | null; finishReason: string | null }
+interface ChatResult  {
+  content: string;
+  finishReason: string | null;
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+}
+```
+
+`usage` is present only when the gateway reports token counts; otherwise it is `undefined`.
+
+## Gateway enforcement
+
+The Gateway path is enforced by construction (`packages/sdk/src/model/gateway.ts`, backed by
+`crates/sdk/core/src/gateway.rs`):
+
+- Every `RunnableContext` carries a `GatewayClient`; there is no context without one.
+- The SDK ships **no provider bindings**, so credentials live in the Gateway, not in your code.
+- `assertAllowedEgressUrl(baseUrl)` rejects direct-provider hosts at construction time. Only the
+  configured gateway, loopback, or private addresses are allowed.
+- It fails closed: a client that cannot reach the Gateway throws rather than calling a provider
+  directly.
+
+These helpers are exported for advanced use:
+
+| Export | Resolves |
+|---|---|
+| `DEFAULT_GATEWAY_URL` | the constant `http://127.0.0.1:7981` |
+| `resolveGatewayUrl()` | `RYU_GATEWAY_URL` when non-empty, else `DEFAULT_GATEWAY_URL` |
+| `resolveGatewayToken()` | `RYU_GATEWAY_TOKEN`, or `undefined` when unset |
+| `assertAllowedEgressUrl(baseUrl)` | throws on a known direct-provider URL |
+
+For the architectural rule behind this (Core decides what runs, the Gateway decides what is allowed
+and paid for), see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway).

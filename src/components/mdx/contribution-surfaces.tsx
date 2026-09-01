@@ -1,20 +1,13 @@
 "use client";
 
+import { Skeleton } from "@ryu/ui/components/skeleton";
 import {
-  Activity,
-  ArrowUpRight,
-  Bot,
-  Check,
-  FileText,
   LayoutPanelTop,
   List,
   Palette,
   PanelLeft,
   Pin,
-  Plus,
-  Settings2,
   Sparkles,
-  TerminalSquare,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import type { ComponentType, ReactNode } from "react";
@@ -45,7 +38,7 @@ const surfaces: SurfaceDefinition[] = [
       "Add a titled, live list to the compact sidebar. The host owns the row treatment, grouping, and navigation.",
     controls: ["title + icon", "source + row map", "target + create action"],
     icon: List,
-    render: () => <SidebarSectionPreview />,
+    render: () => <HostShellSkeleton slot="sidebar-section" />,
   },
   {
     key: "sidebar-button",
@@ -55,7 +48,7 @@ const surfaces: SurfaceDefinition[] = [
       "Place one navigation row in the shell for an app-owned page or companion surface.",
     controls: ["label + icon", "order", "target route"],
     icon: PanelLeft,
-    render: () => <SidebarButtonPreview />,
+    render: () => <HostShellSkeleton slot="sidebar-button" />,
   },
   {
     key: "pinned-summary",
@@ -65,7 +58,7 @@ const surfaces: SurfaceDefinition[] = [
       "Feed a host-owned summary rail with live status rows. The rail stays recognizable while your activity stays visible.",
     controls: ["title + accent", "source + status map", "progress + target"],
     icon: Pin,
-    render: () => <PinnedSummaryPreview />,
+    render: () => <HostShellSkeleton slot="pinned-summary" />,
   },
   {
     key: "workspace-tab",
@@ -75,7 +68,7 @@ const surfaces: SurfaceDefinition[] = [
       "Offer a panel in the bottom or right workspace dock, backed by a companion, declarative view, or registered native host panel.",
     controls: ["title + icon", "bottom / right / both", "companion or view"],
     icon: LayoutPanelTop,
-    render: () => <WorkspaceTabPreview />,
+    render: () => <HostShellSkeleton slot="workspace-tab" />,
   },
   {
     key: "companion",
@@ -85,7 +78,7 @@ const surfaces: SurfaceDefinition[] = [
       "Ship a focused app surface that can open as a tab, sidebar companion, or dock panel through the host bridge.",
     controls: ["sandboxed UI bundle", "host context", "theme bridge"],
     icon: Sparkles,
-    render: () => <CompanionPreview />,
+    render: () => <HostShellSkeleton slot="companion" />,
   },
   {
     key: "theme",
@@ -95,7 +88,7 @@ const surfaces: SurfaceDefinition[] = [
       "Ship palette tokens as a normal plugin contribution. The shell applies them as CSS variables without evaluating code.",
     controls: ["light / dark mode", "preview palette", "CSS token map"],
     icon: Palette,
-    render: () => <ThemePreview />,
+    render: () => <HostShellSkeleton slot="theme" />,
   },
 ];
 
@@ -137,9 +130,8 @@ export function ContributionSurfaces() {
           </span>
         </div>
         <p className="mt-3 mb-0 max-w-2xl text-fd-muted-foreground text-sm leading-relaxed">
-          These are intentionally small skeletons. They use the docs host
-          tokens, so switching light/dark mode updates every render without
-          changing the extension contract.
+          These six views share one shell skeleton. The highlighted slot is the
+          part a manifest changes; the host keeps the rest of the UI consistent.
         </p>
       </header>
 
@@ -194,223 +186,133 @@ function SurfaceCard({ surface }: { surface: SurfaceDefinition }) {
   );
 }
 
-function SidebarSectionPreview() {
-  return (
-    <div className="flex min-h-44 overflow-hidden rounded-md bg-fd-background shadow-sm">
-      <aside className="w-32 shrink-0 bg-fd-secondary/70 p-2">
-        <div className="mb-3 flex items-center gap-1.5 text-fd-foreground text-[10px]">
-          <span className="flex size-4 items-center justify-center rounded bg-fd-primary text-[8px] text-fd-primary-foreground">
-            R
-          </span>
-          Ryu
-        </div>
-        <div className="space-y-1 text-[10px]">
-          <div className="rounded bg-fd-accent px-2 py-1 text-fd-foreground">
-            Overview
-          </div>
-          <div className="mt-3 flex items-center justify-between px-2 text-fd-muted-foreground uppercase tracking-wider">
-            <span>Research</span>
-            <Plus size={10} />
-          </div>
-          <div className="flex items-center gap-1.5 rounded bg-fd-background px-2 py-1 text-fd-foreground">
-            <FileText className="text-fd-primary" size={11} />
-            Sprint notes
-          </div>
-          <div className="flex items-center gap-1.5 px-2 py-1 text-fd-muted-foreground">
-            <FileText size={11} />
-            Field guide
-          </div>
-        </div>
-      </aside>
-      <div className="min-w-0 flex-1 p-3">
-        <div className="flex items-center justify-between">
-          <span className="font-medium text-fd-foreground text-xs">
-            Sprint notes
-          </span>
-          <ArrowUpRight className="text-fd-muted-foreground" size={12} />
-        </div>
-        <div className="mt-3 space-y-2">
-          <div className="h-2 w-4/5 rounded-full bg-fd-secondary" />
-          <div className="h-2 w-3/5 rounded-full bg-fd-secondary" />
-          <div className="h-16 rounded-md bg-fd-secondary/70" />
-        </div>
-      </div>
-    </div>
-  );
-}
+type ContributionSlot =
+  | "companion"
+  | "pinned-summary"
+  | "sidebar-button"
+  | "sidebar-section"
+  | "theme"
+  | "workspace-tab";
 
-function SidebarButtonPreview() {
+function HostShellSkeleton({ slot }: { slot: ContributionSlot }) {
   return (
-    <div className="flex min-h-44 overflow-hidden rounded-md bg-fd-background shadow-sm">
-      <aside className="w-36 shrink-0 bg-fd-secondary/70 p-2">
-        <div className="mb-3 px-2 text-fd-muted-foreground text-[9px] uppercase tracking-wider">
-          Workspace
-        </div>
-        <div className="space-y-1 text-[10px]">
-          <div className="flex items-center gap-2 px-2 py-1.5 text-fd-muted-foreground">
-            <Bot size={12} />
-            Agents
+    <div className="relative min-h-44 overflow-hidden rounded-md bg-fd-background">
+      <div className="flex min-h-44 overflow-hidden">
+        <aside className="w-32 shrink-0 bg-fd-secondary/70 p-2">
+          <div className="mb-3 flex items-center gap-1.5">
+            <Skeleton className="size-4 rounded bg-fd-primary/30" />
+            <Skeleton className="h-2 w-10 rounded-full bg-fd-background/70" />
           </div>
-          <div className="flex items-center gap-2 rounded bg-fd-accent px-2 py-1.5 text-fd-foreground">
-            <Activity className="text-fd-primary" size={12} />
-            Research
-            <ArrowUpRight
-              className="ml-auto text-fd-muted-foreground"
-              size={10}
+          <div className="space-y-1">
+            <Skeleton className="h-5 w-full rounded bg-fd-background/70" />
+            <SlotMarker
+              active={slot === "sidebar-section"}
+              label="Sidebar section"
             />
-          </div>
-          <div className="flex items-center gap-2 px-2 py-1.5 text-fd-muted-foreground">
-            <Settings2 size={12} />
-            Settings
-          </div>
-        </div>
-      </aside>
-      <div className="min-w-0 flex-1 p-3">
-        <p className="mb-1 text-fd-muted-foreground text-[9px] uppercase tracking-wider">
-          /research
-        </p>
-        <p className="m-0 font-medium text-fd-foreground text-xs">
-          Your app-owned page opens here.
-        </p>
-        <div className="mt-3 flex items-center gap-2 rounded-md bg-fd-secondary p-2 text-fd-muted-foreground text-[10px]">
-          <Check className="text-emerald-500" size={12} />
-          One row, one target, no shell fork.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PinnedSummaryPreview() {
-  return (
-    <div className="min-h-44 rounded-md bg-fd-background p-2 shadow-sm">
-      <div className="flex items-center gap-2 px-1 text-fd-muted-foreground text-[9px] uppercase tracking-wider">
-        <span className="size-1.5 rounded-full bg-emerald-500" />
-        Chat · running
-      </div>
-      <div className="mt-2 grid grid-cols-[1fr_9rem] gap-2">
-        <div className="space-y-2 p-2">
-          <div className="h-2 w-4/5 rounded-full bg-fd-secondary" />
-          <div className="h-2 w-3/5 rounded-full bg-fd-secondary" />
-          <div className="mt-5 h-12 rounded-md bg-fd-secondary/70" />
-        </div>
-        <aside className="rounded-md bg-fd-secondary/80 p-2.5">
-          <div className="flex items-center gap-1.5 text-fd-foreground text-[10px]">
-            <Pin className="text-fd-primary" size={11} />
-            Pinned summary
-          </div>
-          <div className="mt-3 rounded-md bg-fd-background p-2">
-            <div className="flex items-center justify-between text-[9px]">
-              <span className="text-fd-foreground">Research pass</span>
-              <span className="text-fd-muted-foreground">68%</span>
-            </div>
-            <div className="mt-2 h-1 rounded-full bg-fd-secondary">
-              <div className="h-1 w-2/3 rounded-full bg-fd-primary" />
-            </div>
-            <p className="mt-2 mb-0 text-fd-muted-foreground text-[9px]">
-              Reading source 4 of 6
-            </p>
+            <SlotMarker
+              active={slot === "sidebar-button"}
+              label="Sidebar button"
+            />
+            <Skeleton className="h-5 w-4/5 rounded bg-fd-background/70" />
           </div>
         </aside>
-      </div>
-    </div>
-  );
-}
 
-function WorkspaceTabPreview() {
-  return (
-    <div className="flex min-h-44 flex-col rounded-md bg-fd-background p-2 shadow-sm">
-      <div className="flex items-center gap-1 rounded bg-fd-secondary/70 p-1 text-[9px]">
-        <span className="rounded bg-fd-background px-2 py-1 text-fd-muted-foreground">
-          Chat
-        </span>
-        <span className="rounded bg-fd-accent px-2 py-1 text-fd-foreground">
-          Research
-        </span>
-        <span className="rounded px-2 py-1 text-fd-muted-foreground">
-          Files
-        </span>
-        <Plus className="ml-auto text-fd-muted-foreground" size={11} />
-      </div>
-      <div className="flex flex-1 items-center justify-center text-center">
-        <div>
-          <TerminalSquare className="mx-auto text-fd-primary" size={20} />
-          <p className="mt-2 mb-0 font-medium text-fd-foreground text-[10px]">
-            App-owned workspace panel
-          </p>
-          <p className="mt-1 mb-0 text-fd-muted-foreground text-[9px]">
-            Bottom, right, or offered in both docks.
-          </p>
-        </div>
-      </div>
-      <div className="flex items-center gap-1 rounded bg-fd-secondary/70 p-1 text-[9px]">
-        <span className="rounded bg-fd-accent px-2 py-1 text-fd-foreground">
-          Research
-        </span>
-        <span className="rounded px-2 py-1 text-fd-muted-foreground">
-          Terminal
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function CompanionPreview() {
-  return (
-    <div className="min-h-44 rounded-md bg-fd-background p-3 shadow-sm">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="flex size-6 items-center justify-center rounded-md bg-fd-primary text-fd-primary-foreground">
-            <Sparkles size={13} />
-          </span>
-          <div>
-            <p className="m-0 font-medium text-fd-foreground text-[10px]">
-              Research companion
-            </p>
-            <p className="m-0 text-fd-muted-foreground text-[9px]">
-              app-owned surface
-            </p>
+        <main className="min-w-0 flex-1 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Skeleton className="h-2.5 w-24 rounded-full bg-fd-secondary" />
+            <Skeleton className="h-5 w-5 rounded bg-fd-secondary" />
           </div>
-        </div>
-        <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[9px] text-emerald-700 dark:text-emerald-300">
-          Connected
-        </span>
+          <div className="mt-3 space-y-2">
+            <Skeleton className="h-2 w-4/5 rounded-full bg-fd-secondary" />
+            <Skeleton className="h-2 w-3/5 rounded-full bg-fd-secondary" />
+            {slot === "companion" ? (
+              <HighlightedSlot label="Companion surface">
+                <Skeleton className="h-2 w-3/4 rounded-full bg-fd-background" />
+                <Skeleton className="mt-2 h-8 w-full rounded bg-fd-background" />
+              </HighlightedSlot>
+            ) : (
+              <Skeleton className="h-16 w-full rounded bg-fd-secondary/70" />
+            )}
+          </div>
+        </main>
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2">
-        <div className="col-span-2 rounded-md bg-fd-secondary p-2">
-          <div className="h-2 w-3/4 rounded-full bg-fd-background" />
-          <div className="mt-2 h-2 w-1/2 rounded-full bg-fd-background" />
-          <div className="mt-4 h-8 rounded bg-fd-background" />
-        </div>
-        <div className="rounded-md bg-fd-accent p-2">
-          <ArrowUpRight className="text-fd-primary" size={12} />
-          <p className="mt-2 mb-0 text-fd-foreground text-[9px]">Open run</p>
-        </div>
-      </div>
+
+      {slot === "pinned-summary" ? <PinnedSummarySlot /> : null}
+      {slot === "workspace-tab" ? <WorkspaceTabSlot /> : null}
+      {slot === "theme" ? <ThemeSlot /> : null}
     </div>
   );
 }
 
-function ThemePreview() {
+function SlotMarker({ active, label }: { active: boolean; label: string }) {
+  if (!active) {
+    return <Skeleton className="h-5 w-full rounded bg-fd-background/60" />;
+  }
+
   return (
-    <div className="min-h-44 rounded-md bg-fd-background p-3 shadow-sm">
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-fd-foreground text-[10px]">
-          Quiet focus
-        </span>
-        <Palette className="text-fd-primary" size={14} />
+    <div className="flex h-5 items-center gap-1.5 rounded bg-fd-accent px-2 text-fd-foreground text-[9px]">
+      <span className="size-1.5 rounded-full bg-fd-primary" />
+      <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+function HighlightedSlot({
+  children,
+  label,
+}: {
+  children: ReactNode;
+  label: string;
+}) {
+  return (
+    <div className="rounded-md bg-fd-accent/70 p-2">
+      <div className="mb-2 flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+        <Sparkles aria-hidden="true" size={11} />
+        {label}
       </div>
-      <div className="mt-3 grid grid-cols-4 gap-2">
-        <div className="h-16 rounded-md bg-fd-secondary" />
-        <div className="h-16 rounded-md bg-fd-accent" />
-        <div className="h-16 rounded-md bg-fd-primary" />
-        <div className="h-16 rounded-md bg-fd-foreground" />
+      {children}
+    </div>
+  );
+}
+
+function PinnedSummarySlot() {
+  return (
+    <aside className="absolute top-8 right-3 w-32 rounded-md bg-fd-accent p-2">
+      <div className="flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+        <Pin aria-hidden="true" size={11} />
+        Live summary
       </div>
-      <div className="mt-3 flex items-center gap-2 rounded-md bg-fd-secondary p-2">
-        <span className="size-2 rounded-full bg-fd-primary" />
-        <span className="text-fd-muted-foreground text-[9px]">
-          Same render, host theme tokens.
-        </span>
+      <Skeleton className="mt-2 h-2 w-4/5 rounded-full bg-fd-background/80" />
+      <Skeleton className="mt-1.5 h-2 w-3/5 rounded-full bg-fd-background/80" />
+    </aside>
+  );
+}
+
+function WorkspaceTabSlot() {
+  return (
+    <div className="absolute right-2 bottom-2 left-2 flex items-center gap-1 rounded bg-fd-secondary/90 p-1">
+      <Skeleton className="h-5 w-12 rounded bg-fd-background" />
+      <div className="flex h-5 items-center gap-1 rounded bg-fd-accent px-2 text-fd-foreground text-[9px]">
+        <LayoutPanelTop aria-hidden="true" size={10} />
+        Dock panel
+      </div>
+      <Skeleton className="h-5 w-10 rounded bg-fd-background/60" />
+    </div>
+  );
+}
+
+function ThemeSlot() {
+  return (
+    <div className="absolute right-3 bottom-3 left-3 rounded bg-fd-accent p-2">
+      <div className="flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+        <Palette aria-hidden="true" size={11} />
+        Theme tokens
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-1.5">
+        <span className="h-5 rounded bg-fd-background/70" />
+        <span className="h-5 rounded bg-fd-secondary" />
+        <span className="h-5 rounded bg-fd-primary" />
+        <span className="h-5 rounded bg-fd-foreground" />
       </div>
     </div>
   );

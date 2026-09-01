@@ -1,0 +1,139 @@
+---
+title: "Device and node pairing"
+description: "Authorize clients, browsers, mobile handoffs, Core nodes, and hardware."
+---
+
+Part of the [Authentication and pairing](/docs/security/authentication-and-pairing) guide.
+
+## 2. Device authorization for desktop, mobile, CLI, and extension fallback
+
+Device authorization is the shared sign-in path for clients that cannot use the website's cookie.
+The desktop, MCP bridge, and extension can call the Ryu auth service directly. Mobile can start the
+same flow through its connected Core node. In every case, the browser is where the human signs in
+and approves the client; the client polls for its own bearer and stores it locally. This bearer
+identifies the user to Better Auth. It does not replace the node bearer used by direct Core MCP.
+Desktop may then exchange that signed-in session for the short-lived managed
+`userJwt` returned by the control-plane node list; that derived credential is a
+separate, scope-checked managed-node path.
+
+```mermaid
+flowchart TD
+  Client["Desktop · mobile · CLI · extension"] --> Start["Start device authorization"]
+  Start --> AuthEndpoint["Ryu auth endpoint creates device code and user code"]
+  AuthEndpoint --> Browser["Open verification URL in a browser"]
+  Browser --> Existing{"Browser already has a session?"}
+  Existing -->|"Yes"| Approve["Review and approve this client"]
+  Existing -->|"No"| SignIn["Complete website sign-in, then approve"]
+  SignIn --> Approve
+  Client --> Poll["Poll the token endpoint"]
+  Approve --> AuthEndpoint
+  AuthEndpoint --> Poll
+  Poll --> Bearer["Receive the client bearer once"]
+  Bearer --> Vault["Encrypted vault or protected device storage"]
+  Vault --> Calls["Call the Ryu control plane"]
+```
+
+The device bearer identifies the client session. It is not the Core node bearer. Signing out or
+revoking the session stops future control-plane calls, while removing a paired node client is the
+separate action that stops access to that node.
+
+## 3. Browser extension auto-authentication
+
+The extension's primary sign-in button opens the website with an explicit extension app flow. If
+the browser already has a valid session, the website skips another login and asks Better Auth for a
+short-lived One-Time Token (OTT). If it does not, the user signs in once in the browser and the same
+handoff continues.
+
+```mermaid
+flowchart TD
+  Extension["Extension: browser sign-in"] --> Login["Website app flow: extension"]
+  Login --> Session{"Browser session exists?"}
+  Session -->|"No"| WebSignIn["Sign in once in the browser"]
+  Session -->|"Yes"| Generate["Generate a short-lived OTT"]
+  WebSignIn --> Generate
+  Generate --> Handoff["Open extension URL with the OTT"]
+  Handoff --> Clean["Extension removes the OTT from its URL"]
+  Clean --> Verify["POST one-time-token/verify"]
+  Verify --> SessionBearer["Return a session bearer; do not set a cookie"]
+  SessionBearer --> LocalVault["Store in the extension account vault"]
+  LocalVault --> Ready["Reload the extension as authenticated"]
+```
+
+The OTT is single-use, expires after a short window, and is stored hashed by the server. The raw
+session bearer is not placed in the extension URL. If browser handoff is unavailable, **Use an
+approval code instead** runs the device-authorization flow.
+
+The OTT is implemented by Better Auth's [One-Time Token plugin](https://better-auth.com/docs/plugins/one-time-token).
+
+## 4. Explicit mobile web handoff
+
+Mobile's normal sign-in remains device authorization. The native app also understands an explicit
+`ryu://auth/callback` handoff when a web flow is opened for the mobile app. This is useful when a
+browser session already exists and the user wants to bring it into the app without typing credentials
+again.
+
+```mermaid
+flowchart TD
+  Mobile["Mobile: request an explicit browser handoff"] --> Web["Website app flow: native"]
+  Web --> Session{"Browser session exists?"}
+  Session -->|"No"| SignIn["Complete website sign-in"]
+  Session -->|"Yes"| Generate["Generate a short-lived OTT"]
+  SignIn --> Generate
+  Generate --> DeepLink["Open ryu://auth/callback with the OTT"]
+  DeepLink --> Handler["Native deep-link handler verifies once"]
+  Handler --> Protected["Store account bearer in protected storage"]
+  Protected --> Ready["Mobile account is signed in"]
+```
+
+This is a session handoff, not hardware pairing. A mobile hardware flow still uses the device
+nonce and per-device token below.
+
+## 5. Core node pairing
+
+Node pairing is intentionally owned by Core rather than Better Auth. It works locally and can work
+without an account or network round trip. A client that cannot read the node's own token requests a
+short-lived pairing code; an already-authenticated client approves or denies the human-visible code.
+
+```mermaid
+flowchart TD
+  NewClient["Browser, extension, or remote client"] --> Request["POST /api/pair/code"]
+  Request --> Pending["Core keeps a pending request with a 10-minute TTL"]
+  Pending --> Codes["Client displays secret device code and human code"]
+  Trusted["Already-authenticated Core client"] --> List["Read pending pairing requests"]
+  List --> Decision{"Approve the matching human code?"}
+  Decision -->|"No"| Deny["Deny; client receives access denied"]
+  Decision -->|"Yes"| Issue["Issue a node bearer and persist only its hash"]
+  Codes --> Poll["Client polls POST /api/pair/token with device code"]
+  Issue --> Poll
+  Poll --> NodeToken["Deliver node bearer once"]
+  NodeToken --> NodeCalls["Call this Core node"]
+  Revoke["Remove paired client"] --> NodeCalls
+  Revoke --> Blocked["Future node requests are rejected"]
+```
+
+Approval is itself authenticated. Pairing lets a trusted client vouch for another client; it does
+not turn an unauthenticated request into an organization grant. Revoking the paired client removes
+the node credential without changing the user's cloud account session.
+
+## 6. Hardware QR and BLE pairing
+
+Hardware pairing uses a device-specific nonce, not an account OTT. The mobile app must already have
+node access to register the hardware. Core validates the nonce, returns a per-device token, and the
+app provisions that token over the authenticated BLE setup channel.
+
+```mermaid
+flowchart TD
+  Hardware["Hardware shows ryu-pair QR or BLE payload"] --> Payload["Device id, type, and pairing nonce"]
+  Mobile["Mobile scans or reads the payload"] --> Pair["Authenticated POST /api/hardware/pair"]
+  Payload --> Pair
+  Pair --> Validate["Core validates nonce and device state"]
+  Validate --> DeviceToken["Return device token and node URL"]
+  DeviceToken --> Provision["Provision token over the BLE setup characteristic"]
+  Provision --> Relay["Hardware connects to its node relay"]
+  Relay --> DeviceAPI["Only this paired device is authorized"]
+  Remove["Remove hardware from the node"] --> Revoke["Revoke the device token"]
+  Revoke --> DeviceAPI
+```
+
+An account session, device-grant bearer, or app OTT must never be substituted for the hardware
+device token. The device token can be revoked without signing the user out everywhere.

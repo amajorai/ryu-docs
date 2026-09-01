@@ -17,6 +17,7 @@ export const UI_COMPONENT_PREVIEW_METADATA: Record<
   "components/bouncy-accordion": {"props":{"disabled":["false","true"]},"targetExport":"BouncyAccordion"},
   "components/button": {"props":{"size":["default","icon","icon-lg","icon-sm","icon-xs","lg","sm","xs"],"variant":["default","destructive","ghost","ghost-muted","link","loading","mono","outline","progress","secondary"],"disabled":["false","true"],"loading":["false","true"]},"targetExport":"Button"},
   "components/checkbox": {"props":{"disabled":["false","true"]},"targetExport":"Checkbox"},
+  "components/connection-status": {"props":{},"targetExport":"ConnectionStatusToast"},
   "components/elastic-slider": {"props":{},"targetExport":"ElasticSlider"},
   "components/input": {"props":{"size":["default","lg"],"disabled":["false","true"]},"targetExport":"Input"},
   "components/kbd": {"props":{},"targetExport":"Kbd"},

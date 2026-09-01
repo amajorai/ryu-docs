@@ -116,10 +116,10 @@ whole request - `count × cost_per_tool_call_micro_usd`, at cost - against the o
 |---|---|---|
 | `reason` | `composio` | Distinguishes the tool-call ledger row from the `gateway_usage` model-call row |
 | `refId` | `{request_id}:composio` | A **distinct** ref from the model-call debit's `{request_id}`. `applyDelta` is idempotent on `refId`, so reusing the request id would dedupe the tool debit against the model-call debit and silently drop it |
-| Cost source | `[credits] cost_per_tool_call_micro_usd` | Per-executed-call rate; `0` (the default) means tool calls are free until a deployment provisions a rate |
+| Cost source | `[credits] cost_per_tool_call_micro_usd` | Per-executed-call rate; the default is `300` micro-USD ($0.30 per 1,000 standard Composio actions) |
 
 The debit is spawned off the response path so it never adds client latency, and it is a no-op when
-credits are inactive, the org is absent, the billable count is zero, or the per-call cost is unset.
+credits are inactive, the org is absent, the billable count is zero, or the per-call cost is zero.
 Managed nodes provision the rate through the `GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD` env var
 (`from_env` in `apps/gateway/src/config.rs`).
 
@@ -130,8 +130,23 @@ Managed nodes provision the rate through the `GATEWAY_CREDITS_COST_PER_TOOL_CALL
 </Callout>
 
 <Callout type="warn">
-Do not set `GATEWAY_CREDITS_FAIL_CLOSED=1` together with the default `wallet_empty_action = stop`. A transient control-plane blip flips the sticky wallet-empty flag, the next request is stopped before dispatch, and the debit that would clear the flag never runs - stranding the org until a process restart. Pair fail-closed with a self-healing action (`downgrade` / `restrict`), or leave it off.
+Credit debit failures are fail-closed by default. A transport error, non-success response, or
+malformed success response marks accounting unavailable and the next managed request returns the
+retryable `credit_accounting_unavailable` (503) error. This is kept separate from
+`wallet_empty_action`, so a funded organization is not permanently classified as empty. Do not
+disable `GATEWAY_CREDITS_FAIL_CLOSED` on a managed fleet; the Gateway refuses that combination at
+fleet startup.
 </Callout>
+
+## Sandbox metering
+
+An org-bound remote sandbox is metered through the same Gateway-to-control-plane debit boundary.
+If that debit cannot be confirmed, the Gateway returns `kill_accounting` and Core destroys the
+sandbox instead of continuing provider or compute spend without an accounting record. A malformed
+or unknown tick response is also treated as an accounting failure. The final short-run tail is
+retried before a completed billable execution is reported; if it still cannot be confirmed, the
+execution reports an error after the remote workspace is destroyed. Unattributed local sandboxes
+remain outside the billing path.
 
 ## Deploying a managed Gateway
 

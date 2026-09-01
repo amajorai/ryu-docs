@@ -1,0 +1,156 @@
+---
+title: "Gateway access and tools"
+description: "Configure API keys, authentication, concurrency, execution budgets, tools, and Composio."
+---
+
+Part of the [Configuration & Auth](/docs/gateway/configuration) guide.
+
+## Auth and API keys
+
+The `[auth]` block (`AuthConfig`, `apps/gateway/src/config.rs`) controls who may call the Gateway.
+
+```toml
+[auth]
+require_auth = true
+master_key = "ryu-master-secret"   # also GATEWAY_MASTER_KEY
+
+[[auth.api_keys]]
+key = "YOUR_GATEWAY_KEY"
+name = "my-app"
+org_id = "org_abc"
+team_id = "team_xyz"
+requests_per_minute = 10000        # per-key override of the global rate limit
+tokens_per_minute = 500000         # per-key override
+token_budget_total = 1000000000    # legacy lifetime token cap (0 = unlimited)
+downgrade_to = "gpt-4o-mini"       # model used once the lifetime cap is hit
+trusted_forwarder = false          # honor x-ryu-user-id / x-ryu-agent-id for budgets
+```
+
+Every request carries its key as a bearer token:
+
+```bash
+curl http://localhost:7981/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+### Field reference
+
+| Field | Type | Meaning |
+|---|---|---|
+| `require_auth` | bool | When `false`, all requests are accepted regardless of key. Default `false` (local dev) |
+| `master_key` | string | A single key that bypasses all per-key limits and gates the admin surface |
+| `api_keys[].key` | string | The bearer token clients send |
+| `api_keys[].name` | string | Human label, surfaced in `GET /v1/config` |
+| `api_keys[].org_id` / `team_id` / `project_id` | string | Tenancy tags carried through to budgets and audit |
+| `api_keys[].requests_per_minute` | int | Per-key override of the global request rate limit |
+| `api_keys[].tokens_per_minute` | int | Per-key override of the global token rate limit |
+| `api_keys[].token_budget_total` | int | Legacy lifetime token cap (input + output). `0` is unlimited; per-agent/user/session spend caps use `[budgets]` |
+| `api_keys[].downgrade_to` | string | Model swapped in once `token_budget_total` is exceeded. If unset, the request is rejected with `BudgetExceeded` |
+| `api_keys[].trusted_forwarder` | bool | See below. Default `false` |
+
+### Trusted forwarders
+
+By default a key's budgets are keyed to the key itself, and any client-supplied `x-ryu-user-id` /
+`x-ryu-agent-id` headers are ignored, so an untrusted caller cannot rotate identity headers to
+evade its quota. Set `trusted_forwarder = true` only for an intermediary you control (Ryu Core
+relaying a real end-user identity): those keys are allowed to pass `x-ryu-user-id` and
+`x-ryu-agent-id`, which then drive per-user and per-agent budgets (`apps/gateway/src/config.rs`,
+`ApiKeyConfig::trusted_forwarder`). Per-user and per-agent budget rules live under `[budgets]` and
+are documented on [Reliability](/docs/gateway/reliability).
+
+<Callout type="warn">
+`require_auth` and `master_key` are environment-variable-only by design. The runtime API will not
+change them (see below), preventing an accidental lockout where you disable auth or rotate the
+master key over the wire and lock yourself out.
+</Callout>
+
+## Concurrency
+
+`[concurrency]` admits requests to the **local** inference engine (llama.cpp, Ollama, etc.) up to a
+configured slot limit and queues the rest with priority. Remote providers are not gated. This config
+is **snapshotted at startup** and is not editable over `PUT /v1/config` - a change requires a
+Gateway restart.
+
+```toml
+[concurrency]
+enabled = true
+local_max_in_flight = 4   # match the engine's --parallel slot count
+local_max_queued = 64     # max waiting before 503 engine_overloaded
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Master switch. When `false`, all local requests pass through ungated |
+| `local_max_in_flight` | `4` | Max concurrent requests to the local provider. Set to your engine's `--parallel`. `0` = unlimited |
+| `local_max_queued` | `64` | Max requests queued before the gateway returns `503 engine_overloaded` |
+
+Interactive requests are served ahead of background fan-out (delegate calls, thread workers, scheduler). The gate is in the Gateway because it governs a shared resource; Core cannot see other callers' in-flight requests.
+
+## Exec budget
+
+`[exec_budget]` limits sandbox runs and MCP tool invocations over a rolling time window. Unlike
+model-spend budgets, this counts executions and wall-clock time, not tokens. Counters reset at each window
+boundary.
+
+```toml
+[exec_budget]
+max_count = 0             # 0 = unlimited
+max_wall_clock_secs = 0   # 0 = unlimited
+window_secs = 3600
+action = "notify"         # "notify" | "stop"
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_count` | `0` | Max sandbox/tool executions per `window_secs`. `0` = unlimited |
+| `max_wall_clock_secs` | `0` | Max total execution wall-clock seconds per window. `0` = unlimited |
+| `window_secs` | `3600` | Rolling window size in seconds |
+| `action` | `notify` | `notify` - log but allow; `stop` - deny with `429 budget_exceeded` |
+
+## Tools
+
+`[tools]` controls the unified search-based tool loop on the OpenAI-compat plane. The loop is
+injected only when a request opts in via `x-ryu-tools` / `x-ryu-tool-search`; plain chat streams
+are unaffected.
+
+```toml
+[tools]
+enabled = true
+max_rounds = 6
+describe_top_n = 5
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Master switch. Also overridable via `GATEWAY_TOOLS_ENABLED` |
+| `max_rounds` | `6` | Maximum tool-call rounds before returning the last turn |
+| `describe_top_n` | `5` | How many top search hits to describe per `tool_search` call |
+| `always_on` | `[]` | Tool definitions always injected for every tool-active request |
+
+## Composio
+
+`[composio]` configures Gateway's managed Composio action-execution backend. Provider keys live
+in Gateway's provider configuration and are never copied into app/satellite settings. This is separate from the
+OAuth-backed **Composio Connect** remote MCP plugin, which does not use `api_key` or
+`COMPOSIO_API_KEY`.
+
+The managed backend is disabled unless `api_key` is set (or `COMPOSIO_API_KEY` is in the environment).
+
+```toml
+[composio]
+enabled = true
+api_key = "..."         # also COMPOSIO_API_KEY
+entity_id = "default"  # also COMPOSIO_ENTITY_ID
+max_rounds = 3
+actions = ["GMAIL_SEND_EMAIL", "GITHUB_CREATE_ISSUE"]
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Auto-enabled when `COMPOSIO_API_KEY` is set |
+| `api_key` | - | Gateway-only Composio API key; app satellites never receive this value |
+| `entity_id` | `"default"` | Per-user entity scoping connected accounts. The pipeline prefers `x-ryu-user-id` at runtime |
+| `max_rounds` | `3` | Max agentic loop rounds |
+| `actions` | `[]` | Allowlist of Composio action names the gateway may execute |

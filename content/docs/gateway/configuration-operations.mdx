@@ -1,0 +1,215 @@
+---
+title: "Gateway credits and operations"
+description: "Configure credits, the control plane, policy alerts, environment variables, and safety diagnostics."
+---
+
+Part of the [Configuration & Auth](/docs/gateway/configuration) guide.
+
+## Credits
+
+`[credits]` enables the platform-credits wallet debit hook. After each metered model call, the
+Gateway debits the request's organization wallet in the control plane. The hook is a no-op when
+`enabled = false`. Managed deployments provide their service credential outside this file.
+
+```toml
+[credits]
+enabled = false
+base_url = "http://127.0.0.1:3000/api"  # defaults to control_plane.base_url
+markup_bps = 0                          # platform markup in basis points (0 = pass-through)
+wallet_empty_action = "stop"            # "stop" | "downgrade"
+wallet_empty_downgrade_to = ""
+timeout_ms = 3000
+
+[credits.provider_billing.openrouter]
+mode = "pass_through"                  # raw provider cost; other providers inherit markup_bps
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch. Also `GATEWAY_CREDITS_ENABLED` |
+| `base_url` | inherits `control_plane.base_url` | Credits endpoint base. Also `GATEWAY_CREDITS_URL` |
+| `markup_bps` | `0` | Platform markup in basis points applied to `costMicroUsd`. `0` = pass-through at cost. Also `GATEWAY_CREDITS_MARKUP_BPS` |
+| `provider_billing.<provider>.mode` | `inherit_global` | `pass_through` charges that Gateway provider's raw cost without `markup_bps`; omitted providers inherit the global markup. The key is the actual Gateway provider id, not a Core catalog label. `GATEWAY_CREDITS_PASS_THROUGH_PROVIDERS` is a CSV shorthand. |
+| `wallet_empty_action` | `stop` | `stop` - reject next request with `402`; `downgrade` - reroute to `wallet_empty_downgrade_to` |
+| `wallet_empty_downgrade_to` | - | Model to route to on `downgrade`. Falls back to `stop` if unset |
+| `timeout_ms` | `3000` | Per-debit POST timeout in milliseconds |
+
+The debit is **post-call** (after the model call completes) and the budget gate is **pre-call**, so
+an empty wallet blocks the next request rather than the one that exhausted it.
+
+### Per-call rates
+
+These are omitted from the block above because every one has a working default — set one only to
+override it. All are also available as `GATEWAY_CREDITS_COST_PER_<NAME>`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `cost_per_tool_call_micro_usd` | `300` | Per standard Composio tool execution, i.e. `$0.30` per 1,000. Billed at cost; override for a higher managed-app or premium-tool invoice |
+| `cost_per_gpu_second_micro_usd` | `975` | `$0.000975`/sec, Replicate's published L40S rate. The base the media fallbacks below derive from |
+| `cost_per_image_micro_usd` | `1950` | Flat fallback for one image generation — 2 GPU-seconds |
+| `cost_per_video_micro_usd` | `58500` | Flat fallback for one video render — 60 GPU-seconds |
+| `cost_per_tts_micro_usd` | `975` | Per speech synthesis — 1 GPU-second |
+| `cost_per_stt_micro_usd` | `975` | Per transcription — 1 GPU-second |
+
+Image and video are metered from the provider's **reported** compute time. Replicate returns
+`metrics.predict_time` and fal returns `metrics.inference_time`; both are normalized to
+`usage.compute_seconds` and priced at `cost_per_gpu_second_micro_usd`. Neither includes queue
+wait, which neither provider charges for. The flat image and video rates are only a fallback for a
+response that carries no timing at all. Audio and Voice Recognition have no metered path, so their flat rate is the
+actual price rather than a fallback.
+
+<Callout type="warn">
+  A rate of `0` does not mean "free". The debit is guarded by `if cost > 0`, so a zero rate skips
+  the debit entirely and silently while the provider still bills you. With `enabled = true`, an
+  explicit `0` on any tool-call or media rate is a **startup failure**. To give a modality away deliberately, set
+  `GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1`.
+</Callout>
+
+When a media provider does not report compute time, the debit uses the configured flat fallback and
+records `taskLabel` as `<modality> (estimated cost)` in the ledger. A measured media debit keeps the
+plain modality label and stores the reported duration separately.
+
+## Control plane
+
+`[control_plane]` connects the gateway to the control-plane API for shared budget reconciliation and
+usage reporting. Disabled unless `gateway_key` is set (or `CONTROL_PLANE_KEY` is in the
+environment).
+
+```toml
+[control_plane]
+enabled = false
+base_url = "http://127.0.0.1:3000/api"  # also CONTROL_PLANE_URL
+gateway_key = "..."                      # also CONTROL_PLANE_KEY; also flips enabled
+report_interval_secs = 60
+audit_limit = 200
+shared_budget_id = ""                    # also CONTROL_PLANE_SHARED_BUDGET_ID
+cost_per_1k_micro_usd = 2000
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Auto-enabled when `CONTROL_PLANE_KEY` is set |
+| `base_url` | `http://127.0.0.1:3000/api` | Control-plane API base URL |
+| `gateway_key` | - | Gateway credential (sent as `X-Gateway-Key`) to authenticate and resolve the org |
+| `report_interval_secs` | `60` | How often to push a usage/audit report |
+| `audit_limit` | `200` | Max audit rows per report push |
+| `shared_budget_id` | - | Optional shared-budget ID to reconcile cross-gateway spend caps through the coordinator |
+| `cost_per_1k_micro_usd` | `2000` | Estimated cost in micro-USD per 1k tokens for spend attribution |
+
+<Callout type="info">
+The `[control_plane]` section handles **reporting and shared budgets only**. Grant validation and
+manifest signing (marketplace governance) are separate endpoints documented on
+[Grants and Manifest Signing](/docs/gateway/governance).
+</Callout>
+
+## Policy alert delivery
+
+Budget, session-budget, wallet-empty, and firewall rules can each request a notification tier when they match, orthogonally to the enforcement action they take. The Gateway **decides** the tier and stamps it on the response; Core **delivers** it. This keeps the Gateway (which owns "what is measured") out of the business of opening notification sockets (which Core owns).
+
+### Alert tiers
+
+`AlertTier` (`apps/gateway/src/config.rs`) is set per rule via an `alert` field on the budget rules, session budget, firewall config, and the wallet-empty action. It defaults to `Silent`, so a pre-existing config is unchanged.
+
+| Tier | Wire value | Delivery |
+|---|---|---|
+| Silent | `silent` (default) | No alert |
+| Warn | `warn` | Live SSE warning to the desktop only, no external fan-out |
+| Fanout | `fanout` | Fan out to webhook / Telegram / Expo push |
+| Email | `email` | Fan out AND send email to the node's configured recipients |
+
+The Gateway only builds a stamp at `>= Warn`. When a matched rule's tier rides, the verdict is written to the `x-ryu-policy-alert` response header as `base64(json)` (`PolicyAlert`, `apps/gateway/src/policy_alert.rs`). It is stamped on **both** the success (2xx) response and the error response (a budget `402` or a firewall-block `403`), so a block-tier alert - which returns before any success response exists - is never dropped.
+
+### How Core delivers
+
+Core reads the header off every gateway-fronted response (`apps/core/src/policy_alerts/mod.rs`) and, when present and parseable, delivers it. A malformed header is a silent no-op, never fatal.
+
+- **Dedupe.** The stamp carries a stable `dedupe_key` (a fixed sha256 over source / scope / subject / limit, deterministic across restarts). Core claims it atomically with a 300-second cooldown, so one chat turn's multi-iteration tool loop - which re-reads the same stamp each iteration - delivers once, not N times.
+- **SSE mirror.** Every delivered alert is mirrored to the live desktop feed regardless of tier.
+- **Fan-out per tier.** `Fanout` calls `notify_all` over the node's webhook / Telegram / Expo-push targets; `Email` additionally resolves the BYO SMTP transport (`resolve_transport`, `apps/core/src/email/mod.rs`, a lettre client) and sends to the configured recipients.
+
+Core exposes the delivery config over these routes (`apps/core/src/server/mod.rs`):
+
+| Route | Purpose |
+|---|---|
+| `GET` / `PUT /api/email/transport` | The node's non-secret SMTP transport config |
+| `POST /api/email/test` | Send a test email over the configured transport |
+| `GET` / `PUT /api/alerts/delivery` | The node's policy-alert delivery targets (fan-out channels + email recipients) |
+
+Budget rules themselves are documented on [Reliability](/docs/gateway/reliability) and firewall policy on [Security](/docs/gateway/security); this section covers only the alert tier and its delivery.
+
+<Callout type="warn">
+Delivery is best-effort - a failing sink logs and drops so one channel never blocks the others. The self-host BYO SMTP transport needs a real mail relay to verify end to end and has not been exercised against a live relay. On a managed node the email leg goes through the control plane instead of the local SMTP sink.
+</Callout>
+
+## Key environment variables
+
+These override `gateway.toml` keys at load time. Setting `GATEWAY_MASTER_KEY` also forces
+`require_auth = true` (`apps/gateway/src/config.rs`).
+
+| Variable | Purpose |
+|---|---|
+| `GATEWAY_CONFIG` | Explicit path to `gateway.toml`; otherwise `$config_dir/ryu/gateway.toml` |
+| `GATEWAY_BIND` | The address the Gateway binds |
+| `GATEWAY_MASTER_KEY` | The master key; also flips `require_auth` on |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI provider credentials |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | Anthropic provider credentials |
+| `OPENROUTER_API_KEY` / `OPENROUTER_BASE_URL` | OpenRouter provider credentials |
+| `MODAL_API_KEY` / `MODAL_BASE_URL` | Modal serverless GPU provider. Both required; no default URL. Provider is only constructed when both are non-empty |
+| `LOCAL_LLM_URL` | The local engine URL (Core sets this to the active engine) |
+| `CORE_URL` / `CORE_TOKEN` | Reach Core for tool execution (set by Core's `gateway_spawn_env`) |
+| `COMPOSIO_API_KEY` / `COMPOSIO_ENTITY_ID` | Composio integration; `api_key` also flips `composio.enabled` |
+| `CONTROL_PLANE_URL` / `CONTROL_PLANE_KEY` | Control-plane relay; `CONTROL_PLANE_KEY` also flips `control_plane.enabled` |
+| `CONTROL_PLANE_SHARED_BUDGET_ID` | Cross-gateway shared budget coordinator ID |
+| `GATEWAY_FIREWALL_ENABLED` / `GATEWAY_FIREWALL_POLICY` | Firewall toggle and policy |
+| `GATEWAY_TOOLS_ENABLED` | Unified tool loop master switch |
+| `GATEWAY_COMPRESSION_ENABLED` / `GATEWAY_COMPRESSION_URL` | Egress compression toggle and service URL |
+| `GATEWAY_COMPRESSION_TIMEOUT_MS` / `GATEWAY_COMPRESSION_MIN_MESSAGES` | Compression timeout and minimum message count |
+| `GATEWAY_CREDITS_ENABLED` / `GATEWAY_CREDITS_URL` | Credits debit hook toggle and endpoint |
+| `GATEWAY_CREDITS_MARKUP_BPS` | Platform markup on metered usage in basis points |
+| `GATEWAY_SMART_ROUTING_ENABLED` / `GATEWAY_SMART_ROUTING_MODEL` | Smart routing toggle and classifier |
+| `RYU_CRASH_REPORTS_ENABLED` | Opt-out crash reporting (default on). Core forwards the user's desktop privacy preference here |
+| `RYU_DIAGNOSTICS_EXPORT_ENABLED` | OpenTelemetry diagnostics export (default off). Core sets this to `1` when the user enables telemetry |
+| `TELEGRAM_BOT_TOKEN`, `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `WHATSAPP_ACCESS_TOKEN` | Channel bot credentials (see [Channels](/docs/gateway/channels)) |
+
+Managed deployments may add private service variables at runtime. They are not part of the
+standalone configuration reference.
+
+## Safety posture and Doctor
+
+The desktop Gateway page and first-run onboarding expose one three-position safety posture slider.
+It coordinates the controls that belong to Gateway and Core without changing provider credentials,
+billing, or agent routing silently:
+
+| Posture | Gateway | Core |
+|---|---|---|
+| **Guarded** | Firewall `Block`, inbound/outbound scans, redaction, and tool-result wrapping on | Command scan on, approval mode `Manual` |
+| **Balanced** (default) | Same safety baseline with `Block` | Command scan on, approval mode `Smart` |
+| **Autonomous** | Scans, redaction, and wrapping stay on; detections use `Sanitize` | Command scan on, approval mode `Off` |
+
+Changing the slider shows a preview and requires an explicit **Apply**. If individual settings no
+longer match a preset, the UI reports **Custom** rather than overwriting the operator's choices.
+Claude Code, Codex, and other native agent traffic remain direct unless their Gateway routing is
+explicitly enabled in the same card; posture changes do not opt those agents in or change which
+credentials they use.
+
+The Doctor checks configuration, security, performance, connectivity, and agent coverage. The
+read-only audit is available to local admins at `GET /v1/doctor`; Core aggregates it with its
+approval preferences and agent-routing coverage at `GET /api/gateway/doctor`. A report includes
+stable check IDs, severity, the affected setting path, and a recommended action. It also identifies
+`schemaVersion`, `rulesetVersion`, `profile: "lint"`, and `readOnly: true` so CI and integrations
+can identify the contract they consumed. Existing drift warnings remain included in `GET /v1/config`
+for compatibility.
+
+The CLI exposes the same audit and an explicit safe-repair flow:
+
+```bash
+ryu doctor                 # read-only audit
+ryu doctor --dry-run       # preview protective changes; writes nothing
+ryu doctor --fix           # apply only the allowlisted protective changes
+```
+
+Desktop uses the same contract: **Run audit** → **Preview safe fixes** → **Apply safe fixes**.
+Automatic repairs are intentionally narrow and idempotent: firewall activation/scanning,
+redaction, and untrusted tool-result wrapping. Bind/auth choices, routing, approvals, providers,
+budgets, and performance limits remain operator decisions. The fix response returns the planned and
+applied setting paths so an automation system can audit exactly what changed.

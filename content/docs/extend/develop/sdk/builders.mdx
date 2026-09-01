@@ -1,0 +1,212 @@
+---
+title: "SDK builders and extension surfaces"
+description: "Use manifest builders, the MCP bridge, and the plugin, app, and turn-hook authoring APIs."
+---
+
+Part of the [Ryu SDKs and libraries](/docs/extend/develop/sdk) guide.
+
+## Builders and manifest schemas
+
+For declaring a `manifest.json` in code, the SDK exports a fluent `PluginBuilder` plus per-kind
+builders (`agent()`, `workflow()`, `tool()`, `skill()`) and their builder classes
+(`AgentBuilder`, `WorkflowBuilder`, `ToolBuilder`, `SkillBuilder`) from `.`.
+
+```typescript
+const manifest = new PluginBuilder()
+  .id("com.example.my-plugin")
+  .name("My Plugin")
+  .version("1.0.0")
+  .runnable(agent().id("agent-main").name("Main Agent").build())
+  .grant("mcp:web_search")
+  .build();
+```
+
+The Zod schemas and helpers behind the builders are also exported:
+
+| Export | Purpose |
+|---|---|
+| `PluginManifestSchema` | full `manifest.json` schema (also at `./manifest`) |
+| `RunnableKindSchema` | enums the four authorable kinds (`agent`, `workflow`, `tool`, `skill`) |
+| `RunnableMetaSchema` | per-runnable metadata block |
+| `CompanionSurfaceSchema` | optional Companion surface declaration |
+| `coreManifestJsonSchema` | the manifest as a plain JSON Schema |
+| `validateManifestStrict(value)` | strict parse helper |
+| `validatePluginId(id)` | plugin-id format check |
+
+`RunnableKindSchema` enumerates only the four authorable kinds because that is the SDK surface. Core
+validates all eight `RunnableKind` variants. The manifest schema itself is documented on
+[Plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest).
+
+## MCP bridge
+
+The SDK can expose your Runnables as MCP tools and call other MCP servers
+(`packages/sdk/src/mcp/`). The protocol version is `2024-11-05`, matching Core's
+`apps/core/src/sidecar/mcp/client.rs`.
+
+`McpServer` is an stdio JSON-RPC server. `register()` advertises a local executable as a tool;
+`passthrough()` forwards `tools/list` and `tools/call` to an upstream MCP stdio server (for example
+Ghost), re-advertising its tools verbatim and degrading gracefully if the upstream is down.
+
+```typescript
+const server = new McpServer()
+  .register({ name: "greet", run: () => Promise.resolve("Hello!") })
+  .passthrough({ command: { command: "ghost" }, label: "ghost" });
+
+await server.serve();   // reads stdin, writes stdout until EOF
+```
+
+The stateless client functions spawn a server, complete the handshake, make one call, and tear the
+process down:
+
+```typescript
+function listTools(cmd: McpStdioCommand): Promise<McpTool[]>;
+function callTool(cmd: McpStdioCommand, tool: string, args: unknown): Promise<unknown>;
+```
+
+`callTool` returns the full `tools/call` result object (`{ content: [{ type, text }], isError? }`);
+extract `.content[0].text` for the plain output.
+
+<Callout type="info">
+  This MCP server intentionally implements no tool-approval or policy. Approval stays in the chat
+  layer and policy stays in the Gateway, per the Core-vs-Gateway rule.
+</Callout>
+
+## definePlugin
+
+`definePlugin` assembles a complete `manifest.json` manifest from typed options
+(`packages/sdk/src/runnable/turn-hook.ts`).
+
+```typescript
+function definePlugin(options: DefinePluginOptions): PluginManifest;
+```
+
+| Option | Type | Purpose |
+|---|---|---|
+| `id` | `string` | Reverse-domain plugin id (e.g., `"com.example.my-plugin"`) |
+| `name` | `string` | Display name |
+| `version` | `string` | Semver version |
+| `grants` | `string[]` | Permission grants the plugin needs |
+| `tools` | `ToolRunnable[]` | Tools to include (auto-adds `tool:execute` grant) |
+| `turnHooks` | `TurnHookContribution[]` | Turn hooks to include |
+| `composerControls` | `Record<string, unknown>[]` | Chat composer toggles |
+| `settingsTabs` | `Record<string, unknown>[]` | Settings UI tabs |
+| `slashCommands` | `Record<string, unknown>[]` | Custom `/` commands |
+| `activationEvents` | `string[]` | Lazy wake events |
+| `requires` | `DefineAppRequires` | Dependencies and capabilities |
+| `targets` | `Surface[]` | Target surfaces |
+
+Each `ToolRunnable` is converted via `inlineToolRunnable()` into a `kind:"tool"` runnable with
+`backend: "inline_deno"` config for Core's sandbox.
+
+```typescript
+import { definePlugin, defineTool } from "@ryuhq/sdk";
+
+const searchTool = defineTool({
+  id: "web-search",
+  name: "Web Search",
+  schema: {
+    type: "object",
+    properties: { query: { type: "string", description: "Search query" } },
+    required: ["query"],
+  },
+  run: async ({ query }, ctx) => {
+    const result = await fetch(`https://api.example.com/search?q=${query}`);
+    return result.json();
+  },
+});
+
+export default definePlugin({
+  id: "com.example.search",
+  name: "Search Plugin",
+  version: "1.0.0",
+  grants: ["tool:execute"],
+  tools: [searchTool],
+});
+```
+
+## defineApp
+
+`defineApp` assembles a manifest for a Ryu App — tools whose results render as interactive widgets
+in chat (`packages/sdk/src/runnable/app.ts`).
+
+```typescript
+function defineApp(options: DefineAppOptions): PluginManifest;
+```
+
+| Option | Type | Purpose |
+|---|---|---|
+| `id` | `string` | Plugin id |
+| `slug` | `string` | URL-safe slug for widget templates |
+| `title` | `string` | Display title |
+| `version` | `string` | Semver version |
+| `uiEntry` | `string` | Source entry for widget UI |
+| `tools` | `AppToolSpec[]` | Render + companion tools |
+| `tools[].runnable` | `ToolRunnable` | Optional executable body, packed as Core `inline_deno` |
+| `grants` | `string[]` | Permission grants |
+| `displayMode` | `string` | `"inline"`, `"fullscreen"`, or `"pip"` |
+
+Each render tool gets a `contributes.widgets[]` entry binding its id to `ui://widget/<slug>.html`.
+Each companion tool gets `widget_accessible: true`.
+
+When a tool carries `runnable: defineTool(...)`, its body is embedded in the same manifest as an
+`inline_deno` backend and `tool:execute` is added automatically. The body runs in Core's
+deny-by-default sandbox; use the injected `host` capabilities for Gateway-routed model work.
+
+```typescript
+import { defineApp } from "@ryuhq/sdk";
+
+export default defineApp({
+  id: "com.example.chart",
+  slug: "chart",
+  title: "Chart Widget",
+  version: "1.0.0",
+  uiEntry: "src/widget.html",
+  tools: [
+    { name: "render_chart", description: "Render a chart from data" },
+    { name: "chart_data", description: "Get chart data", accessible: true },
+  ],
+});
+```
+
+## defineTurnHook
+
+`defineTurnHook` creates a turn hook that runs after assistant turns (`packages/sdk/src/runnable/turn-hook.ts`).
+
+```typescript
+function defineTurnHook(options: DefineTurnHookOptions): TurnHookContribution;
+```
+
+| Option | Type | Purpose |
+|---|---|---|
+| `id` | `string` | Hook id |
+| `on` | `string` | Phase (default: `"post_assistant_turn"`) |
+| `run` | `HookRun` | The hook function |
+
+The hook function receives `ctx` (turn context) and `host` (capability bridge):
+
+```typescript
+import { definePlugin, defineTurnHook } from "@ryuhq/sdk";
+
+export default definePlugin({
+  id: "com.example.double-check",
+  name: "Double Check",
+  version: "1.0.0",
+  grants: ["hook:side-model"],
+  turnHooks: [
+    defineTurnHook({
+      id: "dc.review",
+      run: async (ctx, host) => {
+        if (!ctx.flags["com.example.double-check"]) {
+          return { kind: "none" };
+        }
+        const last = ctx.transcript.at(-1);
+        const review = await host.sideModel({
+          prompt: last?.content ?? "",
+          model_pref_key: "double-check-model",
+        });
+        return { kind: "note", text: review };
+      },
+    }),
+  ],
+});
+```

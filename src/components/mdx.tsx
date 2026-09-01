@@ -10,6 +10,7 @@ import { ContributionSurfaces } from "@/components/mdx/contribution-surfaces";
 import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
 import { Mermaid } from "@/components/mdx/mermaid";
 import { Quiz } from "@/components/mdx/quiz";
+import { SurfacePreview } from "@/components/mdx/surface-preview";
 import { TryInRyu } from "@/components/mdx/try-in-ryu";
 import { UiComponentPreview } from "@/components/mdx/ui-component-preview";
 import { versionedDocsHref } from "@/lib/docs-version";
@@ -46,6 +47,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Folder,
     Mermaid,
     Quiz,
+    SurfacePreview,
     Step,
     Steps,
     TryInRyu,

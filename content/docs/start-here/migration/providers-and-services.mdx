@@ -1,0 +1,101 @@
+---
+title: "Migrate providers and services"
+description: "Move an application's traffic from a provider such as Resend to Ryu or your own alternative with explicit data, event, credential, and rollback boundaries."
+tags: ["migration", "providers", "services", "resend", "mail", "webhooks"]
+---
+
+Use this page when an application sends through a hosted provider and you are moving it to Ryu Mail
+or building a compatible alternative. Treat the work as a provider cutover, not an account clone.
+
+## Resend-style migration
+
+Resend separates email activity, domains, contacts, templates, API keys, and webhooks. Its
+dashboard offers admin CSV exports for emails, broadcasts, contacts, segments, domains, logs, and
+API keys. Export those categories before removing the old account or key. See the official [Resend
+email export documentation](https://resend.com/docs/dashboard/emails/introduction).
+
+<Callout type="warn">
+Ryu Mail is not documented as a Resend drop-in importer. Its public contract covers inboxes,
+messages, attachments, SMTP hand-off, and a signed inbound webhook. It does not define an import
+for Resend domains, hosted templates, contacts, broadcasts, suppressions, API keys, or delivery
+history. Keep each mapping explicit and keep the old provider available for rollback.
+</Callout>
+
+| Resend concern | Migration action | Ryu Mail boundary |
+|---|---|---|
+| Send calls | Put a provider adapter behind the existing send function. Map `to`, `cc`, `subject`, `text`, `html`, and `inReplyTo`. | `POST /api/mail/inboxes/:id/send` sends from the selected inbox through its configured SMTP transport. |
+| Sending address and domain | Recreate the sender at the destination and verify its DNS and transport before changing production traffic. Keep the source configuration during the canary. | An inbox has a fixed address. Ryu Mail uses a bring-your-own domain model and does not move the Resend domain record for you. |
+| Inbound mail | Configure the new forwarder only after the destination inbox exists, then test a signed inbound message. | `POST /api/mail/inbound/:id` accepts raw inbound mail with that inbox's HMAC secret. It is not a Resend event envelope. |
+| Delivery events | Normalize provider events into your application's event model. Store the source event ID and received time, and make handlers safe to replay. | Ryu Mail exposes `Email received` and `Email sent` hook events. A successful send means transport hand-off, not recipient delivery; a later bounce is not visible in this process. |
+| Contacts and audiences | Import the source CSV into the system that owns contacts and consent. Do not use an inbox table as a mailing list. | The documented Mail API has no contacts, audiences, segments, or broadcast contract. |
+| Hosted templates | Keep template source in your application or move it to the destination renderer. Test rendered HTML and plain text separately. | The send body accepts rendered `text` and `html`; the documented Mail API has no hosted-template endpoint. |
+| API keys and signing secrets | Issue new destination credentials. Rotate the source key only after the cutover is proven. | Standalone Mail uses `RYU_MAIL_API_TOKEN` for protected routes. Inbound mail uses a separate per-inbox HMAC secret. |
+| History and logs | Preserve the source export as a read-only archive. Keep source IDs and provider message IDs beside any records you recreate. | Mail messages are owned by the Mail service. The public contract does not provide a Resend-history importer. |
+
+The Ryu Mail send body is:
+
+```json
+{
+  "to": ["person@example.com"],
+  "cc": [],
+  "subject": "Your receipt",
+  "text": "Thanks for your order.",
+  "html": "<p>Thanks for your order.</p>",
+  "inReplyTo": "<previous-message@example.com>"
+}
+```
+
+The `inReplyTo` value is the source message's `Message-ID` when the recipient's mail client should
+continue the same thread. Ryu Mail records a provider message ID after transport hand-off but does
+not claim that the recipient received the message. See [Standalone Ryu Mail](/docs/standalone/mail)
+for authentication, inbound signing, and the complete route table.
+
+## Resend-to-Ryu cutover
+
+1. **Create one provider interface.** Keep application code independent of `resend` or Ryu Mail.
+   Put provider-specific payloads, errors, retries, and event verification inside adapters.
+2. **Export and map.** Download the source exports, preserve every source ID, and map contacts,
+   templates, domains, webhooks, and message history to their real owners. Do not put all of them
+   into the Mail inbox store.
+3. **Provision the destination.** Create a Ryu Mail inbox, configure its SMTP transport, save its
+   protected bearer, and store its inbound HMAC secret in the forwarder. Ryu Mail returns the
+   inbound secret only when an inbox is created or its secret is rotated.
+4. **Test without duplicate sends.** Send only to internal test recipients. Confirm the rendered
+   message, reply threading, inbound signature check, attachments, and application event handling.
+5. **Canary one workload.** Route one application, tenant, or notification class through the new
+   adapter. Compare accepted-send counts, failures, reply threading, and inbound processing.
+6. **Switch and retain rollback.** Change provider selection, keep the old adapter and source
+   exports available, and stop the old path only after the destination passes reconciliation.
+
+Resend supports an `Idempotency-Key` for email send and batch-send requests for a limited window.
+The documented Ryu Mail send body has no equivalent idempotency field, so do not blindly retry a
+lost `POST /api/mail/inboxes/:id/send` response. If a retry could duplicate a real email, keep a
+send ledger in your application keyed by your own message or notification ID. See [Resend
+idempotency keys](https://resend.com/docs/dashboard/emails/idempotency-keys).
+
+Resend webhooks are at-least-once and can arrive out of order. A compatible alternative should
+deduplicate by an event ID, persist the event timestamp, and make replay safe. Ryu hook consumers
+should apply the same discipline even though the Mail service's inbound path uses per-inbox HMAC
+instead of Resend's webhook signing scheme. See [Resend webhooks](https://resend.com/docs/webhooks/introduction)
+for the source provider's event and retry behavior.
+
+## Build migration into an alternative
+
+If you are building a Ryu app or a service that replaces another product, make migration a first
+class contract from the first release.
+
+- Expose a bounded export for every durable resource with a schema version, stable IDs, timestamps,
+  provenance, and an attachment manifest.
+- Preview counts, conflicts, unsupported fields, permissions, and secret-bearing files before
+  writing anything.
+- Accept source IDs or idempotency keys and record source checksums so retries converge.
+- Keep content, credentials, webhooks, billing, and domain ownership as separate setup paths.
+- Preserve unknown fields in a bounded source snapshot or a visible warning.
+- Support a staged canary and rollback without rebuilding the identity map.
+- State which resources, events, permissions, and delivery guarantees are actually supported.
+
+<Cards>
+  <DocCard href="/docs/standalone/mail" />
+  <DocCard href="/docs/extend/integrate/protocol-compat" />
+  <DocCard href="/docs/start-here/migration/plan-and-cutover" />
+</Cards>

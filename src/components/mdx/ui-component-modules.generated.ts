@@ -21,6 +21,8 @@ export const UI_COMPONENT_MODULE_LOADERS: Record<
     (await import("@ryu/ui/components/button")) as UiComponentModule,
   "components/checkbox": async () =>
     (await import("@ryu/ui/components/checkbox")) as UiComponentModule,
+  "components/connection-status": async () =>
+    (await import("@ryu/ui/components/connection-status")) as UiComponentModule,
   "components/elastic-slider": async () =>
     (await import("@ryu/ui/components/elastic-slider")) as UiComponentModule,
   "components/input": async () =>

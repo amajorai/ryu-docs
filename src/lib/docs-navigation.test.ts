@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 type Meta = {
+  icon?: string;
   pages?: string[];
   root?: boolean;
 };
@@ -9,6 +10,25 @@ const docsRoot = new URL("../../content/docs/", import.meta.url);
 
 async function readMeta(path: string): Promise<Meta> {
   return (await Bun.file(new URL(path, docsRoot)).json()) as Meta;
+}
+
+async function readPage(path: string): Promise<string> {
+  return Bun.file(new URL(path, docsRoot)).text();
+}
+
+function pagesUnderHeader(
+  pages: string[],
+  header: string,
+  nextHeader?: string,
+): string[] {
+  const start = pages.indexOf(header);
+  const end = nextHeader ? pages.indexOf(nextHeader) : pages.length;
+
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error(`Missing sidebar section: ${header}`);
+  }
+
+  return pages.slice(start + 1, end);
 }
 
 describe("docs navigation", () => {
@@ -160,16 +180,136 @@ describe("docs navigation", () => {
     ).toBe(false);
   });
 
-  test("keeps the desktop subrealms available to the root selector", async () => {
+  test("nests desktop guides under the Desktop App root", async () => {
+    const desktop = await readMeta("surfaces/desktop/meta.json");
+    expect(desktop.root).toBe(true);
+    expect(desktop.pages).toEqual(
+      expect.arrayContaining(["user-guide", "engines", "productivity"]),
+    );
+
     for (const realm of [
-      "desktop",
       "desktop/user-guide",
       "desktop/engines",
       "desktop/productivity",
     ]) {
       const meta = await readMeta(`surfaces/${realm}/meta.json`);
-      expect(meta.root).toBe(true);
+      expect(meta.root).not.toBe(true);
+      expect(meta.icon).toBeString();
     }
+  });
+
+  test("keeps long guides split under their existing sidebar sections", async () => {
+    const sections = [
+      {
+        meta: "surfaces/desktop/user-guide/meta.json",
+        header: "---Chat & agents---",
+        nextHeader: "---Knowledge & tools---",
+        pages: [
+          "chat",
+          "chat-basics",
+          "chat-sessions",
+          "chat-messages",
+          "chat-session-controls",
+          "chat-composer-and-media",
+        ],
+      },
+      {
+        meta: "gateway/meta.json",
+        header: "---Configuration & Security---",
+        nextHeader: "---Tools & Channels---",
+        pages: [
+          "configuration",
+          "configuration-settings",
+          "configuration-access",
+          "configuration-operations",
+          "configuration-api",
+        ],
+      },
+      {
+        meta: "gateway/meta.json",
+        header: "---Tools & Channels---",
+        nextHeader: "---Observability & Reliability---",
+        pages: [
+          "channels",
+          "channel-setup",
+          "channel-controls",
+          "channel-routing",
+        ],
+      },
+      {
+        meta: "security/meta.json",
+        header: "---Access Control---",
+        nextHeader: "---Isolation---",
+        pages: [
+          "authentication-and-pairing",
+          "authentication-account",
+          "authentication-devices",
+          "authentication-mcp",
+          "authentication-organizations",
+          "authentication-tokens",
+        ],
+      },
+      {
+        meta: "extend/develop/meta.json",
+        header: "---TypeScript SDK---",
+        nextHeader: "---Rust SDK---",
+        pages: ["sdk/index", "sdk/runnables", "sdk/builders", "sdk/tooling"],
+      },
+    ];
+
+    for (const section of sections) {
+      const navigation = (await readMeta(section.meta)).pages ?? [];
+      expect(
+        pagesUnderHeader(navigation, section.header, section.nextHeader),
+      ).toEqual(expect.arrayContaining(section.pages));
+    }
+
+    const compactGuides = [
+      "surfaces/desktop/user-guide/chat.mdx",
+      "surfaces/desktop/user-guide/chat-basics.mdx",
+      "surfaces/desktop/user-guide/chat-sessions.mdx",
+      "surfaces/desktop/user-guide/chat-messages.mdx",
+      "surfaces/desktop/user-guide/chat-session-controls.mdx",
+      "surfaces/desktop/user-guide/chat-composer-and-media.mdx",
+      "gateway/configuration.mdx",
+      "gateway/configuration-settings.mdx",
+      "gateway/configuration-access.mdx",
+      "gateway/configuration-operations.mdx",
+      "gateway/configuration-api.mdx",
+      "gateway/channels.mdx",
+      "gateway/channel-setup.mdx",
+      "gateway/channel-controls.mdx",
+      "gateway/channel-routing.mdx",
+      "security/authentication-and-pairing.mdx",
+      "security/authentication-account.mdx",
+      "security/authentication-devices.mdx",
+      "security/authentication-mcp.mdx",
+      "security/authentication-organizations.mdx",
+      "security/authentication-tokens.mdx",
+      "extend/develop/sdk/index.mdx",
+      "extend/develop/sdk/runnables.mdx",
+      "extend/develop/sdk/builders.mdx",
+      "extend/develop/sdk/tooling.mdx",
+    ];
+
+    for (const guide of compactGuides) {
+      const content = await readPage(guide);
+      expect(content.split(/\r?\n/).length).toBeLessThan(500);
+    }
+  });
+
+  test("keeps generated API roots as directories of endpoint groups", async () => {
+    const coreIndex = await readPage(
+      "extend/develop/api-reference/core/index.mdx",
+    );
+    const agentsIndex = await readPage(
+      "extend/develop/api-reference/core/agents/index.mdx",
+    );
+
+    expect(coreIndex.split(/\r?\n/).length).toBeLessThan(120);
+    expect(coreIndex).toContain("Browse by endpoint group");
+    expect(agentsIndex).toContain("<Cards>");
+    expect(agentsIndex).toContain("core/agents/list_agents");
   });
 
   test("groups every billing page and includes Teams seats", async () => {

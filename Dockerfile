@@ -32,5 +32,7 @@ ENV HOSTNAME=0.0.0.0
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+RUN chown -R node:node /app
 EXPOSE 3002
+USER node
 CMD ["node", "server.js"]

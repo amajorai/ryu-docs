@@ -438,6 +438,12 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
       "aria-label": "Enable notifications",
       defaultChecked: true,
     }),
+  "components/connection-status": (module) =>
+    view(module, "ConnectionStatusToast", {
+      nodeName: "Design node",
+      onRetry: () => undefined,
+      phase: "node-unreachable",
+    }),
   "components/elastic-slider": (module) =>
     view(module, "ElasticSlider", {
       "aria-label": "Temperature",

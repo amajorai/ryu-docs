@@ -93,6 +93,8 @@ const DEFAULT_DESCRIPTIONS: Record<string, string> = {
     "Presents a reviewable approval request for a tool or action.",
   "components/agents/loading-states":
     "Loading and progress indicators for agent work.",
+  "components/connection-status":
+    "A compact, non-blocking status toast for network and node outages.",
   "components/dither-kit/avatar":
     "Renders a deterministic dithered avatar from a user seed.",
   "components/dither-kit/gradient":
@@ -123,6 +125,8 @@ const EXAMPLES: Record<string, string> = {
   "components/input": `<Input placeholder="Search" />`,
   "components/textarea": `<Textarea placeholder="Write a note" />`,
   "components/checkbox": `<Checkbox aria-label="Enable notifications" />`,
+  "components/connection-status":
+    `<ConnectionStatusToast nodeName="Design node" phase="node-unreachable" />`,
   "components/switch": `<Switch aria-label="Enable notifications" />`,
   "components/progress": `<Progress value={64} />`,
   "components/spinner": `<Spinner />`,
