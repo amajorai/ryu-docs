@@ -194,7 +194,7 @@ catalog entry remains the honesty signal for what a surface may claim is live.
 
 ## Audit
 
-The audit log (`apps/gateway/src/audit/mod.rs`, `AuditLogger`) records every model call to a SQLite
+The audit log (`crates/gateway/audit/src/lib.rs`, `AuditLogger`) records every model call to a SQLite
 store, alongside sandbox exec events and identity-vault credential reads. Writes go to a background OS
 thread over a bounded channel, so the async request path never blocks on disk I/O; reads use a
 separate query-only connection under WAL mode. The store is off when `AuditConfig.enabled` is false,
@@ -219,6 +219,7 @@ discriminator separates a `model_call`, `exec_call`, `credential_read`, or `cont
 | `request_id` | Gateway-internal id, also returned as the `x-request-id` response header |
 | `api_key` | Redacted to a short prefix in query results; raw keys never leave the store |
 | `user_name`, `org_id`, `team_id`, `project_id` | Tenant attribution |
+| `user_id`, `agent_id` | Verified caller and stable agent attribution when Core has it |
 | `provider`, `model` | Resolved route for the call |
 | `input_tokens`, `output_tokens`, `cache_hit`, `latency_ms` | Usage and timing |
 | `eval_score` | The `overall` eval score when this request was sampled, else null |
@@ -226,8 +227,9 @@ discriminator separates a `model_call`, `exec_call`, `credential_read`, or `cont
 | `session_id` | Core conversation/session id, from `x-ryu-session-id` |
 | `error` | Error message when the call failed |
 | `event_type`, `backend`, `command`, `duration_ms`, `exit_code` | Exec, credential-read, and control fields; null when not applicable |
-| `user_id` | Verified Core user id when a signed-in organization member initiated a gateway control; null for direct gateway-admin changes |
+| `user_id` | Verified Core user id when a signed-in organization member initiated the request or control; null for direct gateway-admin changes |
 | `feature` | Product surface; control rows use `control` |
+| `widget_instance_id` | Bounded widget-render correlation for widget tool/follow-up rows |
 
 ### Querying
 
@@ -246,6 +248,7 @@ parameterized), and `limit` is clamped to a maximum of 1000 (default 100).
 | `provider`, `model` | Resolved route |
 | `request_id` | A single gateway request |
 | `session_id` | All rows belonging to one Core session |
+| `agent_id` | All model, tool, credential, widget, and control rows attributed to one agent |
 | `event_type` | `model_call`, `exec_call`, `credential_read`, `widget_follow_up`, or `control_change` |
 | `errors_only` | Only rows that recorded an error |
 | `limit` | Row cap, 1 to 1000 |
@@ -270,7 +273,7 @@ withdrawn when [mesh](/docs/core/node-and-presence) is enabled (a tailnet peer c
 `127.0.0.1`). From Core, `GET /api/gateway/audit` proxies the supported filters for the node owner and returns
 `reachable: false` rather than erroring when the Gateway is down.
 
-### Control activity
+### Control activity and agent traceability
 
 Successful administrator changes are recorded as `control_change` rows as well as being reflected
 in the owning configuration. Direct Gateway-admin calls are attributed to the authenticated local
@@ -280,10 +283,24 @@ available, `model` for the target (for example `gateway_config`), and `command` 
 plus changed-section summary. Raw policy bodies, API keys, and other request payloads are never
 copied into the row.
 
+Core agent-management mutations (create, edit, delete, capability changes, prompt-version changes,
+runtime authentication, imports, and session operations) also emit a bounded `control_change` row.
+The row carries the verified organization caller and the stable `agent_id`; it never carries the
+agent prompt, tool arguments, credentials, or request body. This is what lets an Agent passport
+answer both sides of the question: **what did the agent perform, and which person changed its
+controls?**
+
 The organization Audit log page merges these gateway rows with organization control-plane activity,
 including policy, config-as-code, firewall, key, budget, server, role, and membership changes. The
 combined view is permission-gated by `audit.view` and can be filtered to organization or gateway
-scope.
+scope. Supplying `agentId=<stable-agent-id>` narrows the same projection to one agent's control
+changes; the organization aggregation audit query uses the same `agentId` filter for its model and
+tool activity rows.
+
+The desktop Gateway activity view shows the same agent, caller, request, session, event, and result
+columns. An agent's **Agent passport** combines its read-only identity/configuration snapshot with
+the latest organization activity and the Gateway's redacted execution rows. Run history remains the
+place to open the full persistent transcript for a correlated session.
 
 <Callout type="warn">
   The audit log records and the eval runner scores, but there is no built-in retention, rotation, or

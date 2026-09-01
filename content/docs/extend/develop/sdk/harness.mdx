@@ -1,0 +1,187 @@
+---
+title: Durable agent harness
+description: Start, resume, cancel, and observe a Ryu agent run through one session and event contract.
+---
+
+The durable harness is the common control surface for Ryu agents. A **session** binds a runnable to
+conversation history and an execution profile. Each call inside that session creates an idempotent
+**run** with a replayable, ordered event stream.
+
+The same run can be observed by a desktop, web app, CLI, messaging adapter, or another TypeScript
+process. Core remains the execution owner; Gateway policy still governs models, tools, budgets, and
+network access.
+
+## Install
+
+```bash
+npm install @ryuhq/client
+# or
+bun add @ryuhq/client
+```
+
+## Create a session
+
+```typescript
+import { createRyuClient } from "@ryuhq/client";
+
+const client = createRyuClient({
+  baseUrl: "https://your-ryu-node.example",
+  token: nodeToken, // load from your app's secure credential store
+});
+
+const session = await client.harness.createSession({
+  runnableId: "pi",
+  runnableKind: "agent",
+  executionProfile: {
+    kind: "worktree",
+    cwd: "/path/to/project",
+    worktreeIsolation: true,
+    network: "inherit",
+    sandbox: "inherit",
+    approval: "on_risk",
+  },
+});
+```
+
+The node returns an opaque session id, the conversation id used for history, and the normalized
+execution profile. Do not derive ids from display names.
+
+## Start and stream a run
+
+```typescript
+const started = await client.harness.startRun(
+  session.id,
+  { prompt: "Review the failing tests and summarize the safest fix." },
+  { idempotencyKey: "review-2026-09-01" },
+);
+
+for await (const event of client.harness.events(started.run.id)) {
+  if (event.type === "text_delta") {
+    process.stdout.write(event.delta);
+  }
+  if (event.type === "approval_requested") {
+    console.log(`Approval required: ${event.summary}`);
+  }
+}
+```
+
+The authoring SDK can consume the same session contract when an agent is already registered on
+Core:
+
+```typescript
+import { Agent } from "@ryuhq/sdk";
+
+const agent = new Agent({
+  name: "reviewer",
+  model: "the-model-is-resolved-by-core",
+  core: { baseUrl: "https://your-ryu-node.example", token: nodeToken },
+  sessionId: session.id,
+});
+
+for await (const event of agent.stream("Continue the review.")) {
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+This mode delegates execution to the Core-registered runnable, so local SDK-only tools are not
+silently copied into the server run. Use the ordinary SDK loop when the tool implementation should
+stay in the calling process.
+
+`idempotencyKey` is scoped to the session. Retrying the same request returns the original run and
+does not dispatch a duplicate turn. A run's terminal event is one of `run_completed`, `run_failed`,
+`run_canceled`, or `run_interrupted`.
+
+## Reconnect after a dropped stream
+
+Events carry a monotonically increasing `seq`. Keep the last sequence received and pass it as the
+exclusive cursor when reconnecting:
+
+```typescript
+let cursor = 0;
+
+for await (const event of client.harness.events(started.run.id, cursor)) {
+  cursor = event.seq;
+  // Update the UI or persist the cursor in your own process.
+}
+```
+
+The event journal is durable and encrypted at rest by Core. The stream records the accepted input
+boundary as a digest and bounded message count, then emits text deltas, tool lifecycle metadata,
+tool-result digests, approval requests, checkpoints, and terminal outcomes through the same event
+vocabulary across transports. User content and tool payloads are not copied into this projection;
+tool arguments and results are represented by hashes.
+
+## Resume with a new attempt
+
+To retry a completed or interrupted run, create a new attempt while keeping the lineage:
+
+```typescript
+const retry = await client.harness.startRun(
+  session.id,
+  { prompt: "Re-run the review after the workspace is available." },
+  { resumeRunId: started.run.id },
+);
+```
+
+The new run has an incremented `attempt` and `parentRunId`. Core rejects a resume id from another
+session. If Core restarts while a run is still `running` or `awaiting_approval`, it appends a
+terminal `run_interrupted` event before serving the session again, so a client never waits forever
+on a stale live cursor.
+
+## Cancel a run
+
+```typescript
+await client.harness.cancel(started.run.id);
+```
+
+Cancellation is authorization-checked against the session's conversation and forwarded to the
+active agent transport when that transport supports cancellation.
+
+When an ACP runtime emits `approval_requested`, use the request id from the event with the existing
+permission boundary. The event carries the runtime's option ids; send the exact id the user chose:
+
+```typescript
+await client.harness.resolvePermission(event.approvalId, selectedOptionId);
+```
+
+Omitting the option id rejects the request. An SDK `Agent` can resolve the same boundary through
+`approvalHandler`; return `true` to select the first allow option, `false` to reject, or a specific
+runtime option id. If no handler is configured, the agent yields the approval event and leaves the
+run in `awaiting_approval` so another UI can resolve it. The SDK also exposes
+`agent.resolvePermission(requestId, optionId)` and `agent.streamRun(runId, after)` when the
+approval UI lives outside the agent loop.
+
+## Execution profiles
+
+| Profile | Meaning |
+|---|---|
+| `local` | Use the selected local workspace without allocating a worktree. |
+| `worktree` | Allocate or reuse an isolated Git worktree for the session; `cwd` must be an existing Git repository. |
+| `remote` | Reserved for a configured remote execution adapter. |
+| `cloud` | Reserved for a configured cloud execution adapter. |
+
+Remote and cloud profiles are rejected by a node that does not advertise those adapters; they do
+not silently fall back to local execution. On the current local/worktree adapter, `network`,
+`sandbox`, and `approval` must be `inherit`; this prevents a caller from believing a setting was
+enforced when the selected runtime does not expose that control. Future execution adapters may
+advertise stricter values. A supplied `cwd` must be an existing directory. Profile fields never
+bypass Core or Gateway policy.
+
+## REST and SSE endpoints
+
+The client wraps these protected Core endpoints:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/harness/sessions` | Create a session |
+| `GET` | `/api/harness/sessions/:id` | Read session state |
+| `GET` | `/api/harness/sessions/:id/children` | List child-agent sessions |
+| `PUT` | `/api/harness/sessions/:id/native` | Bind a native runtime session id |
+| `GET` | `/api/harness/sessions/:id/runs` | List attempts |
+| `POST` | `/api/harness/sessions/:id/runs` | Start an idempotent run |
+| `GET` | `/api/harness/runs/:id` | Read run state |
+| `GET` | `/api/harness/runs/:id/events?after=N` | Replay and follow events |
+| `POST` | `/api/harness/runs/:id/cancel` | Request cancellation |
+
+Every endpoint is scoped to the session's conversation ACL. A node token is not a provider key;
+keep provider credentials in the Gateway's existing secret boundary.
