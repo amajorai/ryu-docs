@@ -1,163 +1,199 @@
 ---
-title: Language bindings
-description: Bind the shared Ryu SDK kernel to Python, Swift, Kotlin, C#, and Go, with an example project and contract tests for each language.
+title: "Libraries and bindings"
+description: Use a Ryu client library from your app, or embed the shared Rust kernel through a generated binding.
 ---
 
-Ryu's SDK has one shared Rust kernel. It owns the `manifest.json` model,
-validation, Gateway egress rules, and Gateway-required model and embedding
-clients. Language bindings wrap that kernel instead of reimplementing those
-rules in each language.
+There are two different integration jobs:
 
-This page covers the native binding projects under `bindings/` and their shared
-source at `crates/sdk/uniffi/` or `crates/sdk/ffi/`. For TypeScript authoring,
-see [TypeScript SDK](/docs/extend/develop/sdk); for calling a running Core node,
-see [Client SDK](/docs/extend/develop/sdk/client) and
-[Core client](/docs/extend/develop/sdk/core-client).
+1. **Call Ryu from an application.** Use a client library. It sends normal HTTP and JSON requests
+   to a running Core node.
+2. **Embed the shared Rust kernel.** Use a generated binding. It exposes manifest validation,
+   Gateway egress checks, model calls, and embeddings, but it does not run Core for you.
 
-All of these projects, their examples, generation shells, and CI matrix are
-published together in the [public SDK hub](https://github.com/amajorai/ryu-sdk).
+If you are unsure, use the client library first. You do not need a Rust toolchain or a generated
+binding just to call an agent.
 
-<Callout type="info">
-  Every language project contains a no-network example and contract tests. The
-  examples validate a plugin id, enforce Gateway-only egress, and construct a
-  Gateway-pointed client. They do not require provider credentials. The Rust
-  SDK transport tests use a local one-shot HTTP server for chat and embeddings.
-</Callout>
+## Choose your library
 
-## Architecture
+| Application | Start with | Package/install |
+|---|---|---|
+| TypeScript or JavaScript | Embedded chat | [`@ryuhq/client`](/docs/extend/develop/sdk/client) |
+| React Native or Expo | Embedded chat | [`@ryuhq/client`](/docs/extend/develop/sdk/client) with `expo/fetch` for streaming |
+| React Native or Expo | Full Core control | [`@ryuhq/core-client`](/docs/extend/develop/sdk/core-client) |
+| Java 17+ | Core client | [`com.ryu:ryu-client`](/docs/extend/develop/sdk/java) |
+| Rust | Kernel or Gateway model client | [`ryu-sdk`](/docs/extend/develop/sdk/rust) |
+| Python, Swift, Kotlin, or C# | Rust-kernel surface | `ryu-sdk-uniffi` generated binding |
+| C or Go | Rust-kernel surface | `ryu-sdk-ffi` C ABI |
 
-There are three binding mechanisms around the same `ryu-sdk` kernel:
+## React Native / Expo
 
-| Binding | Languages | Surface | Status |
-|---|---|---|---|
-| `crates/sdk/napi` | TypeScript / JavaScript | Manifest rules, egress, chat, streaming, embeddings | Shipped; smoke-tested through the package loader |
-| `crates/sdk/ffi` | C and Go through cgo | Blocking manifest, egress, chat, and embeddings | Shipped; Go has unit tests and an example |
-| `crates/sdk/uniffi` | Python, Swift, Kotlin | Manifest rules, egress, blocking chat/embeddings, streaming through `ChatSink` | Generated and tested in the language projects |
-| `crates/sdk/uniffi` + `uniffi-bindgen-cs` | C# | The same UniFFI surface, including `ChatSink` | Generated and smoke-tested in the example project |
+Ryu's React Native integration is a TypeScript library, not a Node-API addon. The first-party
+mobile app uses `@ryuhq/core-client` directly. The package has no React or platform dependency, so
+you provide the selected node target from your app.
 
-The Rust implementation is the source of truth. `uniffi::setup_scaffolding!`
-and `#[uniffi::export]` define the foreign surface; the generated files are
-build outputs and are not hand-edited.
+For list, create, and management calls:
 
-## Shared API
+```tsx
+import { fetchAgents } from "@ryuhq/core-client/agents";
+import type { ApiTarget } from "@ryuhq/core-client/client";
 
-The generated bindings expose these operations:
+const target: ApiTarget = {
+  url: "http://192.168.1.10:7980",
+  token: nodeToken,
+};
 
-- `validatePluginId` / `validate_plugin_id`
-- `parseAndValidateManifest` / `parse_and_validate_manifest`
-- `pluginManifestJsonSchema` / `plugin_manifest_json_schema`
-- `resolveGatewayUrl` and `resolveGatewayToken`
-- `assertAllowedEgress` / `assert_allowed_egress`
-- `ModelClient` with `chat` and `stream`
-- `EmbeddingClient` with `embed`
+const agents = await fetchAgents(target);
+```
 
-The exact naming follows each language's generator. `ModelClient` and
-`EmbeddingClient` reject direct provider URLs during construction. Provider
-credentials belong in the Gateway; a binding token is a Gateway token.
+For embedded chat with Expo's streaming implementation:
 
-Streaming uses the UniFFI `ChatSink` callback interface. A sink receives zero or
-more deltas and then exactly one `onDone` or `onError` callback. A callback must
-return before it calls another blocking SDK method; this avoids re-entering the
-binding's Tokio runtime.
+```tsx
+import { fetch as expoFetch } from "expo/fetch";
+import { createRyuClient, type RyuFetch } from "@ryuhq/client";
+
+const client = createRyuClient({
+  baseUrl: "http://192.168.1.10:7980",
+  token: nodeToken,
+  fetch: expoFetch as RyuFetch,
+});
+
+const reply = await client.agents.run("pi", [
+  { role: "user", content: "Hello from Expo." },
+]);
+```
+
+Store `nodeToken` with `expo-secure-store`. A node token grants access to that Core node; it is not
+a provider key. Never put an OpenAI, Anthropic, or other provider key in the mobile bundle.
+
+## Java
+
+Java application developers should use the high-level Maven library:
+
+```xml
+<dependency>
+  <groupId>com.ryu</groupId>
+  <artifactId>ryu-client</artifactId>
+  <version>0.2.5</version>
+</dependency>
+```
+
+```java
+import com.ryu.sdk.RyuClient;
+import java.util.List;
+
+try (var ryu = new RyuClient("http://127.0.0.1:7980", nodeToken)) {
+  var reply = ryu.run(
+      "pi",
+      List.of(RyuClient.Message.user("Hello from Java.")));
+}
+```
+
+The source library is in `bindings/java`; run `mvn install` there when using a checkout. Its
+verification command is:
+
+```bash
+bash bindings/java/test.sh
+```
+
+See the
+[Java library guide](/docs/extend/develop/sdk/java) for streaming and Spaces.
+
+## Kernel bindings
+
+These targets are generated from the same Rust export. They are the right choice when your app
+needs the kernel's local validation or Gateway model/embedding client, rather than Core's broader
+HTTP API.
+
+The generated surface is:
+
+| Operation | Purpose |
+|---|---|
+| `validate_plugin_id` | Check a plugin identifier |
+| `parse_and_validate_manifest` | Parse and validate a `manifest.json` string |
+| `plugin_manifest_json_schema` | Get the Rust-derived JSON Schema |
+| `resolve_gateway_url` / `resolve_gateway_token` | Read Gateway connection defaults |
+| `assert_allowed_egress` | Reject direct-provider URLs |
+| `ModelClient` | Gateway-routed chat and streaming |
+| `EmbeddingClient` | Gateway-routed embeddings |
+
+The generated files are build outputs. The source of truth is `crates/sdk/uniffi`; do not hand-edit
+generated language code.
 
 ## Python
 
-The Python project is under `bindings/python/`. Its generated `ryu_sdk/`
-package is loaded by `__init__.py`; the generated module and native library are
-created by the test command.
-
-```sh
+```bash
 bash bindings/python/test.sh
 ```
 
-This runs `test_sdk.py`, `smoke_test.py`, and `example.py`. The import name is
-`ryu_sdk` and the distribution shell is named `ryu-sdk`.
+```python
+import ryu_sdk
 
-## Go
-
-The Go project is under `bindings/go/`. It uses the hand-written C ABI in
-`crates/sdk/ffi`, which keeps Go independent of third-party UniFFI generator
-version lag. The binding includes lifecycle methods and JSON-returning
-`ModelClient` / `EmbeddingClient` methods.
-
-```sh
-bash bindings/go/test.sh
+ryu_sdk.validate_plugin_id("io.example.plugin")
+client = ryu_sdk.ModelClient("gemma4", None, None)
+reply = client.chat([ryu_sdk.ChatMessage("user", "Hello from Python.")])
+print(reply.content)
 ```
-
-The command builds the Rust FFI, runs `ryusdk_test.go`, and runs
-`example/main.go`.
-
-## C#
-
-The C# project is under `bindings/csharp/`. The generated source is produced by
-the version-matched `uniffi-bindgen-cs` generator. The pinned generator version
-is `v0.9.2+v0.28.3` for the UniFFI `0.28.3` dependency.
-
-```sh
-cargo install uniffi-bindgen-cs \
-  --git https://github.com/NordSecurity/uniffi-bindgen-cs \
-  --tag v0.9.2+v0.28.3
-bash bindings/csharp/test.sh
-```
-
-`Program.cs` is the no-network example and smoke test. The generated source and
-native library remain ignored build outputs.
-
-## Swift
-
-The Swift Package example is under `bindings/swift/`. It includes an executable
-target and XCTest target. The generated `RyuSdk.swift` file is produced from the
-same UniFFI library.
-
-```sh
-bash bindings/swift/test.sh
-```
-
-The current script targets macOS because it links the macOS Rust dynamic
-library. The package exposes `ChatSink` for streaming and the same manifest,
-egress, model, and embedding operations as Python and Kotlin.
 
 ## Kotlin
 
-The Gradle/JVM example is under `bindings/kotlin/`. UniFFI generates the Kotlin
-source and JNA provides the JVM bridge.
+The generated Kotlin package is callable from Kotlin or Java, but the application-facing Java
+library above is easier for Core HTTP access. Use this binding only when you need the Rust-kernel
+surface:
 
-```sh
+```bash
 bash bindings/kotlin/test.sh
 ```
 
-The command runs the JUnit tests and the no-network example with JDK 17 or
-newer. The example targets the JVM; Android packaging and native ABI delivery
-remain host integration work, not a second Ryu contract.
+## Swift
 
-## TypeScript and NAPI
-
-The authoring package (`@ryuhq/sdk`) and the Core client (`@ryuhq/client`) have
-their own Bun test suites. The NAPI addon smoke uses the same `index.js` loader
-that consumers use, so platform-specific `.node` filenames are tested through
-the normal resolution path:
-
-```sh
-(cd crates/sdk/napi && bun test)
-(cd packages/sdk && bun test)
-(cd packages/client && bun test)
+```bash
+bash bindings/swift/test.sh
 ```
 
-The NAPI binding retains callback streaming because Node-API can bridge a
-per-invocation callback directly. The UniFFI bindings use `ChatSink` so Swift,
-Kotlin, Python, and C# have an explicit cross-thread lifetime contract.
+The Swift package uses the same `ModelClient`, `EmbeddingClient`, manifest,
+and egress operations. Streaming is callback-based through `ChatSink` because
+UniFFI cannot export a language-neutral closure.
 
-## CI coverage
+## C#
 
-`.github/workflows/sdk-bindings.yml` runs the structural matrix check and
-language jobs for Python, Swift, Kotlin, Go, C#, and NAPI. The main CI workflow
-also runs the Core, Gateway, Web, Fumadocs, Native, Desktop, CLI, server, and
-package test tasks. The matrix is a test gate; it does not claim a provider
-round-trip or a store publication.
+```bash
+bash bindings/csharp/test.sh
+```
 
-<Cards>
-  <DocCard href="/docs/extend/develop/sdk/rust" />
-  <DocCard href="/docs/extend/develop/sdk/client" />
-  <DocCard href="/docs/extend/develop/sdk/plugin-api" />
-  <DocCard href="/docs/extend/develop/api-reference" />
-</Cards>
+The C# package uses the same `ModelClient`, `EmbeddingClient`, manifest, and
+egress operations. It uses the version-matched third-party UniFFI generator.
+
+## C
+
+`ryu-sdk-ffi` is the maintained C ABI. The generated header is in
+`crates/sdk/ffi/include/ryu_sdk.h` in the hub. Returned strings are owned by
+the library and must be released with the matching `*_free` functions.
+
+## Node-API
+
+`@ryuhq/sdk-native` is the Node-API implementation detail used by
+`@ryuhq/sdk`. Application code should install `@ryuhq/sdk` rather than loading
+the addon directly.
+
+```bash
+(cd crates/sdk/napi && bun test)
+```
+
+## Go
+
+`ryu-sdk-ffi` is the maintained C ABI. Go uses it through cgo:
+
+```bash
+bash bindings/go/test.sh
+```
+
+The C ABI owns returned strings and exposes explicit `*_free` functions. See the generated
+[`include/ryu_sdk.h`](https://github.com/amajorai/ryu-sdk/blob/main/crates/sdk/ffi/include/ryu_sdk.h)
+when writing a non-Go consumer.
+
+## Testing boundary
+
+The binding examples use local fixtures and do not require provider credentials. Core and Gateway
+remain separate processes with their own configuration; a binding call cannot create a node or
+replace Core's permissions, routing, approvals, or audit policy. The CI matrix
+for these projects is defined in `.github/workflows/sdk-bindings.yml`.

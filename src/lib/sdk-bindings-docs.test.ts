@@ -7,7 +7,15 @@ const pageUrl = new URL(
 
 test("language bindings docs describe every tested SDK project", async () => {
 	const page = await Bun.file(pageUrl).text();
-	for (const language of ["Python", "Go", "C#", "Swift", "Kotlin"]) {
+	for (const language of [
+		"Python",
+		"Go",
+		"C#",
+		"Swift",
+		"Kotlin",
+		"Java",
+		"React Native / Expo",
+	]) {
 		expect(page).toContain(`## ${language}`);
 	}
 	for (const command of [
@@ -16,6 +24,7 @@ test("language bindings docs describe every tested SDK project", async () => {
 		"bindings/swift/test.sh",
 		"bindings/kotlin/test.sh",
 		"bindings/csharp/test.sh",
+		"bindings/java/test.sh",
 		"crates/sdk/napi && bun test",
 	]) {
 		expect(page).toContain(command);
