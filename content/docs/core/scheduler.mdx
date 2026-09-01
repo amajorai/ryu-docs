@@ -40,7 +40,7 @@ A `Schedule` is one of two shapes (`Schedule` enum, tagged on `kind`).
 
 | Kind | Field | Example | Behavior |
 |---|---|---|---|
-| `cron` | `expr` | `0 9 * * *` | Classic 5-field cron expression, evaluated in UTC. Fires at most once per matching minute. |
+| `cron` | `expr`, optional `tz` | `0 9 * * *` | Classic 5-field cron expression, evaluated in UTC unless `tz` names an IANA time zone. Fires at most once per matching minute. |
 | `every` | `interval` | `30s`, `5m`, `1h` | Fixed interval parsed by `humantime`. |
 
 Cron expressions are parsed by `CronSchedule::parse` (`apps/core/src/scheduler/cron.rs`) and a
@@ -56,24 +56,44 @@ persisted state; firing once on start is the pragmatic always-on behavior (`is_d
 
 ## Job targets
 
-`JobTarget` (`scheduler/store.rs`) is tagged on `type` and has five variants.
+`JobTarget` (`scheduler/store.rs`) is tagged on `type` and has six variants.
 
 | Variant | Fields | What it runs |
 |---|---|---|
 | `workflow` | `workflow_id`, `input` map | Loads the persisted workflow and runs it (`workflow::executor::run_workflow`). Records the workflow run id on success. |
-| `agent` | `agent_id`, `prompt` | One chat turn against the configured agent via the global agent runner (its engine binding, gateway routing, tools, and persona). |
+| `agent` | `agent_id`, `prompt`, optional `model`, optional `conversation_id` | A durable chat turn against the configured agent. `conversation_id` appends to one existing chat; when omitted, every firing gets a new persistent chat. |
 | `monitor` | `monitor_id` | One website-monitor check (fetch then compare then alert) via the monitor engine. |
 | `quest` | `quest_id` | One quest detection pass (gather Shadow context, judge, suggest or auto-complete) via the quest engine. |
 | `identity_health` | none | Re-validates every `AUTHENTICATED` Identity Vault connection and flips stale ones to `NEEDS_AUTH`. |
+| `learning_cycle` | none | Runs the opted-in continual-learning sweep and dispatches eligible retraining work. |
 
-The `agent` target routes through `global_agent_runner()` so the *configured* agent handles the
-prompt on the real chat path. When no runner is published (headless or tests) it falls back to an
-ephemeral single-node `Prompt` workflow that still routes the agent correctly.
+The `agent` target routes through `global_agent_runner()` so the configured agent handles the
+prompt on the real chat path. Scheduled agent runs persist both the instruction and response in
+the selected conversation. A routine created while an agent is answering in an existing chat can
+omit `conversation_id` to keep using that chat; set `new_chat` in the agent tool or choose **New
+chat each run** in the Desktop editor to create a separate durable transcript per firing.
 
-<Callout type="warn">
-Agent and monitor runs fire with `persist = false`, so scheduled and triggered runs do not yet
-appear in chat history. This is a known caveat carried from the workflow engine.
-</Callout>
+## Agent routines
+
+Agents have a built-in `routines` tool server for background work:
+
+| Tool | Purpose |
+|---|---|
+| `routines.list` | List the current user's agent routines, destinations, outcomes, and bounded history. |
+| `routines.create` | Create a cron or interval routine with instructions, approval, model, and chat-destination options. |
+| `routines.update` | Edit a saved routine without recreating it. |
+| `routines.delete` | Remove a routine while leaving its chat transcripts intact. |
+| `routines.run_now` | Execute the saved target immediately and record the result. |
+
+Routine mutations are approval-gated by default under the normal agent approval policy. On an
+org-bound node, Core scopes routine visibility and existing-chat selection to the verified user
+who owns the current conversation. Only **Active** agents may run an enabled routine; pausing an
+agent pauses its schedules without deleting their definitions.
+
+The Desktop agent editor's **Routines** view is the setup and operations surface. It shows an
+uptime-style 24-hour status strip, per-routine history, the last outcome, and controls to add,
+edit, pause, run now, or delete. The **Run history** view links automated entries back to their
+persistent transcripts, while **Calendar → Agenda** provides the cross-agent timeline.
 
 ### Agent templates can carry several schedules
 
@@ -92,13 +112,14 @@ midnight deep configuration scan with separate instructions. Codex Quota Reset W
 last snapshot, and uses the desktop notification tool only for meaningful changes, outages, and
 recovery.
 
-The desktop agent editor's **Schedules** section lets you add, remove, enable, and edit several
+The desktop agent editor's **Routines** section lets you add, remove, pause, run, and edit several
 entries without creating a workflow for each one. The calendar shows each materialized job, and a
-schedule created from the calendar also asks for its custom instructions.
+routine created by an agent can explicitly stay in the current chat or start a new persistent chat
+for each firing.
 
 ### Most jobs are created for you
 
-Four of the five targets are never created by hand. They are reconciled automatically so they ride
+Five of the six targets are never created by hand. They are reconciled automatically so they ride
 the same tick loop as everything else, using deterministic ids.
 
 | Source | Deterministic id | Reconciled by |
@@ -107,6 +128,7 @@ the same tick loop as everything else, using deterministic ids.
 | A website monitor | `monitor-<id>` | `apps/core/src/server/monitors_api.rs` |
 | An open quest | `quest-<id>` | `apps/core/src/server/quests_api.rs` |
 | Identity Vault health | `identity-health` | Ensured once at startup |
+| Continual learning | `learning-cycle` | Ensured once at startup |
 
 The ids are stable across re-saves so reconciliation is idempotent: editing a workflow's triggers
 converges the `wf-sched-*` jobs to the declared set and deletes stale ones, and deleting the
@@ -162,7 +184,7 @@ records (`MAX_HISTORY`), oldest dropped first.
 |---|---|
 | `started_at` / `finished_at` | RFC 3339 timestamps for the run. |
 | `outcome` | `success` or `failure`. |
-| `run_id` | Workflow run id, when the target was a workflow. |
+| `run_id` | Workflow run id, or the persistent conversation id for an agent run. |
 | `error` | Human-readable error string, on failure. |
 
 A failed workflow or agent run records the failure and the loop continues; one failing job never
@@ -177,16 +199,19 @@ The scheduler is served under the `heartbeat` prefix (`apps/core/src/server/mod.
 | List jobs | `GET /heartbeat/jobs` |
 | Create a job | `POST /heartbeat/jobs` |
 | Fetch a job | `GET /heartbeat/jobs/:id` |
+| Update a job | `PUT /heartbeat/jobs/:id` |
 | Delete a job | `DELETE /heartbeat/jobs/:id` |
+| Run a job now | `POST /heartbeat/jobs/:id/run` |
 
 Creating a job validates the cron expression or interval before persisting, so a malformed schedule
-is rejected up front rather than failing silently at run time. There is no update route; to change a
-job, recreate it under the same id (workflow, monitor, and quest jobs are reconciled for you).
+is rejected up front rather than failing silently at run time. The list, update, delete, and manual
+run routes are scoped to the verified user on an org-bound node; personal nodes retain their
+single-user behavior.
 
 <Callout type="info">
-Most users never call these routes directly. You create scheduled work by adding a schedule trigger
-to a [workflow](/docs/core/workflows), a [website monitor](/docs/core/website-monitoring), or a
-[quest](/docs/core/quests), and the scheduler job is reconciled automatically.
+Most users never call these routes directly. You create scheduled work from an agent's **Routines**
+view, a [workflow](/docs/core/workflows), a [website monitor](/docs/core/website-monitoring), or a
+[quest](/docs/core/quests); Core persists the job and reconciles the backing jobs automatically.
 </Callout>
 
 ## Related

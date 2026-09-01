@@ -54,7 +54,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.2.4/start-here",
+        destination: "/docs/0.2.5/start-here",
         permanent: false,
       },
       // Mobile and Browser extension have dedicated roots again. Keep the
