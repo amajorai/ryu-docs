@@ -103,7 +103,24 @@ describe("docs navigation", () => {
     const standalone = await readMeta("standalone/meta.json");
 
     expect(standalone.root).toBe(true);
-    expect(standalone.pages).toEqual(["index", "notify", "mail"]);
+    expect(standalone.pages).toEqual([
+      "index",
+      "---Ryu Gateway---",
+      "gateway",
+      "gateway-api",
+      "---Ryu Box---",
+      "box",
+      "box-api",
+      "box-lifecycle",
+      "---Ryu Mail---",
+      "mail",
+      "mail-api",
+      "mail-delivery",
+      "---Ryu Notify---",
+      "notify",
+      "notify-api",
+      "notify-streams",
+    ]);
   });
 
   test("publishes the browser WebMCP guide with the MCP server docs", async () => {

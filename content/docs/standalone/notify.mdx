@@ -1,28 +1,18 @@
 ---
 title: "Ryu Notify"
-description: "A standalone, tenant-scoped event inbox with REST history and SSE."
-tags: ["notifications", "events", "sse", "api"]
+description: "Run a tenant-scoped event inbox with durable REST history and live SSE"
+tags: ["notifications", "events", "sse", "standalone", "api"]
 ---
 
-Ryu Notify is a small standalone service for products and agents that need to
-record important events and let another process consume them. It stores events
-in its own SQLite database, exposes bounded history reads, and streams newly
-created events over Server-Sent Events.
+Ryu Notify is a standalone event inbox for products and agents. It stores
+bounded JSON events in SQLite, exposes tenant-scoped history, acknowledges
+individual events, and streams new events over Server-Sent Events.
 
-It is not a replacement for Core's user-scoped `/api/notifications` feed. Core
-owns Ryu users, workflow gates, desktop/native notifications, and Expo push;
-Notify owns this external event API.
+Notify is not a replacement for Core's user-scoped
+`/api/notifications/*` feed. Core owns Ryu users, workflow gates, desktop and
+native notifications, and Expo push. Notify owns this external event API.
 
-<Callout type="info">
-  The local service is tested as one Bun process. Hosted key provisioning,
-  billing, TLS, high availability, and device delivery are separate operating
-  surfaces and are not implied by this page.
-</Callout>
-
-## Start it
-
-Supply a new Notify API key. Do not reuse a Core, Gateway, Mail, Box, or
-provider credential:
+## Start the service
 
 ```sh
 RYU_NOTIFY_API_TOKEN=replace-me \
@@ -31,142 +21,39 @@ RYU_NOTIFY_DATA_DIR=/var/lib/ryu-notify \
 bun run apps/notify/src/index.ts
 ```
 
-For multiple tenants, map each tenant to a distinct bearer key:
+For more than one tenant, map each tenant to a distinct bearer key:
 
 ```sh
 RYU_NOTIFY_API_TOKENS='{"acme":"acme-secret","beta":"beta-secret"}' \
+RYU_NOTIFY_DATA_DIR=/var/lib/ryu-notify \
 bun run apps/notify/src/index.ts
 ```
 
-The service defaults to a local bind. If it is exposed through a network,
-place TLS and an edge rate limit in front of it. API keys are held in process
-memory and are never written to the Notify database or returned in responses.
+The default bind is `127.0.0.1:8092`. Set `RYU_NOTIFY_HOSTNAME` and
+`RYU_NOTIFY_PORT` when the service has an authenticated network boundary. If
+it is exposed beyond the host, put TLS and an edge rate limit in front of it.
 
-## Publish an event
+API keys stay in process memory and are never written to the Notify database or
+returned in responses. The service stores events in `events.db` below
+`RYU_NOTIFY_DATA_DIR`.
 
-```sh
-curl -fsS -X POST "$NOTIFY_URL/v1/events" \
-  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: deploy-184' \
-  -d '{
-    "title": "Deploy complete",
-    "body": "Production is serving the new build.",
-    "level": "success",
-    "source": "github-actions",
-    "type": "deploy.completed",
-    "fingerprint": "deploy:production",
-    "actions": [{"label": "Open run", "url": "https://github.com/acme/app/actions"}],
-    "data": {"commit": "abc123", "environment": "production"}
-  }'
-```
+## Health and capabilities
 
-The service returns `201` for a new event and `200` for a replay with the same
-idempotency key and body. Reusing the key with another body returns
-`409 idempotency_conflict`. The response includes the opaque event id and
-RFC 3339 UTC `createdAt`/`occurredAt` values.
+`GET /health` is unauthenticated and returns the service name, API version, and
+the features available in this process:
 
-`title` is required. The optional fields are:
-
-| Field | Meaning |
+| Feature | Meaning |
 |---|---|
-| `body` | Plain text description |
-| `level` | `info`, `success`, `warning`, `error`, or `critical` |
-| `source` | Producer label such as `box` or `agent-mail` |
-| `type` | Producer event type such as `box.ready` |
-| `externalId` | Producer-owned id for lookup |
-| `fingerprint` | Grouping/filter hint; it never coalesces rows |
-| `recipient` | Optional consumer-defined recipient label |
-| `actions` | Up to three absolute HTTP(S) action links |
-| `data` | Bounded JSON object, redacted before storage |
-| `occurredAt` | Optional producer timestamp, normalized to UTC |
+| `events` | Create and read durable events |
+| `filters` | Filter history by level, source, recipient, time, and acknowledgement |
+| `idempotency` | Safely retry event creation with an idempotency key |
+| `sse` | Receive newly-created matching events live |
+| `acknowledgements` | Mark a tenant-owned event as acknowledged |
 
-The request JSON is bounded. Common credential-shaped keys in `data`, including
-`token`, `apiKey`, `accessKey`, `authorization`, `password`, `secret`, and `privateKey`, are
-replaced with `[REDACTED]`. This is damage reduction, not a secret scanner:
-producers must not send raw credentials, message bodies, command output, or
-provider keys.
+## Read next
 
-## Read history and acknowledge
-
-```sh
-curl -fsS "$NOTIFY_URL/v1/events?source=github-actions&limit=50" \
-  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
-
-curl -fsS -X POST "$NOTIFY_URL/v1/events/evt_replace/ack" \
-  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
-```
-
-`GET /v1/events` supports `level`, `source`, `fingerprint`, `externalId`,
-`recipient`, `since`, `until`, `acknowledged`, `limit`, and an opaque `before`
-cursor. The default page is bounded and newest-first. When another page exists,
-the response returns `nextCursor`; clients pass it back unchanged.
-
-`POST /v1/events/:id/ack` is tenant-scoped and naturally idempotent. A missing
-event is returned as `404 not_found` rather than revealing another tenant's
-event.
-
-## Live SSE
-
-```sh
-curl -N "$NOTIFY_URL/v1/events/stream?source=github-actions" \
-  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
-```
-
-The stream sends `event: notification`, an opaque event id, and a JSON `data`
-frame for each newly-created matching event. It sends comment keep-alives and
-removes a subscriber when the client disconnects. The stream is live-only; on a
-reconnect, read the durable list endpoint first with the last `nextCursor` and
-then open the stream again. This keeps the local API honest about its
-single-process in-memory live hub.
-
-## API surface
-
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| `GET` | `/health` | none | Liveness and safe feature report |
-| `POST` | `/v1/events` | Notify bearer | Store one event |
-| `GET` | `/v1/events` | Notify bearer | List bounded, filtered history |
-| `GET` | `/v1/events/:id` | Notify bearer | Read one event in the caller's tenant |
-| `POST` | `/v1/events/:id/ack` | Notify bearer | Mark one event acknowledged |
-| `GET` | `/v1/events/stream` | Notify bearer | Stream newly-created events |
-
-JSON errors use a stable `code`, safe `message`, HTTP `status`, and `requestId`
-at both the top level and inside `error`. Clients should branch on `code`, not
-message text. All API responses include `X-Request-ID`.
-
-## Box and Agent Mail examples
-
-The repository examples call the source service first and Notify second:
-
-```sh
-# Agent Mail -> Notify
-MAIL_BASE_URL=http://mail.example \
-MAIL_API_TOKEN=mail-secret \
-MAIL_INBOX_ID=inbox-id \
-MAIL_TO=operator@example.com \
-NOTIFY_BASE_URL=http://notify.example \
-NOTIFY_API_TOKEN=notify-secret \
-bun run examples/notifications/agent-mail.ts
-
-# Box -> Notify
-BOX_BASE_URL=http://box.example \
-BOX_API_TOKEN=box-secret \
-NOTIFY_BASE_URL=http://notify.example \
-NOTIFY_API_TOKEN=notify-secret \
-bun run examples/notifications/box.ts
-```
-
-The Mail example reports an accepted SMTP hand-off; it does not claim recipient
-delivery. The event contains ids and status metadata, not message bodies. The
-Box example reports the Box lifecycle response and does not send driver refs or
-command output. See `examples/notifications/README.md` in the repository for the
-environment variables.
-
-## What is not in this service
-
-Notify v1 does not provide Apple/Expo push, email/SMS delivery, Slack/Discord
-webhook fan-out, workflow orchestration, action execution, user preferences,
-hosted billing, or multi-process pub/sub. Those can be added as separately
-owned adapters around the event contract after their credentials, retries,
-consent, and operational proof are defined.
+<Cards>
+  <DocCard href="/docs/standalone/notify-api" />
+  <DocCard href="/docs/standalone/notify-streams" />
+  <DocCard href="/docs/standalone/mail-delivery" />
+</Cards>

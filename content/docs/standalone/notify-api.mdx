@@ -1,0 +1,99 @@
+---
+title: "Ryu Notify API"
+description: "Publish, filter, read, and acknowledge tenant-scoped events over HTTP"
+tags: ["notify", "events", "api", "standalone"]
+---
+
+The Notify API uses the `/v1/events` resource family. Every protected request
+must carry the bearer key for one Notify tenant.
+
+## Authentication and limits
+
+```text
+Authorization: Bearer <RYU_NOTIFY_API_TOKEN>
+```
+
+Request bodies are bounded to the service's JSON limit. Event data is redacted
+recursively for credential-shaped keys such as `token`, `apiKey`,
+`authorization`, `password`, `secret`, and `privateKey`. This reduces accidental
+exposure but is not a substitute for keeping credentials out of event payloads.
+
+## Publish an event
+
+```sh
+curl -fsS -X POST "$NOTIFY_URL/v1/events" \
+  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: deploy-184' \
+  -d '{
+    "title": "Deploy complete",
+    "body": "Production is serving the new build.",
+    "level": "success",
+    "source": "github-actions",
+    "type": "deploy.completed",
+    "fingerprint": "deploy:production",
+    "actions": [{"label": "Open run", "url": "https://github.com/acme/app/actions"}],
+    "data": {"commit": "abc123", "environment": "production"}
+  }'
+```
+
+The service returns `201` for a new event and `200` for an idempotent replay
+with the same key and body. Reusing the key with another body returns
+`409 idempotency_conflict`.
+
+## Event fields
+
+| Field | Meaning |
+|---|---|
+| `title` | Required human-readable event title |
+| `body` | Optional plain-text description |
+| `level` | `info`, `success`, `warning`, `error`, or `critical` |
+| `source` | Producer label, such as `box` or `agent-mail` |
+| `type` | Producer event type, such as `box.ready` |
+| `externalId` | Producer-owned identifier for lookup |
+| `fingerprint` | Grouping and filter hint; it never coalesces rows |
+| `recipient` | Optional consumer-defined recipient label |
+| `actions` | Up to three absolute HTTP(S) action links |
+| `data` | Bounded JSON object, redacted before storage |
+| `occurredAt` | Optional producer timestamp normalized to UTC |
+
+Created events include opaque `id`, RFC 3339 `createdAt` and `occurredAt`, and
+nullable `acknowledgedAt` fields.
+
+## History and acknowledgement
+
+```sh
+curl -fsS "$NOTIFY_URL/v1/events?source=github-actions&limit=50" \
+  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
+
+curl -fsS -X POST "$NOTIFY_URL/v1/events/evt_replace/ack" \
+  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
+```
+
+`GET /v1/events` supports `level`, `source`, `fingerprint`, `externalId`,
+`recipient`, `since`, `until`, `acknowledged`, `limit`, and an opaque `before`
+cursor. Results are bounded and newest-first. Use `nextCursor` unchanged for
+the next page.
+
+Acknowledgement is tenant-scoped and idempotent. A missing event returns
+`404 not_found` without revealing another tenant's event.
+
+## Endpoint surface
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Read unauthenticated liveness and capabilities |
+| `POST` | `/v1/events` | Create one event |
+| `GET` | `/v1/events` | List bounded, filtered history |
+| `GET` | `/v1/events/:id` | Read one event in the caller's tenant |
+| `POST` | `/v1/events/:id/ack` | Mark one event acknowledged |
+| `GET` | `/v1/events/stream` | Open a filtered live stream |
+
+Errors include a stable `code`, safe `message`, HTTP `status`, and `requestId`
+at the top level and inside `error`. All API responses include `X-Request-ID`.
+Clients should branch on `code`, not message text.
+
+<Cards>
+  <DocCard href="/docs/standalone/notify" />
+  <DocCard href="/docs/standalone/notify-streams" />
+</Cards>

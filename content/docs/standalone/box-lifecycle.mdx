@@ -1,0 +1,90 @@
+---
+title: "Ryu Box lifecycle and workers"
+description: "Understand Box states, commands, prompts, expiry, billing, and lifecycle events"
+tags: ["box", "lifecycle", "agents", "standalone"]
+---
+
+Box lifecycle state is stored in SQLite and projected through the tenant-scoped
+API. One Box admits one command at a time. The service restores expiry timers
+after a restart and retains lifecycle events after a resource is deleted.
+
+## States
+
+| State | Meaning | Allowed next states |
+|---|---|---|
+| `provisioning` | The selected driver is creating the workspace | `ready`, `error`, `deleted` |
+| `ready` | Commands, prompts, and interactive work may start | `running`, `stopped`, `deleted`, `error` |
+| `running` | A command is using the workspace | `ready`, `stopped`, `deleted`, `error` |
+| `stopped` | The workspace is stopped while its disk remains | `ready`, `deleted`, `error` |
+| `error` | Provisioning or execution needs recovery | `ready`, `deleted` |
+| `deleted` | The driver resource is destroyed; the audit row remains | none |
+
+## Create, run, and stop
+
+Creation emits `box.provisioning` and waits for the driver to report ready
+before returning the created resource. A command moves the Box to `running`,
+emits `command.started`, then returns it to `ready` after the driver completes.
+
+```sh
+BOX_ID=bx_replace_me
+
+curl -fsS -X POST "${BOX_API_BASE}/boxes/$BOX_ID/commands" \
+  -H "Authorization: Bearer $BOX_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"git","args":["status","--short"],"cwd":".","timeoutSeconds":120}'
+
+curl -fsS -X POST "${BOX_API_BASE}/boxes/$BOX_ID/stop" \
+  -H "Authorization: Bearer $BOX_API_TOKEN"
+
+curl -fsS -X POST "${BOX_API_BASE}/boxes/$BOX_ID/resume" \
+  -H "Authorization: Bearer $BOX_API_TOKEN"
+```
+
+Commands use an argv array internally, keep `cwd` inside the workspace, and
+bound combined stdout and stderr to 1 MiB. A second command while the Box is
+running returns `409 box_busy`.
+
+## Fork and expiry
+
+A ready or stopped Box can be forked with a new name and optional size. Forks
+require an idempotency key and emit `box.forked` for the new resource.
+
+If `ttlSeconds` is set, the deadline starts at creation. Expiry destroys the
+driver resource and emits `box.expired`. A busy Box retries expiry rather than
+destroying a workspace during an admitted command.
+
+## Prompt workers
+
+`POST /v1/boxes/:id/prompt` queues a prompt for `codex`, `cursor`, `claude`,
+`claude-code`, or `opencode`. A worker claims it through
+`POST /v1/boxes/:id/prompts/:run/claim`, runs the work inside or against the
+Box, and reports `completed` or `failed` through the matching `complete` route.
+
+Prompt listing omits prompt text. Do not put long-lived model credentials in
+prompt bodies, command arguments, or event payloads.
+
+## Events and Notify
+
+Box events are local lifecycle history. Use `GET /v1/boxes/:id/events` for a
+bounded list. If another product needs a shared event stream, publish only the
+Box id and status to [Ryu Notify](/docs/standalone/notify). The [Box to Notify
+example](/docs/standalone/notify-streams#box-and-agent-mail-examples) keeps the
+two bearer credentials separate.
+
+## Metering and security
+
+Ryu-owned capacity uses the Gateway sandbox heartbeat and the rates in
+[Metering Rates](/docs/billing/metering). Connected provider mode uses that
+provider's subscription as the machine-capacity authority, so Core does not
+debit the same machine time again.
+
+Keep the service behind TLS and a Ryu-authenticated network boundary. Keep the
+Docker socket private, allowlist images with `RYU_BOX_ALLOWED_IMAGES`, and
+leave network access off unless a Box needs egress. Treat desktop, VNC, SSH,
+artifact, and snapshot URLs as secrets.
+
+<Cards>
+  <DocCard href="/docs/standalone/box-api" />
+  <DocCard href="/docs/standalone/notify-streams" />
+  <DocCard href="/docs/security/sandboxing-isolation" />
+</Cards>
