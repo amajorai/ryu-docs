@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { buildUiCatalog, componentNavigationPages } from "./generate-ui-docs";
+import {
+  buildUiCatalog,
+  componentNavigationPages,
+  hasVariantOrSizeOptions,
+} from "./generate-ui-docs";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const COMPONENTS_ROOT = path.join(
@@ -63,7 +67,7 @@ describe("Ryu UI documentation catalog", () => {
     );
   });
 
-  test("every component page has previews, variants, settings, and a lazy loader", async () => {
+  test("every component page has previews, conditional variants, settings, and a lazy loader", async () => {
     const [catalog, previewSource, metadataSource] = await Promise.all([
       buildUiCatalog(),
       readFile(
@@ -93,7 +97,13 @@ describe("Ryu UI documentation catalog", () => {
       expect(page).toContain(
         `<UiComponentPreview component="${component.importPath}" exportName=`,
       );
-      expect(page).toContain('mode="variants" />');
+      if (hasVariantOrSizeOptions(component.preview)) {
+        expect(page).toContain("## Variants");
+        expect(page).toContain('mode="variants" />');
+      } else {
+        expect(page).not.toContain("## Variants");
+        expect(page).not.toContain('mode="variants" />');
+      }
       expect(page).toContain('mode="settings" />');
       expect(previewSource).toContain(`"${component.importPath}": async () =>`);
       expect(metadataSource).toContain(`"${component.importPath}":`);

@@ -198,6 +198,15 @@ function previewSettingEntries(
   }).slice(0, 6);
 }
 
+function hasVariantOrSizeOptions(
+  metadata: UiComponentPreviewMetadata,
+): boolean {
+  return ["variant", "size"].some((property) => {
+    const options = metadata.props[property];
+    return options !== undefined && options.length > 1;
+  });
+}
+
 function PreviewNotice({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-12 w-full max-w-2xl items-center justify-center rounded-2xl bg-card px-4 py-3 text-center text-muted-foreground text-sm">
@@ -242,25 +251,23 @@ function PreviewVariantSample({
 
 function PreviewVariants({
   component,
-  exportName,
   metadata,
   module,
 }: {
   component: string;
-  exportName: string;
   metadata: UiComponentPreviewMetadata;
   module: PreviewModule;
 }) {
+  if (!hasVariantOrSizeOptions(metadata)) {
+    return null;
+  }
+
   const entries = previewSettingEntries(metadata).filter(([property]) =>
     PREVIEW_VARIANT_PROPERTIES.has(property),
   );
 
   if (entries.length === 0) {
-    return (
-      <PreviewNotice>
-        No named variants or sizes are declared by <code>{exportName}</code>.
-      </PreviewNotice>
-    );
+    return null;
   }
 
   return (
@@ -2148,7 +2155,6 @@ export function UiComponentPreview({
       content = (
         <PreviewVariants
           component={component}
-          exportName={exportName}
           metadata={metadata}
           module={state.module}
         />

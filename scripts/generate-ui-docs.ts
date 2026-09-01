@@ -125,8 +125,7 @@ const EXAMPLES: Record<string, string> = {
   "components/input": `<Input placeholder="Search" />`,
   "components/textarea": `<Textarea placeholder="Write a note" />`,
   "components/checkbox": `<Checkbox aria-label="Enable notifications" />`,
-  "components/connection-status":
-    `<ConnectionStatusToast nodeName="Design node" phase="node-unreachable" />`,
+  "components/connection-status": `<ConnectionStatusToast nodeName="Design node" phase="node-unreachable" />`,
   "components/switch": `<Switch aria-label="Enable notifications" />`,
   "components/progress": `<Progress value={64} />`,
   "components/spinner": `<Spinner />`,
@@ -143,8 +142,7 @@ const EXAMPLES: Record<string, string> = {
   "components/avatar": `<Avatar />`,
   "components/bubble": `<Bubble>Message</Bubble>`,
   "components/message": `<Message>Message content</Message>`,
-  "components/run-status-timeline":
-    `<RunStatusTimeline ariaLabel="Run status" endAt={Date.now()} entries={[]} startAt={Date.now() - 86400000} />`,
+  "components/run-status-timeline": `<RunStatusTimeline ariaLabel="Run status" endAt={Date.now()} entries={[]} startAt={Date.now() - 86400000} />`,
   "components/logo": `<Logo />`,
   "components/data-grid/data-grid": `<DataGrid />`,
 };
@@ -635,6 +633,15 @@ function previewMetadata(
   };
 }
 
+export function hasVariantOrSizeOptions(
+  preview: UiComponentPreviewMetadata,
+): boolean {
+  return ["variant", "size"].some((property) => {
+    const options = preview.props[property];
+    return options !== undefined && options.length > 1;
+  });
+}
+
 export function componentNavigationPages(catalog: UiComponent[]): string[] {
   const pages = ["index"];
   let currentCategory = "";
@@ -660,6 +667,16 @@ function componentPage(component: UiComponent): string {
   const packageImport = `@ryu/ui/${component.importPath}`;
   const namedExports = component.exports.join(", ");
   const primary = primaryExport(component);
+  const variantsSection = hasVariantOrSizeOptions(component.preview)
+    ? [
+        "## Variants",
+        "",
+        `<UiComponentPreview component=${JSON.stringify(component.importPath)} exportName=${JSON.stringify(primary)} mode="variants" />`,
+        "",
+        "This section renders the named variants, sizes, and states declared by the module when they are available.",
+        "",
+      ]
+    : [];
   return [
     "---",
     `title: ${JSON.stringify(component.title)}`,
@@ -674,12 +691,7 @@ function componentPage(component: UiComponent): string {
     "",
     "The preview uses representative props and is safe to interact with. It does not call a provider, write data, or depend on a host application.",
     "",
-    "## Variants",
-    "",
-    `<UiComponentPreview component=${JSON.stringify(component.importPath)} exportName=${JSON.stringify(primary)} mode="variants" />`,
-    "",
-    "This section renders the named variants, sizes, and states declared by the module when they are available.",
-    "",
+    ...variantsSection,
     "## Settings",
     "",
     `<UiComponentPreview component=${JSON.stringify(component.importPath)} exportName=${JSON.stringify(primary)} mode="settings" />`,

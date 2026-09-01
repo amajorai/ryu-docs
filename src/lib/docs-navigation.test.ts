@@ -140,6 +140,8 @@ describe("docs navigation", () => {
       "notify",
       "notify-api",
       "notify-streams",
+      "---Ryu Hire---",
+      "hire",
     ]);
   });
 
