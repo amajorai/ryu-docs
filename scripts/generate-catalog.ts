@@ -431,14 +431,26 @@ const CONTRIBUTE_TITLES: Record<string, string> = {
 
 function contributesSection(
   contributes: Manifest["contributes"] | undefined,
+  base: CatalogBase,
 ): string {
   const entries = Object.entries(contributes ?? {}).filter(
-    ([, items]) => Array.isArray(items) && items.length > 0,
+    ([key, items]) =>
+      !(base === "apps" && key === "sidebar_buttons") &&
+      Array.isArray(items) &&
+      items.length > 0,
   );
-  if (entries.length === 0) {
+  if (entries.length === 0 && base !== "apps") {
     return "";
   }
   const lines: string[] = ["", "## UI it contributes"];
+  if (base === "apps") {
+    lines.push(
+      "",
+      "### Apps shelf",
+      "",
+      "When enabled, this app appears as one icon tile in the desktop sidebar's Apps shelf. Use sidebar sections for the app's record lists; feature navigation stays inside the Companion.",
+    );
+  }
   for (const [key, items] of entries) {
     const title = CONTRIBUTE_TITLES[key] ?? key.replace(/_/g, " ");
     lines.push("", `### ${title}`, "");
@@ -575,7 +587,7 @@ function buildPage(
   }
 
   body.push(permissionsSection(m));
-  body.push(contributesSection(m.contributes));
+  body.push(contributesSection(m.contributes, base));
   body.push(requiresSection(m));
   body.push(engineSection(m));
   body.push(activationSection(m));

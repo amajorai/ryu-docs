@@ -1,4 +1,4 @@
-export const DOCS_VERSION = "0.2.6" as const;
+export const DOCS_VERSION = "0.2.7" as const;
 
 /**
  * Ryu's public docs intentionally serve one current version.
@@ -50,7 +50,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.2.6", not "v0.2.6".
+    // Bare number, no "v" prefix — the switcher reads "0.2.7", not "v0.2.7".
     title: DOCS_VERSION,
   },
 ];
