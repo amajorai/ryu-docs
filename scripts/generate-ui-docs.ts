@@ -663,7 +663,22 @@ function inlineCode(value: string): string {
   return `\`${value}\``;
 }
 
-function componentPage(component: UiComponent): string {
+function componentNavigation(
+  component: UiComponent,
+  related: UiComponent[],
+): string {
+  const relatedText =
+    related.length > 0
+      ? ` In the same ${component.category.toLowerCase()} group, compare ${related
+          .map(
+            (peer) => `[${peer.title}](/docs/ui/components/${peer.pageSlug})`,
+          )
+          .join(", ")}.`
+      : "";
+  return `This reference is part of the [Ryu UI overview](/docs/ui), the [component catalog](/docs/ui/components), and the [UI getting started guide](/docs/ui/getting-started). Read the [primitive usage guide](/docs/ui/primitives) for composition and ownership rules.${relatedText}`;
+}
+
+function componentPage(component: UiComponent, related: UiComponent[]): string {
   const packageImport = `@ryu/ui/${component.importPath}`;
   const namedExports = component.exports.join(", ");
   const primary = primaryExport(component);
@@ -684,6 +699,8 @@ function componentPage(component: UiComponent): string {
     "---",
     "",
     `${component.description} The module is part of the ${inlineCode("@ryu/ui")} package and is available on every surface that includes the package.`,
+    "",
+    componentNavigation(component, related),
     "",
     "## Preview",
     "",
@@ -737,6 +754,8 @@ function componentsIndex(catalog: UiComponent[]): string {
     "---",
     "",
     "Every entry below maps to a real `@ryu/ui` component module. Open a component page for its live preview, variants, settings, import path, named exports, and usage example.",
+    "",
+    "Use the [Ryu UI overview](/docs/ui), [UI getting started](/docs/ui/getting-started), and [primitive usage guide](/docs/ui/primitives) to place these components in a host surface.",
     "",
   ];
   let currentCategory = "";
@@ -842,9 +861,22 @@ export async function generateUiDocs(): Promise<UiComponent[]> {
   await writeFile(PREVIEW_MODULES_SOURCE, previewModulesSource(catalog));
   await writeFile(PREVIEW_METADATA_SOURCE, previewMetadataSource(catalog));
   for (const component of catalog) {
+    const siblings = catalog.filter(
+      (candidate) => candidate.category === component.category,
+    );
+    const index = siblings.findIndex(
+      (candidate) => candidate.pageSlug === component.pageSlug,
+    );
+    const related =
+      index < 0
+        ? []
+        : [
+            ...siblings.slice(Math.max(0, index - 2), index),
+            ...siblings.slice(index + 1, index + 3),
+          ];
     await writeFile(
       path.join(COMPONENTS_ROOT, `${component.pageSlug}.mdx`),
-      componentPage(component),
+      componentPage(component, related),
     );
   }
   return catalog;

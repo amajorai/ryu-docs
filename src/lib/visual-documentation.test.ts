@@ -28,4 +28,7 @@ test("key docs pages pair prose with live UI and diagrams", async () => {
   expect(contributions).toContain("share one shell skeleton");
   expect(contributions).not.toContain('<SurfacePreview surface="plugin" />');
   expect(contributions).toContain("Shared shell");
+  expect(contributions).toContain("Repository ownership");
+  expect(contributions).toContain("amajorai/ryu-marketplace");
+  expect(contributions).toContain("generated/ryu-runtime");
 });

@@ -7,6 +7,9 @@ type Meta = {
 };
 
 const docsRoot = new URL("../../content/docs/", import.meta.url);
+const docsRootPath = docsRoot.pathname;
+const internalMarkdownLink = /\[[^\]]+\]\((\/docs(?:\/[^)\s]+)?)\)/g;
+const versionSegment = /^\d+\.\d+\.\d+$/;
 
 async function readMeta(path: string): Promise<Meta> {
   return (await Bun.file(new URL(path, docsRoot)).json()) as Meta;
@@ -14,6 +17,38 @@ async function readMeta(path: string): Promise<Meta> {
 
 async function readPage(path: string): Promise<string> {
   return Bun.file(new URL(path, docsRoot)).text();
+}
+
+function normalizeDocsHref(href: string): string {
+  const pathname = href.split(/[?#]/, 1)[0] ?? href;
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (segments[0] !== "docs") {
+    return pathname;
+  }
+
+  if (versionSegment.test(segments[1] ?? "")) {
+    segments.splice(1, 1);
+  }
+
+  return segments.length === 1 ? "/docs" : `/${segments.join("/")}`;
+}
+
+async function readDocFiles(): Promise<string[]> {
+  const files: string[] = [];
+  const glob = new Bun.Glob("**/*.mdx");
+
+  for await (const file of glob.scan({ cwd: docsRootPath })) {
+    files.push(file);
+  }
+
+  return files.sort();
+}
+
+function pagePathFromFile(file: string): string {
+  const withoutExtension = file.replace(/\.mdx$/, "");
+  const withoutIndex = withoutExtension.replace(/\/index$/, "");
+  return withoutIndex ? `/docs/${withoutIndex}` : "/docs";
 }
 
 function pagesUnderHeader(
@@ -355,5 +390,45 @@ describe("docs navigation", () => {
       "creator-program",
       "referrals",
     ]);
+  });
+
+  test("keeps every public page connected by valid inline documentation links", async () => {
+    const files = await readDocFiles();
+    const pagePaths = new Set(files.map(pagePathFromFile));
+    const missingInlineLinks: string[] = [];
+    const brokenLinks: string[] = [];
+
+    for (const file of files) {
+      const content = await readPage(file);
+      const links = [...content.matchAll(internalMarkdownLink)].map(
+        (match) => match[1],
+      );
+
+      if (links.length === 0) {
+        missingInlineLinks.push(file);
+      }
+
+      const minimum = [
+        "apps/",
+        "plugins/",
+        "ui/components/",
+        "extend/develop/api-reference/",
+      ].some((prefix) => file.startsWith(prefix))
+        ? 3
+        : 0;
+      expect(
+        links.length,
+        `${file} should expose at least ${minimum} inline documentation links`,
+      ).toBeGreaterThanOrEqual(minimum);
+
+      for (const href of links) {
+        if (!pagePaths.has(normalizeDocsHref(href ?? ""))) {
+          brokenLinks.push(`${file} -> ${href}`);
+        }
+      }
+    }
+
+    expect(missingInlineLinks).toEqual([]);
+    expect(brokenLinks).toEqual([]);
   });
 });

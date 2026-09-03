@@ -7,6 +7,8 @@ const pageUrl = new URL(
 
 test("language bindings docs describe every tested SDK project", async () => {
 	const page = await Bun.file(pageUrl).text();
+	expect(page).toContain("amajorai/ryu-sdk");
+	expect(page).toContain("main runtime repository does\nnot carry the language-binding projects");
 	for (const language of [
 		"Python",
 		"Go",

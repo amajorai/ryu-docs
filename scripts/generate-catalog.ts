@@ -123,6 +123,27 @@ type Manifest = {
   contributes?: Record<string, ContributesItem[]>;
 };
 
+type CatalogBase = "apps" | "plugins";
+
+type CatalogEntry = {
+  dir: string;
+  manifest: Manifest;
+  category?: string;
+};
+
+const PLUGIN_CATEGORY_ORDER = [
+  "Automation",
+  "Browsers",
+  "Language Servers",
+  "Developer Tools",
+  "Knowledge & Memory",
+  "Models",
+  "Productivity",
+  "Research",
+  "Search",
+  "Security",
+];
+
 /**
  * Escape text for safe insertion into MDX prose. Curly braces would be read as
  * JSX expressions, so they become HTML entities; pipes and newlines stay legal
@@ -153,6 +174,42 @@ function frontmatter(
     `tags: ${JSON.stringify(tags)}`,
     "---",
   ].join("\n");
+}
+
+function catalogNavigation(
+  base: CatalogBase,
+  related: { dir: string; manifest: Manifest }[],
+): string {
+  const isApps = base === "apps";
+  const realm = isApps ? "Apps" : "Plugins";
+  const realmHref = isApps ? "/docs/apps" : "/docs/plugins";
+  const links = isApps
+    ? [
+        `[${realm} catalog](${realmHref})`,
+        "[app manifest lifecycle](/docs/core/app-manifest-lifecycle)",
+        "[Plugins vs Apps](/docs/extend/develop/extensions/plugins-vs-apps)",
+        "[Marketplace](/docs/extend/develop/extensions/marketplace)",
+        "[Gateway governance](/docs/gateway/governance)",
+      ]
+    : [
+        `[${realm} catalog](${realmHref})`,
+        "[plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest)",
+        "[plugin runtime](/docs/extend/develop/extensions/plugin-runtime)",
+        "[unified tool catalog](/docs/core/unified-tool-catalog)",
+        "[Marketplace](/docs/extend/develop/extensions/marketplace)",
+        "[Gateway governance](/docs/gateway/governance)",
+      ];
+  const relatedText =
+    related.length > 0
+      ? ` In the same category, compare ${related
+          .map(
+            ({ dir, manifest }) =>
+              `[${cell(manifest.name ?? dir)}](/docs/${base}/${dir})`,
+          )
+          .join(", ")}.`
+      : "";
+
+  return `This page is part of the ${links.join(", ")} documentation path.${relatedText}`;
 }
 
 function surfacesSection(surfaces: Manifest["surfaces"]): string {
@@ -476,7 +533,11 @@ function activationSection(m: Manifest): string {
   ].join("\n");
 }
 
-function buildPage(m: Manifest): string {
+function buildPage(
+  m: Manifest,
+  base: CatalogBase,
+  related: { dir: string; manifest: Manifest }[],
+): string {
   const description = m.tagline ?? m.description?.split(/[.!?]\s/)[0] ?? "";
   const body: string[] = [];
   body.push(frontmatter(m.name ?? "", description, [m.category ?? ""]));
@@ -494,6 +555,8 @@ function buildPage(m: Manifest): string {
   if (m.description) {
     body.push("## What it does", "", esc(m.description), "");
   }
+
+  body.push("", catalogNavigation(base, related), "");
 
   body.push(surfacesSection(m.surfaces));
 
@@ -536,21 +599,37 @@ function buildPage(m: Manifest): string {
 }
 
 function groupByCategory(
-  manifests: { dir: string; manifest: Manifest }[],
+  manifests: CatalogEntry[],
+  base: CatalogBase,
 ): { category: string; entries: { dir: string; manifest: Manifest }[] }[] {
-  const groups = new Map<string, { dir: string; manifest: Manifest }[]>();
+  const groups = new Map<string, CatalogEntry[]>();
   for (const entry of manifests) {
-    const category = entry.manifest.category ?? "Uncategorized";
+    const category =
+      entry.category ?? entry.manifest.category ?? "Uncategorized";
     const list = groups.get(category) ?? [];
     list.push(entry);
     groups.set(category, list);
   }
+  const categoryOrder = base === "plugins" ? PLUGIN_CATEGORY_ORDER : [];
   return [...groups.entries()]
     .map(([category, entries]) => ({
       category: CATEGORY_LABELS.get(category) ?? category,
       entries: entries.sort((a, b) => a.dir.localeCompare(b.dir)),
     }))
-    .sort((a, b) => a.category.localeCompare(b.category));
+    .sort((a, b) => {
+      const aIndex = categoryOrder.indexOf(a.category);
+      const bIndex = categoryOrder.indexOf(b.category);
+      if (aIndex >= 0 && bIndex >= 0) {
+        return aIndex - bIndex;
+      }
+      if (aIndex >= 0) {
+        return -1;
+      }
+      if (bIndex >= 0) {
+        return 1;
+      }
+      return a.category.localeCompare(b.category);
+    });
 }
 
 function realmMeta(
@@ -583,11 +662,19 @@ function realmIndex(
   title: string,
   description: string,
   groups: ReturnType<typeof groupByCategory>,
-  base: string,
+  base: CatalogBase,
 ): string {
   const lines: string[] = [];
   lines.push(frontmatter(title, description, [title]));
-  lines.push("", description, "");
+  lines.push(
+    "",
+    description,
+    "",
+    base === "apps"
+      ? "Use the [Apps catalog](/docs/apps) with the [app manifest lifecycle](/docs/core/app-manifest-lifecycle), [Plugins vs Apps](/docs/extend/develop/extensions/plugins-vs-apps), and [Marketplace](/docs/extend/develop/extensions/marketplace) guides to understand how these pages fit together."
+      : "Use the [Plugins catalog](/docs/plugins) with [plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest), the [plugin runtime](/docs/extend/develop/extensions/plugin-runtime), the [unified tool catalog](/docs/core/unified-tool-catalog), and [Gateway governance](/docs/gateway/governance) to move from discovery to execution.",
+    "",
+  );
   for (const group of groups) {
     lines.push("", `## ${group.category}`, "");
     lines.push("<Cards>");
@@ -599,11 +686,12 @@ function realmIndex(
   return lines.join("\n");
 }
 
-function readManifests(
-  storeDirs: string | string[],
-): { dir: string; manifest: Manifest }[] {
-  const entries: { dir: string; manifest: Manifest }[] = [];
+function readManifests(storeDirs: string | string[]): CatalogEntry[] {
+  const entries: CatalogEntry[] = [];
   for (const storeDir of Array.isArray(storeDirs) ? storeDirs : [storeDirs]) {
+    const isLanguageServerStore = storeDir.endsWith(
+      path.join("plugins-store", "lsp"),
+    );
     for (const dir of readdirSync(storeDir, { withFileTypes: true })) {
       if (!dir.isDirectory()) {
         continue;
@@ -613,7 +701,11 @@ function readManifests(
         const manifest = JSON.parse(
           readFileSync(manifestPath, "utf8"),
         ) as Manifest;
-        entries.push({ dir: dir.name, manifest });
+        entries.push({
+          dir: dir.name,
+          manifest,
+          ...(isLanguageServerStore ? { category: "Language Servers" } : {}),
+        });
       } catch {
         // Skip directories without a parseable manifest.json.
       }
@@ -627,13 +719,13 @@ async function writeRealm(opts: {
   title: string;
   description: string;
   icon: string;
-  base: string;
-  manifests: { dir: string; manifest: Manifest }[];
+  base: CatalogBase;
+  manifests: CatalogEntry[];
 }): Promise<void> {
   await rm(opts.outDir, { recursive: true, force: true });
   await mkdir(opts.outDir, { recursive: true });
 
-  const groups = groupByCategory(opts.manifests);
+  const groups = groupByCategory(opts.manifests, opts.base);
   await writeFile(
     path.join(opts.outDir, "meta.json"),
     realmMeta(opts.title, opts.description, opts.icon, groups),
@@ -644,7 +736,19 @@ async function writeRealm(opts: {
   );
 
   for (const entry of opts.manifests) {
-    const page = buildPage(entry.manifest);
+    const group = groups.find((candidate) =>
+      candidate.entries.some(({ dir }) => dir === entry.dir),
+    );
+    const index =
+      group?.entries.findIndex(({ dir }) => dir === entry.dir) ?? -1;
+    const related =
+      index < 0 || !group
+        ? []
+        : [
+            ...group.entries.slice(Math.max(0, index - 2), index),
+            ...group.entries.slice(index + 1, index + 3),
+          ];
+    const page = buildPage(entry.manifest, opts.base, related);
     await writeFile(path.join(opts.outDir, `${entry.dir}.mdx`), page);
   }
 
