@@ -8,6 +8,9 @@ import {
 } from "node:fs/promises";
 import * as path from "node:path";
 
+import { EXPRESSIVE_EXPRESSION_IDS } from "../../../packages/ui/src/components/expressive.ts";
+import { EXPRESSIVE_ANIMATION_IDS } from "../../../packages/ui/src/components/expressive-animation.ts";
+
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const UI_PACKAGE_ROOT = path.join(REPO_ROOT, "packages/ui");
 const CONTENT_ROOT = path.join(REPO_ROOT, "apps/fumadocs/content/docs/ui");
@@ -119,6 +122,31 @@ const DEFAULT_DESCRIPTIONS: Record<string, string> = {
     "Maps scheduled run outcomes onto a compact 24-hour status strip.",
 };
 
+const DEFAULT_PREVIEW_OPTIONS: Record<string, Record<string, string[]>> = {
+  // Button's public entry point re-exports the implementation and the server-safe
+  // CVA definition from sibling modules, so its literal unions are intentionally
+  // not present in the entry file that the lightweight scanner reads.
+  "components/button": {
+    size: ["default", "icon", "icon-lg", "icon-sm", "icon-xs", "lg", "sm", "xs"],
+    variant: [
+      "default",
+      "destructive",
+      "ghost",
+      "ghost-muted",
+      "link",
+      "loading",
+      "mono",
+      "outline",
+      "progress",
+      "secondary",
+    ],
+  },
+  "components/logo": {
+    animation: ["random", ...EXPRESSIVE_ANIMATION_IDS],
+    expression: ["random", ...EXPRESSIVE_EXPRESSION_IDS],
+  },
+};
+
 const EXAMPLES: Record<string, string> = {
   "components/button": `<Button>Continue</Button>`,
   "components/badge": `<Badge variant="secondary">Ready</Badge>`,
@@ -143,7 +171,7 @@ const EXAMPLES: Record<string, string> = {
   "components/bubble": `<Bubble>Message</Bubble>`,
   "components/message": `<Message>Message content</Message>`,
   "components/run-status-timeline": `<RunStatusTimeline ariaLabel="Run status" endAt={Date.now()} entries={[]} startAt={Date.now() - 86400000} />`,
-  "components/logo": `<Logo />`,
+  "components/logo": `<Logo animation="random" expression="random" variant="outline-muted" />`,
   "components/data-grid/data-grid": `<DataGrid />`,
 };
 
@@ -570,7 +598,7 @@ function objectBodies(source: string, property: string): string[] {
 function extractLiteralOptions(source: string, property: string): string[] {
   const values = new Set<string>();
   const unionPattern = new RegExp(
-    `\\b${property}\\??\\s*:\\s*((?:(?:"[^"]+"|'[^']+')\\s*\\|\\s*)+(?:"[^"]+"|'[^']+'))`,
+    `\\b${property}\\??\\s*:\\s*((?:\\s*\\|\\s*)?(?:"[^"]+"|'[^']+')(?:\\s*\\|\\s*(?:"[^"]+"|'[^']+'))+)`,
     "g",
   );
   for (const match of source.matchAll(unionPattern)) {
@@ -613,6 +641,12 @@ function previewMetadata(
     if (options.length >= 2 && options.length <= 12) {
       props[property] = options;
     }
+  }
+
+  for (const [property, options] of Object.entries(
+    DEFAULT_PREVIEW_OPTIONS[component.importPath] ?? {},
+  )) {
+    props[property] = options;
   }
 
   const booleanProps = new Set(

@@ -37,6 +37,8 @@ export const UI_COMPONENT_MODULE_LOADERS: Record<
     )) as UiComponentModule,
   "components/native-select": async () =>
     (await import("@ryu/ui/components/native-select")) as UiComponentModule,
+  "components/notification-bell": async () =>
+    (await import("@ryu/ui/components/notification-bell")) as UiComponentModule,
   "components/profile-charts": async () =>
     (await import("@ryu/ui/components/profile-charts")) as UiComponentModule,
   "components/progress": async () =>

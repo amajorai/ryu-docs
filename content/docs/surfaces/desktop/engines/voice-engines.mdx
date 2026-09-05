@@ -14,6 +14,7 @@ lazy, so its model is only loaded when cleanup is used or the engine is started 
 |---|---|---|---|
 | `whispercpp` | `8090` | `ggml-base.en` (whisper.cpp) | Built; downloaded on first run |
 | `parakeet` | in-process | Parakeet v3 ONNX bundle | Built, but transcription is behind a cargo feature |
+| `audiocpp` | `8086` | Parakeet-TDT Q8 + PocketTTS Q8 | Optional native runtime; installed on first use |
 | `llamacpp-speech` | `8088` | S1-mini by Superwhisper (`s1-mini-q4_k_m.gguf`) | Downloaded with the default local models; lazy |
 
 Whisper.cpp is the local fallback Voice Recognition engine. Its model path defaults to
@@ -25,6 +26,12 @@ model bundle downloads from a public host. In-process inference is gated behind 
 `voice-parakeet` cargo feature (it pulls a heavy native ONNX Runtime dependency). Without the feature,
 the lifecycle, download, and routing are all present, but a transcription request returns a clear
 "feature not built" error.
+
+audio.cpp is the native process alternative. Core downloads the pinned `audiocpp_server` release
+and its default Parakeet-TDT and PocketTTS GGUF packages into the node's Ryu data directory, writes
+the server config, and starts it on loopback port `8086` (the development profile adds the normal
+Ryu port offset). It is optional and independent of the in-process Parakeet feature. Set the
+`audiocpp` engine in Voice Recognition or Audio settings to route a request there.
 
 ## Speech Processing
 
@@ -66,7 +73,7 @@ inserted. If a cleanup request fails, Dictation fails open to the raw transcript
 ## Voice Recognition
 
 ```
-POST /api/voice/transcribe?engine=whisper|parakeet
+POST /api/voice/transcribe?engine=whisper|audiocpp|parakeet|gateway
 ```
 
 The request is a multipart form with the audio bytes in a `file` field, and the response is the
@@ -79,13 +86,29 @@ graph and POSTs it to this endpoint, then appends the transcript to your message
 ## Audio
 
 Audio is the generative counterpart to whisper and parakeet's transcription. Like the Voice Recognition
-engines, Audio engines are opt-in and run alongside Chat. There are two paths: a built-in
-OuteTTS engine and a universal sidecar that fronts many other engines behind one contract.
+engines, Audio engines are opt-in and run alongside Chat. There are three local paths: the native
+audio.cpp server, the built-in OuteTTS engine, and a universal sidecar that fronts many other engines.
+
+### Native audio.cpp
+
+The `audiocpp` engine uses audio.cpp's OpenAI-compatible `/v1/audio/speech` route. Ryu's managed
+config declares the same server for PocketTTS TTS and Parakeet-TDT STT, so installing the curated
+audio.cpp voice model provisions both capabilities. The default TTS voice is `alba`; `speed`,
+`language`, and a reference voice path are passed through when supplied. An explicit `audiocpp`
+selection returns an actionable error when the runtime or model is unavailable rather than silently
+switching to OuteTTS.
+
+The upstream runtime supports more model families than Ryu's curated package currently provisions.
+Those upstream packages need a compatible audio.cpp server config and model-specific validation;
+they are not implied by the single `audiocpp` picker row. See the [audio.cpp project](https://github.com/0xShug0/audio.cpp)
+for its current model matrix.
 
 <Callout type="warn">
-  The Audio engines are opt-in and not in the startup order. Built-in OuteTTS synthesis has not been
-  exercised live here. On the universal sidecar, Pocket TTS was verified producing a WAV, but
-  KittenTTS install is blocked by an upstream `misaki` dependency pin. The sidecar needs Python.
+  The Audio engines are opt-in. An installed `audiocpp` runtime starts with the other managed
+  sidecars; built-in OuteTTS remains a per-request CLI path, and the universal RyuTTS sidecar is
+  still separately installed. Built-in OuteTTS synthesis has not been exercised live here. On the
+  universal sidecar, Pocket TTS was verified producing a WAV, but KittenTTS install is blocked by an
+  upstream `misaki` dependency pin. The sidecar needs Python.
 </Callout>
 
 ### Built-in OuteTTS
@@ -138,12 +161,12 @@ POST /api/voice/speak
 ```
 
 The body is `{ text, engine?, voice?, speed?, language?, reference_audio? }` and the response is an
-`audio/wav` body (`apps/core/src/server/voice.rs`). The `engine` field selects the path: omitted or
-`"outetts"` runs the built-in `llama-tts` path, and any other id (for example `"kitten"` or
-`"pocket"`) is proxied to the sidecar's `/generate`. The remaining fields are passed through to the
-sidecar when present.
+`audio/wav` body. The `engine` field selects the path: omitted or `"outetts"` runs the built-in
+`llama-tts` path, `"audiocpp"` uses the native audio.cpp server, and other ids (for example
+`"kitten"` or `"pocket"`) are proxied to the RyuTTS sidecar's `/generate`. An explicit `audiocpp`
+selection does not silently fall back to another engine when its runtime is unavailable.
 
-Engine and model discovery is data-driven, so nothing is hardcoded:
+Engine and model discovery exposes the built-in/native rows plus the RyuTTS registry:
 
 | Action | Endpoint |
 |---|---|
@@ -151,9 +174,9 @@ Engine and model discovery is data-driven, so nothing is hardcoded:
 | List the curated, installable Audio model catalog | `GET /api/voice/tts-models` |
 | Install a curated model into the Core-managed HF cache | `POST /api/voice/tts-models/install` |
 
-`GET /api/voice/tts-engines` always includes the built-in `outetts` and appends the sidecar's
-`/engines` catalog when it is reachable. When the sidecar is down, only the built-in is returned. The
-curated model catalog is the voicebox-style known-good set, distinct from the raw Hugging Face
+`GET /api/voice/tts-engines` always includes the built-in `outetts`, native `audiocpp`, and the cloud
+slot, then appends the sidecar's `/engines` catalog when it is reachable. The curated model catalog
+is the voicebox-style known-good set, distinct from the raw Hugging Face
 audio-generation browse in the Models tab. Curated installs run `huggingface_hub.snapshot_download`
 into the Core-managed cache and are registered with the download overlay as a spinner entry, since
 Hugging Face reports no byte total there.

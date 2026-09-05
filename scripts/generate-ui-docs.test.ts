@@ -114,6 +114,17 @@ describe("Ryu UI documentation catalog", () => {
     );
     expect(button?.preview.props.variant).toContain("progress");
     expect(button?.preview.props.size).toContain("icon-lg");
+
+    const logo = catalog.find(
+      (component) => component.importPath === "components/logo",
+    );
+    expect(logo?.preview.props.variant).toContain("outline-muted");
+    expect(logo?.preview.props.animation).toContain("random");
+    expect(logo?.preview.props.animation).toContain("wink");
+    expect(logo?.preview.props.animation).toHaveLength(15);
+    expect(logo?.preview.props.expression).toContain("random");
+    expect(logo?.preview.props.expression).toContain("surprised");
+    expect(logo?.preview.props.expression).toHaveLength(17);
   });
 
   test("the UI realm contains no external source-comparison copy", async () => {

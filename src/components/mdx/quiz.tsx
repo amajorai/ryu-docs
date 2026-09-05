@@ -2,7 +2,7 @@
 
 import { Check, RotateCcw, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "@/lib/cn";
 
 /**
  * A single multiple-choice question. `answer` is the zero-based index of the
@@ -73,7 +73,7 @@ export function Quiz({ questions }: { questions: QuizQuestion[] }) {
                     return (
                       <button
                         aria-pressed={isPicked}
-                        className={twMerge(
+                        className={cn(
                           "flex items-center gap-2.5 rounded-lg bg-fd-background px-3 py-2 text-left text-sm transition-colors",
                           !isAnswered && "hover:bg-fd-accent",
                           isAnswered &&

@@ -35,6 +35,8 @@ type PreviewMode = "default" | "settings" | "variants";
 
 const PREVIEW_SETTING_ORDER = [
   "variant",
+  "animation",
+  "expression",
   "size",
   "disabled",
   "loading",
@@ -187,15 +189,22 @@ function previewTarget(
   );
 }
 
-function previewSettingEntries(
+export function previewSettingEntries(
   metadata: UiComponentPreviewMetadata,
 ): Array<[string, string[]]> {
-  return PREVIEW_SETTING_ORDER.flatMap((property) => {
+  const orderedProperties = new Set(PREVIEW_SETTING_ORDER);
+  const properties = [
+    ...PREVIEW_SETTING_ORDER,
+    ...Object.keys(metadata.props)
+      .filter((property) => !orderedProperties.has(property))
+      .sort(),
+  ];
+  return properties.flatMap((property) => {
     const options = metadata.props[property];
     return options && options.length > 1
       ? [[property, options] as [string, string[]]]
       : [];
-  }).slice(0, 6);
+  });
 }
 
 function hasVariantOrSizeOptions(
@@ -228,7 +237,16 @@ function PreviewVariantSample({
   property: string;
   value: string;
 }) {
-  const props = { [property]: previewValue(value) };
+  const isLogo = component === "components/logo";
+  const props = {
+    ...(isLogo
+      ? {
+          animated: false,
+          size: "72px",
+        }
+      : {}),
+    [property]: previewValue(value),
+  };
   const content =
     component === "components/avatar"
       ? view(
@@ -310,11 +328,16 @@ function PreviewSettings({
   module: PreviewModule;
 }) {
   const entries = previewSettingEntries(metadata);
+  const preferred: Record<string, string> =
+    component === "components/logo"
+      ? { animation: "random", expression: "random", variant: "outline-muted" }
+      : {};
   const [selected, setSelected] = useState<Record<string, string>>(() =>
     Object.fromEntries(
       entries.map(([property, options]) => [
         property,
-        options.includes("default") ? "default" : (options[0] ?? ""),
+        preferred[property] ??
+          (options.includes("default") ? "default" : (options[0] ?? "")),
       ]),
     ),
   );
@@ -328,12 +351,15 @@ function PreviewSettings({
     );
   }
 
-  const props = Object.fromEntries(
-    entries.map(([property, options]) => [
-      property,
-      previewValue(selected[property] ?? options[0] ?? ""),
-    ]),
-  );
+  const props = {
+    ...(component === "components/logo" ? { size: "88px" } : {}),
+    ...Object.fromEntries(
+      entries.map(([property, options]) => [
+        property,
+        previewValue(selected[property] ?? options[0] ?? ""),
+      ]),
+    ),
+  };
 
   return (
     <div className="flex w-full flex-col gap-4">
@@ -1896,9 +1922,11 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
     view(module, "Lanyard", { className: "h-48 w-full max-w-md" }),
   "components/logo": (module) =>
     view(module, "Logo", {
-      animated: false,
+      animated: true,
+      animation: "random",
+      expression: "random",
       size: "88px",
-      variant: "outline-static",
+      variant: "outline-muted",
     }),
   "components/marker": (module) =>
     view(

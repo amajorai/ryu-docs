@@ -388,6 +388,7 @@ describe("docs navigation", () => {
       "---Build & earn---",
       "sell-your-own-agents",
       "creator-program",
+      "challenges",
       "referrals",
     ]);
   });

@@ -1,6 +1,6 @@
 ---
 title: "Permissions and roles"
-description: "The org/team RBAC permission vocabulary, built-in roles, and how Core enforces them on a shared node."
+description: "The organization, team, node, resource-ACL, and notification permission model used across Ryu."
 ---
 
 Ryu is local-first and single-tenant by default, but a node can be bound to an organization (a shared "company brain"). On such a node, Core enforces org/team role-based access control on its REST surface, keyed to a per-user identity verified from a signed JWT. The permission vocabulary and the built-in role sets are a contract shared byte-for-byte with the TypeScript control plane (`apps/core/src/identity_verify/permissions.rs`), so an effective-permission check agrees on both sides.
@@ -16,7 +16,7 @@ JWKS and still applies the node's organization, team, personal-owner, and route 
 
 ## The permission vocabulary
 
-28 `resource.action` keys, defined in `PERMISSIONS` (`apps/core/src/identity_verify/permissions.rs`). The Rust constants and the TypeScript control-plane array must match exactly.
+37 `resource.action` keys, defined in `PERMISSIONS` (`apps/core/src/identity_verify/permissions.rs`). The Rust constants and the TypeScript control-plane array must match exactly.
 
 | Key | Grants |
 |---|---|
@@ -36,6 +36,15 @@ JWKS and still applies the node's organization, team, personal-owner, and route 
 | `channel.manage` | Edit a shared organization channel configuration or credentials |
 | `channel.delete` | Delete a channel configuration; its shared Core session history remains |
 | `tool.exec` | Execute a tool |
+| `notifications.view` | Read notification policy and delivery status |
+| `notifications.manage` | Change organization notification switches and recipient roles |
+| `mail.read` | Read messages in an organization-owned Agent Mail inbox |
+| `mail.manage` | Create, edit, delete, and send from organization-owned Agent Mail inboxes |
+| `teams.manage` | Create and manage organization teams |
+| `projects.manage` | Create organization projects |
+| `registry.manage` | Curate registry entries, grants, governance, and integration credentials |
+| `nodes.view` | Discover managed nodes in the caller's allowed org/team/personal scope |
+| `nodes.manage` | Create, configure, revoke, and operate managed node resources |
 | `members.manage` | Add, remove, and re-role members |
 | `roles.manage` | Create, edit, and assign custom roles |
 | `billing.manage` | Manage billing and subscriptions |
@@ -57,10 +66,15 @@ Four built-in roles map from a caller's Better Auth org role (`permissions_for_r
 |---|---|
 | `owner` | Every permission |
 | `admin` | Every permission except `billing.manage` |
-| `member` | `gateway.view`, `workflow.view`, `workflow.run`, `space.read`, `space.write`, `agent.view`, `agent.run`, `tool.exec`, `marketplace.view` |
-| `viewer` | `gateway.view`, `workflow.view`, `space.read`, `agent.view`, `marketplace.view` |
+| `member` | `gateway.view`, `workflow.view`, `workflow.run`, `space.read`, `space.write`, `agent.view`, `agent.run`, `tool.exec`, `notifications.view`, `mail.read`, `projects.manage`, `nodes.view`, `marketplace.view` |
+| `viewer` | `gateway.view`, `workflow.view`, `space.read`, `agent.view`, `notifications.view`, `mail.read`, `nodes.view`, `marketplace.view` |
 
-A member's **effective** permissions are the built-in set of their role UNION every permission granted by a custom role assigned to them in the org. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
+A member's **effective** permissions are the built-in set of their role UNION every applicable permission granted by a custom role assigned to them. Organization assignments apply at organization scope; a team assignment applies only when the caller is a member of that team and the resource is in that team. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
+
+Better Auth remains the source of truth for membership, invitations, and teams. Better Auth's
+dynamic organization roles can govern Better Auth's own actions, but Ryu capability keys and team
+scopes are resolved by the control plane and carried to Core separately. This avoids treating a
+role that merely looks like `admin` as proof of a Ryu capability.
 
 ### Self-hosted node binding
 
@@ -136,11 +150,14 @@ Core wires `enforce_permission` into these handler families (call sites in `apps
 | `agent.edit` | Agent writes plus sync profiles, imports, and conflict resolution |
 | `agent.delete` | Agent deletion |
 
-The `channel.manage` key is enforced by the control plane for updates to an organization-owned
-channel created by another member. The `marketplace.*` keys govern catalog visibility, publishing,
-and ownership transfer on the control plane. The remaining keys (`tool.exec`, `members.manage`,
-`roles.manage`, `billing.manage`, `audit.view`) are part of the shared vocabulary; member, role,
-and billing management are enforced on the control-plane side (the epic's `roleSatisfies` gates).
+The `notifications.*` keys govern the organization notification page; `mail.*` gates hosted Agent
+Mail; `teams.manage`, `projects.manage`, `registry.manage`, and `nodes.manage` gate their matching
+control-plane mutations. The `channel.manage` key is enforced by the control plane for updates to
+an organization-owned channel created by another member. The `marketplace.*` keys govern catalog
+visibility, publishing, and ownership transfer on the control plane. The remaining keys
+(`tool.exec`, `members.manage`, `roles.manage`, `billing.manage`, `audit.view`) are part of the
+shared vocabulary; member, role, and billing management remain behind their Better Auth and
+billing policy boundaries.
 `audit.view` gates the organization Audit log, which merges org control changes with reported
 Gateway control changes; the local Gateway audit endpoint retains its own master-key gate.
 
@@ -183,10 +200,10 @@ process; native sidecars remain publisher-trust boundaries as described in [Plug
 
 ## Custom-role resolution and caching
 
-The custom-role slice Core cannot compute locally is fetched from the control plane (`resolve_permissions`, `apps/core/src/sidecar/control_plane.rs`). Core sends only its `x-gateway-key` credential and the `userId`; the org is derived server-side from the key.
+The custom-role slice Core cannot compute locally is fetched from the control plane (`resolve_permissions`, `apps/core/src/sidecar/control_plane.rs`). Core sends only its gateway credential and the organization/team scope is derived server-side from that credential and the registered node.
 
 - The lookup is **fail-closed** - any failure (no gateway key, network error, non-2xx, decode error) returns an empty set, never an error and never a wide set. The caller falls back to the built-in role tier alone (never full access).
-- Only **successful** lookups are cached, for `PERMISSIONS_TTL` (30 seconds), keyed by user id. A transient failure is not cached, so it never denies a user for the whole window. A role or grant change propagates within 30 seconds.
+- Only **successful** lookups are cached, for `PERMISSIONS_TTL` (30 seconds), keyed by user id and registered team scope. A transient failure is not cached, so it never denies a user for the whole window. A role or grant change propagates within 30 seconds.
 
 ## Related
 
