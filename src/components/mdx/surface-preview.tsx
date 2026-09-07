@@ -477,7 +477,7 @@ function PermissionRow({
         className={cn(
           "flex size-5 items-center justify-center rounded-full",
           allowed
-            ? "bg-success/12 text-success"
+            ? "bg-success/12 text-status-success"
             : "bg-muted text-muted-foreground",
         )}
       >
@@ -519,7 +519,7 @@ function GovernanceSurface() {
             <div className="flex items-center gap-2">
               <ShieldCheck
                 aria-hidden="true"
-                className="text-success"
+                className="text-status-success"
                 size={16}
               />
               <CardTitle>Gateway checks</CardTitle>
@@ -553,7 +553,7 @@ function StatusLine({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg bg-background/70 px-2.5 py-2 text-xs">
       <span className="text-muted-foreground">{label}</span>
-      <span className="inline-flex items-center gap-1.5 font-medium text-success">
+      <span className="inline-flex items-center gap-1.5 font-medium text-status-success">
         <span className="size-1.5 rounded-full bg-success" />
         {value}
       </span>

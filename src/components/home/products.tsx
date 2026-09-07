@@ -133,17 +133,12 @@ export const DOCS_PRODUCT_GROUPS: readonly ProductGroup[] = [
 ] as const;
 
 function ProductCard({ product }: { product: Product }) {
-  const Icon = product.icon;
-
   return (
     <li>
       <Link
-        className="group flex h-full items-start gap-3 rounded-xl bg-fd-secondary p-4 transition-colors hover:bg-fd-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
+        className="group flex h-full items-start gap-3 py-4 outline-offset-4 focus-visible:outline-2 focus-visible:outline-fd-ring"
         href={product.href}
       >
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-fd-background text-fd-foreground">
-          <Icon aria-hidden="true" className="size-4" />
-        </span>
         <span className="min-w-0 flex-1">
           <span className="font-medium text-fd-foreground text-sm">
             {product.name}
@@ -165,19 +160,18 @@ export function Products() {
   return (
     <section
       aria-labelledby="products-heading"
-      className="mx-auto w-full max-w-5xl scroll-mt-20 px-4 py-12 sm:py-16"
+      className="mx-auto w-full max-w-6xl scroll-mt-20 px-6 py-16"
       id="products"
     >
       <div className="max-w-3xl">
         <h2
-          className="text-balance font-medium font-heading text-3xl text-fd-foreground tracking-tight sm:text-4xl"
+          className="text-balance font-medium font-heading text-2xl text-fd-foreground tracking-tight md:text-3xl"
           id="products-heading"
         >
           Products
         </h2>
-        <p className="mt-4 max-w-2xl text-balance text-fd-muted-foreground leading-relaxed sm:text-lg">
-          Start with the runtime, integration layer, or surface that matches the
-          work you want to do
+        <p className="mt-4 max-w-2xl text-fd-muted-foreground leading-relaxed">
+          Find setup guides and API references for the products you use.
         </p>
       </div>
 
@@ -193,7 +187,7 @@ export function Products() {
             >
               {group.title}
             </h3>
-            <ul className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <ul className="mt-5 grid gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
               {group.products.map((product) => (
                 <ProductCard key={product.name} product={product} />
               ))}

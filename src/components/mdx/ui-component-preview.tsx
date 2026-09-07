@@ -682,7 +682,7 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
   "components/status-badge": (module) =>
     view(module, "StatusBadge", { kind: "active" }),
   "components/success-check": (module) =>
-    view(module, "SuccessCheck", { className: "size-12 text-success" }),
+    view(module, "SuccessCheck", { className: "size-12 text-status-success" }),
   "components/switch": (module) =>
     view(module, "Switch", {
       "aria-label": "Enable notifications",
@@ -2095,7 +2095,7 @@ function PreviewLoading() {
 function PreviewError({ error }: { error: Error }) {
   return (
     <div className="max-w-md text-center text-sm" role="alert">
-      <p className="font-medium text-destructive">
+      <p className="font-medium text-status-destructive">
         This preview could not render.
       </p>
       <details className="mt-2 text-left text-muted-foreground">

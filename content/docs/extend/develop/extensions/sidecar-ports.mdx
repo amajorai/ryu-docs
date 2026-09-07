@@ -84,8 +84,9 @@ port itself.
 
 ## Choosing a number
 
-There is no port registry, and no allocator: the number in your manifest is the number Core tries.
-Pick from the community band.
+Core keeps a runtime registry so two managed sidecars cannot claim the same port, but it does not
+allocate a replacement when a declaration collides. The number in your manifest is the number Core
+tries, after the active profile's offset. Pick from the community band.
 
 | Range | Who uses it | Safe for your app? |
 | --- | --- | --- |
@@ -130,20 +131,14 @@ sidecar that is a compiled-in built-in, or software Ryu has never heard of.
   only place the port is named is that error string.
 </Callout>
 
-The failure is quieter than you would expect, in three ways worth designing against:
+Enabling an app and starting its sidecar are separate operations. If the port is occupied,
+Core records a startup failure and refuses to send requests or credentials to the unrelated
+listener. Both public app routes and Core's internal app clients require a registered,
+running sidecar before forwarding. The app can therefore appear enabled while its service
+is unavailable; show the startup failure instead of treating it as a successful connection.
 
-- **Enabling the app still succeeds.** The sidecar is spawned off the request thread so a slow
-  download never blocks enable, so the enable call returns fine and the app reads as on.
-- **The sidecar is missing from `GET /api/sidecar/status`, not listed as unhealthy.** A sidecar that
-  never cleared the port check is never registered, so it does not appear at all. Code that polls
-  status for your sidecar must treat *absent* as a failure state, not as "still starting".
-- **Requests are still proxied to that port.** The proxy resolves its target from your manifest
-  rather than from whether your process actually started, so `/api/ext/<plugin_id>/*` is forwarded
-  to whatever is listening there. You do not get a clean error; you get another program's answers.
-  Never assume a response on your own route came from your own process - version or identify it.
-
-Nothing retries, either: the health monitor reports and does not restart, so a sidecar that lost its
-port stays down until Core restarts.
+After freeing the port, disable and re-enable the app to retry registration. Restarting an
+unregistered sidecar cannot recover a failed port claim.
 
 So the remedies are all outside the app:
 
@@ -162,14 +157,14 @@ A bind probe proves the port was free a moment ago, not that it is free when you
 listener Core opens is dropped immediately so your child can take the port, and another process can
 win that gap. If your process can lose the race, exit non-zero on `EADDRINUSE` rather than retrying
 in a loop or silently binding something else - a sidecar listening on a port Core is not watching is
-reported unhealthy and proxied to a dead socket, which is much harder to diagnose than a clean exit.
+unavailable until its managed process is running again.
 
 Treat the manifest `port` as *what you asked for* and `port_env` as *what you got*. An app written
 that way needs no changes if the number it is handed ever stops matching the number it declared.
 
 ## Your port is not your public URL
 
-Clients never dial your sidecar. Core exposes it at
+App consumers and companion UIs never dial your sidecar directly. Core exposes it at
 
 ```
 /api/ext/<plugin_id>/<your route>
@@ -179,6 +174,10 @@ and proxies through to whatever port your process ended up on. That indirection 
 port change - a profile shift, a reinstall, a future allocator - invisible to every caller. Do not
 publish `127.0.0.1:<port>` in your app's own docs or bake it into a companion UI; use the
 `/api/ext/` path, which is stable.
+
+Core's own internal drivers use the manager's live sidecar registration when they need to call the
+service. They do not read the manifest port as a dial target, so an unregistered or stopped process
+receives no Core credentials.
 
 The shorter `/api/<name>` mounts you see on Ryu's first-party apps are reserved to built-ins and
 registered when Core builds its router, so a third-party app cannot claim one - and does not need

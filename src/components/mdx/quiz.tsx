@@ -78,11 +78,11 @@ export function Quiz({ questions }: { questions: QuizQuestion[] }) {
                           !isAnswered && "hover:bg-fd-accent",
                           isAnswered &&
                             isCorrect &&
-                            "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                            "bg-success/10 text-status-success",
                           isAnswered &&
                             isPicked &&
                             !isCorrect &&
-                            "bg-red-500/10 text-red-700 dark:text-red-300",
+                            "bg-destructive/10 text-status-destructive",
                           isAnswered &&
                             !(isCorrect || isPicked) &&
                             "opacity-60",
