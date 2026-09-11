@@ -1,12 +1,17 @@
 ---
 title: "Ryu Mail API"
-description: "Manage Agent Inboxes, messages, secrets, and signed inbound mail over HTTP"
+description: "Manage Agent Inboxes, messages, threads, drafts, webhooks, and signed mail over HTTP"
 tags: ["mail", "api", "standalone"]
 ---
 
 The standalone Mail service preserves the `/api/mail/*` route spelling used by
 the Core companion. Protected routes use the standalone Mail bearer. Inbound
 mail uses a per-inbox HMAC secret instead.
+
+The canonical contract version is `v1` (also returned as `apiVersion` by the
+status endpoint). Hosted organization Mail and the self-host sidecar keep the
+same resource names and event vocabulary; only credential and ownership rules
+differ.
 
 ## Route surface
 
@@ -19,7 +24,27 @@ mail uses a per-inbox HMAC secret instead.
 | `POST` | `/api/mail/inboxes/:id/rotate-secret` | Mail bearer | Replace an inbound HMAC secret |
 | `GET` | `/api/mail/inboxes/:id/messages` | Mail bearer | List messages in an inbox |
 | `GET` | `/api/mail/messages/:id` | Mail bearer | Read one message and its metadata |
+| `GET` | `/api/mail/inboxes/:id/messages/search` | Mail bearer | Search messages by sender, subject, body, direction, or labels |
+| `PATCH/DELETE` | `/api/mail/inboxes/:id/messages/:message_id` | Mail bearer | Mark/label or delete one message |
+| `GET` | `/api/mail/messages/:id/raw` | Mail bearer | Download stored raw MIME |
+| `GET` | `/api/mail/attachments/:id` | Mail bearer | Download an attachment |
 | `POST` | `/api/mail/inboxes/:id/send` | Mail bearer | Hand a message to the configured transport |
+| `POST` | `/api/mail/inboxes/:id/messages/:message_id/reply` | Mail bearer | Reply with threading headers |
+| `POST` | `/api/mail/inboxes/:id/messages/:message_id/reply-all` | Mail bearer | Reply to the visible recipient set |
+| `POST` | `/api/mail/inboxes/:id/messages/:message_id/forward` | Mail bearer | Forward a message |
+| `GET/PATCH/DELETE` | `/api/mail/inboxes/:id/threads/:thread_id` | Mail bearer | Read, label, or delete a thread |
+| `GET/POST` | `/api/mail/inboxes/:id/drafts` | Mail bearer | Save drafts, including a future `send_at` |
+| `GET/PATCH/DELETE` | `/api/mail/inboxes/:id/drafts/:draft_id` | Mail bearer | Manage one draft |
+| `POST` | `/api/mail/inboxes/:id/drafts/:draft_id/send` | Mail bearer | Send a saved draft |
+| `GET/POST` | `/api/mail/webhooks` | Mail bearer | Create/list signed outbound event subscriptions |
+| `GET/PATCH/DELETE` | `/api/mail/webhooks/:id` | Mail bearer | Manage one webhook |
+| `GET/PATCH` | `/api/mail/webhooks/:id/headers` | Mail bearer | Read names or merge/remove write-only custom headers |
+| `GET` | `/api/mail/webhooks/:id/deliveries` | Mail bearer | Inspect retry/delivery state |
+| `GET` | `/api/mail/events` | Mail bearer | Replay durable delivery/message events |
+| `GET` | `/api/mail/ws` | Mail bearer | Stream authenticated realtime events (send a JSON subscription to filter) |
+| `GET/POST` | `/api/mail/lists/:scope/:scope_id/:direction/:list_type` | Mail bearer | Manage allow/block entries (`send`, `receive`, or `reply`) |
+| `GET/POST` | `/api/mail/pods` | Mail bearer | Group inboxes and webhook scope |
+| `GET/POST` | `/api/mail/domains` | Mail bearer | Track custom-domain verification and DNS records |
 | `POST` | `/api/mail/inbound/:id` | Per-inbox HMAC | Receive signed raw mail |
 
 ## Bearer authentication
@@ -49,6 +74,53 @@ configuration.
 
 The raw body must be signed exactly as received. Do not parse and reserialize
 the MIME body before calculating the signature.
+
+## Outbound event webhooks
+
+Create a webhook with `event_types` such as `message.received`, `message.sent`,
+`message.delivered`, `message.bounced`, `message.complained`,
+`message.rejected`, or `message.opened`. An empty event list subscribes to the
+sidecar's standard event set. `inbox_ids` and `pod_ids` narrow delivery;
+`addInboxIds`, `removeInboxIds`, `addPodIds`, and `removePodIds` update those
+scopes without replacing the whole list. Custom header values are accepted on
+create/update but only their names are returned later. Use `removeHeaders` with
+the headers endpoint to remove values atomically. Destinations must be public HTTPS endpoints; loopback, private, link-local,
+metadata, and internal DNS targets are rejected.
+
+List directions follow the AgentMail vocabulary: `send`, `receive`, and
+`reply`, each with an `allow` or `block` list. The hosted API also accepts the
+legacy `outbound` and `inbound` path names as aliases and stores them under the
+canonical directions.
+
+Each delivery is a JSON envelope:
+
+```json
+{
+  "type": "event",
+  "event_type": "message.received",
+  "event_id": "evt_…",
+  "data": { "message": { "id": "…", "subject": "…" } }
+}
+```
+
+The sidecar sends `svix-id`, `svix-timestamp`, and a base64 HMAC
+`svix-signature` (`v1,<signature>`) over `event_id.timestamp.body`. It records
+delivery attempts and retries a failed endpoint three times. Treat `event_id` as
+the idempotency key at the consumer.
+
+## Sends and retries
+
+`POST /api/mail/inboxes/:id/send` accepts text and/or HTML, `cc`, `bcc`,
+`replyTo`, RFC headers, base64 attachments, labels, `references`, and
+`inReplyTo`. Use `Idempotency-Key` for a safe retry of a send; reusing a key with
+a different request returns `409`. The API accepts at most 50 recipients and
+8 MiB of decoded attachments. `trackOpens: true` adds a pixel only when
+`RYU_MAIL_PUBLIC_URL` and `RYU_MAIL_TRACKING_ENABLED=1` are configured.
+
+For realtime consumers, connect to `/api/mail/ws` with the bearer in the
+`Authorization` header (or the `ryu-bearer.<token>` WebSocket subprotocol), then
+send `{ "event_types": ["message.received"], "inbox_ids": ["…"] }`. The socket
+is a low-latency projection; replay `/api/mail/events` after reconnecting.
 
 ## Inbox and secret responses
 

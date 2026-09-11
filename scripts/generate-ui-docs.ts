@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as path from "node:path";
+import ts from "typescript";
 
 import { EXPRESSIVE_EXPRESSION_IDS } from "../../../packages/ui/src/components/expressive.ts";
 import { EXPRESSIVE_ANIMATION_IDS } from "../../../packages/ui/src/components/expressive-animation.ts";
@@ -116,6 +117,8 @@ const DEFAULT_DESCRIPTIONS: Record<string, string> = {
     "Animated radio control with reduced-motion support.",
   "components/motion/text-scramble":
     "Animated text transition that scrambles characters before settling.",
+  "components/text-morph":
+    "Character-level text morphing for changing interface copy, with reduced-motion support.",
   "components/motion/text-shimmer":
     "Animated shimmer treatment for text content.",
   "components/run-status-timeline":
@@ -127,7 +130,16 @@ const DEFAULT_PREVIEW_OPTIONS: Record<string, Record<string, string[]>> = {
   // CVA definition from sibling modules, so its literal unions are intentionally
   // not present in the entry file that the lightweight scanner reads.
   "components/button": {
-    size: ["default", "icon", "icon-lg", "icon-sm", "icon-xs", "lg", "sm", "xs"],
+    size: [
+      "default",
+      "icon",
+      "icon-lg",
+      "icon-sm",
+      "icon-xs",
+      "lg",
+      "sm",
+      "xs",
+    ],
     variant: [
       "default",
       "destructive",
@@ -154,6 +166,8 @@ const EXAMPLES: Record<string, string> = {
   "components/textarea": `<Textarea placeholder="Write a note" />`,
   "components/checkbox": `<Checkbox aria-label="Enable notifications" />`,
   "components/connection-status": `<ConnectionStatusToast nodeName="Design node" phase="node-unreachable" />`,
+  "components/text-morph": `<TextMorph duration={240}>Ryu UI</TextMorph>`,
+  "components/text-swap": `<TextSwap>Checking…</TextSwap>`,
   "components/switch": `<Switch aria-label="Enable notifications" />`,
   "components/progress": `<Progress value={64} />`,
   "components/spinner": `<Spinner />`,
@@ -167,11 +181,13 @@ const EXAMPLES: Record<string, string> = {
   "components/popover": `<Popover>Additional context</Popover>`,
   "components/tooltip": `<Tooltip>Helpful context</Tooltip>`,
   "components/calendar": `<Calendar />`,
+  "components/color-picker": `<ColorPickerPopover defaultValue="#0099ff" swatches={["#000000", "#ffffff", "#ff3b30"]} />`,
   "components/avatar": `<Avatar />`,
   "components/bubble": `<Bubble>Message</Bubble>`,
   "components/message": `<Message>Message content</Message>`,
   "components/run-status-timeline": `<RunStatusTimeline ariaLabel="Run status" endAt={Date.now()} entries={[]} startAt={Date.now() - 86400000} />`,
-  "components/logo": `<Logo animation="random" expression="random" variant="outline-muted" />`,
+  "components/logo": `<Logo variant="3d" size="192px" />`,
+  "components/plan-badge": `<PlanBadge plan="business" size="md" />`,
   "components/data-grid/data-grid": `<DataGrid />`,
 };
 
@@ -181,6 +197,7 @@ const PREVIEW_OPTION_KEYS = [
   "kind",
   "mode",
   "orientation",
+  "plan",
   "position",
   "side",
   "size",
@@ -557,16 +574,10 @@ function componentExample(component: UiComponent): string {
   return EXAMPLES[component.importPath] ?? `<${primaryExport(component)} />`;
 }
 
-function literalValues(value: string): string[] {
-  const values = new Set<string>();
-  const pattern = /(["'])(.*?)\1/g;
-  for (const match of value.matchAll(pattern)) {
-    const literal = match[2]?.trim();
-    if (literal) {
-      values.add(literal);
-    }
-  }
-  return [...values];
+function usageExport(component: UiComponent, primary: string): string {
+  return component.importPath === "components/color-picker"
+    ? "ColorPickerPopover"
+    : primary;
 }
 
 function objectBodies(source: string, property: string): string[] {
@@ -595,14 +606,182 @@ function objectBodies(source: string, property: string): string[] {
   return bodies;
 }
 
+function typeNodeName(node: ts.EntityName): string {
+  return ts.isIdentifier(node) ? node.text : node.right.text;
+}
+
+function addDirectPropTypes(
+  members: readonly ts.TypeElement[],
+  propTypes: Map<string, ts.TypeNode[]>,
+): void {
+  for (const member of members) {
+    if (!ts.isPropertySignature(member) || !member.type) {
+      continue;
+    }
+    const propertyName =
+      ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)
+        ? member.name.text
+        : undefined;
+    if (!propertyName) {
+      continue;
+    }
+    const existing = propTypes.get(propertyName) ?? [];
+    existing.push(member.type);
+    propTypes.set(propertyName, existing);
+  }
+}
+
+function addPropTypesFromType(
+  type: ts.Node | undefined,
+  aliases: ReadonlyMap<string, ts.TypeNode>,
+  propTypes: Map<string, ts.TypeNode[]>,
+  seen = new Set<string>(),
+): void {
+  if (!type) {
+    return;
+  }
+  if (ts.isParenthesizedTypeNode(type)) {
+    addPropTypesFromType(type.type, aliases, propTypes, seen);
+    return;
+  }
+  if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+    for (const member of type.types) {
+      addPropTypesFromType(member, aliases, propTypes, seen);
+    }
+    return;
+  }
+  if (ts.isInterfaceDeclaration(type)) {
+    addDirectPropTypes(type.members, propTypes);
+    return;
+  }
+  if (ts.isTypeLiteralNode(type)) {
+    addDirectPropTypes(type.members, propTypes);
+    return;
+  }
+  if (!ts.isTypeReferenceNode(type)) {
+    return;
+  }
+  const aliasName = typeNodeName(type.typeName);
+  const alias = aliases.get(aliasName);
+  if (!alias || seen.has(aliasName)) {
+    return;
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(aliasName);
+  addPropTypesFromType(alias, aliases, propTypes, nextSeen);
+}
+
+function publicPropTypes(source: string): Map<string, ts.TypeNode[]> {
+  const sourceFile = ts.createSourceFile(
+    "component.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const aliases = new Map<string, ts.TypeNode>();
+  const publicComponents = new Set(extractComponentExports(source));
+  const propTypes = new Map<string, ts.TypeNode[]>();
+
+  const collectAliases = (node: ts.Node): void => {
+    if (ts.isTypeAliasDeclaration(node)) {
+      aliases.set(node.name.text, node.type);
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  collectAliases(sourceFile);
+
+  const collectPropContainers = (node: ts.Node): void => {
+    if (
+      (ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
+      /Props$/.test(node.name.text)
+    ) {
+      addPropTypesFromType(
+        ts.isTypeAliasDeclaration(node) ? node.type : node,
+        aliases,
+        propTypes,
+      );
+    }
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      if (publicComponents.has(node.name.text)) {
+        addPropTypesFromType(node.parameters[0]?.type, aliases, propTypes);
+      }
+    }
+    if (ts.isVariableDeclaration(node)) {
+      const name = ts.isIdentifier(node.name) ? node.name.text : undefined;
+      const initializer = node.initializer;
+      if (
+        name &&
+        publicComponents.has(name) &&
+        initializer &&
+        (ts.isArrowFunction(initializer) ||
+          ts.isFunctionExpression(initializer))
+      ) {
+        addPropTypesFromType(
+          initializer.parameters[0]?.type,
+          aliases,
+          propTypes,
+        );
+      }
+    }
+    ts.forEachChild(node, collectPropContainers);
+  };
+  collectPropContainers(sourceFile);
+  return propTypes;
+}
+
+function literalOptionsFromType(
+  type: ts.TypeNode | undefined,
+  aliases: ReadonlyMap<string, ts.TypeNode>,
+  seen = new Set<string>(),
+): string[] {
+  if (!type) {
+    return [];
+  }
+  if (ts.isParenthesizedTypeNode(type)) {
+    return literalOptionsFromType(type.type, aliases, seen);
+  }
+  if (ts.isUnionTypeNode(type)) {
+    return type.types.flatMap((member) =>
+      literalOptionsFromType(member, aliases, seen),
+    );
+  }
+  if (ts.isLiteralTypeNode(type) && ts.isStringLiteral(type.literal)) {
+    return [type.literal.text];
+  }
+  if (ts.isTypeReferenceNode(type)) {
+    const aliasName = typeNodeName(type.typeName);
+    const alias = aliases.get(aliasName);
+    if (!alias || seen.has(aliasName)) {
+      return [];
+    }
+    const nextSeen = new Set(seen);
+    nextSeen.add(aliasName);
+    return literalOptionsFromType(alias, aliases, nextSeen);
+  }
+  return [];
+}
+
 function extractLiteralOptions(source: string, property: string): string[] {
   const values = new Set<string>();
-  const unionPattern = new RegExp(
-    `\\b${property}\\??\\s*:\\s*((?:\\s*\\|\\s*)?(?:"[^"]+"|'[^']+')(?:\\s*\\|\\s*(?:"[^"]+"|'[^']+'))+)`,
-    "g",
+  const aliases = new Map<string, ts.TypeNode>();
+  const sourceFile = ts.createSourceFile(
+    "component.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
   );
-  for (const match of source.matchAll(unionPattern)) {
-    for (const value of literalValues(match[1] ?? "")) {
+  const collectAliases = (node: ts.Node): void => {
+    if (ts.isTypeAliasDeclaration(node)) {
+      aliases.set(node.name.text, node.type);
+    }
+    ts.forEachChild(node, collectAliases);
+  };
+  collectAliases(sourceFile);
+
+  for (const type of publicPropTypes(source).get(property) ?? []) {
+    for (const value of literalOptionsFromType(type, aliases)) {
       values.add(value);
     }
   }
@@ -670,7 +849,7 @@ function previewMetadata(
 export function hasVariantOrSizeOptions(
   preview: UiComponentPreviewMetadata,
 ): boolean {
-  return ["variant", "size"].some((property) => {
+  return ["plan", "variant", "size"].some((property) => {
     const options = preview.props[property];
     return options !== undefined && options.length > 1;
   });
@@ -726,6 +905,45 @@ function componentPage(component: UiComponent, related: UiComponent[]): string {
         "",
       ]
     : [];
+  const planBadgeDetails =
+    component.importPath === "components/plan-badge"
+      ? [
+          "## Tier palettes",
+          "",
+          "Pro and Business intentionally use different palettes. Pro keeps the signature soft holographic pastel sweep, while Business uses the repeated cyan, green, yellow, blue, violet, pink, and amber sweep requested for organization-facing plan badges. Business stretches that field to 300% of the badge width and eases it left and right over eight seconds so the fourteen stops blend more gently; the shared reduced-motion rule disables the drift. The same Business stops feed the shared tier-card border and backdrop so related surfaces stay aligned.",
+          "",
+        ]
+      : [];
+  const textMorphDetails =
+    component.importPath === "components/text-morph"
+      ? [
+          "## Text morphing",
+          "",
+          "This Ryu primitive is backed by [Torph](https://github.com/lochie/torph), a dependency-free text morphing library. It accepts text-only children and keeps the current value available to assistive technology while visual segments move between values.",
+          "",
+          "The shared default is a 240 ms ease-out transition with `respectReducedMotion` enabled. Use `disabled` for a host-controlled static state, `numbers={false}` for ordinary character matching, or `as` to choose the semantic element when a heading or other text element is appropriate.",
+          "",
+        ]
+      : component.importPath === "components/text-swap"
+        ? [
+            "## Text morphing behavior",
+            "",
+            "`TextSwap` is the compatibility entry point for short button-state changes. Its existing API now uses the shared Torph-backed text morph with a 160 ms duration, while the component continues to respect reduced-motion preferences.",
+            "",
+          ]
+        : [];
+  const colorPickerDetails =
+    component.importPath === "components/color-picker"
+      ? [
+          "## Recent colors",
+          "",
+          "The complete panel follows the Fluid Functionalism interaction model with saturation/brightness, hue, alpha, and format controls for HEX, RGB, HSL, and OKLCH values. The built-in swatch strip shows recent selections above any supplied `swatches` presets.",
+          "",
+          "Recent colors are shared by Ryu picker instances and retained in local browser storage. Set `showRecentColors={false}` when a surface should show only its supplied presets. Use `ColorPickerPanel` to compose the complete panel while preserving a custom trigger, or use `ColorPickerPopover` for the compact swatch trigger and panel together.",
+          "",
+        ]
+      : [];
+  const usage = usageExport(component, primary);
   return [
     "---",
     `title: ${JSON.stringify(component.title)}`,
@@ -743,6 +961,9 @@ function componentPage(component: UiComponent, related: UiComponent[]): string {
     "The preview uses representative props and is safe to interact with. It does not call a provider, write data, or depend on a host application.",
     "",
     ...variantsSection,
+    ...planBadgeDetails,
+    ...textMorphDetails,
+    ...colorPickerDetails,
     "## Settings",
     "",
     `<UiComponentPreview component=${JSON.stringify(component.importPath)} exportName=${JSON.stringify(primary)} mode="settings" />`,
@@ -760,7 +981,7 @@ function componentPage(component: UiComponent, related: UiComponent[]): string {
     "## Usage",
     "",
     "```tsx",
-    `import { ${primary} } from "${packageImport}";`,
+    `import { ${usage} } from "${packageImport}";`,
     "",
     "export function Example() {",
     "  return (",
@@ -771,6 +992,35 @@ function componentPage(component: UiComponent, related: UiComponent[]): string {
     "",
     "Add the props required by your workflow and compose the named exports as needed. TypeScript provides the complete prop and event contract at the import site.",
     "",
+    ...(component.importPath === "components/logo"
+      ? [
+          "## Rounded 3D ghost",
+          "",
+          'Use `variant="3d"` for a real, closed WebGL mesh with a smoothly rounded body, face, and tail. Drag horizontally or focus the model and use the left/right arrow keys to rotate it; Home restores the front view.',
+          "",
+          "`animated={false}` disables motion, blinking, expression cycling, and rotation controls, displaying a representative still pose of the selected animation. Reduced-motion preferences also stop automatic motion while keeping deliberate rotation available. Rendering pauses while offscreen or when the tab is hidden.",
+          "",
+          '`bodyStyle="orb"` wraps the 3D body in flowing colors from the default logo palette. Customize it',
+          "with `colors={{ bg, c1, c2, c3 }}`; CSS colors including OKLCH are supported. `animationDuration`",
+          "controls the color-flow speed in seconds (default 20). The solid pearl body remains the default;",
+          "`colors.bg` sets its color. Color flow also stops with `animated={false}` or reduced motion.",
+          "",
+          "`size` accepts CSS lengths, `eyeScale` adjusts the oval eyes, and `showEyes={false}` hides them. All",
+          "17 named `expression` values are supported in 3D, including the crossed eyes of `dead`.",
+          '`expression="random"` changes the face every four seconds while motion is enabled. Eye width,',
+          "openness, tilt, spacing, and gaze share the 2D expression definitions. Expressions blend smoothly over",
+          "450 ms.",
+          "",
+          'All 14 named `animation` values and `animation="random"` work in 3D, including wink, thinking, sleep,',
+          "orbit, burst, and comet. The shared timeline drives the body and eye poses, with three-dimensional dots",
+          "and marks. Orbit, burst, and comet use rounded particle trails in the body palette; the ghost dissolves",
+          "and reforms during burst and comet. Idle eye blinks close and reopen smoothly; wink, sleep, and crossed",
+          "eyes retain their own poses.",
+          "",
+          "The 3D renderer loads only when this variant is used. A static outline appears while it loads and if WebGL is unavailable or its context is lost.",
+          "",
+        ]
+      : []),
     "## Package path",
     "",
     inlineCode(packageImport),

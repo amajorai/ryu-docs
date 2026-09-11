@@ -5,7 +5,8 @@ tags: ["sdk", "primitives", "rag", "memory", "tts", "stt", "image", "durable", "
 ---
 
 The SDK provides composable primitive clients that give your Runnables access to Ryu's full
-capability stack. Every primitive routes through the Gateway — there are no direct provider calls.
+capability stack through Core's governed host APIs and capability broker. Model calls route through
+the Gateway; apps never need direct provider credentials for these primitives.
 
 ## The RunnableContext
 
@@ -22,6 +23,7 @@ interface RunnableContext {
   durable?: DurableClient;  // durable execution checkpoints
   realtime?: RealtimeClient; // WebSocket/RTC streaming
   engines?: EnginesClient;  // direct engine access
+  backups?: BackupsClient;  // encrypted app-owned snapshots
   sessionId?: string;       // Core session ID
   signal?: AbortSignal;     // cancellation
 }
@@ -30,6 +32,45 @@ interface RunnableContext {
 Primitives are optional — they are only available when the Runnable is running inside Core where
 the capability broker has resolved them. When running standalone (`ryu dev`), only `gateway` is
 guaranteed.
+
+## BackupsClient
+
+An app can save and recover JSON snapshots through Ryu's S3 backup service. Declare
+`backups:app` in `permission_grants`. A node administrator must also add your app's canonical ID
+to the chosen [backup destination](/docs/surfaces/desktop/user-guide/s3-backups). A managed sidecar
+declares the same grant in its host API permissions. No S3 credentials enter the app.
+
+```typescript
+const destinations = await ctx.backups.destinations();
+if (destinations.length === 0) throw new Error("No backup destination is shared with this app");
+const destinationId = destinations[0].id;
+const operation = await ctx.backups.create({
+  destinationId,
+  namespace: "workspace",
+  idempotencyKey: crypto.randomUUID(),
+  data: { schemaVersion: 1, records: [{ id: "example", title: "Saved work" }] },
+});
+// Poll get({ destinationId, namespace: "workspace", operationId: operation.id })
+// until status is completed or failed before treating the snapshot as saved.
+const snapshots = await ctx.backups.list({ destinationId, namespace: "workspace" });
+if (snapshots.length > 0) {
+  const data = await ctx.backups.restore({
+    destinationId,
+    namespace: "workspace",
+    backupId: snapshots[0].id,
+  });
+  // Validate the app's own schema before applying recovered data.
+}
+```
+
+The JSON snapshot limit is 8 MiB. Core derives the calling app and tenant; apps cannot supply a
+node/Space scope, raw object key or filesystem path. Restore returns the snapshot to the app;
+the app decides how to apply it to its own store. Schedule recurring submissions through the
+app's existing job mechanism when needed.
+
+Companion frames expose the same methods through `window.ryu.backups`. The low-level transport is
+the existing host bridge, with `backups.destinations`, `backups.create`, `backups.list`,
+`backups.get` and `backups.restore`. Feature-detect the capability before showing app backup controls.
 
 ## GatewayClient
 

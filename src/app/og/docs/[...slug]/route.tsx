@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { renderDocsOgCard } from "@/lib/og-card";
 import { getPage } from "@/lib/source";
 
-export const revalidate = false;
+export const revalidate = 86400;
 
 // OG images are cheap to generate on demand; pre-rendering one for every doc
 // page needlessly triples the cold production build.
@@ -18,6 +18,5 @@ export async function GET(
 
   return renderDocsOgCard({
     title: page.data.title,
-    description: page.data.description,
   });
 }

@@ -45,6 +45,7 @@ const PREVIEW_SETTING_ORDER = [
   "kind",
   "theme",
   "orientation",
+  "plan",
   "direction",
   "position",
   "side",
@@ -61,6 +62,7 @@ const PREVIEW_VARIANT_PROPERTIES = new Set([
   "direction",
   "kind",
   "mode",
+  "plan",
   "orientation",
   "position",
   "side",
@@ -93,6 +95,74 @@ const CONTRIBUTION_DATA = Array.from({ length: 42 }, (_, index) => ({
   count: (index * 7 + 3) % 8,
   day: `2026-07-${String(index + 1).padStart(2, "0")}`,
 }));
+
+const PREVIEW_BASE_PROPS: Record<string, Record<string, unknown>> = {
+  "components/run-status-timeline": {
+    ariaLabel: "Example run status for the last 24 hours",
+    endAt: 86_400_000,
+    entries: [],
+    startAt: 0,
+  },
+  "components/contributions-graph": {
+    colorSchema: "blue",
+    data: CONTRIBUTION_DATA,
+    title: "@ryu",
+  },
+  "components/overflow-actions": {
+    overflowActions: [
+      { id: "duplicate", label: "Duplicate" },
+      { id: "archive", label: "Archive" },
+    ],
+    primaryActions: [{ id: "save", label: "Save" }],
+  },
+  "components/dither-kit/avatar": {
+    name: "Ryu UI",
+  },
+  "components/dither-kit/gradient": {
+    bloom: "low",
+    className: "h-32 w-full max-w-md",
+    from: "blue",
+    to: "transparent",
+  },
+  "components/agents/code-block": {
+    code: "<Button>Continue</Button>",
+    filename: "example.tsx",
+    language: "tsx",
+  },
+  "components/agents/file-diff": {
+    file: "components/button.tsx",
+    lines: [
+      { content: "+ export { Button }", id: "1", type: "added" },
+      { content: "  export type ButtonProps", id: "2", type: "context" },
+    ],
+  },
+  "components/agents/todo-list": {
+    items: [
+      { id: "tokens", status: "completed", title: "Load design tokens" },
+      {
+        id: "preview",
+        progress: 64,
+        status: "in-progress",
+        title: "Render component",
+      },
+    ],
+  },
+  "components/agents/tool-approval": {
+    choices: [
+      { id: "allow", label: "Allow", tone: "secondary" },
+      { id: "deny", label: "Deny", tone: "ghost" },
+    ],
+    parameters: [{ id: "path", label: "Path", value: "packages/ui" }],
+    title: "Allow component inspection?",
+    tool: "read",
+  },
+  "components/agents/tool-result": {
+    kind: "terminal",
+    status: "success",
+    title: "Component catalog",
+    tool: "read",
+  },
+};
 
 function resolveComponent(
   module: PreviewModule,
@@ -159,6 +229,9 @@ function previewChildren(
   props: Record<string, unknown>,
   label = "Preview",
 ): ReactNode {
+  if (component === "components/motion-highlight") {
+    return <span>Highlighted content</span>;
+  }
   const size = props.size;
   if (typeof size === "string" && size.startsWith("icon")) {
     return <ArrowUpRight aria-hidden="true" />;
@@ -210,7 +283,7 @@ export function previewSettingEntries(
 function hasVariantOrSizeOptions(
   metadata: UiComponentPreviewMetadata,
 ): boolean {
-  return ["variant", "size"].some((property) => {
+  return ["plan", "variant", "size"].some((property) => {
     const options = metadata.props[property];
     return options !== undefined && options.length > 1;
   });
@@ -239,6 +312,7 @@ function PreviewVariantSample({
 }) {
   const isLogo = component === "components/logo";
   const props = {
+    ...(PREVIEW_BASE_PROPS[component] ?? {}),
     ...(isLogo
       ? {
           animated: false,
@@ -352,6 +426,7 @@ function PreviewSettings({
   }
 
   const props = {
+    ...(PREVIEW_BASE_PROPS[component] ?? {}),
     ...(component === "components/logo" ? { size: "88px" } : {}),
     ...Object.fromEntries(
       entries.map(([property, options]) => [
@@ -400,6 +475,34 @@ function PreviewSettings({
           {previewTarget(component, module, metadata, props)}
         </PreviewErrorBoundary>
       </div>
+    </div>
+  );
+}
+
+function TextMorphPreview({ module }: { module: PreviewModule }): ReactNode {
+  const values = ["Ryu UI", "Agents ready", "Work stays yours"];
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setIndex((current) => (current + 1) % values.length);
+    }, 1600);
+    return () => window.clearInterval(timer);
+  }, [values.length]);
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <span aria-live="polite" className="font-heading text-2xl">
+        {view(
+          module,
+          "TextMorph",
+          { duration: 240, numbers: false },
+          values[index],
+        )}
+      </span>
+      <span className="text-muted-foreground text-xs">
+        Cycles through representative text states.
+      </span>
     </div>
   );
 }
@@ -1438,18 +1541,26 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
     view(
       module,
       "ColorPicker",
-      { defaultOpen: true, defaultValue: "#0099ff" },
+      {
+        defaultOpen: true,
+        defaultValue: "#0099ff",
+        swatches: [
+          "#000000",
+          "#ffffff",
+          "#ff3b30",
+          "#f0f0f0",
+          "#e5e5e5",
+          "#d0d0d0",
+          "rgba(0, 0, 0, 0.5)",
+        ],
+      },
       <>
         {view(module, "ColorPickerTrigger", {}, "Choose color")}
         {view(
           module,
           "ColorPickerContent",
           {},
-          <>
-            {view(module, "ColorPickerArea", { className: "h-40" })}
-            {view(module, "ColorPickerHueSlider")}
-            {view(module, "ColorPickerSwatch", { className: "size-8" })}
-          </>,
+          view(module, "ColorPickerPanel"),
         )}
       </>,
     ),
@@ -1842,6 +1953,7 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
       { className: "text-2xl" },
       "Shared design system",
     ),
+  "components/text-morph": (module) => <TextMorphPreview module={module} />,
   "components/text-swap": (module) =>
     view(module, "TextSwap", {}, "Rendered component"),
   "components/voice-activity-beam": (module) =>
@@ -1925,8 +2037,8 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
       animated: true,
       animation: "random",
       expression: "random",
-      size: "88px",
-      variant: "outline-muted",
+      size: "240px",
+      variant: "3d",
     }),
   "components/marker": (module) =>
     view(
@@ -1935,8 +2047,12 @@ const PREVIEW_RENDERERS: Record<string, PreviewRenderer> = {
       { className: "w-full max-w-md", variant: "separator" },
       view(module, "MarkerContent", {}, "A marked section"),
     ),
-  "components/plan-badge": (module) =>
-    view(module, "PlanBadge", { plan: "pro", size: "md" }),
+  "components/plan-badge": (module) => (
+    <div className="flex flex-wrap items-center justify-center gap-3">
+      {view(module, "PlanBadge", { plan: "pro", size: "md" })}
+      {view(module, "PlanBadge", { plan: "business", size: "md" })}
+    </div>
+  ),
   "components/signature": (module) =>
     view(module, "Signature", { inView: true, text: "Ryu UI" }),
   "components/agents/agent-activity": (module) =>

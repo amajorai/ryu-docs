@@ -1,6 +1,6 @@
 ---
 title: Client SDK
-description: TypeScript client SDK for calling a Ryu Core node from any app - list agents, stream chat, query sessions, and search Spaces.
+description: TypeScript client SDK for calling Ryu Core and the standalone Notify API from any app.
 ---
 
 `@ryuhq/client` (`packages/client/`) is the TypeScript client SDK for calling a running Ryu **Core**
@@ -11,7 +11,7 @@ agent, stream, or operate a [durable harness run](/docs/extend/develop/sdk/harne
 For the **full** Core surface — plugins, models, skills, MCP servers, spaces, workflows, gateway
 config — see [`@ryuhq/core-client`](/docs/extend/develop/sdk/core-client), the shared client the desktop
 app, CLI/TUI, and mobile app run on. `@ryuhq/client` is the lightweight subset for embedded agent
-chat only.
+chat plus the optional standalone Notify event API.
 
 It has zero runtime dependencies (native `fetch` only), so it works in Node 18+, Bun, Deno, modern
 browsers, and React Native. Pass an alternate `fetch` implementation when a mobile runtime needs
@@ -28,6 +28,7 @@ one for response-body streaming.
 flowchart LR
   A[Your App] --> B["@ryuhq/client"]
   B -->|HTTP + SSE| C[Core :7980]
+  B -->|HTTP + SSE| N[Notify service]
   C --> D[Agent routing]
   C --> E[Chat streaming]
   C --> F[Spaces / RAG]
@@ -36,8 +37,8 @@ flowchart LR
   B -->|zero deps| H[native fetch]
 ```
 
-`@ryuhq/client` is a thin typed wrapper over `fetch`. It calls Core's HTTP API directly with no
-runtime dependencies — works in Node 18+, Bun, Deno, and browsers.
+`@ryuhq/client` is a thin typed wrapper over `fetch`. It calls Core and Notify HTTP APIs directly
+with no runtime dependencies — works in Node 18+, Bun, Deno, and browsers.
 
 ## Install
 
@@ -71,9 +72,9 @@ with an `{ url, token, fetch }` target.
 
 ## Create a client
 
-`createRyuClient(options)` returns a `RyuClient` with four typed namespaces - `agents`, `sessions`,
-`harness`, and `spaces`. The only required option is `baseUrl`; pass a `token` for authenticated or
-remote nodes.
+`createRyuClient(options)` returns a `RyuClient` with typed `agents`, `sessions`, `harness`,
+`spaces`, and `mail` namespaces. Pass the optional `notify` connection to add a tenant-scoped
+`notify` namespace; its API key is deliberately separate from the Core node token.
 
 ```typescript
 import { createRyuClient } from "@ryuhq/client";
@@ -92,8 +93,32 @@ interface RyuClientOptions {
   baseUrl: string; // Base URL of the Core server, e.g. "http://localhost:7980"
   fetch?: RyuFetch; // Optional Expo/RN fetch implementation
   token?: string;  // Optional bearer token for authenticated nodes
+  mailRealtime?: "core" | "standalone"; // Core WS by default; direct sidecar WS for standalone Mail
+  notify?: { baseUrl: string; apiKey: string; fetch?: RyuFetch }; // Optional standalone Notify
 }
 ```
+
+## `client.notify`
+
+```typescript
+const client = createRyuClient({
+  baseUrl: "http://127.0.0.1:7980",
+  token: coreToken,
+  notify: { baseUrl: "https://notify.example", apiKey: notifyTenantKey },
+});
+
+const event = await client.notify?.publish(
+  { title: "Deploy complete", topic: "deployments", source: "ci" },
+  "deploy-184",
+);
+for await (const item of client.notify?.stream({ topic: "deployments" }) ?? []) {
+  if (item.type === "notification") console.log(item.event.title);
+}
+```
+
+The Notify namespace also exposes topic publishing, acknowledgement/archive, interactive
+responses, live activities, destinations and delivery history, preferences, silences, groups,
+and analytics. See [Ryu Notify](/docs/standalone/notify) for the standalone service contract.
 
 ## `client.agents`
 
@@ -180,6 +205,46 @@ for (const match of matches) {
 Each `SpaceMatch` carries the chunk text plus a `distance` (squared L2 distance - smaller is closer).
 Embeddings are computed server-side by Core's RAG pipeline.
 
+## `client.mail`
+
+Agent Inboxes use the same `/api/mail/*` paths whether Core is proxying the
+self-host sidecar or the caller is using the hosted organization API. The
+namespace normalizes the sidecar's snake_case response fields to camelCase.
+
+| Method | Returns | Calls |
+|---|---|---|
+| `listInboxes()` / `createInbox()` | `MailInbox[]` / `MailInbox` | Inbox CRUD |
+| `listMessages()` / `searchMessages()` / `getMessage()` | `MailMessage[]` / `MailMessage` | Message reads/search |
+| `send()` / `reply()` / `replyAll()` / `forward()` | `MailMessage` | External mail send |
+| `listThreads()` / `getThread()` | `MailThread[]` / `MailMessage[]` | Conversation views |
+| `listDrafts()` / `createDraft()` / `sendDraft()` | `MailDraft[]` / `MailDraft` / `MailMessage` | Drafts and scheduling |
+| `listWebhooks()` / `createWebhook()` | `MailWebhook[]` / `{ webhook, secret }` | Signed event subscriptions |
+| `listEvents()` / `connectRealtime()` | `MailEvent[]` / `WebSocket` | Replay and low-latency events |
+
+```typescript
+const inbox = (await client.mail.listInboxes())[0];
+const sent = await client.mail.send(inbox.id, {
+  to: ["person@example.com"],
+  subject: "Hello",
+  text: "Sent through Ryu Mail.",
+  attachments: [{
+    filename: "report.txt",
+    contentType: "text/plain",
+    contentBase64: "cmVwb3J0",
+  }],
+}, "send-once-1");
+
+const socket = client.mail.connectRealtime((event) => {
+  console.log(event.eventType, event.messageId);
+}, { eventTypes: ["message.received"], inboxIds: [inbox.id] });
+```
+
+`send()` and draft/reply variants accept an idempotency key where supported.
+`connectRealtime()` targets Core's WebSocket tunnel by default; pass
+`mailRealtime: "standalone"` when the base URL is a direct `ryu-mail` process.
+Webhook signing secrets are returned only when a subscription is created or
+rotated; later reads return header names, never header values.
+
 ## Types
 
 All types are exported from the package root:
@@ -194,6 +259,10 @@ import type {
   Space,
   SpaceMatch,
   Conversation,
+  MailMessage,
+  MailWebhook,
+  NotificationEvent,
+  NotifyActivity,
 } from "@ryuhq/client";
 ```
 

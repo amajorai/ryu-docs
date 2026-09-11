@@ -11,9 +11,12 @@ import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 
 import { APIPage } from "@/components/api-page";
+import { CatalogMetadata } from "@/components/catalog-metadata";
+import { Feedback } from "@/components/feedback/client";
 import { JsonLd } from "@/components/json-ld";
 import { getMDXComponents, VersionedAnchor } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
+import { submitDocsFeedback } from "@/lib/docs-feedback";
 import {
   archivedDocsUrl,
   docsPath,
@@ -132,6 +135,8 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         toc={page.data.toc}
         full={page.data.full}
         lastUpdate={page.data.lastModified}
+        tableOfContent={{ style: "clerk", single: false }}
+        tableOfContentPopover={{ style: "clerk" }}
       >
         {page.data.level === undefined ? null : (
           <div className="mb-1">
@@ -142,6 +147,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         <DocsDescription className="mb-0">
           {page.data.description}
         </DocsDescription>
+        <CatalogMetadata attributes={page.data.catalog} />
         <div className="flex flex-row gap-2 items-center pb-6">
           <MarkdownCopyButton markdownUrl={`${page.url}.mdx`} />
           <ViewOptionsPopover
@@ -166,6 +172,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
             })}
           />
         </DocsBody>
+        <Feedback onSendAction={submitDocsFeedback} />
       </DocsPage>
     </>
   );

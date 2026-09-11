@@ -15,8 +15,19 @@ import { docsSegmentsFromPathname } from "@/lib/docs-version";
  * a "data-docs-root" wrapper switches "--color-fd-primary" so the whole layout
  * (sidebar, content, TOC) takes on that root's color while you are inside it.
  */
-function rootSegment(url: string): string {
-  return docsSegmentsFromPathname(url)[0] ?? "";
+const NESTED_ROOTS = [
+  { path: "extend/develop/api-reference", segment: "api-reference" },
+  { path: "reference/benchmark", segment: "benchmark" },
+] as const;
+
+/** Resolve the accent segment for both top-level and nested Fumadocs roots. */
+export function rootSegment(url: string): string {
+  const segments = docsSegmentsFromPathname(url);
+  const path = segments.join("/");
+  const nestedRoot = NESTED_ROOTS.find(
+    (root) => path === root.path || path.startsWith(`${root.path}/`),
+  );
+  return nestedRoot?.segment ?? segments[0] ?? "";
 }
 
 function rootColor(segment: string): string {

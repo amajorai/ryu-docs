@@ -124,7 +124,57 @@ describe("Ryu UI documentation catalog", () => {
     expect(logo?.preview.props.animation).toHaveLength(15);
     expect(logo?.preview.props.expression).toContain("random");
     expect(logo?.preview.props.expression).toContain("surprised");
-    expect(logo?.preview.props.expression).toHaveLength(17);
+    expect(logo?.preview.props.expression).toHaveLength(18);
+    expect(logo?.preview.props.variant).toContain("3d");
+
+    const planBadge = catalog.find(
+      (component) => component.importPath === "components/plan-badge",
+    );
+    expect(planBadge?.preview.props.plan).toEqual([
+      "business",
+      "desktop-license",
+      "enterprise",
+      "marketplace-membership",
+      "max",
+      "plus",
+      "pro",
+      "teams",
+      "teams-lite",
+    ]);
+
+    const contributions = catalog.find(
+      (component) => component.importPath === "components/contributions-graph",
+    );
+    expect(contributions?.preview.props.variant).toEqual([
+      "city-lights",
+      "default",
+      "minimal",
+    ]);
+
+    const spinner = catalog.find(
+      (component) => component.importPath === "components/spinner",
+    );
+    expect(spinner?.preview.props.size).toEqual(["default", "lg", "md", "sm"]);
+
+    const loader = catalog.find(
+      (component) => component.importPath === "components/motion/loader",
+    );
+    expect(loader?.preview.props.variant).toContain("ascii-braille");
+
+    const motionHighlight = catalog.find(
+      (component) => component.importPath === "components/motion-highlight",
+    );
+    expect(motionHighlight?.preview.props.mode).toEqual(["children", "parent"]);
+
+    const timeline = catalog.find(
+      (component) => component.importPath === "components/run-status-timeline",
+    );
+    expect(timeline?.preview.props.status).toBeUndefined();
+
+    const todoList = catalog.find(
+      (component) => component.importPath === "components/agents/todo-list",
+    );
+    expect(todoList?.preview.props.status).toBeUndefined();
   });
 
   test("the UI realm contains no external source-comparison copy", async () => {

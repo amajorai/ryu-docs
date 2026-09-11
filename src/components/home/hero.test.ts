@@ -52,6 +52,7 @@ test("docs home exposes every root selector destination", () => {
     "providers",
     "ci/github-actions",
     "extend",
+    "extend/develop/api-reference",
     "ui",
     "apps",
     "programs",
@@ -60,6 +61,7 @@ test("docs home exposes every root selector destination", () => {
     "legal",
     "billing",
     "reference",
+    "reference/benchmark",
     "learn",
     "roadmap",
   ]);

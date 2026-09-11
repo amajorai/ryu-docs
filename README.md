@@ -50,3 +50,12 @@ and page conventions.
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE). © 2026 A Major Pte. Ltd.
+
+## Star History
+
+<a href="https://github.com/amajorai/ryu-docs/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/shieldcn/star-chart-dark.svg" />
+    <img alt="Star history" src="./.github/shieldcn/star-chart-light.svg" />
+  </picture>
+</a>

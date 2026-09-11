@@ -107,7 +107,7 @@ violation rejects that manifest only; the others continue loading.
 
 ## Lifecycle operations
 
-The four state transitions live in `apps/core/src/plugins/lifecycle.rs` and are backed by the
+The lifecycle operations live in `apps/core/src/plugins/lifecycle.rs` and are backed by the
 SQLite `PluginStore`. Each maps to an HTTP handler in `apps/core/src/server/mod.rs`.
 
 | Operation | Behavior |
@@ -115,6 +115,7 @@ SQLite `PluginStore`. Each maps to an HTTP handler in `apps/core/src/server/mod.
 | `install_app` | Creates a `PluginRecord` with `enabled = false`. Re-validates semver. Fails if already installed |
 | `enable_app` | Validates the manifest's declared grants via the Gateway, then flips `enabled = true` and records the approved grants. Fails closed |
 | `disable_app` | Flips `enabled = false` and clears approved grants |
+| `uninstall_app` | Applies the same disable/dependent checks, then removes the target lifecycle record and its owned scheduler jobs |
 | `update_app` | Compares semver. Refuses a downgrade (new < installed) unless `force = true`. A same-version update is a no-op. Does not re-enable a disabled plugin |
 
 Install always lands disabled. Enabling is the gated step: Core calls the Gateway's
@@ -152,6 +153,26 @@ POST /api/plugins/:id/disable     disable + clear approved grants
 POST /api/plugins/:id/update      update to a new manifest version
 ```
 
+### Dry-run lifecycle plans
+
+Lifecycle operations that can change a node expose the same validation as a
+read-only plan. Plans never write the plugin store, activate or deactivate a
+runtime, remove scheduler jobs, or delete a plugin directory. They may still read
+the loaded manifest set and call the Gateway's grant-validation seam, because those
+checks are needed to report an honest result.
+
+Use `dryRun: true` in install and enable request bodies, `dryRun=true` on disable
+and uninstall query strings, and `dryRun: true` in an update body. The response is
+marked `dryRun: true` and uses `wouldEnable`, `wouldDisable`, `wouldRemove`, or
+`installedDependencies` fields rather than pretending the requested state was
+persisted. The CLI exposes the same contract through
+`ryu add|enable|disable|uninstall <id> --dry-run`; add `--json` for automation.
+
+An enable plan resolves the dependency closure and validates each plugin's own
+declared grants. A disable or uninstall plan reports the reverse-topological blast
+radius and applies the same mandatory, load-bearing, protected-plugin, and
+dependent checks as the live operation.
+
 ## Two-tier registry
 
 A plugin's trust tier is **derived from membership** in a constant, never asserted by a manifest
@@ -168,12 +189,14 @@ engine (`durable`), the four default tool apps (`ghost`, `shadow`, `spider`, `ag
 [Default tool apps](#default-tool-apps-auto-seed)), the chat turn-hook plugins (`goal`, `proof`,
 `double-check`), the pre-turn prompt improver (`@ryu/auto-expand`), and the bundled Ryu Apps
 (`checklist`, `smart-intake-form`, `data-grid-explorer`, `chart-studio`, `decision-wizard`,
-`quest-board`, `worktree-diff-review`, `gateway-budget-dial`). Ids are the bare manifest `id`
-(e.g. `engines`, not `io.ryu.engines`). The seed runs once at startup and respects user choice: it
-acts only when there is no prior record for that plugin, so a later disable survives a restart
-(`main.rs` pre-installed seeding). The opt-in Core plugins (`firewall`, `routing`, `sandbox`,
-`predict`) are Core-tier but deliberately excluded from pre-installed because they change gateway,
-sandbox, or capture behaviour.
+`quest-board`, `worktree-diff-review`, `gateway-budget-dial`).
+
+Ids are the bare manifest `id` (e.g. `engines`, not `io.ryu.engines`). The seed runs once at startup
+and respects user choice: it acts only when there is no prior record for that plugin, so a later
+disable survives a restart (`main.rs` pre-installed seeding).
+
+The opt-in Core plugins (`firewall`, `routing`, `sandbox`, `predict`) are Core-tier but deliberately
+excluded from pre-installed because they change gateway, sandbox, or capture behaviour.
 
 ## Default tool apps auto-seed
 
@@ -275,11 +298,12 @@ declared, unvalidated `permission_grants`. For the Python flavor this one grant 
 
 Once permitted, the sidecar is registered under the namespaced key `<plugin_id>/<name>` into the live
 `SidecarManager`, so it rides the same managed lifecycle - health monitor, resource sampler,
-`/api/sidecar/status`, graceful stop - as any built-in. Before spawning, the manager claims the
-declared `port` with a `TcpListener` bind-probe, which rejects a collision with a built-in (e.g.
-llama.cpp on 8080) or another plugin. A collision is *refused*, not reallocated: the sidecar does
-not start, and the port stays with whoever holds it. There is no port registry in v1, so the plugin
-author is responsible for choosing a free port - see
+`/api/sidecar/status`, graceful stop - as any built-in.
+
+Before spawning, the manager claims the declared `port` with a `TcpListener` bind-probe, which rejects
+a collision with a built-in (e.g. llama.cpp on 8080) or another plugin. A collision is *refused*, not
+reallocated: the sidecar does not start, and the port stays with whoever holds it. There is no port
+registry in v1, so the plugin author is responsible for choosing a free port - see
 [Pick a Sidecar Port](/docs/extend/develop/extensions/sidecar-ports) for the ranges that are safe to pick
 from, and for `port_env`, which is how the spawned process learns the port it should bind (Core
 profile-shifts it, so it is not always the number in the manifest).

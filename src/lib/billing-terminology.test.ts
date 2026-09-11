@@ -22,3 +22,10 @@ test("billing docs describe hosted capacity as servers", async () => {
 	expect(content).toContain("two months free");
 	expect(content).not.toMatch(/managed node|cloud nodes|Remote nodes/i);
 });
+
+test("billing docs record the pinned Polar API contract", async () => {
+	const credits = await readPage("credits.mdx");
+
+	expect(credits).toContain("`2026-04`");
+	expect(credits).toContain("Polar-Version");
+});

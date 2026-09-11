@@ -1,6 +1,6 @@
 ---
 title: "Ryu Notify API"
-description: "Publish, filter, read, and acknowledge tenant-scoped events over HTTP"
+description: "Publish, route, respond to, and deliver tenant-scoped notifications over HTTP"
 tags: ["notify", "events", "api", "standalone"]
 ---
 
@@ -32,6 +32,11 @@ curl -fsS -X POST "$NOTIFY_URL/v1/events" \
     "source": "github-actions",
     "type": "deploy.completed",
     "fingerprint": "deploy:production",
+    "project": "web",
+    "topic": "deployments",
+    "priority": 4,
+    "tags": ["production", "deploy"],
+    "url": "https://github.com/acme/app/actions",
     "actions": [{"label": "Open run", "url": "https://github.com/acme/app/actions"}],
     "data": {"commit": "abc123", "environment": "production"}
   }'
@@ -52,13 +57,20 @@ with the same key and body. Reusing the key with another body returns
 | `type` | Producer event type, such as `box.ready` |
 | `externalId` | Producer-owned identifier for lookup |
 | `fingerprint` | Grouping and filter hint; it never coalesces rows |
+| `project` | Optional product or project grouping label |
+| `topic` | Optional stream/topic name; also available as `/v1/topics/:topic` |
 | `recipient` | Optional consumer-defined recipient label |
+| `priority` | Integer from `1` (lowest) to `5` (urgent), compatible with ntfy-style routing |
+| `tags` | Up to sixteen bounded tags for filtering or downstream adapters |
+| `url` | Optional absolute HTTP(S) click-through URL |
+| `attachment` | Optional metadata-only HTTP(S) attachment reference; Notify does not fetch it |
 | `actions` | Up to three absolute HTTP(S) action links |
 | `data` | Bounded JSON object, redacted before storage |
 | `occurredAt` | Optional producer timestamp normalized to UTC |
+| `response` | Optional `approval`, `yes_no`, or `text` interaction with an expiry and callback |
 
 Created events include opaque `id`, RFC 3339 `createdAt` and `occurredAt`, and
-nullable `acknowledgedAt` fields.
+nullable `acknowledgedAt`, `archivedAt`, and `response` fields.
 
 ## History and acknowledgement
 
@@ -70,13 +82,52 @@ curl -fsS -X POST "$NOTIFY_URL/v1/events/evt_replace/ack" \
   -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
 ```
 
-`GET /v1/events` supports `level`, `source`, `fingerprint`, `externalId`,
-`recipient`, `since`, `until`, `acknowledged`, `limit`, and an opaque `before`
-cursor. Results are bounded and newest-first. Use `nextCursor` unchanged for
-the next page.
+`GET /v1/events` supports `level`, `priority`, `source`, `fingerprint`,
+`externalId`, `project`, `topic`, `tag`, `recipient`, `since`, `until`,
+`acknowledged`, `archived`, `limit`, and an opaque `before` cursor. Results are
+bounded and newest-first. Use `nextCursor` unchanged for the next page.
 
 Acknowledgement is tenant-scoped and idempotent. A missing event returns
 `404 not_found` without revealing another tenant's event.
+
+## Topics and interactions
+
+For a small producer, publish plain text directly to a topic. JSON is also
+accepted on the same path and the path topic wins over a body topic:
+
+```sh
+curl -fsS -X POST "$NOTIFY_URL/v1/topics/deployments" \
+  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}" \
+  -H 'Content-Type: text/plain' \
+  -H 'Title: Canary live' \
+  -H 'Priority: 5' \
+  -H 'Tags: deploy,canary' \
+  -d 'The canary is serving traffic.'
+```
+
+An interactive event starts with a `response` object. Reply with
+`POST /v1/events/:id/respond` and `{"status":"approved"}`,
+`{"status":"yes"}`, or `{"status":"replied","value":"…"}` as appropriate.
+Responses are single-use, tenant-scoped, and can call an optional HTTPS
+callback after the response is durably stored. Use `POST /v1/events/:id/cancel`
+to cancel a still-pending interaction.
+
+## Destinations and delivery history
+
+Create a destination with `POST /v1/destinations` using `kind: "webhook"`,
+`"ntfy"`, or `"buzzkit"`. Webhooks receive JSON with an `event` and delivery
+identifier. When a secret is configured, `X-Ryu-Notify-Signature` carries an
+`sha256=` HMAC of the request body. ntfy destinations receive the event body
+with `Title`, `Priority`, `Tags`, `Click`, and `Actions` headers. A BuzzKit
+destination is an HTTP bridge adapter; it does not claim to implement Buzz's
+Nostr signing or workspace identity.
+
+Each new event creates at most one delivery per enabled destination. Delivery
+attempts are durable, bounded, retried with backoff, and available from
+`GET /v1/deliveries`. `POST /v1/deliveries/:id/retry` explicitly requeues a
+failed or suppressed attempt. Destination URLs and custom header values are
+never returned by list or read endpoints; read `urlPreview`, `hasSecret`, and
+`headerNames` instead.
 
 ## Endpoint surface
 
@@ -87,7 +138,35 @@ Acknowledgement is tenant-scoped and idempotent. A missing event returns
 | `GET` | `/v1/events` | List bounded, filtered history |
 | `GET` | `/v1/events/:id` | Read one event in the caller's tenant |
 | `POST` | `/v1/events/:id/ack` | Mark one event acknowledged |
+| `POST` | `/v1/events/:id/archive` | Archive one event |
+| `POST` | `/v1/events/:id/unarchive` | Restore one event |
+| `POST` | `/v1/events/:id/respond` | Record one interactive response |
+| `POST` | `/v1/events/:id/cancel` | Cancel a pending interactive response |
 | `GET` | `/v1/events/stream` | Open a filtered live stream |
+| `POST` | `/v1/topics/:topic` | Publish JSON or plain text to a topic |
+| `GET` | `/v1/topics/:topic` | Read bounded events for one topic |
+| `GET` | `/v1/topics/:topic/stream` | Open a topic-filtered live stream |
+| `GET` | `/v1/topics` | List topic counts |
+| `POST` | `/v1/activities` | Start a live activity; requires `Idempotency-Key` |
+| `GET` | `/v1/activities` | List live activities |
+| `GET` | `/v1/activities/:id` | Read one activity |
+| `PATCH` | `/v1/activities/:id` | Update an activity with optional sequence checking |
+| `POST` | `/v1/activities/:id/end` | End an activity |
+| `POST` | `/v1/destinations` | Create a delivery destination |
+| `GET` | `/v1/destinations` | List redacted destination projections |
+| `PATCH` | `/v1/destinations/:id` | Update a destination |
+| `DELETE` | `/v1/destinations/:id` | Delete a destination |
+| `POST` | `/v1/destinations/:id/test` | Send a bounded test delivery |
+| `GET` | `/v1/deliveries` | List durable delivery attempts |
+| `GET` | `/v1/deliveries/:id` | Read one delivery |
+| `POST` | `/v1/deliveries/:id/retry` | Requeue a failed or suppressed delivery |
+| `GET` | `/v1/preferences` | Read default or recipient preferences |
+| `PUT` | `/v1/preferences` | Set mute and quiet-hours preferences |
+| `GET` | `/v1/silences` | List active silences |
+| `POST` | `/v1/silences` | Create a bounded matching silence |
+| `DELETE` | `/v1/silences/:id` | Remove a silence |
+| `GET` | `/v1/groups` | Read fingerprint groups |
+| `GET` | `/v1/analytics` | Read bounded event aggregates |
 
 Errors include a stable `code`, safe `message`, HTTP `status`, and `requestId`
 at the top level and inside `error`. All API responses include `X-Request-ID`.

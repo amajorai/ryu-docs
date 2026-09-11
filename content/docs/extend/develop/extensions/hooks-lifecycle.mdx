@@ -217,6 +217,29 @@ The matcher (`glob_match`) is deliberately tiny:
 
 A hook whose gate does not match the current tool never spawns the Deno sandbox.
 
+## Cross-platform hook bodies
+
+Ryu hook bodies are sandboxed JavaScript fragments, not shell commands. Core loads a flat
+`hooks/<name>.js` or `hooks/<name>.mjs` file from the plugin's `code_file` and runs it with only
+`ctx` and `host` injected. The same body is therefore usable across Ryu's supported hosts; Core
+owns the host-specific runtime details.
+
+Keep the platform boundary in the host:
+
+- Do not add `bash`, `sh`, PowerShell, `cmd`, `.sh`, `.cmd`, or `.ps1` wrappers. A hook has no
+  command field; Core invokes the fragment through its sandbox.
+- Do not import or reach for Node, Bun, Deno, `process`, `fetch`, child processes, or filesystem
+  APIs. Use `host.storage`, `host.sideModel`, and other declared capabilities instead.
+- Do not hard-code home, temporary, or drive paths (`/tmp`, `/Users`, `/home`, `C:\\...`, `$HOME`,
+  `%TEMP%`). Treat paths in `ctx` or tool payloads as opaque strings. Filesystem or process work
+  belongs in an app sidecar with a typed host boundary.
+- Keep `code_file` package-relative with forward slashes, for example `hooks/review.js`. Core's
+  manifest validator rejects traversal and backslash-separated forms before loading a plugin.
+
+The repository's plugin test gate scans every packaged hook body under `apps-store` and
+`plugins-store` for these portability hazards. A missing sandbox runtime degrades a hook to
+`{ kind: "none" }`; it does not turn a platform-specific fallback into a supported path.
+
 ### Tokenmaxxing: notify when delegation becomes idle
 
 The `delegation_lifecycle` event is the smallest useful primitive for an “always keep work moving”
@@ -247,6 +270,50 @@ not start a timer, create a new agent, or claim that work is still active. Disab
 do not want an idle notification; it does not change delegation scheduling or model budgets.
 
 ## Building a turn hook
+
+### Function-hook middleware
+
+Ryu also supports an opt-in middleware form inspired by Koa-style function hooks. Set
+`mode: "middleware"` on a `turn_hooks` entry, or use `defineFunctionHook` in the TypeScript SDK:
+
+```ts
+import { defineFunctionHook, definePlugin } from "@ryuhq/sdk";
+
+export default definePlugin({
+  id: "com.example.redact-tools",
+  name: "Redact Tools",
+  version: "1.0.0",
+  turnHooks: [
+    defineFunctionHook({
+      id: "redact.result",
+      on: "tool_result",
+      match: { tools: ["http*"] },
+      run: async (ctx, _host, next) => {
+        const result = await next(ctx);
+        if (result.kind !== "transform" || typeof result.output !== "object") {
+          return result;
+        }
+        return {
+          kind: "transform",
+          output: { ...(result.output as Record<string, unknown>), secret: "[redacted]" },
+        };
+      },
+    }),
+  ],
+});
+```
+
+Middleware hooks run in descending `priority` order, with ties resolved by plugin id and hook id.
+`next(ctx)` reaches the remaining middleware hooks. A hook can return without calling `next` to
+short-circuit its chain, pass a rewritten event context downstream, or await the downstream
+directive and wrap it on the way back out. A failed middleware hook is skipped and the chain below
+it continues. Legacy hooks (mode omitted) retain their independent directive behavior.
+
+The continuation is Core-owned and one-shot. Request identity (`conversation_id`, `caller_user_id`,
+the resolved agent, and plugin flags) is preserved across rewrites, so a plugin cannot retarget a
+downstream hook's tenant or enable another plugin's flag. Middleware code still runs in the same
+deny-by-default sandbox and uses the same grant-gated `host` capabilities; this is function-shaped
+composition, not ambient in-process plugin code.
 
 ### 1. Declare the hook in manifest.json
 

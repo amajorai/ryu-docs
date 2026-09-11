@@ -1,7 +1,7 @@
 import { docs } from "collections/server";
 import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
-
+import type { CatalogAttributes } from "@/lib/catalog";
 import {
   DOCS_VERSION,
   docsPath,
@@ -48,7 +48,7 @@ export function generateDocsParams() {
 }
 
 export function getPageImage(page: DocsPage) {
-  const segments = [DOCS_VERSION, ...page.slugs, "image.webp"];
+  const segments = [DOCS_VERSION, ...page.slugs, "image-v4.png"];
 
   return {
     segments,
@@ -78,6 +78,20 @@ function specDescription(openapi: Record<string, unknown> | undefined): string {
   return typeof content === "string" ? content : "";
 }
 
+function catalogSurfaceSummary(
+  surfaces: CatalogAttributes["surfaces"],
+): string {
+  if (surfaces === undefined) {
+    return "all (default)";
+  }
+  const entries = Object.entries(surfaces);
+  return entries.length > 0
+    ? entries
+        .map(([surface, support]) => `${surface}:${support || "none"}`)
+        .join(",")
+    : "none declared";
+}
+
 export async function getLLMText(page: DocsPage) {
   const processed = await page.data.getText("processed");
 
@@ -86,7 +100,8 @@ export async function getLLMText(page: DocsPage) {
   // record on the schema, so each field is narrowed rather than asserted.
   const openapi = page.data._openapi;
   const method = openapi?.method;
-  const methodLine = typeof method === "string" ? `Method: ${method.toUpperCase()}` : "";
+  const methodLine =
+    typeof method === "string" ? `Method: ${method.toUpperCase()}` : "";
   const descriptionFromSpec = specDescription(openapi);
 
   // Tags for agent-optimized discoverability. Read straight off `page.data`,
@@ -95,6 +110,10 @@ export async function getLLMText(page: DocsPage) {
   // rendered on any of the 33 pages that declare tags.
   const tags = page.data.tags;
   const tagsLine = tags?.length ? `Tags: ${tags.join(", ")}` : "";
+  const catalog = page.data.catalog;
+  const catalogLine = catalog
+    ? `Catalog: ${catalog.kind} ${catalog.id} v${catalog.version}; official=${catalog.official}; builtIn=${catalog.builtIn}; system=${catalog.system}; preInstalled=${catalog.preInstalled}; stability=${catalog.stability}; hidden=${catalog.hidden}; surfaces=${catalogSurfaceSummary(catalog.surfaces)}`
+    : "";
 
   const header = [
     `Source: ${siteConfig.url}${page.url}`,
@@ -102,6 +121,7 @@ export async function getLLMText(page: DocsPage) {
     methodLine ? `${methodLine}` : "",
     `Description: ${page.data.description || descriptionFromSpec || "(no description)"}`,
     tagsLine,
+    catalogLine,
   ]
     .filter(Boolean)
     .join("\n");

@@ -223,6 +223,8 @@ export const UI_COMPONENT_MODULE_LOADERS: Record<
     (await import("@ryu/ui/components/rolling-number")) as UiComponentModule,
   "components/stagger-reveal": async () =>
     (await import("@ryu/ui/components/stagger-reveal")) as UiComponentModule,
+  "components/text-morph": async () =>
+    (await import("@ryu/ui/components/text-morph")) as UiComponentModule,
   "components/motion/text-scramble": async () =>
     (await import(
       "@ryu/ui/components/motion/text-scramble"

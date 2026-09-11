@@ -10,6 +10,7 @@ import {
   Code2,
   Cpu,
   CreditCard,
+  Gauge,
   GitBranch,
   GraduationCap,
   Handshake,
@@ -192,6 +193,16 @@ const REALMS: Realm[] = [
     track: "build",
   },
   {
+    slug: "api-reference",
+    path: "extend/develop/api-reference",
+    title: "API Reference",
+    description:
+      "Browse the interactive OpenAPI contracts for Core and Gateway.",
+    icon: Code2,
+    accent: "var(--api-reference-color)",
+    track: "build",
+  },
+  {
     slug: "ui",
     title: "UI",
     description: "Use Ryu's shared components, themes, and hooks.",
@@ -254,6 +265,15 @@ const REALMS: Realm[] = [
     description: "Defaults, swappable building blocks, and benchmarks.",
     icon: BookOpen,
     accent: "var(--reference-color)",
+    track: "build",
+  },
+  {
+    slug: "benchmark",
+    path: "reference/benchmark",
+    title: "RyuBench",
+    description: "Measure how well models and harnesses operate current Ryu.",
+    icon: Gauge,
+    accent: "var(--benchmark-color)",
     track: "build",
   },
   {
@@ -380,7 +400,7 @@ function SearchTrigger() {
     <button
       aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
       aria-label="Search the documentation"
-      className="group flex w-full items-center gap-3 rounded-lg bg-fd-secondary px-4 py-3.5 text-left transition-colors hover:bg-fd-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
+      className="group flex w-full items-center gap-3 rounded-xl bg-fd-secondary px-4 py-3.5 text-left shadow-sm transition-colors hover:bg-fd-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
       onClick={() => setOpenSearch(true)}
       type="button"
     >
@@ -401,11 +421,11 @@ function SearchTrigger() {
 function QuickLinks() {
   return (
     <nav aria-label="Common destinations">
-      <ul className="flex flex-wrap items-center gap-x-5 gap-y-3">
+      <ul className="flex flex-wrap items-center justify-center gap-2">
         {QUICK_LINKS.map((link) => (
           <li key={link.id}>
             <Link
-              className="inline-flex items-center py-1 font-medium text-fd-muted-foreground text-sm underline-offset-4 hover:text-fd-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
+              className="inline-flex items-center rounded-full bg-fd-secondary px-3.5 py-1.5 font-medium text-fd-muted-foreground text-sm transition-colors hover:bg-fd-accent hover:text-fd-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
               href={link.href}
             >
               {link.label}
@@ -419,16 +439,16 @@ function QuickLinks() {
 
 export function Hero() {
   return (
-    <section className="mx-auto flex w-full max-w-6xl flex-col px-6 pt-16 pb-12 sm:pt-24">
-      <h1 className="max-w-2xl text-balance font-medium font-heading text-3xl text-fd-foreground leading-tight tracking-tight md:text-4xl">
+    <section className="mx-auto flex w-full max-w-4xl flex-col items-center px-4 pt-16 pb-8 text-center sm:pt-24">
+      <h1 className="text-balance font-medium font-heading text-4xl text-fd-foreground tracking-tight sm:text-5xl md:text-6xl">
         {DOCS_HOME_COPY.title}
       </h1>
 
-      <p className="mt-4 max-w-2xl text-pretty text-base text-fd-muted-foreground leading-relaxed">
+      <p className="mt-6 max-w-2xl text-balance text-base text-fd-muted-foreground leading-relaxed sm:text-lg">
         {DOCS_HOME_COPY.description}
       </p>
 
-      <div className="mt-8 flex w-full max-w-2xl flex-col gap-5">
+      <div className="mt-9 flex w-full max-w-xl flex-col items-center gap-4">
         <SearchTrigger />
         <QuickLinks />
       </div>
@@ -437,11 +457,28 @@ export function Hero() {
 }
 
 function RealmCard({ realm }: { realm: Realm }) {
+  const Icon = realm.icon;
   return (
     <Link
-      className="group relative flex flex-col py-3 outline-offset-4 focus-visible:outline-2 focus-visible:outline-fd-ring"
+      className="group relative flex flex-col gap-3 rounded-xl bg-fd-secondary p-5 transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
       href={docsPath(realm.path ?? realm.slug)}
     >
+      <div className="flex items-center justify-between">
+        <span
+          aria-hidden="true"
+          className="flex size-10 items-center justify-center rounded-lg"
+          style={{
+            backgroundColor: `color-mix(in oklab, ${realm.accent} 16%, transparent)`,
+            color: realm.accent,
+          }}
+        >
+          <Icon className="size-5" />
+        </span>
+        <ArrowRight
+          aria-hidden="true"
+          className="size-4 text-fd-muted-foreground opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100"
+        />
+      </div>
       <div className="flex flex-col gap-1">
         <h3 className="font-heading font-medium text-fd-foreground text-lg">
           <span className="inline-flex items-center gap-2">
@@ -492,7 +529,7 @@ function TrackSection({ track }: { track: (typeof TRACKS)[number] }) {
       </p>
       <nav
         aria-label={track.title}
-        className="mt-5 grid grid-cols-1 gap-x-12 gap-y-6 sm:grid-cols-2 lg:grid-cols-3"
+        className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
       >
         {realms.map((realm) => (
           <RealmCard key={realm.slug} realm={realm} />
@@ -506,7 +543,7 @@ export function Realms() {
   return (
     <section
       aria-labelledby="realms-heading"
-      className="mx-auto w-full max-w-6xl px-6 py-16"
+      className="mx-auto w-full max-w-4xl px-4 py-12"
     >
       <h2
         className="font-heading font-medium text-fd-foreground text-xl"
@@ -529,9 +566,16 @@ export function Realms() {
 function FeaturedCard({ item }: { item: Featured }) {
   return (
     <Link
-      className="group flex flex-col gap-2 py-5 outline-offset-4 focus-visible:outline-2 focus-visible:outline-fd-ring sm:flex-row sm:items-center sm:gap-5"
+      className="group flex flex-col gap-2 rounded-xl bg-fd-secondary p-5 transition-colors hover:bg-fd-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring sm:flex-row sm:items-center sm:gap-5 sm:p-6"
       href={item.href}
     >
+      <span
+        aria-hidden="true"
+        className="hidden h-12 w-1 shrink-0 rounded-full sm:block"
+        style={{
+          backgroundColor: `color-mix(in oklab, ${item.accent} 55%, transparent)`,
+        }}
+      />
       <div className="flex flex-1 flex-col gap-1">
         <h3 className="font-heading font-medium text-base text-fd-foreground sm:text-lg">
           {item.title}
@@ -552,7 +596,7 @@ export function FeaturedRail() {
   return (
     <section
       aria-labelledby="featured-heading"
-      className="mx-auto w-full max-w-6xl px-6 py-16"
+      className="mx-auto w-full max-w-4xl px-4 py-12"
     >
       <h2
         className="font-heading font-medium text-fd-foreground text-xl"
@@ -563,7 +607,7 @@ export function FeaturedRail() {
       <p className="mt-1 text-fd-muted-foreground text-sm">
         Start with a working example or a system reference.
       </p>
-      <div className="mt-6 grid grid-cols-1 gap-x-12 gap-y-6 md:grid-cols-2">
+      <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
         {FEATURED.map((item) => (
           <FeaturedCard item={item} key={item.id} />
         ))}

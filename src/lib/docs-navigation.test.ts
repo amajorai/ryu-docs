@@ -91,6 +91,7 @@ describe("docs navigation", () => {
       "billing",
       "reference",
       "learn",
+      "rsi",
       "roadmap",
     ];
 
@@ -98,6 +99,36 @@ describe("docs navigation", () => {
     for (const realm of realms) {
       const meta = await readMeta(`${realm}/meta.json`);
       expect(meta.root).toBe(true);
+    }
+  });
+
+  test("publishes the recursive improvement section as a complete guide set", async () => {
+    const rsi = await readMeta("rsi/meta.json");
+    const pages = [
+      "index",
+      "operating-model",
+      "learning-loop",
+      "experiment-loop",
+      "self-building",
+      "guardrails",
+      "roadmap",
+    ];
+
+    expect(rsi.root).toBe(true);
+    expect(rsi.pages).toEqual([
+      "index",
+      "---Operating model---",
+      "operating-model",
+      "learning-loop",
+      "experiment-loop",
+      "self-building",
+      "---Safety & adoption---",
+      "guardrails",
+      "roadmap",
+    ]);
+
+    for (const page of pages) {
+      await readPage(`rsi/${page}.mdx`);
     }
   });
 
@@ -175,6 +206,7 @@ describe("docs navigation", () => {
       "notify",
       "notify-api",
       "notify-streams",
+      "notify-parity",
       "---Ryu Hire---",
       "hire",
     ]);
@@ -347,6 +379,44 @@ describe("docs navigation", () => {
     expect(coreIndex).toContain("Browse by endpoint group");
     expect(agentsIndex).toContain("<Cards>");
     expect(agentsIndex).toContain("core/agents/list_agents");
+  });
+
+  test("surfaces API reference and RyuBench as dedicated root selectors", async () => {
+    const apiReference = await readMeta(
+      "extend/develop/api-reference/meta.json",
+    );
+    const benchmark = await readMeta("reference/benchmark/meta.json");
+
+    expect(apiReference.root).toBe(true);
+    expect(benchmark.root).toBe(true);
+    expect(apiReference.pages).toEqual(["index", "gateway", "core"]);
+    expect(benchmark.pages).toEqual([
+      "index",
+      "tasks",
+      "scoring",
+      "local-models",
+      "kernel-boundaries",
+    ]);
+  });
+
+  test("keeps current Core operations visible in generated API navigation", async () => {
+    const core = await readMeta("extend/develop/api-reference/core/meta.json");
+    const catalog = await readMeta(
+      "extend/develop/api-reference/core/catalog/meta.json",
+    );
+    const outputStyles = await readMeta(
+      "extend/develop/api-reference/core/output-styles/meta.json",
+    );
+
+    expect(catalog.pages).toContain("catalog_sources_remove");
+    expect(core.pages).toContain("output-styles");
+    expect(outputStyles.pages).toEqual(
+      expect.arrayContaining([
+        "create_style_handler",
+        "delete_style_handler",
+        "list_styles",
+      ]),
+    );
   });
 
   test("groups every billing page and includes Teams seats", async () => {

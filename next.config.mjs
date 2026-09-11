@@ -1,10 +1,11 @@
-import { createMDX } from "fumadocs-mdx/next";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createMDX } from "fumadocs-mdx/next";
 
 const withMDX = createMDX();
 const require = createRequire(import.meta.url);
+const docsRouteAliases = require("./docs-route-aliases.json");
 const appRoot = dirname(fileURLToPath(import.meta.url));
 const turbopackAssetLoader = join(appRoot, "turbopack-asset-loader.mjs");
 const transformersWebEntry = join(
@@ -43,6 +44,10 @@ const config = {
   async rewrites() {
     return [
       {
+        source: "/docs/:path*.md",
+        destination: "/llms.mdx/docs/:path*",
+      },
+      {
         source: "/docs/:path*.mdx",
         destination: "/llms.mdx/docs/:path*",
       },
@@ -54,93 +59,22 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.3.0/start-here",
+        destination: "/docs/0.3.1/start-here",
         permanent: false,
       },
-      // Mobile and Browser extension have dedicated roots again. Keep the
-      // grouped Surfaces URLs working as compatibility links.
-      {
-        source: "/docs/surfaces/mobile",
-        destination: "/docs/mobile",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/surfaces/mobile",
-        destination: "/docs/:version/mobile",
-        permanent: true,
-      },
-      {
-        source: "/docs/surfaces/browser-extension",
-        destination: "/docs/browser-extension",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/surfaces/browser-extension",
-        destination: "/docs/:version/browser-extension",
-        permanent: true,
-      },
-      // Retire unreleased campaign, preview-app, and internal reference pages
-      // without leaving old bookmarks at a dead end.
-      {
-        source: "/docs/billing/battle-pass",
-        destination: "/docs/billing",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/billing/battle-pass",
-        destination: "/docs/:version/billing",
-        permanent: true,
-      },
-      {
-        source: "/docs/apps/content",
-        destination: "/docs/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/apps/reelfarm",
-        destination: "/docs/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/apps/token-table",
-        destination: "/docs/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/content",
-        destination: "/docs/:version/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/reelfarm",
-        destination: "/docs/:version/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/apps/token-table",
-        destination: "/docs/:version/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/reference/defaults/apps",
-        destination: "/docs/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/reference/defaults/ports",
-        destination: "/docs/reference/defaults",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/reference/defaults/apps",
-        destination: "/docs/:version/apps",
-        permanent: true,
-      },
-      {
-        source: "/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/reference/defaults/ports",
-        destination: "/docs/:version/reference/defaults",
-        permanent: true,
-      },
+      // Keep compatibility redirects and canonical sitemap exclusions together.
+      ...docsRouteAliases.flatMap(({ from, to }) => [
+        {
+          source: `/docs/${from}`,
+          destination: `/docs/${to}`,
+          permanent: true,
+        },
+        {
+          source: `/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/${from}`,
+          destination: `/docs/:version/${to}`,
+          permanent: true,
+        },
+      ]),
       // The recipes gallery became its own "Cookbook" root. Keep the old
       // /docs/using-ryu/recipes URLs (and every recipe under it) alive. These
       // must precede the /docs/using-ryu catch-all below so recipes still land

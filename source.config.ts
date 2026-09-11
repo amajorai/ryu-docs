@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { remarkMdxMermaid } from "fumadocs-core/mdx-plugins";
@@ -8,35 +7,21 @@ import { defineConfig, defineDocs } from "fumadocs-mdx/config";
 import lastModified from "fumadocs-mdx/plugins/last-modified";
 import { z } from "zod";
 
+import { catalogAttributesSchema } from "./src/lib/catalog";
+import { createContentTimestampReader } from "./src/lib/content-timestamps";
+
 const execFileAsync = promisify(execFile);
 
-/**
- * Prefer Git's authoring timestamp, but keep last-modified metadata available
- * in the production Docker build, where the root .dockerignore excludes .git.
- */
-async function getLastModified(filePath: string): Promise<Date | null> {
+// A Docker copy time is not a content update. Omit lastmod without Git history.
+const getLastModified = createContentTimestampReader(async (filePath) => {
   const cwd = process.cwd();
-
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["log", "-1", "--format=%aI", "--", path.relative(cwd, filePath)],
-      { cwd, encoding: "utf8" },
-    );
-    const date = new Date(stdout.trim());
-    if (!Number.isNaN(date.getTime())) {
-      return date;
-    }
-  } catch {
-    // Docker builds do not include .git; use the content file timestamp below.
-  }
-
-  try {
-    return (await stat(filePath)).mtime;
-  } catch {
-    return null;
-  }
-}
+  const { stdout } = await execFileAsync(
+    "git",
+    ["log", "-1", "--format=%aI", "--", path.relative(cwd, filePath)],
+    { cwd, encoding: "utf8", timeout: 10_000 },
+  );
+  return stdout;
+});
 
 // You can customise Zod schemas for frontmatter and `meta.json` here
 // see https://fumadocs.dev/docs/mdx/collections
@@ -69,6 +54,9 @@ export const docs = defineDocs({
       // header by `getLLMText`. Must be declared: the schema strips undeclared
       // keys, so leaving it out drops the tags outright.
       tags: z.array(z.string()).optional(),
+      // Generated app/plugin pages carry their Marketplace status data here so
+      // the docs route can render one universal header block for both catalogs.
+      catalog: catalogAttributesSchema.optional(),
       // Written into generated API-reference frontmatter by fumadocs-openapi
       // and read back by `getLLMText`. Typed as an open record rather than a
       // precise shape ON PURPOSE: the schema strips unknown keys, so pinning

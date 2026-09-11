@@ -1,6 +1,8 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
+
+import type { CatalogAttributes } from "../src/lib/catalog";
 
 /**
  * Generate the public Apps and Plugins catalog realms from the store manifests.
@@ -18,12 +20,14 @@ import * as path from "node:path";
  * secret headers, sidecar command/env details, or crate paths. The manifests
  * are the source of truth; the generated prose is a faithful, sanitized mirror.
  */
-const CONTENT_ROOT = path.join("content", "docs");
-const APPS_STORE = path.join("..", "..", "apps-store");
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+const CONTENT_ROOT = path.join(REPO_ROOT, "apps/fumadocs/content/docs");
+const AUTHORED_GUIDES_ROOT = path.join(REPO_ROOT, "apps/fumadocs/content-guides");
+const APPS_STORE = path.join(REPO_ROOT, "apps-store");
 const PLUGIN_STORES = [
-  path.join("..", "..", "plugins-store", "plugins"),
-  path.join("..", "..", "plugins-store", "lsp"),
-  path.join("..", "..", "plugins-store", "external_plugins"),
+  path.join(REPO_ROOT, "plugins-store", "plugins"),
+  path.join(REPO_ROOT, "plugins-store", "lsp"),
+  path.join(REPO_ROOT, "plugins-store", "external_plugins"),
 ];
 
 const CATEGORY_LABELS = new Map([
@@ -101,8 +105,16 @@ type Manifest = {
   tagline?: string;
   keywords?: string[];
   icon?: string;
+  author?: string | { name?: string };
+  repository?: string;
+  external?: boolean;
+  system?: boolean;
+  mandatory?: boolean;
   hidden?: boolean;
+  source?: string;
+  stability?: string;
   surfaces?: Record<string, { support?: string }>;
+  targets?: string[];
   engines?: Record<string, string>;
   runnables?: Runnable[];
   permission_grants?: string[];
@@ -131,6 +143,11 @@ type CatalogEntry = {
   category?: string;
 };
 
+export type CatalogState = {
+  builtInIds: Set<string>;
+  preinstalledIds: Set<string>;
+};
+
 const PLUGIN_CATEGORY_ORDER = [
   "Automation",
   "Browsers",
@@ -157,6 +174,48 @@ function esc(text: string): string {
     .replace(/\}/g, "&#125;");
 }
 
+const CATALOG_PROSE_PARAGRAPH_LIMIT = 900;
+
+function proseParagraphs(text: string): string[] {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const sentences: string[] = [];
+  let start = 0;
+  for (const match of normalized.matchAll(/[.!?](?=\s+(?:[A-Z0-9`*_[(]))/g)) {
+    const end = (match.index ?? 0) + 1;
+    sentences.push(normalized.slice(start, end).trim());
+    start = end;
+  }
+  if (start < normalized.length) {
+    sentences.push(normalized.slice(start).trim());
+  }
+
+  const paragraphs: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (!current) {
+      current = sentence;
+      continue;
+    }
+
+    const candidate = `${current} ${sentence}`;
+    if (candidate.length > CATALOG_PROSE_PARAGRAPH_LIMIT) {
+      paragraphs.push(current);
+      current = sentence;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) {
+    paragraphs.push(current);
+  }
+
+  return paragraphs.map((paragraph) => esc(paragraph));
+}
+
 /** Collapse whitespace for use inside a table cell (no pipes/newlines). */
 function cell(text: string): string {
   return esc(text).replace(/\s+/g, " ").replace(/\|/g, "&#124;").trim();
@@ -166,13 +225,227 @@ function frontmatter(
   title: string,
   description: string,
   tags: string[],
+  catalog?: CatalogAttributes,
 ): string {
-  return [
+  const lines = [
     "---",
     `title: ${JSON.stringify(title)}`,
     `description: ${JSON.stringify(cell(description))}`,
     `tags: ${JSON.stringify(tags)}`,
-    "---",
+  ];
+  if (catalog) {
+    lines.push(`catalog: ${JSON.stringify(catalog)}`);
+  }
+  lines.push("---");
+  return lines.join("\n");
+}
+
+function withoutRustLineComments(source: string): string {
+  return source.replace(/\/\/.*$/gm, "");
+}
+
+function rustStringConstants(sources: string[]): Map<string, string> {
+  const constants = new Map<string, string>();
+  for (const source of sources) {
+    for (const match of withoutRustLineComments(source).matchAll(
+      /(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([^"]+)"/g,
+    )) {
+      constants.set(match[1], match[2]);
+    }
+  }
+  return constants;
+}
+
+function resolveRustIdList(
+  body: string,
+  constants: Map<string, string>,
+  label: string,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const match of withoutRustLineComments(body).matchAll(
+    /"([^"]+)"|([A-Z][A-Z0-9_]*)/g,
+  )) {
+    const id = match[1] ?? constants.get(match[2]);
+    if (!id) {
+      throw new Error(`Could not resolve ${label} entry ${match[2]}`);
+    }
+    ids.add(id);
+  }
+  return ids;
+}
+
+function readManifestId(manifestPath: string): string | undefined {
+  if (!existsSync(manifestPath)) {
+    return undefined;
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
+  return typeof manifest.id === "string" ? manifest.id : undefined;
+}
+
+/**
+ * Read the Core-owned lifecycle sets used by the Marketplace status columns.
+ *
+ * Built-in is derived from the production `CORE_RUNTIME_BUILTIN_MANIFESTS`
+ * registry, while Pre-installed is derived from `CORE_PREINSTALLED`. The
+ * manifest's `system` flag remains the public Marketplace listing attribute,
+ * matching `tools/generate-marketplace.mjs` and the mirrored README.
+ */
+export function readCoreCatalogState(
+  repoRoot: string = REPO_ROOT,
+): CatalogState {
+  const builtinsSourcePath = path.join(
+    repoRoot,
+    "apps/core/src/plugins/builtins.rs",
+  );
+  const manifestSourcePath = path.join(
+    repoRoot,
+    "apps/core/src/plugin_manifest/mod.rs",
+  );
+  const builtinsSource = readFileSync(builtinsSourcePath, "utf8");
+  const manifestSource = readFileSync(manifestSourcePath, "utf8");
+  const constants = rustStringConstants([builtinsSource, manifestSource]);
+  const preinstalledBlock = withoutRustLineComments(builtinsSource).match(
+    /pub const CORE_PREINSTALLED:\s*&\[&str\]\s*=\s*&\[(.*?)\n\];/s,
+  );
+  if (!preinstalledBlock) {
+    throw new Error("CORE_PREINSTALLED is missing from Core");
+  }
+
+  const preinstalledIds = resolveRustIdList(
+    preinstalledBlock[1],
+    constants,
+    "CORE_PREINSTALLED",
+  );
+  const productionBlock = withoutRustLineComments(manifestSource).match(
+    /const CORE_RUNTIME_BUILTIN_MANIFESTS:\s*&\[&str\]\s*=\s*&\[(.*?)\n\];/s,
+  );
+  const fallbackBlock = withoutRustLineComments(manifestSource).match(
+    /(?:pub(?:\([^)]*\))?\s+)?const BUILTIN_MANIFESTS:\s*&\[&str\]\s*=\s*&\[(.*?)\n\];/s,
+  );
+  const builtInBlock = productionBlock?.[1] ?? fallbackBlock?.[1];
+  if (!builtInBlock) {
+    throw new Error(
+      "production built-in manifest registry is missing from Core",
+    );
+  }
+
+  const manifestConstants = new Map<string, string>();
+  const manifestDirectory = path.dirname(manifestSourcePath);
+  for (const match of withoutRustLineComments(manifestSource).matchAll(
+    /(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*include_str!\("([^"]+\/manifest\.json)"\)/g,
+  )) {
+    const id = readManifestId(path.resolve(manifestDirectory, match[2]));
+    if (id) {
+      manifestConstants.set(match[1], id);
+    }
+  }
+
+  const builtInIds = new Set<string>();
+  const builtInBody = withoutRustLineComments(builtInBlock);
+  for (const match of builtInBody.matchAll(
+    /include_str!\("([^"]+\/manifest\.json)"\)/g,
+  )) {
+    const id = readManifestId(path.resolve(manifestDirectory, match[1]));
+    if (id) {
+      builtInIds.add(id);
+    }
+  }
+  for (const match of builtInBody.matchAll(/\b([A-Z][A-Z0-9_]*)\b/g)) {
+    const id = manifestConstants.get(match[1]);
+    if (id) {
+      builtInIds.add(id);
+    }
+  }
+
+  return { builtInIds, preinstalledIds };
+}
+
+function stabilityLabel(manifest: Manifest): string {
+  const stability = manifest.stability?.trim().toLowerCase();
+  return stability || "stable";
+}
+
+function layerLabel(manifest: Manifest): string | undefined {
+  const layers = (manifest.provides ?? [])
+    .map((provide) => provide.title ?? provide.capability)
+    .filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => cell(value));
+  return layers.length > 0 ? layers.join(", ") : undefined;
+}
+
+function surfaceSupport(manifest: Manifest): CatalogAttributes["surfaces"] {
+  if (manifest.surfaces !== undefined) {
+    return Object.fromEntries(
+      Object.entries(manifest.surfaces).map(([surface, entry]) => [
+        surface,
+        entry.support?.trim() || "none",
+      ]),
+    );
+  }
+
+  // Older manifests used `targets` without support levels. Keep those pages
+  // truthful while preserving the Core default of every surface when neither
+  // declaration exists.
+  if (manifest.targets && manifest.targets.length > 0) {
+    return Object.fromEntries(
+      manifest.targets.map((surface) => [surface, "supported"]),
+    );
+  }
+
+  return undefined;
+}
+
+export function catalogAttributes(
+  manifest: Manifest,
+  base: CatalogBase,
+  catalogState: CatalogState,
+): CatalogAttributes {
+  const catalog: CatalogAttributes = {
+    kind: base === "apps" ? "app" : "plugin",
+    id: manifest.id ?? "not declared",
+    category: manifest.category ?? "Uncategorized",
+    version: manifest.version ?? "0.0.0",
+    official: true,
+    builtIn:
+      typeof manifest.id === "string" &&
+      catalogState.builtInIds.has(manifest.id),
+    system: manifest.system === true,
+    preInstalled:
+      typeof manifest.id === "string" &&
+      catalogState.preinstalledIds.has(manifest.id),
+    stability: stabilityLabel(manifest),
+    hidden: manifest.hidden === true,
+    surfaces: surfaceSupport(manifest),
+  };
+  if (manifest.external === true) {
+    catalog.external = true;
+  }
+  const layer = base === "plugins" ? layerLabel(manifest) : undefined;
+  if (layer) {
+    catalog.layer = layer;
+  }
+  return catalog;
+}
+
+function attributesLegend(): string {
+  return [
+    "",
+    "## Attribute legend",
+    "",
+    "Every app and plugin detail page includes a generated Attributes table. The values are projected from the manifest plus Core's compiled and fresh-install registries.",
+    "",
+    "| Attribute | Meaning |",
+    "|---|---|",
+    "| **Official** | Published through Ryu's official marketplace source; this is provenance, not install state. |",
+    "| **Built-in** | The manifest is compiled into the Core distribution. |",
+    "| **System** | The manifest's Marketplace system marker for a Core-owned/protected runtime component; it is distinct from Built-in. |",
+    "| **Pre-installed** | Core seeds an enabled lifecycle record on a fresh store. |",
+    "| **Stability** | The manifest's maturity label; an omitted value is shown as `stable`, not as an update channel. |",
+    "| **Hidden** | The listing is kept out of the normal catalog view. |",
+    "| **External** | The provider operates outside the local Ryu runtime; shown only for external plugins. |",
+    "| **Layer** | Capability layers projected from a plugin's `provides` declarations; shown only when declared. |",
+    "| **Surfaces** | Per-surface support levels from the manifest; an omitted map uses the legacy all-surfaces default. |",
+    "",
   ].join("\n");
 }
 
@@ -210,19 +483,6 @@ function catalogNavigation(
       : "";
 
   return `This page is part of the ${links.join(", ")} documentation path.${relatedText}`;
-}
-
-function surfacesSection(surfaces: Manifest["surfaces"]): string {
-  const rows = Object.entries(surfaces ?? {});
-  if (rows.length === 0) {
-    return "";
-  }
-  const lines = ["", "## Surfaces", "", "| Surface | Support |", "|---|---|"];
-  for (const [surface, { support }] of rows) {
-    lines.push(`| ${surface} | ${support ?? "none"} |`);
-  }
-  lines.push("");
-  return lines.join("\n");
 }
 
 function toolSection(runnable: Runnable): string {
@@ -545,15 +805,46 @@ function activationSection(m: Manifest): string {
   ].join("\n");
 }
 
-function buildPage(
+export function buildPage(
   m: Manifest,
   base: CatalogBase,
   related: { dir: string; manifest: Manifest }[],
+  catalogState: CatalogState,
 ): string {
   const description = m.tagline ?? m.description?.split(/[.!?]\s/)[0] ?? "";
   const body: string[] = [];
-  body.push(frontmatter(m.name ?? "", description, [m.category ?? ""]));
+  body.push(
+    frontmatter(
+      m.name ?? "",
+      description,
+      [m.category ?? ""],
+      catalogAttributes(m, base, catalogState),
+    ),
+  );
   body.push("");
+
+  const authoredGuideName =
+    base === "apps"
+      ? {
+          "@ryu/activity": "activity",
+          "@ryu/checks": "checks",
+          "@ryu/video-studio": "video-studio",
+        }[m.id ?? ""]
+      : undefined;
+  const authoredGuide = authoredGuideName
+    ? (() => {
+        const guidePath = path.join(
+          AUTHORED_GUIDES_ROOT,
+          authoredGuideName + ".mdx",
+        );
+        if (!existsSync(guidePath)) {
+          return undefined;
+        }
+        return readFileSync(guidePath, "utf8")
+          .replace(/^---[\s\S]*?---\s*/u, "")
+          .trim();
+      })()
+    : undefined;
 
   if (m.hidden) {
     body.push(
@@ -564,13 +855,20 @@ function buildPage(
     );
   }
 
-  if (m.description) {
-    body.push("## What it does", "", esc(m.description), "");
+  if (authoredGuide) {
+    body.push(catalogNavigation(base, related), "", authoredGuide, "");
+  } else if (m.description) {
+    body.push(
+      "## What it does",
+      "",
+      proseParagraphs(m.description).join("\n\n"),
+      "",
+    );
   }
 
-  body.push("", catalogNavigation(base, related), "");
-
-  body.push(surfacesSection(m.surfaces));
+  if (!authoredGuide) {
+    body.push("", catalogNavigation(base, related), "");
+  }
 
   const runnables = runnablesSection(m.runnables);
   const capabilitySection =
@@ -687,6 +985,7 @@ function realmIndex(
       : "Use the [Plugins catalog](/docs/plugins) with [plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest), the [plugin runtime](/docs/extend/develop/extensions/plugin-runtime), the [unified tool catalog](/docs/core/unified-tool-catalog), and [Gateway governance](/docs/gateway/governance) to move from discovery to execution.",
     "",
   );
+  lines.push(attributesLegend());
   for (const group of groups) {
     lines.push("", `## ${group.category}`, "");
     lines.push("<Cards>");
@@ -704,15 +1003,21 @@ function readManifests(storeDirs: string | string[]): CatalogEntry[] {
     const isLanguageServerStore = storeDir.endsWith(
       path.join("plugins-store", "lsp"),
     );
+    const isExternalPluginStore = storeDir.endsWith(
+      path.join("plugins-store", "external_plugins"),
+    );
     for (const dir of readdirSync(storeDir, { withFileTypes: true })) {
       if (!dir.isDirectory()) {
         continue;
       }
       const manifestPath = path.join(storeDir, dir.name, "manifest.json");
       try {
-        const manifest = JSON.parse(
+        const parsedManifest = JSON.parse(
           readFileSync(manifestPath, "utf8"),
         ) as Manifest;
+        const manifest = isExternalPluginStore
+          ? { ...parsedManifest, external: true }
+          : parsedManifest;
         entries.push({
           dir: dir.name,
           manifest,
@@ -733,6 +1038,7 @@ async function writeRealm(opts: {
   icon: string;
   base: CatalogBase;
   manifests: CatalogEntry[];
+  catalogState: CatalogState;
 }): Promise<void> {
   await rm(opts.outDir, { recursive: true, force: true });
   await mkdir(opts.outDir, { recursive: true });
@@ -760,7 +1066,12 @@ async function writeRealm(opts: {
             ...group.entries.slice(Math.max(0, index - 2), index),
             ...group.entries.slice(index + 1, index + 3),
           ];
-    const page = buildPage(entry.manifest, opts.base, related);
+    const page = buildPage(
+      entry.manifest,
+      opts.base,
+      related,
+      opts.catalogState,
+    );
     await writeFile(path.join(opts.outDir, `${entry.dir}.mdx`), page);
   }
 
@@ -772,6 +1083,7 @@ async function writeRealm(opts: {
 async function main() {
   const apps = readManifests(APPS_STORE);
   const plugins = readManifests(PLUGIN_STORES);
+  const catalogState = readCoreCatalogState();
 
   await writeRealm({
     outDir: path.join(CONTENT_ROOT, "apps"),
@@ -781,6 +1093,7 @@ async function main() {
     icon: "AppWindow",
     base: "apps",
     manifests: apps,
+    catalogState,
   });
 
   await writeRealm({
@@ -791,10 +1104,13 @@ async function main() {
     icon: "Blocks",
     base: "plugins",
     manifests: plugins,
+    catalogState,
   });
 }
 
-main().catch((error) => {
-  process.exitCode = 1;
-  throw error;
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    process.exitCode = 1;
+    throw error;
+  });
+}
