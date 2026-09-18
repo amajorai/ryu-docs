@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { remarkMdxMermaid } from "fumadocs-core/mdx-plugins";
+import { remarkBlockId } from "fumadocs-core/mdx-plugins/remark-block-id";
 import { metaSchema } from "fumadocs-core/source/schema";
 import { defineConfig, defineDocs } from "fumadocs-mdx/config";
 import lastModified from "fumadocs-mdx/plugins/last-modified";
@@ -75,7 +76,12 @@ export const docs = defineDocs({
 export default defineConfig({
   plugins: [lastModified({ versionControl: getLastModified })],
   mdxOptions: {
-    // Convert ```mermaid code blocks into the <Mermaid> client component.
-    remarkPlugins: [remarkMdxMermaid],
+    // Convert ```mermaid code blocks into the <Mermaid> client component and
+    // mark readable blocks so the docs feedback popover can attribute a
+    // submission to the paragraph or list item the reader selected.
+    remarkPlugins: [
+      remarkMdxMermaid,
+      [remarkBlockId, { addDataAttribute: "feedback" }],
+    ],
   },
 });

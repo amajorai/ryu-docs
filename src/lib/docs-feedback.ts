@@ -3,23 +3,37 @@
 import {
   type ActionResponse,
   actionResponse,
+  type BlockFeedback,
+  blockFeedback,
   type PageFeedback,
   pageFeedback,
 } from "@/components/feedback/schema";
+import { isDocsLocale } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
 
 const DEFAULT_GITHUB_OWNER = "amajorai";
 const DEFAULT_GITHUB_REPOSITORY = "ryu";
 const FEEDBACK_EMAIL = "hello@ryuhq.com";
 
-function feedbackBody(feedback: PageFeedback, pageUrl: URL): string {
+type DocsFeedback = PageFeedback | BlockFeedback;
+
+function feedbackBody(feedback: DocsFeedback, pageUrl: URL): string {
   const opinion = feedback.opinion === "good" ? "Good" : "Needs improvement";
+  const blockContext =
+    "blockId" in feedback
+      ? [
+          `- Block: #${feedback.blockId}`,
+          "- Block text:",
+          ...feedback.blockBody.split(/\r?\n/).map((line) => `> ${line}`),
+        ]
+      : [];
 
   return [
     "## Documentation feedback",
     "",
     `- Opinion: ${opinion}`,
     `- Page: ${pageUrl.href}`,
+    ...blockContext,
     "",
     feedback.message,
     "",
@@ -27,10 +41,12 @@ function feedbackBody(feedback: PageFeedback, pageUrl: URL): string {
   ].join("\n");
 }
 
-function fallbackUrl(feedback: PageFeedback, pageUrl: URL): string {
+function fallbackUrl(feedback: DocsFeedback, pageUrl: URL): string {
   const params = new URLSearchParams({
     body: feedbackBody(feedback, pageUrl),
-    subject: `Ryu Docs feedback: ${pageUrl.pathname}`,
+    subject: `Ryu Docs feedback: ${pageUrl.pathname}${
+      "blockId" in feedback ? ` #${feedback.blockId}` : ""
+    }`,
   });
 
   return `mailto:${FEEDBACK_EMAIL}?${params.toString()}`;
@@ -41,7 +57,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function sendToGitHub(
-  feedback: PageFeedback,
+  feedback: DocsFeedback,
   pageUrl: URL,
   token: string,
 ): Promise<string> {
@@ -62,7 +78,9 @@ async function sendToGitHub(
       },
       body: JSON.stringify({
         body: feedbackBody(feedback, pageUrl),
-        title: `[Docs] ${pageUrl.pathname}`,
+        title: `[Docs] ${pageUrl.pathname}${
+          "blockId" in feedback ? ` #${feedback.blockId}` : ""
+        }`,
       }),
     },
   );
@@ -83,7 +101,9 @@ function isAllowedPageUrl(pageUrl: URL): boolean {
   if (pageUrl.protocol !== "http:" && pageUrl.protocol !== "https:") {
     return false;
   }
-  if (pageUrl.pathname !== "/docs" && !pageUrl.pathname.startsWith("/docs/")) {
+  const segments = pageUrl.pathname.split("/").filter(Boolean);
+  const offset = isDocsLocale(segments[0]) ? 1 : 0;
+  if (segments[offset] !== "docs") {
     return false;
   }
 
@@ -96,7 +116,16 @@ function isAllowedPageUrl(pageUrl: URL): boolean {
 export async function submitDocsFeedback(
   input: PageFeedback,
 ): Promise<ActionResponse> {
-  const feedback = pageFeedback.parse(input);
+  return submitFeedback(pageFeedback.parse(input));
+}
+
+export async function submitDocsBlockFeedback(
+  input: BlockFeedback,
+): Promise<ActionResponse> {
+  return submitFeedback(blockFeedback.parse(input));
+}
+
+async function submitFeedback(feedback: DocsFeedback): Promise<ActionResponse> {
   const pageUrl = new URL(feedback.url);
   if (!isAllowedPageUrl(pageUrl)) {
     throw new Error("Feedback must come from the Ryu Docs site");

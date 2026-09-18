@@ -44,9 +44,16 @@ roadmap or would embarrass the team on the homepage, it does not belong here.
 
 ```bash
 bun install
-bun test
+bun test src
+bun run types:check
+bun run lint:links
 bun run build
 ```
+
+For local Markdown and MDX editing, run `bun run docs:studio` from the repository root. Studio
+edits the files under `content/docs`; review the resulting Git diff and run the checks above before
+publishing. Feedback actions are server-owned and fall back to an email draft when the hosted
+GitHub destination is not configured.
 
 ## Pull requests
 

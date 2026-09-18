@@ -28,8 +28,8 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LocalizedLink as Link } from "@/components/localized-link";
 import { AlphaBadge, isAlphaRealm } from "@/components/realm-alpha-badge";
 import { docsPath } from "@/lib/docs-version";
 

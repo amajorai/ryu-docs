@@ -3,8 +3,16 @@ import { expect, test } from "bun:test";
 const docsRoot = new URL("../../content/docs/", import.meta.url);
 
 const servicePages = [
-  ["Gateway", ["standalone/gateway.mdx", "standalone/gateway-api.mdx"]],
-  [
+	["Gateway", ["standalone/gateway.mdx", "standalone/gateway-api.mdx"]],
+	[
+		"Passport",
+		["standalone/passport.mdx", "standalone/passport-api.mdx"],
+	],
+	[
+		"Connect",
+		["standalone/connect.mdx", "standalone/connect-api.mdx"],
+	],
+	[
     "Box",
     [
       "standalone/box.mdx",

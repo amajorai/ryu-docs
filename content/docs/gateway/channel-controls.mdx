@@ -42,6 +42,38 @@ emoji values. An empty reaction, such as removing the current reaction, clears
 the Learning rating. The setting is deliberately opt-in and does not change the
 channel's normal lifecycle reactions.
 
+### Delivery retries and duplicate webhooks
+
+Webhook providers deliver at least once, so a callback can arrive again after a
+network timeout or while a previous attempt is still running. Gateway claims the
+provider's stable event identity before acknowledging the callback and keeps a
+bounded, node-local delivery ledger in its existing channel state. The ledger is
+shared by the channel adapters, written atomically, and retained for 30 days.
+
+The stable identities are the Telegram `update_id`, WhatsApp Business `wamid`,
+OpenWA's message or delivery id, and BlueBubbles' message `guid`. Store-backed
+channel records are part of the ledger scope, so two Telegram bots or WhatsApp
+numbers cannot suppress one another's events. A duplicate that is already in
+flight or has completed is acknowledged without another model call or outbound
+message.
+
+The webhook response has a deliberate failure contract:
+
+- invalid credentials or signatures are rejected before parsing;
+- malformed JSON is rejected as a client error;
+- a valid event returns `200` only after its delivery claim is durably accepted;
+- a full or unavailable local queue/ledger returns `503`, allowing the provider
+  to retry;
+- a downstream send failure is retried locally up to three times with backoff;
+  after that, the delivery remains reclaimable by a later provider retry and the
+  channel status reports the failure for the operator.
+
+For agent/team-routed channels, the same delivery key is passed to Core as
+`idempotencyKey`. If a provider send times out after Core already persisted the
+turn, a retry replays the stored reply and assistant message ids instead of
+running the model again. The legacy model-only pipeline has the Gateway ledger
+protection, but does not have Core's persisted reply replay.
+
 ### Telegram
 
 Telegram uses Bot API long polling by default, so a bot works without a public URL. Set the optional
@@ -138,7 +170,8 @@ In **Gateway -> Channels**, choose **WhatsApp Personal** and provide:
 
 The adapter supports text, groups, media/voice transcription, typing, read receipts, reactions,
 WhatsApp markdown, `/help`, and OpenWA session lifecycle/reconnects. OpenWA retries webhook
-deliveries, so Ryu deduplicates them using `X-OpenWA-Idempotency-Key`. Voice replies require
+deliveries, so Ryu deduplicates them using the stable message id first, then
+`X-OpenWA-Idempotency-Key`/the provider delivery id when needed. Voice replies require
 OpenWA's optional media conversion feature (`MEDIA_CONVERSION_ENABLED=true`) so Core's WAV output
 can become an OGG/Opus voice note.
 

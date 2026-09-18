@@ -17,23 +17,31 @@ progress over SSE, convert the result to GGUF, and use it as the active chat mod
 
 ```
 Desktop (FinetuningPage)
-  └─ Core /api/finetune/*  (server/finetune.rs)
+  └─ ryu-finetune sidecar /api/finetune/*
         ├─ finetune/store.rs          ~/.ryu/finetune.db
         ├─ finetune/adapters.rs       ~/.ryu/installed-adapters.json
         ├─ model_catalog/device.rs    GPU gate
-        └─ sidecar/providers/unsloth  python -m ryu_unsloth
+        └─ unsloth sidecar            python -m ryu_unsloth
               FastLanguageModel → SFTTrainer → GGUF
 ```
 
 Core decides **what runs** (a job on this node's GPU, or a remote node) and owns the durable job
 record. The sidecar is a pure training runtime. The desktop is the UI.
 
+On shared managed nodes, Core and the Fine-tune sidecar bind every job and progress stream to the
+verified caller's owner, organization, and server-derived node. The public mount and Companion
+host bridge use the same scope; a job id alone cannot read, cancel, or merge another caller's job.
+
 ## Lifecycle
 
 1. **Check capability** — `GET /api/finetune/capability` reports whether local training is
    possible (GPU present, VRAM sufficient, sidecar running).
 2. **Start a job** — `POST /api/finetune/start` with a base model, dataset, and optional LoRA /
-   training config. Returns a `job_id` and initial `state`.
+   training config. The request is limited to 4 MiB, the base model must be a Hugging Face
+   `namespace/model` id, and the worker applies bounded dataset/training settings. Returns a
+   `job_id` and initial `state`. An `Idempotency-Key` header (or `idempotency_key` body field)
+   makes a retried start replay the original job instead of launching a duplicate. A remote
+   target must be an allowed HTTPS origin; private and metadata addresses are refused.
 3. **Stream progress** — `GET /api/finetune/{id}/stream` is an SSE endpoint that proxies the
    sidecar's live training metrics (loss, epochs, ETA).
 4. **Merge** — `POST /api/finetune/merge` converts the trained LoRA adapter into a standalone GGUF
@@ -71,6 +79,12 @@ still present on disk, so deleting a file automatically removes the adapter from
 The `/api/finetune/*` surface is served by the `ryu-finetune` sidecar, not by Core itself, so it is
 not part of the [Core API reference](/docs/extend/develop/api-reference/core). Request and response shapes
 are documented in the [Routes table](#routes) above.
+
+Remote targets are normalized to an origin before use. Set `RYU_FINETUNE_REMOTE_ALLOWLIST`
+when the node must dispatch only to specific GPU origins; repeated status, cancel, and stream
+requests never follow redirects and pin DNS results after rejecting private addresses, so a saved
+remote bearer cannot be forwarded to a different host. Job snapshots advance monotonically, so
+late poll responses cannot resurrect a terminal job.
 
 ## See also
 

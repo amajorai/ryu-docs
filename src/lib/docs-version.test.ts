@@ -8,8 +8,10 @@ import {
   DOCS_VERSIONS,
   archivedDocsUrl,
   docsPath,
+  docsPathForLocale,
   docsSegmentsFromPathname,
   isVersionSegment,
+  localizeDocsHref,
   stripDocsVersion,
   versionedDocsHref,
 } from "./docs-version";
@@ -48,11 +50,20 @@ describe("docs version policy", () => {
 
 	test("keeps current and legacy paths on the same content tree", () => {
     expect(docsPath("start-here")).toBe(`/docs/${DOCS_VERSION}/start-here`);
+    expect(docsPathForLocale("es", "start-here")).toBe(
+      `/es/docs/${DOCS_VERSION}/start-here`,
+    );
     expect(versionedDocsHref("/docs/start-here")).toBe(
       `/docs/${DOCS_VERSION}/start-here`,
     );
     expect(versionedDocsHref(`/docs/${DOCS_VERSION}/start-here`)).toBe(
       `/docs/${DOCS_VERSION}/start-here`,
+    );
+    expect(versionedDocsHref("/es/docs/start-here")).toBe(
+      `/es/docs/${DOCS_VERSION}/start-here`,
+    );
+    expect(localizeDocsHref(`/docs/${DOCS_VERSION}/start-here`, "es")).toBe(
+      `/es/docs/${DOCS_VERSION}/start-here`,
     );
     expect(stripDocsVersion([DOCS_VERSION, "start-here"])).toEqual([
       "start-here",
@@ -60,6 +71,9 @@ describe("docs version policy", () => {
     expect(docsSegmentsFromPathname(`/docs/${DOCS_VERSION}/start-here`)).toEqual([
       "start-here",
     ]);
+    expect(
+      docsSegmentsFromPathname(`/es/docs/${DOCS_VERSION}/start-here`),
+    ).toEqual(["start-here"]);
 		expect(isVersionSegment("0.1.4")).toBe(true);
 	});
 

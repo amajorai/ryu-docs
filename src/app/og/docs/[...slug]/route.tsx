@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "@/lib/i18n";
 import { renderDocsOgCard } from "@/lib/og-card";
 import { getPage } from "@/lib/source";
 
@@ -12,8 +13,10 @@ export async function GET(
   _req: Request,
   { params }: RouteContext<"/og/docs/[...slug]">,
 ) {
-  const { slug } = await params;
-  const page = getPage(slug.slice(0, -1));
+  const { slug: rawSlug } = await params;
+  const locale = isDocsLocale(rawSlug[0]) ? rawSlug[0] : DEFAULT_DOCS_LOCALE;
+  const slug = isDocsLocale(rawSlug[0]) ? rawSlug.slice(1) : rawSlug;
+  const page = getPage(slug.slice(0, -1), locale);
   if (!page) notFound();
 
   return renderDocsOgCard({

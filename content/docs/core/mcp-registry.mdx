@@ -91,6 +91,12 @@ Writing `mcp.json` is an administrative node mutation: registering, updating, or
 user-owned server requires the caller's `gateway.configure` permission. The check is applied at
 Core's mutation routes, so a direct API caller cannot bypass the desktop's settings UI.
 
+An organization can also apply a signed Fleet assignment with `kind: "mcp"` to block a server on
+enrolled nodes. A blocked server is removed from summaries and tool discovery, and the dispatch
+chokepoint rejects a direct call even if a stale user-owned config still names it. This node policy
+is separate from the per-agent allowlist and from the caller's organization/resource permissions;
+all three layers must allow the action.
+
 The server summary also reports whether authentication is required and whether static credentials are
 configured. A conventional credential header such as `Authorization` or `X-API-Key`, or a credential
 environment variable such as `OPENAI_API_KEY`, is classified as static authentication; a manifest OAuth
@@ -120,7 +126,8 @@ is absent.
 | `shadow` | Screen/audio/input capture + semantic search | Uses the authenticated Shadow sidecar connection. Cross-platform; reports unavailable when Shadow is not running |
 | `spider` | Web crawling / scraping | Shells out to the `spider` binary. Degrades gracefully when not installed |
 | `exa` | Neural web search | Provider-configured credentials. Degrades gracefully when unavailable |
-| `web_fetch` | Authenticated web fetch over HTTPS | Built-in. Injects the user's [Identity Vault](/docs/core/identity-vault) session for the URL's host server-side (acts as the user; the credential never reaches the model) |
+| `web_fetch` | Authenticated web fetch over HTTPS | Built-in. Uses the user's [Passport](/docs/standalone/passport) connection for the URL's host server-side (acts as the user; the credential never reaches the model) |
+| `usage` | Provider/model usage and quota windows | Built-in. Returns remaining/used percentages, window length, prepaid meters, and RFC 3339 reset timestamps; credentials stay inside Core |
 | `search_conversations` | Semantic search over the user's past chat messages | Built-in. Backed by the message index; see [Search and recall](/docs/surfaces/desktop/user-guide/search-and-recall) |
 | `threads` | Coordinator threads: spin up and manage worker threads (8 tools) | Built-in. See [Coordinator threads](/docs/core/coordinator-threads) |
 | `sandbox` | Run a selected WASM, container, microVM, or remote execution backend with default-deny capabilities | Built-in backend selector; explicit backend names never silently fall back. The historical server name remains for compatibility. See [Execution backends](/docs/core/sandbox) |
@@ -179,11 +186,11 @@ store when its local bridge is not wanted.
 
 `call_tool_with_identity` is the boundary every plane funnels through. `call_tool` and
 `call_tool_with_user` delegate to it; the chat/ACP and PTC planes call it directly so they can pass
-the caller's bound [Identity Vault](/docs/core/identity-vault) profiles.
+the caller's bound [Passport](/docs/standalone/passport) profiles.
 
 ```mermaid
 flowchart TD
-  Call["call_tool_with_identity(id, args, allowlist, user_id, profile_ids)"] --> Vault{Identity Vault consult}
+  Call["call_tool_with_identity(id, args, allowlist, user_id, profile_ids)"] --> Vault{Passport consult}
   Vault -->|NEEDS_AUTH| Elicit["Return __ryu_elicitation__ envelope (no dispatch)"]
   Vault -->|AUTHENTICATED| Cred["Read credential under gateway identity.read grant + audit"]
   Vault -->|no bound profiles| Allow{Per-agent allowlist}
@@ -192,7 +199,7 @@ flowchart TD
   Allow -->|not allowed| Deny["Reject: not in this agent's allowlist"]
 ```
 
-1. **Identity Vault consult.** For a bound agent, a call targeting a domain that is `NEEDS_AUTH`
+1. **Passport consult.** For a bound agent, a call targeting a domain that is `NEEDS_AUTH`
    returns the `__ryu_elicitation__` envelope as its result (the caller pauses for login, no
    dispatch). An `AUTHENTICATED` domain reads the credential through the gateway-governed
    `identity.read` grant plus audit at this boundary, never exposing it to the LLM. No-op when the
@@ -242,6 +249,13 @@ one.
 <Cards>
   <DocCard href="/docs/core/unified-tool-catalog" />
   <DocCard href="/docs/core/programmatic-tool-calling" />
-  <DocCard href="/docs/core/identity-vault" />
+  <DocCard href="/docs/standalone/passport" />
   <DocCard href="/docs/extend/develop/extensions/mcp-server" />
 </Cards>
+
+
+Each tool-discovery request checks up to four servers concurrently, retaining each server's
+results and skipping failed servers as before. A slow server does not prevent
+other discovery slots from making progress. An explicitly empty agent allowlist
+returns no tools without starting server discovery; normal allowlist and
+credential checks still apply to non-empty discovery requests.

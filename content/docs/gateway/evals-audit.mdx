@@ -1,6 +1,6 @@
 ---
 title: "Evals & Audit"
-description: "Score a sampled subset of responses for routing, and record every call in a queryable audit log."
+description: "Score live and replayed agent behavior, and record every call in a queryable local audit log."
 ---
 
 Measurement is a Gateway concern. The Gateway scores a sampled fraction of responses to feed
@@ -10,9 +10,10 @@ blocks it.
 
 ## Evals
 
-The eval runner (`apps/gateway/src/evals/mod.rs`, `EvalsRunner`) does two jobs: it passively scores
-sampled live responses and folds those scores into a rolling per-provider average, and it replays a
-dataset on demand for explicit eval runs. Passive scoring is **on by default** (`EvalsConfig.enabled`
+The eval runner (`EvalsRunner`) does three jobs: it passively scores sampled live responses and folds
+those scores into a rolling per-provider average, replays a dataset on demand for explicit eval runs,
+and scores already-completed outputs through the online scoring endpoint. Passive scoring is **on by
+default** (`EvalsConfig.enabled`
 defaults to `true` and `sample_rate` defaults to `1.0`).
 
 ### Dimensions
@@ -81,7 +82,11 @@ POST /v1/evals/run
 
 replays each prompt in `dataset` through the full pipeline (firewall, routing, provider call) and
 returns per-case scores plus an aggregate. An explicit run always scores, independent of whether
-passive evals are enabled, and cases run sequentially to keep provider load and budgets observable.
+passive evals are enabled. The expanded dataset is capped at 1,000 cases and the request's
+conservative provider/judge-call upper bound is capped at 2,000 calls. Cases can run concurrently
+within those limits; the request body is capped at 8 MiB, each case at 256 KiB, and recursive
+assertion sets at eight levels/128 nodes. The response preserves input order so a result matrix
+remains deterministic.
 
 | Field | Purpose |
 |---|---|
@@ -92,10 +97,32 @@ passive evals are enabled, and cases run sequentially to keep provider load and 
 | `judge_model` | One fixed model that judges every `llm_judge` assertion (fair cross-model compare) |
 | `evaluators` | Optional run-level registry evaluator ids (from `GET /v1/evaluators`) scored against every case, unioned with any per-case `evaluators` |
 | `agent_id` | Optional id forwarded for per-agent budget tracking |
+| `max_concurrency` | Maximum provider calls in flight, clamped to 1–32; cache-enabled runs serialize duplicate-input lookup so a miss cannot charge the same input twice |
+| `timeout_ms` | Per-case provider deadline, bounded to 100–120000 ms |
+| `repeat` | Repeat every case up to 20 times, with stable repetition ids, subject to the 1,000-case and 2,000-call limits |
+| `cache` | Reuse identical provider inputs within the run |
+| `tags` | String key/value labels retained in the run envelope |
+| `prefix`, `suffix` | Run-level text around each single-turn prompt |
 
-Each case also supports `assertions` evaluated against the response text - `contains`, `not_contains`,
-`equals`, `regex`, `json_valid` (all deterministic), and `llm_judge` (a second pipeline call whose
-verdict is parsed defensively, with a missing verdict failing safe). Unlike `GET /v1/audit`, this
+Each case also supports stable `id`/`description`, typed `vars`, `metadata`, a per-case
+`provider`/`providers` selection, a precomputed `provider_output`, and `options` for prefix, suffix,
+output/variable transforms, timeout, and caching, plus an optional `context`/reference payload for
+factuality and faithfulness checks. Assertions evaluated against the response include
+
+the deterministic Promptfoo-compatible set (`contains`, `not_contains`, `equals`, `regex`,
+`icontains`, `starts_with`, contains-any/all, JSON/HTML/XML/SQL containment, validity/refusal,
+Levenshtein, latency, cost, moderation, negation via `not: true`, and nested assertion sets) plus model-assisted
+`llm-rubric`, `similar`, `factuality`, `context-faithfulness`, and `answer-relevance`. Custom JS/Python
+assertions run through Core's sandbox seam and report unavailable runtimes as `executed: false`; the
+same flag is returned for model/media checks whose prerequisites are unavailable.
+
+Deterministic
+assertion sets may be nested, but model-graded assertions (`llm_judge`, `similar`, factuality,
+faithfulness, and answer relevance) must be top-level case assertions; the API rejects them inside
+an `assert_set` rather than reporting a misleading unexecuted failure. Assertion scores remain
+separate from latency, token, policy, and cost measurements.
+
+Unlike `GET /v1/audit`, this
 endpoint authenticates with any valid API key, not the master key, because a dataset run is a normal
 metered call.
 
@@ -103,10 +130,47 @@ From Core, `POST /api/gateway/evals/run` proxies the dataset run (including opti
 `evaluators` and Core-local `code_evaluators`). `GET /api/gateway/evaluators` proxies the
 evaluator catalog.
 
+### Online scoring
+
+```
+POST /v1/evals/score
+```
+
+scores an already-completed output without replaying its provider request. Send `response` plus
+optional `prompt`, `model`, typed `vars`, `metadata`, `expected`, assertions, and evaluator ids. Pass
+`latency_ms` and `cost_micro_usd` when the measurements came from an external trace; latency and cost
+assertions use those submitted measurements. The request body is capped at 512 KiB and the submitted
+response is bounded to 256 KiB; expensive
+Levenshtein comparisons skip oversized inputs. Model-graded assertions may make an explicit second judge
+call through the normal Gateway pipeline. Core exposes the owner-routed equivalent at
+`POST /api/gateway/evals/score`, so desktop clients never need the Gateway admin key.
+
+### Bounded red-team campaigns
+
+Core also exposes a local Promptfoo-style security campaign:
+
+```
+POST /api/gateway/redteam/run
+```
+
+The request accepts an agent id, an optional model, and an optional closed list of strategy ids.
+When the list is omitted, Core runs ten server-owned probes covering `prompt_injection`,
+`jailbreak`, `pii_exfiltration`, `tool_misuse`, `toxic_output`, system-prompt and indirect
+injection, SQL and shell injection, and bias/fairness. Each probe is scored through the existing
+Gateway evaluator catalog and returns a `protected` boolean plus bounded evaluator detail. Unknown
+strategy ids are rejected. The tool-misuse probe is text-only; the campaign never executes a real
+tool. Because the probes are provider-backed, they use the normal Gateway authentication, policy,
+budget, and audit path.
+
+The desktop and Activity Companion render this as **Security sweep**. The CLI exposes the same
+contract as `ryu redteam <agent-id> [model] --json`; `tools/check-observability-gate.ts` can fail CI
+when `summary.needs_attention` is non-zero or an evaluation aggregate is below a supplied threshold.
+
 <Callout type="warn">
-  Dataset runs are sequential and synchronous. A multi-model run with `llm_judge` fans out
+  Dataset runs are bounded and synchronous. A multi-model run with `llm_judge` fans out
   `models * cases * (1 + judge_calls)` provider calls, all under Core's 120s proxy timeout, so a large
-  matrix can time out at the proxy even though no field is dropped. Keep matrices small.
+  matrix can time out at the proxy even though no field is dropped. Use `max_concurrency`, `timeout_ms`,
+  and `repeat` deliberately.
 </Callout>
 
 ## Evaluator catalog
@@ -172,6 +236,11 @@ Two blank-slate evaluators let you create your own:
 Custom evaluators follow the same `inline`/`offline` capability pattern. A code evaluator that
 needs filesystem or network access is offline-only; one that just parses JSON can be inline.
 
+Promptfoo-style JavaScript assertions can use the injected `output`, `input`, `expected`, `vars`, and
+`context` names, and may return a boolean, numeric score, or `{ score, pass, reason }` result. Ryu
+executes these forms in Core's deny-all sandbox and reports `executed: false` when the required
+runtime is unavailable.
+
 ### Binding an evaluator
 
 Evaluators are bound to a firewall scope through `FirewallConfig.evaluators`, a list of `EvaluatorBinding` entries that cascade node → org → agent with the same union-plus-lock semantics as the firewall dials (see [Hierarchical policy resolution](/docs/gateway/security)).
@@ -195,19 +264,33 @@ catalog entry remains the honesty signal for what a surface may claim is live.
 ## Audit
 
 The audit log (`crates/gateway/audit/src/lib.rs`, `AuditLogger`) records every model call to a SQLite
-store, alongside sandbox exec events and identity-vault credential reads. Writes go to a background OS
+store, alongside sandbox exec events and Passport credential reads. Writes go to a background OS
 thread over a bounded channel, so the async request path never blocks on disk I/O; reads use a
 separate query-only connection under WAL mode. The store is off when `AuditConfig.enabled` is false,
 in which case writes are dropped and queries return empty.
 
 ### DB path
 
-The default path is resolved by `dirs::data_local_dir()`:
+When `RYU_DIR` is set, the default path is `$RYU_DIR/audit.db`. Launching Core
+and its managed Gateway with this override keeps audit rows in the selected
+node data directory. If `RYU_DIR` is unset, the Gateway keeps the platform default:
 
-- Linux/macOS - `~/.local/share/ryu/audit.db` (respects `$XDG_DATA_HOME`)
+- Linux - `~/.local/share/ryu/audit.db` (respects `$XDG_DATA_HOME`)
+- macOS - `~/Library/Application Support/ryu/audit.db`
 - Windows - `%LOCALAPPDATA%\ryu\audit.db`
 
-Override with `db_path` under `[audit]` in `gateway.toml`.
+An explicit `db_path` under `[audit]` in `gateway.toml` overrides the defaults.
+Core-managed Gateway children receive the runtime `RYU_AUDIT_DB_PATH` value for
+the active Core data directory; that profile-isolation override wins for the
+child and is never written back to `gateway.toml`.
+
+### Retention
+
+Local audit storage is bounded automatically when the Gateway opens. The default policy keeps 90 days
+and at most 1,000,000 rows. Set `RYU_AUDIT_RETENTION_DAYS=0` or `RYU_AUDIT_MAX_ROWS=0` to disable one
+bound, or set a positive value to choose a different bound. Owners can run the same maintenance pass
+through `POST /v1/audit/prune` (or Core's `POST /api/gateway/audit/prune`); the endpoint only applies
+the configured bounds and never accepts SQL or a path.
 
 ### Record schema
 
@@ -267,6 +350,12 @@ raw-row limit. Core exposes the owner-only proxy at
 `GET /api/gateway/audit/usage` and returns a fail-soft `reachable` status when
 the Gateway is unavailable.
 
+The signed-in organization aggregation view is a read-only projection of the
+latest gateway reports. It presents gateway count, request/error/token/cost
+totals as KPI cards, ranks gateway cost and provider eval scores as horizontal
+bar charts, and keeps the recent audit rows below the charts. The projection
+does not become a second measurement or billing source.
+
 This endpoint is master-key only. Audit data is tenant-wide and sensitive, so a per-tenant key cannot
 read it. The one exception is no-auth mode from a loopback peer, and even that loopback trust is
 withdrawn when [mesh](/docs/core/node-and-presence) is enabled (a tailnet peer can appear as
@@ -302,10 +391,25 @@ columns. An agent's **Agent passport** combines its read-only identity/configura
 the latest organization activity and the Gateway's redacted execution rows. Run history remains the
 place to open the full persistent transcript for a correlated session.
 
-<Callout type="warn">
-  The audit log records and the eval runner scores, but there is no built-in retention, rotation, or
-  alerting on this data yet.
-</Callout>
+## Local versus hosted capabilities
+
+Ryu's parity target is the portable observe → evaluate → secure workflow: correlated traces, prompt and
+model experiments, deterministic and model-assisted scoring, custom sandboxed evaluators, human review,
+facets/views, exports, online scoring, red-team probes, CI gates, and local retention. Ryu keeps these
+records on the node by default and routes provider calls through its own Gateway.
+
+The following are hosted-service boundaries rather than missing local behavior:
+
+| Hosted capability | Ryu behavior |
+|---|---|
+| Vendor-managed multi-tenant storage, cloud search, and SaaS uptime | Node-local SQLite stores with explicit Core/Gateway ACLs and bounded retention |
+| Vendor account billing, hosted sharing links, and organization administration | Ryu account, node, project, and existing sharing/ACL surfaces; no claim of Braintrust or Promptfoo Cloud tenancy |
+| Vendor-managed enterprise SSO/compliance contracts and proprietary hosted attack generation | Ryu's local auth/RBAC, privacy controls, bounded server-owned security campaign, and provider-neutral adapters |
+| Vendor-specific cloud integrations and managed support | Ryu SDK/API/CLI contracts and self-hosted provider configuration |
+
+These boundaries are deliberate: local Ryu can export reproducible artifacts to a hosted service when an
+operator chooses, but it does not silently send prompts, responses, traces, or secrets to an external
+vendor.
 
 <Callout type="info">
   The Gateway records tokens, cost, and quality. Core records sequencing and latency. The two are

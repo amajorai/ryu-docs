@@ -1,0 +1,562 @@
+---
+title: "Connect API"
+description: "Use one tenant-scoped edge for MCP, Skills, tools, and Composio"
+tags: ["connect", "api", "mcp", "skills", "tools", "composio", "standalone"]
+---
+
+The standalone Connect API uses a tenant-scoped bearer token on routes
+under `/v1` and `/mcp`, except the signed Composio webhook ingress described
+below. `GET /health` is public and reports which upstream lanes
+are configured without disclosing URLs, keys, or provider state.
+
+`POST /v1/composio/execute` is a native-only execution endpoint. It accepts the
+same `operation: "execute"`, `toolId`, and `body` as native `/v1/composio`, plus
+an optional `expectedAccountId`. That field is a constraint, not an account
+selector: it must equal the tenant's assigned account. A mismatch is rejected
+before contacting Composio. The native-only endpoint returns unavailable in
+compatibility mode instead of forwarding back to Core.
+
+`GET /v1/composio/tools` returns only the authenticated tenant's configured
+Composio tool grants. It is native-only and does not contact the provider to
+discover tools from other accounts. Unconfigured compatibility mode returns
+unavailable instead of forwarding this request.
+
+## Native trigger management
+
+Connect creates provider trigger instances for active Connect-linked accounts.
+All trigger management endpoints require the tenant's separate management bearer;
+runtime tool and event-consumer tokens are rejected.
+
+| Endpoint | Request | Result |
+|---|---|---|
+| `POST /v1/composio/triggers` | `{ "triggerSlug": "GMAIL_NEW_GMAIL_MESSAGE", "triggerConfig": {} }` | Local `id`, provider `triggerId`, `triggerSlug`, `connectedAccountId`, `userId`, `authConfigId`, and `status` |
+| `GET /v1/composio/triggers` | No body | `{ "triggers": [...] }`, including pending and deleted records |
+| `DELETE /v1/composio/triggers/{id}` | No body; use the local ID | Same projection with `status: "deleted"` on confirmed deletion |
+| `POST /v1/composio/triggers/{id}/reconcile` | `{ "triggerConfig": {} }` with the generation's original configuration | Same projection after provider-state reconciliation |
+
+`userId` and `authConfigId` are read-only ownership metadata taken from the
+persisted binding, never accepted from request fields. The local `id` identifies
+one generation and changes after deletion and recreation.
+
+Creation also accepts optional `expectedAccountId`, a nonempty string that must
+equal the effective tenant account. A mismatch returns `403` with
+`code: "trigger_denied"` before any provider request or trigger reservation.
+It only constrains the assigned account; it cannot select or override one.
+Invalid types or blank values return `400`. Reconciliation does not accept this
+field because its local ID already identifies the saved generation.
+
+Operators grant exact trigger slugs separately from tools. No grants means no
+creation. Requests cannot choose a tenant, account, user, auth config, project
+credential, version, or webhook URL. Unknown top-level fields are rejected. The
+body limit is 512 KiB and `triggerConfig` is limited to 16,384 serialized
+characters. Composio validates the trigger-specific configuration. Connect does
+not execute agents or workflows; those remain Core responsibilities.
+
+Provision the project webhook subscription before enabling grants: use the
+Connect public HTTPS ingress, V3, and `composio.trigger.message`, with its signing
+secret in the operator secret environment. Connect verifies the configured
+subscription ID, URL, version, event selection, and any returned secret before
+creation. Tenant APIs never create, overwrite, or rotate project subscriptions.
+Tenants sharing a project share this source; use one credential reference per
+project. Created trigger IDs immediately become exact signed ingress bindings,
+without static environment edits. Static bindings cannot override managed
+reservations, including deletion tombstones.
+
+There is one non-deleted generation per tenant and trigger slug. Repeating an
+equivalent active request returns its record without another provider upsert.
+Nested object keys are canonicalized; array order remains significant. Changed
+configuration and pending/deleting generations return `409` on creation. After
+confirmed deletion, ordinary creation allocates a fresh local generation and
+upserts the configured provider trigger. Retained provider IDs can never activate
+another generation: a reused old ID returns `409`, preserving delivery denial.
+Listings return all locally managed records,
+ordered by local ID, bounded to 256 per tenant including tombstones; there is no
+pagination or provider-wide enumeration.
+
+Deletion persists local ingress denial before provider I/O. Failure returns
+`503` and leaves `deleting` durable across restart; retry deletion after fixing
+the provider failure. Confirmed deletion is idempotent. Lost creation responses
+remain `pending`; call the management reconciliation endpoint with the original
+configuration. Connect re-verifies the account and project source, then reads
+provider instances filtered by account, user, auth config, slug and, when known,
+trigger ID. It includes disabled instances and bounds pagination to six pages of
+50 under a 25-second listing deadline. Returned ownership and configuration are
+checked again rather than trusting provider filters. Exactly one matching enabled
+instance can activate a pending generation without another upsert. Ambiguous,
+disabled, or changed instances remain denied; incomplete reads fail with `503`.
+
+Reconciliation of `deleting` recovers an unknown provider ID and deletes it without
+activating delivery. For a known ID, a complete filtered read with no instance
+confirms deletion, including a lost delete response followed by provider `404`.
+An old local ID never addresses a later generation, and late creation responses
+cannot overwrite a deleted generation or its retained provider ID.
+
+Composio does not document an operation-status or generation-fencing contract for
+upsert. If an uncertain create has no visible matching instance, absence cannot
+prove it never ran or will not complete later. Reconciliation returns `409` and
+can be retried; it does not blindly replay upsert or release that unresolved slot.
+Provider-added configuration defaults that prevent an exact match also require
+operator investigation. Confirmed deletion and ordinary recreation are supported.
+Deletion of a reservation without a provider ID records denial and returns
+`409` until reconciliation identifies it. Existing queued events
+and claimed work are not recalled. Local account revocation stops new managed
+ingress.
+
+Success returns `200`; invalid input `400`, wrong credentials `401`, ungranted
+or foreign resources `403`, conflicts `409`, unsupported methods `405`, and
+unavailable provider/configuration `503`. Errors have a stable `code` and the
+standard request-ID header without raw provider diagnostics. Retained lifecycle
+state supplies operation metadata; there is no separate trigger audit feed.
+
+The version-2 trigger store retains ownership, provider IDs, state, and a
+configuration hash, never signing secrets or raw trigger configuration. Future
+schema versions are refused. Version 1 upgrades transactionally without losing
+IDs, ownership, or tombstones. Because old stores retained only an order-dependent
+hash, their first verification requires the original configuration ordering;
+successful verification upgrades that hash to canonical ordering. Preserve SQLite state and its WAL in backups;
+restoring an old snapshot can lose deletion decisions. Disable ingress and
+management access before recovery, reconcile provider state, and prefer rolling
+forward. Core trigger import and automatic uncertain-operation recovery are not
+provided.
+
+Provider contracts follow Composio's official
+[upsert](https://docs.composio.dev/reference/api-reference/triggers/postTriggerInstancesBySlugUpsert),
+[instance listing](https://docs.composio.dev/reference/api-reference/triggers/getTriggerInstancesActive),
+[deletion](https://docs.composio.dev/reference/api-reference/triggers/deleteTriggerInstancesManageByTriggerId),
+and [subscription](https://docs.composio.dev/reference/api-reference/webhook-subscriptions/getWebhookSubscriptionsById)
+APIs.
+
+## Signed trigger delivery
+
+Connect can receive Composio V3 trigger events directly, without Core running.
+Configure `RYU_CONNECT_TRIGGER_BINDINGS` as an array of operator-owned bindings:
+
+```json
+[
+  {
+    "id": "github-updates",
+    "tenantId": "demo",
+    "secretEnv": "COMPOSIO_WEBHOOK_SECRET",
+    "triggerId": "ti_example",
+    "triggerSlug": "GITHUB_COMMIT_EVENT",
+    "connectedAccountId": "ca_example",
+    "userId": "user-example",
+    "authConfigId": "ac_example"
+  }
+]
+```
+
+Use real IDs from the existing Composio trigger and account. Set the named
+environment variable to the webhook subscription's signing secret, and point
+that subscription at your public HTTPS origin plus
+`/v1/webhooks/composio/github-updates`. Select V3 payloads. This setup does not
+create provider trigger instances or automatically migrate Core subscriptions.
+Bindings must refer to configured Connect tenants, and a trigger instance can
+appear only once. Multiple bindings can share the same endpoint `id` when they
+use the same `secretEnv`, allowing one project-wide webhook subscription to
+route several triggers to their assigned tenants. Conflicting secrets for one
+endpoint are rejected. Native trigger delivery cannot be mixed with shared upstream
+compatibility proxies.
+
+The webhook route authenticates the delivery ID, timestamp, and raw body using
+Composio's HMAC signature. It rejects deliveries outside a five-minute window,
+bodies over 512 KiB, and mismatched trigger/account/user/auth-config metadata.
+Only configured `composio.trigger.message` V3 events enter the inbox. Signed
+events for unconfigured triggers or other project event types return HTTP `200`
+with `outcome: "ignored"` and are not stored or dispatched. A configured trigger
+with mismatched ownership metadata is still denied. A missing signing secret
+returns `503`; an invalid signature returns `401`; a binding mismatch returns
+`403`. The payload cannot choose its tenant or the agent that will run.
+
+Accepted events are durably stored before HTTP `200` is returned. Repeated
+delivery IDs with identical raw bodies return `outcome: "duplicate"`; reuse
+with different content returns `409`. A full inbox returns `503`, allowing the
+provider to retry instead of losing the delivery.
+
+An authenticated consumer uses:
+
+| Endpoint | JSON body | Result |
+|---|---|---|
+| `POST /v1/events/claim` | `{ "limit": 10 }` | Up to ten events, each with `deliveryId`, `leaseToken`, and `payload` |
+| `POST /v1/events/renew` | `{ "deliveryId": "...", "leaseToken": "..." }` | `{ "renewed": true }` when the current lease is extended |
+| `POST /v1/events/ack` | `{ "deliveryId": "...", "leaseToken": "..." }` | `{ "acknowledged": true }` when the lease is valid |
+
+The bearer selects the tenant; tenant fields in these requests are rejected.
+Claims lease events for 30 seconds. Renew before expiry during longer handling;
+a successful renewal extends ownership to at least 30 seconds from that request.
+Expired, replaced, acknowledged, and foreign-tenant leases cannot renew. A failed
+renewal is not permission to continue consuming the event.
+An expired lease can be retried, and its old
+token cannot acknowledge a newer lease. Process events idempotently and
+acknowledge only after durable handling: delivery is at least once, not exactly
+once. No Core agent or workflow is started by these endpoints automatically.
+
+Connect stores the inbox in `events.db` under `RYU_CONNECT_DATA_DIR`. The default
+limits are 256 pending events and 25,600 retained records per tenant. Pending
+events are not discarded by retention. Acknowledgment clears the live payload;
+deduplication records remain for 24 hours and are pruned during later ingestion.
+Event payloads are application data stored in SQLite, not encrypted OAuth token
+bundles. Protect the data directory and backups; clearing a row is not secure
+erasure of SQLite pages or backups.
+
+## Core target bindings and consumption
+
+`GET /v1/composio/trigger-types?toolkit=gmail` supplies the authenticated
+tenant's operator-granted trigger types and configuration schemas. It uses the
+assigned toolkit and configured toolkit version, omits ungranted types and
+provider-private fields, and rejects malformed or oversized catalog responses.
+Core's existing trigger picker delegates to this endpoint in remote mode and
+does not require a local Composio provider key.
+
+When Core is configured for Connect, its existing
+`POST /api/composio/triggers/subscribe` endpoint creates the provider instance
+through Connect and saves an owner-scoped agent binding locally. Its existing
+request fields remain `agent_id`, `toolkit`, `trigger_slug`,
+`connected_account_id`, and `config`. The account is a constraint on the
+tenant's assigned account, not an override. Core checks the caller's agent-run
+permission before provider creation.
+
+To attach an already-created Connect trigger, use
+`POST /api/composio/targets` with the Connect management record's `id` (not its
+provider `triggerId`):
+
+```json
+{
+  "connectTriggerId": "00000000-0000-4000-8000-000000000001",
+  "target": { "kind": "workflow", "id": "your-workflow-id" }
+}
+```
+
+Use `kind: "agent"` for an agent target. Core verifies target run permission,
+ownership of the Connect trigger, and the current bound account before saving
+the mapping. Provider user and auth-config identities come from Connect, never
+from the binding request. Repeating the same active binding returns its existing
+Core subscription ID.
+
+Core uses its operator-configured `RYU_CONNECT_USER_MANAGEMENT_TOKENS` mapping
+for management calls and `RYU_CONNECT_USER_TOKENS` for event consumption. The
+authenticated Core user selects the mapping; request bodies do not select a
+user. A personal node uses the explicit `local` mapping. Unresolved users on
+shared nodes are refused.
+
+`GET /api/composio/trigger-subscriptions` lists only the caller's Connect-backed
+targets in remote mode. Deleting one of these Core subscriptions detaches that
+local target and records its removal; it does not delete the independently
+owned provider instance. Use Connect's management API to delete that instance
+when it is no longer needed. Legacy Core rows with unknown ownership are not
+silently adopted into Connect consumption; recreate the authorized binding.
+
+An authenticated caller can request one consumption attempt with
+`POST /api/composio/events/consume` and JSON body `{}`. Core claims one event,
+checks its exact trigger/account/user/auth-config identity against the caller's
+saved targets, checks each target's run permission, and renews its lease while
+handling it. A delivery is acknowledged only after durable completion or a
+persisted human-approval checkpoint. An unknown binding is retained for retry;
+a previously removed binding is acknowledged without starting work.
+
+Connect bindings are managed separately from the workflow definition. Editing
+or resaving a workflow preserves them; explicitly removing the binding or
+deleting the workflow disables its local target. In Connect mode Core does not
+create or delete provider triggers through its legacy Composio client.
+Core project-webhook reconciliation is disabled, and the legacy Core Composio
+webhook endpoint returns `410` rather than executing deliveries outside Connect.
+Existing embedded Composio trigger declarations are not automatically migrated: create
+the provider trigger in Connect and bind its identifier through the target API.
+
+In the Workflows editor, select **Composio event** on a Core configured for
+Connect. Save the workflow first, then enter the existing Connect trigger's ID
+and choose **Bind trigger**. The panel lists this workflow's bindings and lets
+you remove a binding without deleting the provider trigger. A failed request
+stays visible; use **Refresh bindings** to confirm the current state before
+retrying. Hosts without the new binding capability report it as unavailable.
+
+The Companion uses the shared `workflows.connectBindings` read operation and
+the `workflows.bindConnectTrigger` / `workflows.removeConnectBinding` operations.
+Reads require the catalog grant; mutations require the workflow run-state grant.
+Core still verifies user ownership and target permissions. Service credentials
+and addresses never enter the Companion frame.
+
+Retries use stable user/delivery/target execution IDs and existing workflow
+checkpoints. Completed work is not deliberately restarted, and awaiting-input
+work remains in the normal approval flow. Changed or unreadable checkpoints
+are refused. This does not guarantee exactly-once external side effects if a
+process fails between an external action and its checkpoint; handlers and
+downstream APIs should use idempotency keys where available. This endpoint is
+an explicit consumption API; background consumption is separately configured.
+
+### Automatic Core consumption
+
+Set `RYU_CONNECT_EVENT_WORKERS` on Core to an array of owner bindings. It is
+disabled when unset or empty. Each configured owner has one serial worker;
+different owners can progress independently. The existing Connect runtime-token
+mapping must contain that owner. Configuration rejects duplicate owners and
+unknown fields, and supports at most 32 workers.
+
+For an unbound personal Core, explicitly select its local owner:
+
+```json
+[{ "ownerUserId": "local" }]
+```
+
+For a verified user, provide an absolute path to a mounted, short-lived Core
+user JWT. Core rereads and verifies the file before each delivery and requires
+its verified subject to match `ownerUserId`. The file is limited to 16 KiB.
+Your identity system must rotate it before expiry; this worker does not mint,
+refresh, store, or log user credentials. A missing, invalid, expired, or
+wrong-subject JWT pauses consumption without falling back to the local owner.
+Managed or organization-bound nodes reject credential-free local workers.
+
+```json
+[{ "ownerUserId": "user-id", "jwtFile": "/run/secrets/connect-worker.jwt" }]
+```
+
+Workers retain Core's tool-execution and per-target run permissions. Disabled
+Workflows apps and missing agents do not run. Organization policy and target
+permissions are still enforced by Core. Empty inboxes are
+checked every five seconds; failures pause for 30 seconds before retrying.
+Successful deliveries are spaced by at least 500 milliseconds. Permission or
+configuration failures retain the event for retry. Manual consumption may run
+alongside workers: Connect leases prevent simultaneous ownership, and Core's
+durable execution IDs protect completed work from deliberate replay.
+
+## Skills
+
+```sh
+curl -fsS http://127.0.0.1:8094/v1/skills \
+  -H "Authorization: Bearer ${RYU_CONNECT_API_TOKEN}"
+
+curl -fsS http://127.0.0.1:8094/v1/skills/passport-review \
+  -H "Authorization: Bearer ${RYU_CONNECT_API_TOKEN}"
+```
+
+Skill responses contain frontmatter metadata and the hosted `SKILL.md` body;
+they do not contain provider credentials.
+
+## Tools and Composio
+
+Connect also supports native Composio execution for operator-bound accounts.
+The authenticated tenant determines the connected account, provider user ID,
+toolkit version, project credential, and exact tool allowlist. The request
+contains `operation: "execute"`, `toolId`, an optional argument object in `body`,
+and optionally the restrictive `expectedAccountId` constraint; account or
+authentication overrides are rejected. Calls go directly
+from Connect to Composio's pinned HTTPS endpoint with redirects disabled.
+The returned projection contains `successful` and `data`, without provider
+session or diagnostic metadata. Linked-account revocation uses the separate
+management endpoint below; trigger orchestration remains outside this native path.
+
+These actions also appear as `composio.<SLUG>` in native MCP discovery and
+REST search/describe. Execute them through `tools/call` or `/v1/exec/tool`
+under the same tenant restrictions. `kind=composio` filters REST searches.
+Arguments pass through as an object; Composio validates the action-specific
+schema for the configured version. The `composio` namespace is reserved while
+native Composio bindings are configured.
+
+Poll `GET /v1/composio/connection` to read the configured account's
+`connectedAccountId`, `status`, and `active` flag. Connect verifies both account
+ID and provider user ID against the authenticated tenant's binding. An owner
+mismatch is denied. Provider credential state and parameters are omitted;
+unknown statuses report inactive.
+
+An optional `expectedAccountId` query parameter restricts polling to that exact
+account; a mismatch is denied before provider I/O. Pending, canceled, and revoked
+Connect-linked accounts return their stored account ID when one exists, along
+with their inactive local status. In remote mode, Core's existing connection-status
+endpoint uses this constraint and the verified caller's runtime token mapping.
+
+## Composio account linking
+
+`GET /v1/composio/actions/{slug}` describes one permitted tool, using the
+tenant's configured version. The caller cannot override that version. The
+response includes the tool's input schema, toolkit, description, and tags;
+ungranted tools are rejected before a provider request. The shared REST
+`/v1/tools/describe?id=composio.{slug}` exposes the same input schema. Both
+full object schemas and provider parameter maps are normalized as JSON Schema.
+Native MCP listings expose those same versioned input schemas and required
+arguments, rather than a generic object input shape. Metadata lookup failures
+remain errors rather than silently advertising a weaker schema.
+
+`GET /v1/composio/actions` browses granted action metadata with optional
+`toolkit`, substring query `q`, repeated `tags` (all must match), and `limit`
+(1–100, default 50). Provider results are intersected with the tenant's tool
+grants before filtering and projection. Pagination is bounded to six pages with
+one 25-second deadline; an incomplete traversal fails rather than returning a
+misleading partial catalog. Core's action picker forwards through this native
+endpoint in remote mode and does not fall back to its provider key.
+
+Core's unified tool-description endpoint uses these schemas in remote mode,
+including required arguments and the full `parameters` object. It uses the
+verified caller's Connect mapping; denied or unavailable lookups do not fall back
+to a shallow local description. Local in-process descriptions use the explicit
+`local` mapping, consistent with local execution.
+
+`GET /v1/composio/accounts` lists only the authenticated tenant's assigned
+account as `{ id, toolkit, status, active }`, with an optional exact `toolkit`
+filter. The account's toolkit slug is included when supplied by its verified
+provider record. Local pending/canceled/revoked records may not yet have a toolkit
+slug and therefore do not match a nonempty toolkit filter. Unlinked tenants
+return an empty list. This is not a project-wide Composio account listing.
+Core's existing connections list uses this endpoint in remote mode, preserving
+its local access-level decoration without requiring a provider key in Core.
+
+`GET /v1/composio/toolkits` exposes the tenant's assigned integration metadata,
+using its enabled auth configuration or verified connected-account record. It
+does not return auth-config credentials or enumerate another tenant's integrations.
+Core's toolkit picker uses this endpoint in remote mode without a local provider
+key. An unassigned tenant receives an empty catalog.
+
+Core's Composio status endpoint also recognizes a valid Connect mapping for the
+authenticated caller. In remote mode it returns `execution_owner: "connect"`
+and no upstream base URL. `configured` describes that caller's configuration,
+not provider login status or service reachability; unmapped callers report false.
+
+Service-managed linking uses a configured auth config and separate management
+credentials. The Composio project must enable callback identity verification;
+the host application identifies the returning user and completes setup for
+that tenant. Runtime tool credentials cannot perform these management actions.
+
+When using Core as the authenticated host, submit the returned session URI to
+`POST /api/composio/connections/complete` with `{ "sessionUri": "..." }` and
+the normal Core authentication. Core derives the user from that authenticated
+request and uses its separate Connect management-token mapping. User IDs,
+account IDs, and other extra body fields are rejected. The endpoint returns
+verified account metadata, not provider credentials. It does not accept an
+unauthenticated provider redirect as proof of user identity; your callback screen
+must establish the user's Core session before submitting completion.
+
+The shared Core client exposes the same operation:
+
+```ts
+import { completeComposioConnection } from "@ryuhq/core-client/composio";
+
+const account = await completeComposioConnection(target, sessionUri);
+```
+
+Use the authenticated active-node target, including its user JWT where required.
+After completion, refresh the connection list to obtain its current access
+policy; completion metadata is not a new authorization grant.
+
+Desktop recognizes session-only Connect callback handoffs and asks you to choose
+an already configured node before completing the account. It does not connect to
+a node supplied by the link or activate the account automatically. Use the same
+node and signed-in identity that started the login. After an uncertain result,
+check Connections instead of resubmitting the same callback.
+
+For a Desktop handoff, a deployed Web host exposes `/connect/callback` as a
+script-free relay. Configure the Composio project's callback verifier to that
+public HTTPS URL. It accepts only `session_uri` and shows an explicit **Open Ryu**
+link; it neither authenticates the user nor completes the connection itself.
+Desktop performs confirmation and calls the authenticated Core endpoint above.
+The relay loads no analytics, scripts, or remote assets and sends no-store and
+no-referrer headers. Redact callback query strings in deployment access logs.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `POST` | `/v1/composio/link` | `{}` or `{ "expectedToolkit": "gmail" }` | Login URL and pending account ID |
+| `POST` | `/v1/composio/complete` | `{ "sessionUri": "..." }` | Verified active account metadata |
+| `POST` | `/v1/composio/cancel` | `{}` | Canceled pending local setup |
+| `POST` | `/v1/composio/revoke` | `{}` | Revoke a Connect-linked account; management token required |
+
+When `expectedToolkit` is supplied, Connect verifies that its configured auth
+config has that exact toolkit slug and is enabled before creating a login link.
+The constraint cannot select another auth config, provider user, or tenant.
+
+Connect persists setup metadata and account IDs in its own SQLite store. Pending
+setup survives a restart and cannot execute tools. Completion verifies the
+provider user, exact pending account, and configured auth-configuration ID before
+activation. Disabled accounts, disabled auth configurations, and non-active
+provider statuses cannot activate a pending setup. Management keys must
+be distinct from runtime keys. OAuth tokens, link tokens, login URLs, and
+verification session URIs are not persisted.
+
+Store upgrades preserve existing account ownership, pending setup, and operation
+generations. Unsupported future store versions are refused without rewriting the
+store. Back up before upgrading and prefer rolling forward. Manual rollback
+requires disabling runtime credentials and reconciling later link/revocation
+decisions first; restoring an older backup alone can lose a revocation decision.
+
+Creation is not automatically retried: an existing setup returns `409`. If a
+login response was lost, explicitly cancel pending setup before retrying.
+Canceling setup does not revoke an active account at Composio. External project
+configuration and the host's callback sign-in flow must be verified separately.
+
+For accounts linked through Connect, revocation first persists a `revoking`
+state that blocks new runtime calls. It then verifies the bound account's owner
+and auth configuration and requests provider revocation. Only a matching
+`REVOKED` result marks local revocation complete. Provider failure leaves the
+account disabled locally, including after a restart; an explicit retry can
+confirm an already-revoked account. A confirmed revocation permits a new link.
+Canceling cannot undo an in-progress revocation. Calls already sent upstream
+cannot be recalled, and provider revocation is best-effort; unsupported providers
+may require manual removal of access. This endpoint does not delete account
+records or manage statically configured preconnected accounts.
+
+This follows the [Composio v3.1 execution contract](https://docs.composio.dev/reference/api-reference/tools/postToolsExecuteByToolSlug).
+
+When the operator configures Connect's native MCP registrations, Connect owns
+tool discovery and execution. Each registration binds a server ID, endpoint,
+tenant, exact tool-name allowlist, and optional credential environment name.
+Callers see qualified names such as `workspace.search`. The same grants apply
+to MCP `tools/list`/`tools/call` and REST search/describe/execute. A different
+tenant cannot discover or execute those tools. Native execution supports
+`kind: "tool"`; code execution and resume remain outside this native path.
+
+An explicitly empty native registry exposes no tools and does not fall back.
+The following upstream behavior applies when native registrations are absent.
+
+Shared upstream proxy mode is limited to one tenant and cannot be combined with
+native MCP or Composio grants. Invalid combinations refuse startup. Use native
+registrations for tenant-bound tool access; every registration must reference
+a configured tenant.
+
+`/v1/tools/search` and `/v1/tools/describe` forward to Core's unified catalog.
+`/v1/tools/composio`, `/v1/exec/tool`, and `/v1/composio` forward to Gateway
+with the operator-configured Gateway bearer and the authenticated Connect tenant
+stamped as `x-ryu-user-id`.
+
+```sh
+curl -fsS 'http://127.0.0.1:8094/v1/tools/search?q=send%20a%20Slack%20message' \
+  -H "Authorization: Bearer ${RYU_CONNECT_API_TOKEN}"
+
+curl -fsS -X POST http://127.0.0.1:8094/v1/composio \
+  -H "Authorization: Bearer ${RYU_CONNECT_API_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"operation":"capabilities","toolId":"slack"}'
+```
+
+The upstream Gateway remains responsible for allowlists, budgets, audit, and
+Composio credentials. Connect does not make an ungoverned shortcut around it.
+
+## Hosted MCP
+
+`POST /mcp` is the Connect-owned MCP server. It runs without an upstream and
+supports initialization, `resources/list`, and `resources/read` for the same
+hosted Skills available through REST. Resource URIs have the form
+`ryu-skill:///<id>/SKILL.md`. Send `Accept: application/json, text/event-stream`
+and the Connect bearer. This endpoint uses stateless Streamable HTTP and JSON
+responses; it does not allocate persistent sessions.
+
+Connect forwards `POST /mcp/*` JSON-RPC requests to the configured MCP upstream,
+preserving only protocol/session headers and replacing the caller bearer with
+`RYU_CONNECT_MCP_TOKEN` when set. Bodies are bounded at 2 MiB and redirects are
+not followed.
+
+## Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Public lane/readiness report |
+| `GET` | `/v1/skills` | List hosted Skill metadata |
+| `GET` | `/v1/skills/:id` | Read one hosted Skill |
+| `GET` | `/v1/tools/search` | Core tool search proxy |
+| `GET` | `/v1/tools/describe` | Core tool schema proxy |
+| `GET` | `/v1/tools/composio` | Gateway Composio catalog proxy |
+| `POST` | `/v1/exec/tool` | Gateway tool/code execution proxy |
+| `POST` | `/v1/composio` | Gateway Composio operation proxy |
+| `POST` | `/mcp/*` | MCP protocol forwarding |
+| `POST` | `/mcp` | Native Connect MCP initialization and Skill resources |
+
+<DocCard href="/docs/standalone/connect" />
+
+Continue with [Ryu Connect](/docs/standalone/connect) and
+[Standalone services](/docs/standalone).

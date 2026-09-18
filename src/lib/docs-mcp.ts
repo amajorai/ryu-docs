@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createFromSource } from "fumadocs-core/search/server";
 import { z } from "zod";
 
+import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
 import { getLLMText, getPage, getPageByHref, source } from "@/lib/source";
 
@@ -86,16 +87,18 @@ function resolvePage(path: string) {
   if (href && !href.startsWith("/")) {
     href = `/${href}`;
   }
-  href = href.startsWith("/docs") ? href : `/docs${href}`;
+  const parts = href.split("/").filter(Boolean);
+  const locale = isDocsLocale(parts[0]) ? parts.shift() : DEFAULT_DOCS_LOCALE;
+  href = parts[0] === "docs" ? `/${parts.join("/")}` : `/docs${href}`;
 
-  const byHref = getPageByHref(href);
+  const byHref = getPageByHref(href, locale);
   if (byHref?.page) {
     return byHref.page;
   }
   // Fall back to treating the remainder as slugs (version segment is handled by
   // `getPage` itself via `stripDocsVersion`).
   const slugs = href.split("/").filter(Boolean).slice(1);
-  return getPage(slugs);
+  return getPage(slugs, locale);
 }
 
 /**
@@ -130,9 +133,26 @@ export function createDocsServer(): McpServer {
         .string()
         .optional()
         .describe("Filter by a documentation tag (e.g. 'mcp', 'extensions')."),
+      locale: z
+        .string()
+        .optional()
+        .describe("Locale to search (defaults to English)."),
     },
-    async ({ query, limit, tag }) => {
-      const results = await search.search(query, { limit: limit ?? 8, tag });
+    async ({ query, limit, tag, locale }) => {
+      const language = locale ?? DEFAULT_DOCS_LOCALE;
+      if (!isDocsLocale(language)) {
+        return {
+          content: [
+            { type: "text" as const, text: `Unsupported locale: ${language}` },
+          ],
+          isError: true,
+        };
+      }
+      const results = await search.search(query, {
+        limit: limit ?? 8,
+        locale: language,
+        tag,
+      });
       const hits = results.map(toSearchHit);
       const text =
         hits.length === 0
@@ -155,7 +175,7 @@ export function createDocsServer(): McpServer {
       path: z
         .string()
         .describe(
-          "The docs page to read: a URL or path, e.g. '/docs/extend/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
+          "The docs page to read: a URL or path, e.g. '/es/docs/extend/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
         ),
     },
     async ({ path }) => {
@@ -187,10 +207,23 @@ export function createDocsServer(): McpServer {
         .describe(
           "Optional top-level section slug to filter by (e.g. 'start-here', 'mcp', 'develop'). Omit for the whole index.",
         ),
+      locale: z
+        .string()
+        .optional()
+        .describe("Locale to list (defaults to English)."),
     },
-    async ({ section }) => {
+    async ({ section, locale }) => {
+      const language = locale ?? DEFAULT_DOCS_LOCALE;
+      if (!isDocsLocale(language)) {
+        return {
+          content: [
+            { type: "text" as const, text: `Unsupported locale: ${language}` },
+          ],
+          isError: true,
+        };
+      }
       const pages = source
-        .getPages()
+        .getPages(language)
         .filter((page) => !section || page.slugs[0] === section)
         .sort((a, b) => a.url.localeCompare(b.url));
       const lines = pages.map(
@@ -205,7 +238,7 @@ export function createDocsServer(): McpServer {
         content: [
           {
             type: "text" as const,
-            text: `${header}\n${lines.join("\n")}`,
+            text: `${header}\nLocale: ${language}\n${lines.join("\n")}`,
           },
         ],
       };

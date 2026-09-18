@@ -1,12 +1,13 @@
 import type { MetadataRoute } from "next";
 import { isCanonicalDocsPage } from "@/lib/canonical-docs";
+import { DOCS_LANGUAGES, localizedPath } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
 import { source } from "@/lib/source";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const pages = source
-    .getPages()
-    .filter((page) => isCanonicalDocsPage(page.slugs));
+  const pages = DOCS_LANGUAGES.flatMap((locale) =>
+    source.getPages(locale).filter((page) => isCanonicalDocsPage(page.slugs)),
+  );
 
   const docEntries: MetadataRoute.Sitemap = pages.map((page) => ({
     url: `${siteConfig.url}${page.url}`,
@@ -15,12 +16,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: 0.8,
   }));
 
-  return [
-    {
-      url: siteConfig.url,
-      changeFrequency: "weekly",
-      priority: 1,
-    },
-    ...docEntries,
-  ];
+  const homeEntries: MetadataRoute.Sitemap = DOCS_LANGUAGES.map((locale) => ({
+    url: `${siteConfig.url}${localizedPath("/", locale)}`,
+    changeFrequency: "weekly",
+    priority: locale === "en" ? 1 : 0.9,
+  }));
+
+  return [...homeEntries, ...docEntries];
 }

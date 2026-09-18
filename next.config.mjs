@@ -5,18 +5,79 @@ import { createMDX } from "fumadocs-mdx/next";
 
 const withMDX = createMDX();
 const require = createRequire(import.meta.url);
-const docsRouteAliases = require("./docs-route-aliases.json");
+const docsRouteAliasesModule = require("./docs-route-aliases.json");
+const docsRouteAliases = Array.isArray(docsRouteAliasesModule)
+  ? docsRouteAliasesModule
+  : Array.isArray(docsRouteAliasesModule?.default)
+    ? docsRouteAliasesModule.default
+    : [];
+const docsLocalePattern = "en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar";
+const localizedLegacyDocsRedirects = [
+  ["/docs", "/docs/0.4.0/start-here"],
+  ["/docs/using-ryu/recipes", "/docs/learn/cookbook"],
+  ["/docs/using-ryu/recipes/:path*", "/docs/learn/cookbook/:path*"],
+  ["/docs/using-ryu", "/docs/surfaces/desktop"],
+  ["/docs/using-ryu/:path*", "/docs/surfaces/desktop/:path*"],
+  ["/docs/desktop/surfaces", "/docs/surfaces"],
+  ["/docs/desktop", "/docs/surfaces/desktop"],
+  ["/docs/desktop/:path*", "/docs/surfaces/desktop/:path*"],
+  ["/docs/cli", "/docs/surfaces/cli"],
+  ["/docs/cli/:path*", "/docs/surfaces/cli/:path*"],
+  ["/docs/develop", "/docs/extend/develop"],
+  ["/docs/develop/:path*", "/docs/extend/develop/:path*"],
+  ["/docs/integrate", "/docs/extend/integrate"],
+  ["/docs/integrate/:path*", "/docs/extend/integrate/:path*"],
+  ["/docs/mcp", "/docs/extend/mcp"],
+  ["/docs/mcp/:path*", "/docs/extend/mcp/:path*"],
+  ["/docs/skills", "/docs/extend/skills"],
+  ["/docs/skills/:path*", "/docs/extend/skills/:path*"],
+  ["/docs/defaults", "/docs/reference/defaults"],
+  ["/docs/defaults/:path*", "/docs/reference/defaults/:path*"],
+  ["/docs/benchmark", "/docs/reference/benchmark"],
+  ["/docs/benchmark/:path*", "/docs/reference/benchmark/:path*"],
+  ["/docs/cookbook", "/docs/learn/cookbook"],
+  ["/docs/cookbook/:path*", "/docs/learn/cookbook/:path*"],
+  ["/docs/academy", "/docs/learn/academy"],
+  ["/docs/academy/:path*", "/docs/learn/academy/:path*"],
+].map(([source, destination]) => ({
+  source: `/:locale(${docsLocalePattern})${source}`,
+  destination: `/:locale${destination}`,
+  permanent: true,
+}));
 const appRoot = dirname(fileURLToPath(import.meta.url));
 const turbopackAssetLoader = join(appRoot, "turbopack-asset-loader.mjs");
 const transformersWebEntry = join(
   dirname(require.resolve("@huggingface/transformers")),
   "transformers.web.js",
 );
+// Shared checkouts may have a live docs dev server holding `.next/lock`. Keep
+// production verification isolated when explicitly requested without changing
+// the normal deploy output directory.
+const buildDir = process.env.RYU_FUMADOCS_BUILD_DIR || ".next";
+const requestedBuildWorkers = Number(process.env.RYU_FUMADOCS_BUILD_WORKERS);
+const buildWorkers =
+  Number.isInteger(requestedBuildWorkers) && requestedBuildWorkers > 0
+    ? Math.min(requestedBuildWorkers, 8)
+    : undefined;
+const disableBuildCache = process.env.RYU_FUMADOCS_DISABLE_BUILD_CACHE === "1";
+const tsConfigPath = process.env.RYU_FUMADOCS_TS_CONFIG;
 
 /** @type {import('next').NextConfig} */
 const config = {
   // Self-contained server bundle for a lean Docker runtime (apps/fumadocs/Dockerfile).
   output: "standalone",
+  distDir: buildDir,
+  ...(buildWorkers || disableBuildCache
+    ? {
+        experimental: {
+          ...(buildWorkers ? { cpus: buildWorkers } : {}),
+          ...(disableBuildCache
+            ? { turbopackFileSystemCacheForBuild: false }
+            : {}),
+        },
+      }
+    : {}),
+  ...(tsConfigPath ? { typescript: { tsconfigPath: tsConfigPath } } : {}),
   transpilePackages: [
     "@ryu/assistant-widget",
     "@ryu/browser-local-ai",
@@ -31,6 +92,9 @@ const config = {
     },
   },
   webpack(config) {
+    if (disableBuildCache) {
+      config.cache = false;
+    }
     config.module.rules.push({
       test: /\.glb$/i,
       type: "asset/resource",
@@ -43,6 +107,16 @@ const config = {
   reactStrictMode: true,
   async rewrites() {
     return [
+      {
+        source:
+          "/:locale(en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar)/docs/:path*.md",
+        destination: "/llms.mdx/docs/:locale/:path*",
+      },
+      {
+        source:
+          "/:locale(en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar)/docs/:path*.mdx",
+        destination: "/llms.mdx/docs/:locale/:path*",
+      },
       {
         source: "/docs/:path*.md",
         destination: "/llms.mdx/docs/:path*",
@@ -59,7 +133,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.3.1/start-here",
+        destination: "/docs/0.4.0/start-here",
         permanent: false,
       },
       // Keep compatibility redirects and canonical sitemap exclusions together.
@@ -72,6 +146,16 @@ const config = {
         {
           source: `/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/${from}`,
           destination: `/docs/:version/${to}`,
+          permanent: true,
+        },
+        {
+          source: `/:locale(${docsLocalePattern})/docs/${from}`,
+          destination: `/:locale/docs/${to}`,
+          permanent: true,
+        },
+        {
+          source: `/:locale(${docsLocalePattern})/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/${from}`,
+          destination: `/:locale/docs/:version/${to}`,
           permanent: true,
         },
       ]),
@@ -210,6 +294,7 @@ const config = {
         destination: "/docs/learn/academy/:path*",
         permanent: true,
       },
+      ...localizedLegacyDocsRedirects,
     ];
   },
 };

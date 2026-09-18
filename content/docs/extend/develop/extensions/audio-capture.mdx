@@ -1,0 +1,78 @@
+---
+title: Audio capture and speech history
+description: Use device-owned recording and Shadow speech history from a Companion app.
+---
+
+Apps use the host bridge to record a device's microphone. They never receive a
+device file path, microphone stream, or node credential. Capture stays on the
+physical device; transcription can use the selected Ryu node.
+
+See [Native bridges](/docs/extend/develop/extensions/native-bridges) for host availability
+and device permission behavior.
+
+See [Companion UI](/docs/extend/develop/extensions/companion-ui) for the host
+surface contract and [Life Recorder](/docs/apps/life-recorder) for a user-facing
+app that combines speech capture, transcription, and private recall.
+
+| Operation | Required approved grant |
+| --- | --- |
+| `media.recording` | `media:record` |
+| `media.transcribe` | `media:transcribe` |
+| `timeline.transcripts` | `timeline:speech` |
+
+`timeline:speech` permits speech history without granting access to captured
+screens or other timeline lanes. Declaring a grant in a manifest does not
+approve it. The host checks approved grants before dispatch, and starting a
+microphone still requires the device's microphone permission.
+
+## Recording lifecycle
+
+Call `window.ryu.media.recording({ action: "status" })` first. A host without a
+recording implementation returns `available: false`. A supported host returns
+`state: "idle"`, `"recording"`, or `"pending"`, plus an opaque `id` when a session
+exists. `background` and `continuous` describe that host's capture behavior.
+
+| Action | Input | Behavior |
+| --- | --- | --- |
+| `start` | `{ action: "start" }` | Request microphone access and start recording. Repeated calls return the existing session. |
+| `stop` | `{ action: "stop", id }` | Stop capture and preserve audio awaiting processing. |
+| `read` | `{ action: "read", id }` | Return pending audio as a WAV data URL. Reading does not delete it. |
+| `ack` | `{ action: "ack", id: chunkId }` | On continuous hosts, delete an acknowledged chunk after its transcript has been saved. |
+| `rewind` | `{ action: "rewind", id, seconds: 15 }` | On continuous hosts, return recent audio without ending the session. `300` seconds is also supported. |
+| `discard` | `{ action: "discard", id }` | Stop a session and delete its remaining temporary audio. Ask the user to confirm this destructive action. |
+
+Continuous iPhone capture returns `pendingChunks`, `chunkId`, `chunkStartedAt`,
+and `durationMs`. Native code rotates minute-long files while JavaScript is
+suspended. Desktop capture returns a whole recording and stops after five
+minutes. Whole-recording hosts do not support `ack` or `rewind`.
+
+Process audio with `media.transcribe({ audio, filename: "recording.wav", detailed: true })`.
+Persist the result through the existing storage or Spaces bridge before
+acknowledging audio. Track each `chunkId` durably so a lost acknowledgement can
+be retried without duplicating text. A failed transcription must leave audio
+available. Use `discard` after successful persistence on whole-recording hosts.
+
+The native host provides a stop control outside app WebViews, so the user can
+stop a microphone even when an app or its node is unavailable. An app must never
+present a network failure as successful capture or silently restart a terminated
+recording. Audio and transcript contents should not appear in logs.
+
+## Speech history
+
+`window.ryu.timeline.transcripts({ start, end, limit, offset })` reads existing
+Shadow transcripts on the host's physical computer. Island additionally checks
+its context-reading consent. A phone reads its own microphone recordings rather
+than pretending a remote node's audio came from the phone.
+
+`start` and `end` are RFC 3339 UTC timestamps spanning at most one day. `limit`
+is between 1 and 500; `offset` starts at zero and cannot exceed 10,000. The response contains `segments`
+and `nextOffset`. A `truncated: true` response means the pagination bound was reached;
+query a shorter range instead. Keep the time range fixed when following pages and deduplicate
+by segment ID if transcription is still catching up.
+
+Each segment contains `id`, `startedAt`, `endedAt`, `text`, and `timing`.
+Shadow returns whole overlapping windows with `timing: "window"`; consumers
+must not imply exact word-level clipping at a rewind boundary.
+
+Use `createResourceId()` from `@ryuhq/core-client/ids` for stored record IDs in
+sandboxed WebViews, where `crypto.randomUUID()` may be unavailable.

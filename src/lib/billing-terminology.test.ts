@@ -29,3 +29,22 @@ test("billing docs record the pinned Polar API contract", async () => {
 	expect(credits).toContain("`2026-04`");
 	expect(credits).toContain("Polar-Version");
 });
+
+test("billing docs state the managed-server plan boundary", async () => {
+	const pages = await Promise.all([
+		readPage("hosted-agents.mdx"),
+		readPage("index.mdx"),
+		readPage("limits.mdx"),
+		readPage("metering.mdx"),
+		readPage("plan-changes.mdx"),
+	]);
+	const content = pages.join("\n");
+
+	expect(content).toContain(
+		"Business, Teams, and Teams Lite can buy additional managed servers"
+	);
+	expect(content).toContain("active Enterprise agreement");
+	expect(content).toMatch(
+		/Pro and Max individual plans cannot buy or upgrade managed-server\s+capacity/
+	);
+});

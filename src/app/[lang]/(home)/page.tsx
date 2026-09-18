@@ -8,6 +8,7 @@ import {
 import { FeaturedRail, Hero, Realms } from "@/components/home/hero";
 import { PlatformMap } from "@/components/home/platform-map";
 import { Products } from "@/components/home/products";
+import { DOCS_LANGUAGES } from "@/lib/i18n";
 
 export default function HomePage() {
   return (
@@ -28,4 +29,8 @@ export default function HomePage() {
       <FeaturedRail />
     </main>
   );
+}
+
+export function generateStaticParams() {
+  return DOCS_LANGUAGES.map((lang) => ({ lang }));
 }

@@ -35,6 +35,11 @@ const CATEGORY_LABELS = new Map([
   ["Media & Voice", "Media & Voice"],
 ]);
 
+// App directories are satellite-owned and may retain a historical folder name
+// after a product identity changes. Public docs follow the manifest identity so
+// a renamed app does not leave a second, stale page under its old name.
+const PAGE_SLUG_ALIASES = new Map([["reelfarm", "studio"]]);
+
 const TOOL_BACKEND_LABEL = new Map<string, string>([
   ["http", "HTTP"],
   ["command", "CLI command"],
@@ -142,6 +147,10 @@ type CatalogEntry = {
   manifest: Manifest;
   category?: string;
 };
+
+function pageSlug(entry: { dir: string }): string {
+  return PAGE_SLUG_ALIASES.get(entry.dir) ?? entry.dir;
+}
 
 export type CatalogState = {
   builtInIds: Set<string>;
@@ -477,7 +486,7 @@ function catalogNavigation(
       ? ` In the same category, compare ${related
           .map(
             ({ dir, manifest }) =>
-              `[${cell(manifest.name ?? dir)}](/docs/${base}/${dir})`,
+              `[${cell(manifest.name ?? dir)}](/docs/${base}/${pageSlug({ dir })})`,
           )
           .join(", ")}.`
       : "";
@@ -590,6 +599,19 @@ function runnablesSection(runnables: Runnable[] | undefined): string {
   return lines.join("\n");
 }
 
+function appearanceSection(m: Manifest, base: CatalogBase): string {
+  if (base !== "apps" || m.id !== "@ryu/browser") {
+    return "";
+  }
+  return [
+    "",
+    "## Appearance bridge",
+    "",
+    "The desktop Browser panel sends the resolved Desktop appearance snapshot to the browser chrome through the authenticated sidecar bridge. The shell follows the selected light or dark palette, contrast colors, interface and heading fonts, locale, and display time zone live. History labels use that display time zone and locale; appearance tokens are never injected into websites opened in browser tabs.",
+    "",
+  ].join("\n");
+}
+
 function providesSection(provides: Provide[] | undefined): string {
   if (!provides || provides.length === 0) {
     return "";
@@ -689,26 +711,58 @@ const CONTRIBUTE_TITLES: Record<string, string> = {
   pi_extensions: "Pi extensions",
 };
 
+const DESKTOP_SHELL_CONTRIBUTIONS = new Set([
+  "dock_panels",
+  "live_activities",
+  "sidebar_buttons",
+  "sidebar_sections",
+  "store_tabs",
+  "views",
+]);
+
+function hasCompanionRunnable(m: Manifest): boolean {
+  return (m.runnables ?? []).some((r) => r.kind === "companion");
+}
+
+function hasDesktopShellContribution(m: Manifest): boolean {
+  if (hasCompanionRunnable(m)) {
+    return true;
+  }
+  return Object.entries(m.contributes ?? {}).some(
+    ([key, items]) =>
+      DESKTOP_SHELL_CONTRIBUTIONS.has(key) &&
+      Array.isArray(items) &&
+      items.length > 0,
+  );
+}
+
 function contributesSection(
   contributes: Manifest["contributes"] | undefined,
   base: CatalogBase,
+  desktopShell = false,
+  companion = false,
 ): string {
   const entries = Object.entries(contributes ?? {}).filter(
     ([key, items]) =>
-      !(base === "apps" && key === "sidebar_buttons") &&
+      !(base === "apps" && companion && key === "sidebar_buttons") &&
       Array.isArray(items) &&
       items.length > 0,
   );
   if (entries.length === 0 && base !== "apps") {
     return "";
   }
+  if (entries.length === 0 && base === "apps" && !desktopShell) {
+    return "";
+  }
   const lines: string[] = ["", "## UI it contributes"];
-  if (base === "apps") {
+  if (base === "apps" && desktopShell) {
     lines.push(
       "",
-      "### Apps shelf",
+      companion ? "### Apps shelf" : "### Desktop shell",
       "",
-      "When enabled, this app appears as one icon tile in the desktop sidebar's Apps shelf. Use sidebar sections for the app's record lists; feature navigation stays inside the Companion.",
+      companion
+        ? "When enabled, this app appears as one icon tile in the desktop sidebar's Apps shelf. Use sidebar sections for the app's record lists; feature navigation stays inside the Companion."
+        : "This app contributes the declared desktop shell surfaces below; the host owns navigation, focus, authentication, and theme behavior.",
     );
   }
   for (const [key, items] of entries) {
@@ -827,10 +881,17 @@ export function buildPage(
     base === "apps"
       ? {
           "@ryu/activity": "activity",
+          "@ryu/autopilot": "autopilot",
           "@ryu/checks": "checks",
+          "@ryu/projects": "projects",
+          "@ryu/security": "security",
+          "@ryu/slides": "slides",
           "@ryu/video-studio": "video-studio",
+          "@ryu/life-recorder": "life-recorder",
         }[m.id ?? ""]
-      : undefined;
+      : {
+          "@ryu/writing-style": "writing-style",
+        }[m.id ?? ""];
   const authoredGuide = authoredGuideName
     ? (() => {
         const guidePath = path.join(
@@ -870,6 +931,11 @@ export function buildPage(
     body.push("", catalogNavigation(base, related), "");
   }
 
+  const appearance = appearanceSection(m, base);
+  if (appearance) {
+    body.push(appearance);
+  }
+
   const runnables = runnablesSection(m.runnables);
   const capabilitySection =
     providesSection(m.provides) + mcpSection(m.mcp_servers);
@@ -885,7 +951,14 @@ export function buildPage(
   }
 
   body.push(permissionsSection(m));
-  body.push(contributesSection(m.contributes, base));
+  body.push(
+    contributesSection(
+      m.contributes,
+      base,
+      hasDesktopShellContribution(m),
+      hasCompanionRunnable(m),
+    ),
+  );
   body.push(requiresSection(m));
   body.push(engineSection(m));
   body.push(activationSection(m));
@@ -952,7 +1025,7 @@ function realmMeta(
   for (const group of groups) {
     pages.push(`---${group.category}---`);
     for (const entry of group.entries) {
-      pages.push(entry.dir);
+      pages.push(pageSlug(entry));
     }
   }
   return `${JSON.stringify(
@@ -990,7 +1063,7 @@ function realmIndex(
     lines.push("", `## ${group.category}`, "");
     lines.push("<Cards>");
     for (const entry of group.entries) {
-      lines.push(`  <DocCard href="/docs/${base}/${entry.dir}" />`);
+      lines.push(`  <DocCard href="/docs/${base}/${pageSlug(entry)}" />`);
     }
     lines.push("</Cards>", "");
   }
@@ -1072,7 +1145,7 @@ async function writeRealm(opts: {
       related,
       opts.catalogState,
     );
-    await writeFile(path.join(opts.outDir, `${entry.dir}.mdx`), page);
+    await writeFile(path.join(opts.outDir, `${pageSlug(entry)}.mdx`), page);
   }
 
   console.log(

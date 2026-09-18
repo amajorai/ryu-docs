@@ -450,6 +450,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EvalRunResponse"
+  /v1/evals/score:
+    post:
+      tags: [Evals]
+      summary: Score a completed output
+      description: >-
+        Scores an already-completed production response without replaying its
+        provider call. Deterministic assertions run locally; model-graded
+        assertions may make an explicit judge call through the normal pipeline.
+      operationId: scoreOnline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OnlineScoreRequest"
+      responses:
+        "200":
+          description: Online score and per-assertion results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnlineScoreResponse"
   /v1/evaluators:
     get:
       tags: [Evals]
@@ -591,6 +613,9 @@ paths:
         - { name: limit, in: query, schema: { type: integer } }
         - { name: request_id, in: query, schema: { type: string } }
         - { name: session_id, in: query, schema: { type: string } }
+        - { name: agent_id, in: query, schema: { type: string } }
+        - { name: event_type, in: query, schema: { type: string } }
+        - { name: widget_instance_id, in: query, schema: { type: string } }
       responses:
         "200":
           description: Matching audit entries.
@@ -603,6 +628,25 @@ paths:
                   entries:
                     type: array
                     items: { $ref: "#/components/schemas/AuditEntry" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/audit/prune:
+    post:
+      tags: [Audit]
+      summary: Apply local audit retention
+      description: Owner-only maintenance pass using the configured retention bounds.
+      operationId: pruneAudit
+      responses:
+        "200":
+          description: Number of rows removed and active bounds.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kind: { type: string, const: retention }
+                  deleted_rows: { type: integer }
+                  retention_days: { type: integer, nullable: true }
+                  max_rows: { type: integer, nullable: true }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/exec/audit:
     post:
@@ -1035,7 +1079,21 @@ components:
       type: object
       properties:
         model: { type: string, default: gpt-4o-mini }
+        models: { type: array, items: { type: string }, maxItems: 32 }
         agent_id: { type: string }
+        judge_model: { type: string }
+        system_prompt: { type: string }
+        system_messages:
+          type: array
+          items: { $ref: "#/components/schemas/EvalMessage" }
+        max_concurrency: { type: integer, minimum: 1, maximum: 32, default: 1 }
+        timeout_ms: { type: integer, minimum: 100, maximum: 120000 }
+        repeat: { type: integer, minimum: 1, maximum: 20, default: 1 }
+        cache: { type: boolean, default: false }
+        tags: { type: object, additionalProperties: { type: string } }
+        prefix: { type: string }
+        suffix: { type: string }
+        prompt_id: { type: string }
         evaluators:
           type: array
           description: >-
@@ -1048,13 +1106,77 @@ components:
           items:
             type: object
             properties:
+              id: { type: string }
+              description: { type: string }
               prompt: { type: string }
               expected: { type: string }
+              context: { description: Optional reference/context payload for faithfulness and factuality checks. }
+              provider: { type: string }
+              providers: { type: array, items: { type: string } }
+              provider_output: { description: Precomputed provider output; skips the provider call. }
+              vars: { type: object, additionalProperties: true }
+              metadata: { type: object, additionalProperties: true }
+              options: { type: object, additionalProperties: true }
+              assertions:
+                type: array
+                items: { $ref: "#/components/schemas/EvalAssertion" }
               evaluators:
                 type: array
                 description: Per-case registry evaluator ids, unioned with the run-level set.
                 items: { type: string }
             required: [prompt]
+    EvalMessage:
+      type: object
+      properties:
+        role: { type: string, enum: [system, user, assistant] }
+        content: { type: string }
+      required: [role, content]
+    EvalAssertion:
+      type: object
+      properties:
+        kind: { type: string }
+        value: { type: string }
+        rubric: { type: string }
+        assertions:
+          type: array
+          items: { $ref: "#/components/schemas/EvalAssertion" }
+        threshold: { type: number, format: float, minimum: 0, maximum: 1 }
+        weight: { type: number, format: float, minimum: 0 }
+        provider: { type: string }
+        transform: { type: string }
+        metric: { type: string }
+        config: { type: object, additionalProperties: true }
+        not: { type: boolean, description: Negate the assertion verdict and score. }
+      required: [kind]
+      additionalProperties: true
+    OnlineScoreRequest:
+      type: object
+      properties:
+        id: { type: string }
+        description: { type: string }
+        agent_id: { type: string }
+        model: { type: string, default: gpt-4o-mini }
+        prompt: { type: string }
+        response: { description: Completed response or an OpenAI-shaped provider payload. }
+        expected: { type: string }
+        context: { description: Optional reference/context payload for faithfulness and factuality checks. }
+        vars: { type: object, additionalProperties: true }
+        metadata: { type: object, additionalProperties: true }
+        latency_ms: { type: integer, minimum: 0 }
+        cost_micro_usd: { type: integer, minimum: 0 }
+        threshold: { type: number, format: float, minimum: 0, maximum: 1 }
+        assertions:
+          type: array
+          items: { $ref: "#/components/schemas/EvalAssertion" }
+        evaluators: { type: array, items: { type: string } }
+      required: [response]
+    OnlineScoreResponse:
+      type: object
+      properties:
+        kind: { type: string, const: online_score }
+        scored_at: { type: string, format: date-time }
+        score: { type: object, additionalProperties: true }
+      required: [kind, scored_at, score]
     Evaluator:
       type: object
       description: >-
@@ -1141,9 +1263,13 @@ components:
         project_id: { type: string }
         model: { type: string }
         provider: { type: string }
-        prompt_tokens: { type: integer }
-        completion_tokens: { type: integer }
-        cost_usd: { type: number, format: double }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cost_micro_usd: { type: integer, nullable: true }
+        event_type: { type: string }
+        feature: { type: string, nullable: true }
+        managed_inference: { type: boolean }
+        widget_instance_id: { type: string, nullable: true }
         error: { type: string }
     CommunitySavings:
       type: object

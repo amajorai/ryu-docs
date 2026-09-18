@@ -10,4 +10,14 @@ describe("docs metadata", () => {
     expect(siteConfig.keywords).toContain("AI agent deployment platform");
     expect(siteConfig.keywords).toContain("AI agents for startups");
   });
+
+  it("publishes locale-aware canonical and Open Graph metadata", () => {
+    const metadata = generateMetadata("es");
+
+    expect(metadata.alternates?.canonical).toBe("/es");
+    expect(metadata.alternates?.languages?.en).toBe("/");
+    expect(metadata.alternates?.languages?.es).toBe("/es");
+    expect(metadata.openGraph?.locale).toBe("es");
+    expect(metadata.openGraph?.url).toBe("/es");
+  });
 });

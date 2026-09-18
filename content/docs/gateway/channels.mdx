@@ -82,7 +82,9 @@ current channel adapters.
   Telegram uses long polling by default and can switch to an authenticated webhook. Slack uses
   Socket Mode, while Discord keeps an identified Gateway WebSocket with heartbeats and an online
   presence. BlueBubbles receives webhook events from the Mac server and sends through its REST API.
-  Ryu's liveness dot reports the adapter's control-plane heartbeat for all four.
+  Ryu's liveness dot reports the adapter's control-plane heartbeat for all four. Webhook callbacks
+  are claimed by their provider event id before acknowledgement; duplicate or in-flight deliveries
+  do not create a second turn.
 </Callout>
 
 ## How a bot turn works
@@ -106,7 +108,10 @@ flowchart LR
 ```
 
 1. The platform delivers a message to the channel's adapter. Webhook deliveries are authenticated
-   before parsing; OpenWA deliveries are also deduplicated by their idempotency key.
+   before parsing and durably claimed by a bounded provider-delivery ledger. Telegram uses
+   `update_id`, WhatsApp uses its `wamid`, OpenWA uses its message/delivery id, and BlueBubbles
+   uses its message `guid`. A callback that cannot be accepted returns a retryable failure instead
+   of acknowledging work that was never queued.
 2. The adapter normalizes it and POSTs to `POST <core_url>/api/channels/run` with the channel's
    `agent_id` xor `team_id`. Store-backed channel records add their own channel identity to the
    platform chat id, so two bot records never accidentally share a transcript. Each sender keeps a
@@ -117,6 +122,13 @@ flowchart LR
 4. The model calls still flow Core to Gateway, so routing, firewall, budgets, and audit stay on the
    path.
 5. The reply is sent back via the platform's send API.
+
+The shared delivery path retries a failed outbound attempt locally up to three times with backoff.
+Completed delivery ids are retained for 30 days, so a provider retry after a lost response is
+acknowledged without another model call or visible reply. For the Core session path, the same key
+is sent as `idempotencyKey` to `POST /api/channels/run`; Core replays the persisted reply and
+assistant message ids when it already finished that turn. The legacy model-only pipeline still
+deduplicates inbound provider callbacks, but does not provide Core's persisted reply replay.
 
 A channel with neither `agent_id` nor `team_id` falls back to the legacy gateway-pipeline path (a
 single non-streaming call with the channel's configured model and system prompt); the agent/team

@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect } from "react";
-import { DOCS_VERSION } from "@/lib/docs-version";
+import {
+  DOCS_VERSION,
+  docsPathForLocale,
+  isVersionSegment,
+} from "@/lib/docs-version";
+import {
+  DEFAULT_DOCS_LOCALE,
+  isDocsLocale,
+  localeFromPathname,
+} from "@/lib/i18n";
 
 interface DocsWebMcpToolSpec {
   annotations: { readOnlyHint: true; untrustedContentHint: true };
@@ -49,6 +58,10 @@ export const DOCS_WEBMCP_TOOL_SPECS: DocsWebMcpToolSpec[] = [
           maximum: 10,
           description: "Optional result count, from 1 to 10.",
         },
+        locale: {
+          type: "string",
+          description: "Optional locale such as 'es' or 'ar'.",
+        },
       },
       required: ["query"],
       additionalProperties: false,
@@ -66,7 +79,7 @@ export const DOCS_WEBMCP_TOOL_SPECS: DocsWebMcpToolSpec[] = [
         path: {
           type: "string",
           description:
-            "A docs path such as '/docs/0.2.3/extend/mcp/webmcp' or 'extend/mcp/webmcp'.",
+            "A docs path such as '/es/docs/0.2.3/extend/mcp/webmcp' or 'extend/mcp/webmcp'.",
         },
       },
       required: ["path"],
@@ -85,6 +98,10 @@ export const DOCS_WEBMCP_TOOL_SPECS: DocsWebMcpToolSpec[] = [
         section: {
           type: "string",
           description: "Optional top-level docs section slug.",
+        },
+        locale: {
+          type: "string",
+          description: "Optional locale such as 'es' or 'ar'.",
         },
       },
       additionalProperties: false,
@@ -175,6 +192,18 @@ async function executeDocsTool(
     if (limit !== undefined) {
       url.searchParams.set("limit", String(limit));
     }
+    const locale = input.locale;
+    if (locale !== undefined) {
+      if (typeof locale !== "string" || !isDocsLocale(locale)) {
+        throw new Error("locale is not supported");
+      }
+      url.searchParams.set("locale", locale);
+    } else {
+      url.searchParams.set(
+        "locale",
+        localeFromPathname(window.location.pathname),
+      );
+    }
     const response = await fetch(url, {
       credentials: "omit",
       headers: { Accept: "application/json" },
@@ -184,29 +213,27 @@ async function executeDocsTool(
   }
   if (name === "docs_get_page") {
     const rawPath = requiredString(input, "path");
+    const currentLocale = localeFromPathname(window.location.pathname);
     const path =
       rawPath.startsWith("http://") || rawPath.startsWith("https://")
         ? rawPath
         : rawPath.startsWith("/")
           ? rawPath
-          : `/docs/${DOCS_VERSION}/${rawPath}`;
+          : docsPathForLocale(currentLocale, ...rawPath.split("/"));
     const url = new URL(path, window.location.origin);
-    if (
-      url.origin !== window.location.origin ||
-      !(url.pathname === "/docs" || url.pathname.startsWith("/docs/"))
-    ) {
+    const parts = url.pathname.split("/").filter(Boolean);
+    const locale = isDocsLocale(parts[0]) ? parts.shift() : DEFAULT_DOCS_LOCALE;
+    if (url.origin !== window.location.origin || parts[0] !== "docs") {
       throw new Error("Only public docs paths on this site can be read.");
     }
-    const parts = url.pathname.split("/").filter(Boolean);
     const version = parts[1] ?? DOCS_VERSION;
-    const slugs = /^\d+\.\d+\.\d+$/.test(version)
-      ? parts.slice(2)
-      : parts.slice(1);
+    const hasVersion = isVersionSegment(version);
+    const slugs = hasVersion ? parts.slice(2) : parts.slice(1);
     if (slugs.length === 0) {
       throw new Error("A specific docs page is required.");
     }
     const markdownUrl = new URL(
-      `/llms.mdx/docs/${/^\d+\.\d+\.\d+$/.test(version) ? version : DOCS_VERSION}/${slugs.join("/")}`,
+      `/llms.mdx/docs/${locale === DEFAULT_DOCS_LOCALE ? "" : `${locale}/`}${hasVersion ? version : DOCS_VERSION}/${slugs.join("/")}`,
       window.location.origin,
     );
     const response = await fetch(markdownUrl, {
@@ -218,10 +245,12 @@ async function executeDocsTool(
   }
   const section =
     input.section === undefined ? "" : requiredString(input, "section");
+  const locale = localeFromPathname(window.location.pathname);
   const url = new URL(
     section ? `/llms-sections/${encodeURIComponent(section)}` : "/llms.txt",
     window.location.origin,
   );
+  url.searchParams.set("locale", locale);
   const response = await fetch(url, {
     credentials: "omit",
     headers: { Accept: "text/markdown" },

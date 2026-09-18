@@ -1,5 +1,5 @@
 import { Check, Cloud, Cpu, HardDrive, Laptop, Server } from "lucide-react";
-import Link from "next/link";
+import { LocalizedLink as Link } from "@/components/localized-link";
 import { docsPath } from "@/lib/docs-version";
 
 /**

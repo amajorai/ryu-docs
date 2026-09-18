@@ -12,8 +12,8 @@ import {
   Smartphone,
   Workflow,
 } from "lucide-react";
-import Link from "next/link";
 
+import { LocalizedLink as Link } from "@/components/localized-link";
 import { Mermaid } from "@/components/mdx/mermaid";
 import { docsPath } from "@/lib/docs-version";
 

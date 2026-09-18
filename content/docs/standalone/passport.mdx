@@ -1,0 +1,105 @@
+---
+title: "Ryu Passport"
+description: "Run an encrypted, tenant-separated identity service for agents"
+tags: ["passport", "identity", "vault", "standalone", "security"]
+---
+
+Ryu Passport is the standalone identity service for agent connections. It stores
+per-domain cookies, tokens, or session state through the same extracted
+`ryu-vault` primitive used by Ryu Core, while keeping the HTTP boundary and
+tenant authentication in its own process.
+
+Passport is deliberately not a browser engine and it does not hand credentials
+to a model. Its API returns profile and connection metadata only. Credential
+state is sealed before storage and is available only to a governed runtime that
+has an explicit identity-read path.
+
+## Start Passport
+
+For a local headless run, provide a master key explicitly and keep the data
+directory isolated:
+
+```sh
+RYU_PASSPORT_API_TOKEN=replace-me \
+RYU_PASSPORT_TENANT_ID=demo \
+RYU_PASSPORT_DATA_DIR=/var/lib/ryu-passport \
+RYU_MASTER_KEY=base64-32-byte-key \
+RYU_KEYCHAIN=off \
+cargo run --manifest-path apps/passport/Cargo.toml
+```
+
+The default bind is `127.0.0.1:8093`. Set `RYU_PASSPORT_HOSTNAME` and
+`RYU_PASSPORT_PORT` only when the service has an authenticated network boundary
+and TLS in front of it. For multiple tenants, use
+`RYU_PASSPORT_API_TOKENS` with a JSON object mapping tenant ids to distinct
+tokens. Passport creates one SQLite store per tenant below the configured data
+directory. Set `RYU_PASSPORT_HEALTH_INTERVAL` to a `humantime` duration such
+as `15m` when the default hourly sweep is not appropriate.
+
+## Import an existing vault
+
+Passport provides an offline `--import-vault SOURCE_DB --tenant TENANT_ID`
+command. Run it before starting the destination tenant, with the source vault's
+matching master key and the destination Passport data directory configured.
+The command takes a consistent SQLite snapshot, preserves connection IDs,
+verifies and reseals stored credentials, and refuses to overwrite a tenant
+store. The source is retained for recovery. A wrong encryption key prevents
+publication of the imported store.
+
+After import, configure runtime credentials and the Core Passport handoff.
+This does not migrate every Core identity consumer automatically. Retain the
+source backup until the required consumers have switched; reverting to it will
+not include later Passport writes.
+
+## What Passport owns
+
+| Concern | Passport behavior |
+|---|---|
+| Identity state | Per-profile, per-domain connections and login lifecycle |
+| At-rest protection | `ryu-crypto` master-key envelope before SQLite writes |
+| Tenant boundary | Bearer token mapped to an isolated tenant store |
+| Re-authentication | `NEEDS_AUTH` state plus a manual login/import flow |
+| Health | Scheduled check that manual connections still have stored credential state |
+
+Manual-import health checks read the connection's own tenant store. They do
+not contact the provider, so they cannot detect a cookie expiring or a token
+being revoked upstream. An authenticated status records imported state; it is
+not proof that the provider still accepts that state.
+
+When Core is configured to use Passport, its existing identity-health scheduler
+job requests a sweep of the configured Passport tenant using the administration
+credential. A rejected or unavailable remote sweep fails the job; it does not
+check Core's older local store instead. Passport also owns its independent
+periodic health loop, so it does not require Core to stay running.
+
+Passport can run beside Core, Connect, or another agent runtime. The owning
+runtime decides when an identity read is allowed and how that read is audited;
+Passport remains the durable identity store.
+
+## Explore Passport
+
+The [Passport product page](https://ryuhq.com/products/passport) includes an
+interactive book introducing profiles, sealed credentials, and runtime access.
+Open the cover, then use the page controls or left and right arrow keys while
+the book is focused. Escape closes it and returns focus to the cover. On small
+screens it displays one page at a time; reduced-motion preferences disable the
+page-turn animation.
+
+Core's domain-based connection-needed signal also reads Passport metadata when
+remote mode is configured. A missing login requests human action; an unavailable
+identity service pauses the action instead of consulting an older local vault.
+This signal does not export credential state or start a login automatically.
+
+For tools that only consult login state, Core uses the calling agent's Passport
+runtime credential and bound profile order. It does not decrypt a local copy
+just to check availability. Missing runtime configuration or a failed metadata
+lookup pauses the action. Credential-consuming calls require the Passport
+execution adapter; this metadata path never returns credential material.
+
+<Cards>
+  <DocCard href="/docs/standalone/passport-api" />
+  <DocCard href="/docs/standalone/connect" title="Ryu Connect" description="Use Passport beside the MCP, Skill, tool, and Composio integration edge." />
+</Cards>
+
+Continue with [Standalone services](/docs/standalone) and the
+[Passport API](/docs/standalone/passport-api).

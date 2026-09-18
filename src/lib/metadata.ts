@@ -1,5 +1,12 @@
 import type { Metadata } from "next";
 
+import {
+  DEFAULT_DOCS_LOCALE,
+  DOCS_LANGUAGES,
+  localizedPath,
+  openGraphLocale,
+} from "@/lib/i18n";
+
 export const siteConfig = {
   name: "Ryu Docs",
   description:
@@ -22,8 +29,14 @@ export const siteConfig = {
   url: process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com",
 };
 
-export function generateMetadata(): Metadata {
+export function generateMetadata(
+  locale: string = DEFAULT_DOCS_LOCALE,
+): Metadata {
   const image = "/opengraph-image";
+  const pageUrl = localizedPath("/", locale);
+  const languages = Object.fromEntries(
+    DOCS_LANGUAGES.map((language) => [language, localizedPath("/", language)]),
+  );
 
   return {
     title: {
@@ -44,7 +57,8 @@ export function generateMetadata(): Metadata {
     },
     keywords: siteConfig.keywords,
     alternates: {
-      canonical: "/",
+      canonical: pageUrl,
+      languages,
     },
     robots: {
       index: true,
@@ -63,9 +77,9 @@ export function generateMetadata(): Metadata {
     openGraph: {
       title: siteConfig.name,
       description: siteConfig.description,
-      url: "/",
+      url: pageUrl,
       siteName: siteConfig.name,
-      locale: "en_US",
+      locale: openGraphLocale(locale),
       type: "website",
       images: [
         {

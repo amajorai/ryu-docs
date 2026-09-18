@@ -1,41 +1,71 @@
+import type { GeneratedPageProps } from "fumadocs-openapi";
 import {
   DocsBody,
   DocsDescription,
+  DocsPage,
   DocsTitle,
   MarkdownCopyButton,
+  PageLastUpdate,
   ViewOptionsPopover,
-} from "fumadocs-ui/layouts/docs/page";
+} from "fumadocs-ui/layouts/glass/page";
 import { createRelativeLink } from "fumadocs-ui/mdx";
-import { DocsPage } from "fumadocs-ui/page";
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 
 import { APIPage } from "@/components/api-page";
 import { CatalogMetadata } from "@/components/catalog-metadata";
 import { Feedback } from "@/components/feedback/client";
+import { FeedbackText } from "@/components/feedback/text";
 import { JsonLd } from "@/components/json-ld";
 import { getMDXComponents, VersionedAnchor } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
-import { submitDocsFeedback } from "@/lib/docs-feedback";
+import {
+  submitDocsBlockFeedback,
+  submitDocsFeedback,
+} from "@/lib/docs-feedback";
 import {
   archivedDocsUrl,
   docsPath,
+  docsPathForLocale,
   docsPathForVersion,
   isDocsVersionSlug,
   isVersionSegment,
 } from "@/lib/docs-version";
+import {
+  DOCS_LANGUAGES,
+  isDocsLocale,
+  localeForDocument,
+  localizedPath,
+  openGraphLocale,
+} from "@/lib/i18n";
 import { gitConfig } from "@/lib/layout.shared";
 import { siteConfig } from "@/lib/metadata";
 import {
-  generateDocsParams,
+  generateDocsPrerenderParams,
   getPage,
   getPageImage,
   source,
 } from "@/lib/source";
 
-export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
-  const params = await props.params;
+type DocsRouteProps = {
+  params: Promise<{ lang: string; slug?: string[] }>;
+};
+
+export default async function Page({ params: paramsPromise }: DocsRouteProps) {
+  const params = await paramsPromise;
+  if (!isDocsLocale(params.lang)) {
+    notFound();
+  }
+
+  const lang = params.lang;
   const slugs = params.slug ?? [];
+  if (
+    slugs.length === 0 ||
+    (isDocsVersionSlug(slugs[0]) && slugs.length === 1)
+  ) {
+    permanentRedirect(docsPathForLocale(lang, "start-here"));
+  }
+
   if (!isDocsVersionSlug(slugs[0])) {
     // A STALE version segment must be dropped, not carried along. This used to
     // pass `slugs` through whole, so `/docs/0.1.1/start-here` redirected to
@@ -53,13 +83,13 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
       permanentRedirect(
         archived
           ? `${archived}${docsPathForVersion(slugs[0], ...rest)}`
-          : docsPath(...rest),
+          : docsPathForLocale(lang, ...rest),
       );
     }
-    permanentRedirect(docsPath(...slugs));
+    permanentRedirect(docsPathForLocale(lang, ...slugs));
   }
 
-  const page = getPage(slugs);
+  const page = getPage(slugs, lang);
   if (!page) notFound();
 
   const MDX = page.data.body;
@@ -94,7 +124,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         description,
         headline: page.data.title,
         image: [imageUrl],
-        inLanguage: "en-US",
+        inLanguage: localeForDocument(lang),
         isPartOf: { "@id": websiteId },
         mainEntityOfPage: pageUrl,
         publisher: { "@id": organizationId },
@@ -107,13 +137,13 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         itemListElement: [
           {
             "@type": "ListItem",
-            item: siteConfig.url,
+            item: `${siteConfig.url}${localizedPath("/", lang)}`,
             name: "Home",
             position: 1,
           },
           {
             "@type": "ListItem",
-            item: `${siteConfig.url}/docs`,
+            item: `${siteConfig.url}${localizedPath(docsPath(), lang)}`,
             name: "Docs",
             position: 2,
           },
@@ -131,13 +161,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   return (
     <>
       <JsonLd data={jsonLd} />
-      <DocsPage
-        toc={page.data.toc}
-        full={page.data.full}
-        lastUpdate={page.data.lastModified}
-        tableOfContent={{ style: "clerk", single: false }}
-        tableOfContentPopover={{ style: "clerk" }}
-      >
+      <DocsPage toc={page.data.toc} full={page.data.full}>
         {page.data.level === undefined ? null : (
           <div className="mb-1">
             <LevelBadge level={page.data.level} />
@@ -156,37 +180,55 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
           />
         </div>
         <DocsBody>
-          <MDX
-            components={getMDXComponents({
-              // this allows you to link to other pages with relative file paths.
-              // `source` is cast because fumadocs 16.9 tightened `createRelativeLink`'s
-              // generic so the concrete docs-page type (`type: undefined`) no longer
-              // unifies with its contravariant `LoaderConfig` parameter.
-              a: createRelativeLink(
-                source as unknown as Parameters<typeof createRelativeLink>[0],
-                page,
-                VersionedAnchor,
-              ),
-              // renders the interactive OpenAPI reference in generated API pages
-              APIPage,
-            })}
-          />
+          <FeedbackText onSendAction={submitDocsBlockFeedback}>
+            <MDX
+              components={getMDXComponents(
+                {
+                  // this allows you to link to other pages with relative file paths.
+                  // `source` is cast because fumadocs 16.9 tightened `createRelativeLink`'s
+                  // generic so the concrete docs-page type (`type: undefined`) no longer
+                  // unifies with its contravariant `LoaderConfig` parameter.
+                  a: createRelativeLink(
+                    source as unknown as Parameters<
+                      typeof createRelativeLink
+                    >[0],
+                    page,
+                    VersionedAnchor,
+                  ),
+                  // renders the interactive OpenAPI reference in generated API pages
+                  // with the current page's schema preloaded server-side.
+                  APIPage: async (props: GeneratedPageProps) => (
+                    <APIPage page={page} {...props} />
+                  ),
+                },
+                lang,
+              )}
+            />
+          </FeedbackText>
         </DocsBody>
         <Feedback onSendAction={submitDocsFeedback} />
+        {page.data.lastModified ? (
+          <PageLastUpdate date={page.data.lastModified} />
+        ) : null}
       </DocsPage>
     </>
   );
 }
 
+export const dynamicParams = true;
+
 export async function generateStaticParams() {
-  return generateDocsParams();
+  return generateDocsPrerenderParams();
 }
 
 export async function generateMetadata(
-  props: PageProps<"/docs/[[...slug]]">,
+  props: DocsRouteProps,
 ): Promise<Metadata> {
   const params = await props.params;
-  const page = getPage(params.slug);
+  if (!isDocsLocale(params.lang)) {
+    notFound();
+  }
+  const page = getPage(params.slug, params.lang);
   if (!page) notFound();
 
   const description =
@@ -194,6 +236,12 @@ export async function generateMetadata(
   const tags = page.data.tags ?? [];
   const lastModified = page.data.lastModified?.toISOString();
   const image = getPageImage(page).url;
+  const languages = Object.fromEntries(
+    DOCS_LANGUAGES.flatMap((locale) => {
+      const localizedPage = source.getPage(page.slugs, locale);
+      return localizedPage ? [[locale, localizedPage.url]] : [];
+    }),
+  );
 
   return {
     title: page.data.title,
@@ -201,13 +249,14 @@ export async function generateMetadata(
     keywords: [...new Set([...siteConfig.keywords, ...tags])],
     alternates: {
       canonical: page.url,
+      languages,
     },
     openGraph: {
       title: page.data.title,
       description,
       url: page.url,
       siteName: siteConfig.name,
-      locale: "en_US",
+      locale: openGraphLocale(params.lang),
       type: "article",
       images: [
         {

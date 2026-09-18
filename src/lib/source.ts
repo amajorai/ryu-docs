@@ -8,14 +8,15 @@ import {
   stripDocsVersion,
   versionedDocsHref,
 } from "@/lib/docs-version";
+import { DEFAULT_DOCS_LOCALE, i18n } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
 import { openapi } from "@/lib/openapi";
 
 // See https://fumadocs.dev/docs/headless/source-api for more info
 export const source = loader({
-  baseUrl: "/docs",
+  baseUrl: docsPath(),
+  i18n,
   source: docs.toFumadocsSource(),
-  url: (slugs) => docsPath(...slugs),
   // `openapi.loaderPlugin()` decorates generated API pages in the page tree with
   // their HTTP method badge (GET/POST/...).
   plugins: [lucideIconsPlugin(), openapi.loaderPlugin()],
@@ -23,17 +24,25 @@ export const source = loader({
 
 export type DocsPage = InferPageType<typeof source>;
 
-export function getPage(slugs: string[] | undefined): DocsPage | undefined {
-  return source.getPage(stripDocsVersion(slugs));
+export function getPage(
+  slugs: string[] | undefined,
+  locale: string = DEFAULT_DOCS_LOCALE,
+): DocsPage | undefined {
+  return source.getPage(stripDocsVersion(slugs), locale);
 }
 
-export function getPageByHref(href: string) {
-  const result = source.getPageByHref(versionedDocsHref(href));
+export function getPageByHref(
+  href: string,
+  locale: string = DEFAULT_DOCS_LOCALE,
+) {
+  const result = source.getPageByHref(versionedDocsHref(href), {
+    language: locale,
+  });
   if (!result) {
     return;
   }
 
-  const page = getPage(result.page.slugs);
+  const page = getPage(result.page.slugs, locale);
   if (!page) {
     return;
   }
@@ -43,12 +52,32 @@ export function getPageByHref(href: string) {
 
 export function generateDocsParams() {
   return source
-    .generateParams()
-    .map(({ slug }) => ({ slug: [DOCS_VERSION, ...slug] }));
+    .generateParams("slug", "lang")
+    .map(({ slug, lang }) => ({ lang, slug: [DOCS_VERSION, ...slug] }));
+}
+
+// Generated API pages and deep localized copies repeat large schema/navigation
+// payloads. Keep their complete URL inventory, but render/cache those pages on
+// first request instead of duplicating tens of gigabytes in every deployment
+// artifact. The default locale remains fully eager for stable canonical pages;
+// localized root pages stay eager as lightweight landings.
+export function generateDocsPrerenderParams() {
+  return generateDocsParams().filter((param) => {
+    const page = getPage(param.slug, param.lang);
+    // `fumadocs-openapi` marks operation pages with `_openapi` in the parsed
+    // page metadata. Use that source-owned marker instead of coupling this build
+    // policy to the current Core/Gateway directory layout.
+    if (page?.data._openapi) {
+      return false;
+    }
+    return param.lang === DEFAULT_DOCS_LOCALE || param.slug.length <= 2;
+  });
 }
 
 export function getPageImage(page: DocsPage) {
-  const segments = [DOCS_VERSION, ...page.slugs, "image-v4.png"];
+  const locale =
+    page.locale && page.locale !== i18n.defaultLanguage ? [page.locale] : [];
+  const segments = [...locale, DOCS_VERSION, ...page.slugs, "image-v4.png"];
 
   return {
     segments,
@@ -93,7 +122,7 @@ function catalogSurfaceSummary(
 }
 
 export async function getLLMText(page: DocsPage) {
-  const processed = await page.data.getText("processed");
+  const processed = await getProcessedMarkdown(page);
 
   // For API reference pages, extract the HTTP method and path from frontmatter
   // to produce a structured header that agents can parse. `_openapi` is an open
@@ -127,4 +156,23 @@ export async function getLLMText(page: DocsPage) {
     .join("\n");
 
   return `${header}\n\n${processed}`;
+}
+
+/**
+ * Keep the Markdown projections useful in lightweight test/CLI runtimes that
+ * load an older generated `.source` without processed Markdown metadata. The
+ * normal Fumadocs build always takes the processed branch.
+ */
+async function getProcessedMarkdown(page: DocsPage): Promise<string> {
+  try {
+    return await page.data.getText("processed");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("includeProcessedMarkdown")
+    ) {
+      return page.data.getText("raw");
+    }
+    throw error;
+  }
 }

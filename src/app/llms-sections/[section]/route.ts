@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 
-import { docsPath } from "@/lib/docs-version";
+import { docsPathForLocale } from "@/lib/docs-version";
+import { localeFromInput } from "@/lib/i18n";
 import { getLLMText, source } from "@/lib/source";
 
 export const revalidate = false;
@@ -55,18 +56,23 @@ export async function GET(
   { params }: { params: Promise<{ section: string }> },
 ) {
   const { section } = await params;
+  const locale = localeFromInput(new URL(_req.url).searchParams.get("locale"));
+  if (!locale) {
+    return new Response("Unsupported documentation locale", { status: 400 });
+  }
   const prefix = VALID_SECTIONS[section];
 
   if (!prefix) {
     notFound();
   }
 
+  const sectionPath = docsPathForLocale(locale, ...prefix.split("/"));
+
   const pages = source
-    .getPages()
+    .getPages(locale)
     .filter(
       (page) =>
-        page.url === docsPath(...prefix.split("/")) ||
-        page.url.startsWith(`${docsPath(...prefix.split("/"))}/`),
+        page.url === sectionPath || page.url.startsWith(`${sectionPath}/`),
     );
 
   if (pages.length === 0) {
@@ -77,6 +83,7 @@ export async function GET(
 
   const header = `# Ryu Docs — ${section}
 
+Locale: ${locale}
 Section: ${section}
 Pages: ${scanned.length}
 Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}

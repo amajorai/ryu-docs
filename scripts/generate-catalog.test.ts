@@ -12,6 +12,8 @@ const PLUGIN_STORES = [
   path.join(REPO_ROOT, "plugins-store", "lsp"),
   path.join(REPO_ROOT, "plugins-store", "external_plugins"),
 ];
+const MANUAL_APP_PAGES = new Set(["preview-boundaries", "showcase"]);
+const APP_PAGE_ALIASES = new Map([["studio", "reelfarm"]]);
 
 type Manifest = {
   id?: string;
@@ -53,6 +55,10 @@ async function readStoreManifests(
 async function pageSlugs(realm: "apps" | "plugins"): Promise<string[]> {
   return (await readdir(path.join(DOCS_ROOT, realm)))
     .filter((entry) => entry.endsWith(".mdx") && entry !== "index.mdx")
+    .filter(
+      (entry) =>
+        realm !== "apps" || !MANUAL_APP_PAGES.has(entry.replace(/\.mdx$/, "")),
+    )
     .map((entry) => entry.replace(/\.mdx$/, ""))
     .sort();
 }
@@ -78,9 +84,18 @@ describe("Apps and Plugins catalog documentation", () => {
       ["apps", apps, appPages],
       ["plugins", pluginManifests, pluginPages],
     ] as const) {
-      expect(pages).toEqual([...manifests.keys()].sort());
-      for (const slug of pages) {
-        const manifest = manifests.get(slug);
+    const expectedPageSlugs = [...manifests.keys()]
+      .map((slug) =>
+        realm === "apps"
+          ? [...APP_PAGE_ALIASES.entries()].find(([, source]) => source === slug)?.[0] ?? slug
+          : slug,
+      )
+      .sort();
+    expect(pages).toEqual(expectedPageSlugs);
+    for (const slug of pages) {
+        const manifest = manifests.get(
+          realm === "apps" ? APP_PAGE_ALIASES.get(slug) ?? slug : slug,
+        );
         expect(manifest).toBeDefined();
         const page = await readFile(
           path.join(DOCS_ROOT, realm, `${slug}.mdx`),
@@ -198,5 +213,76 @@ describe("Apps and Plugins catalog documentation", () => {
 
     expect(page).toContain("## Gateway budget snapshot");
     expect(page).toContain("## Production readiness");
+  });
+
+  test("renders the authored Writing Style guide in the plugin catalog page", () => {
+    const page = buildPage(
+      {
+        id: "@ryu/writing-style",
+        name: "Writing Style",
+        description: "Extract a personal writing guide.",
+      },
+      "plugins",
+      [],
+      { builtInIds: new Set(), preinstalledIds: new Set() },
+    );
+
+    expect(page).toContain("## How it works");
+    expect(page).toContain("personal-writing-style.md");
+    expect(page).toContain("can compose with a selected profile");
+  });
+
+  test("does not claim an Apps shelf or Companion for provider-only apps", () => {
+    const page = buildPage(
+      {
+        id: "@ryu/content",
+        name: "Content",
+        description: "A list-only catalog preview.",
+        contributes: {
+          chat_widget_templates: [{
+            id: "content.chat",
+            title: "Content widget",
+            description: "Coming soon; no render tool is available yet.",
+          }],
+        },
+        runnables: [],
+      },
+      "apps",
+      [],
+      { builtInIds: new Set(), preinstalledIds: new Set() },
+    );
+
+    expect(page).not.toContain("### Apps shelf");
+    expect(page).not.toContain("feature navigation stays inside the Companion");
+    expect(page).toContain("### chat widget templates");
+  });
+
+  test("describes a real non-Companion shell contribution without inventing a Companion", () => {
+    const page = buildPage(
+      {
+        id: "@ryu/agent-status",
+        name: "Agent Status",
+        description: "Live run status.",
+        contributes: {
+          sidebar_buttons: [{
+            id: "home",
+            title: "Agent Status",
+          }],
+          sidebar_sections: [{
+            id: "working",
+            title: "Working",
+          }],
+        },
+        runnables: [],
+      },
+      "apps",
+      [],
+      { builtInIds: new Set(), preinstalledIds: new Set() },
+    );
+
+    expect(page).toContain("### Desktop shell");
+    expect(page).toContain("declared desktop shell surfaces below");
+    expect(page).toContain("### Sidebar buttons");
+    expect(page).not.toContain("feature navigation stays inside the Companion");
   });
 });

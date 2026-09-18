@@ -1,0 +1,151 @@
+---
+title: Plugin and app evals
+description: "Measure the behavior of an installed Ryu plugin or app with a Claude-compatible eval suite."
+---
+
+Ryu [plugins and apps](/docs/extend/develop/extensions/plugins-vs-apps) can carry
+a package-local `evals/` suite alongside their [`manifest.json`](/docs/extend/develop/extensions/plugin-json-manifest).
+The layout follows [Claude Code plugin evals](https://code.claude.com/docs/en/plugin-evals)
+so authors can keep realistic prompts and graders in ordinary reviewable files:
+
+```text
+my-plugin/
+├── manifest.json
+└── evals/
+    └── search-uses-the-plugin/
+        ├── prompt.md
+        └── graders/
+            ├── reply.md
+            └── tool.md
+```
+
+## Write a case
+
+`prompt.md` contains the message sent to the enabled Ryu artifact. Its optional
+front matter accepts `runs`, `max_turns`, `timeout_seconds`, `tags`, and
+`runnable`. Ryu enforces `timeout_seconds`; `max_turns` is retained in the
+suite report while the normal Core turn-loop cap remains authoritative.
+`runnable` names an agent runnable from the same manifest; when it
+is absent Ryu selects the package's first agent runnable, or the default Ryu
+agent for a tool, skill, or workflow contribution.
+
+```md
+---
+runs: 3
+tags: [smoke]
+runnable: support-agent
+---
+
+Find the order with id 42 and summarize its current status.
+```
+
+Use an optional `case.yaml` when a case needs a name or execution settings
+outside the prompt file. The accepted top-level shape is compatible with the
+Claude format and uses `schema_version: "1.1"`.
+
+## Grade the result
+
+Each Markdown file under `graders/` is one grader. Ryu supports these grader
+types:
+
+| Type | What it checks |
+| --- | --- |
+| `regex` | A regular expression over the final reply. Use `flags: i`, `match: not_contains`, or `match: count:N` when needed. |
+| `tool_used` | Whether a named tool was called. Core exposes tool names, but intentionally keeps raw arguments as privacy-safe hashes, so `input_match` is reported as skipped. |
+| `tool_order` | Whether the named `before` tool ran before the named `after` tool. |
+| `llm` | A Gateway judge evaluates the criteria over the final reply. Judge calls use normal Gateway auth, budgets, audit, and provider routing. |
+
+For example:
+
+```md
+---
+type: regex
+pattern: "order\\s+42"
+flags: i
+---
+```
+
+and:
+
+```md
+---
+type: tool_used
+tool: app.orders.lookup
+---
+```
+
+`file_exists`, `baseline`, and unknown custom grader types are discovered and
+reported as skipped. Ryu does not claim that an agent-created file exists when
+it did not capture that artifact, and it never disables a live installation to
+manufacture a no-plugin baseline. Skipped graders are excluded from the score
+and remain visible in the report.
+
+## Inspect and run
+
+The read-only doctor inventories the suite but never executes package code:
+
+```text
+ryu plugin doctor <plugin-id>
+```
+
+Inspect the machine-readable suite summary with `GET /api/plugins/evals?id=…`.
+To run it, the artifact must be installed and enabled:
+
+```text
+ryu plugin eval <plugin-id>
+```
+
+The equivalent API is `POST /api/plugins/evals/run` with a body such as:
+
+```json
+{
+  "id": "com.example.orders",
+  "case": "search-uses-the-plugin",
+  "runs": 3,
+  "threshold": 0.8
+}
+```
+
+Every attempt uses a fresh temporary conversation and the normal Core agent
+path. Plugin turn hooks, registered tools, tool ordering, Gateway policy,
+budgets, and audit boundaries therefore remain in the path. Conversation text
+and temporary trace spans are removed after grading; the trace is used only while
+the report's privacy-safe tool metadata is assembled. Model responses are clipped
+in the report.
+One request may execute at most 100 total attempts; larger case/repeat requests
+are rejected before any model call, and a target agent must pass its exact
+agent ACL and node-availability policy.
+
+An eval report carries `evidenceLevel: "plugin-agent"`, a per-case score, each
+attempt's grader verdicts, and the `ryu-plugin-evals-1` ruleset. A passing
+manifest scorecard or a healthy doctor is not behavioral proof; use the eval
+report for that separate claim.
+
+## Desktop health view
+
+For an installed artifact, Store → Installed → Health shows three distinct
+layers:
+
+- the Marketplace scorecard, which evaluates published metadata and declared
+  surfaces;
+- the Core runtime doctor, which checks the loaded manifest, lifecycle state,
+  dependencies, grants, and suite files without running them; and
+- Behavioral evals, which runs the package cases and shows per-case evidence.
+
+If an artifact has no `evals/` directory, the doctor and Desktop say
+`not_configured`; they do not convert missing optional coverage into a runtime
+failure.
+
+<Callout type="warn">
+Eval runs make real model calls and can invoke the enabled artifact's tools. Run
+only suites and packages you trust. Keep destructive tools behind Ryu's normal
+approval and permission controls.
+</Callout>
+
+## What this does not prove
+
+This contract is intentionally local and bounded. It does not claim browser
+screenshots, DOM/video capture, real-device matrices, hosted grids, OAuth
+authorization, or an independent security audit. Those need an explicit Ryu
+browser/agent or external CI capability and should be reported with their own
+evidence level.

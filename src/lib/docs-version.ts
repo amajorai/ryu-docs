@@ -1,4 +1,6 @@
-export const DOCS_VERSION = "0.3.1" as const;
+import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "./i18n";
+
+export const DOCS_VERSION = "0.4.0" as const;
 
 /**
  * Ryu's public docs intentionally serve one current version.
@@ -50,7 +52,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.3.1", not "v0.3.1".
+    // Bare number, no "v" prefix — the switcher reads "0.4.0", not "v0.4.0".
     title: DOCS_VERSION,
   },
 ];
@@ -67,6 +69,15 @@ export function docsPath(...segments: string[]): string {
   return docsPathForVersion(DOCS_VERSION, ...segments);
 }
 
+/** Add the visible locale prefix for a non-default docs page. */
+export function docsPathForLocale(
+  locale: string,
+  ...segments: string[]
+): string {
+  const path = docsPath(...segments);
+  return locale === DEFAULT_DOCS_LOCALE ? path : `/${locale}${path}`;
+}
+
 export function isDocsVersionSlug(slug: string | undefined): boolean {
   return DOCS_VERSIONS.some((version) => version.slug === slug);
 }
@@ -77,7 +88,7 @@ export function versionedDocsHref(href: string | undefined): string | undefined;
 export function versionedDocsHref(
   href: string | undefined,
 ): string | undefined {
-  if (!href || (href !== "/docs" && !href.startsWith("/docs/"))) {
+  if (!href) {
     return href;
   }
 
@@ -88,11 +99,51 @@ export function versionedDocsHref(
 
   const [, pathname, suffix = ""] = match;
   const pathParts = pathname.split("/").filter(Boolean);
-  if (pathParts[0] === "docs" && isDocsVersionSlug(pathParts[1])) {
+  const locale = isDocsLocale(pathParts[0]) ? pathParts.shift() : undefined;
+  if (pathParts[0] !== "docs") {
     return href;
   }
 
-  return `${docsPath()}${pathname.slice("/docs".length)}${suffix}`;
+  if (isDocsVersionSlug(pathParts[1])) {
+    return href;
+  }
+
+  const segments = pathParts.slice(1);
+  const path = docsPath(...segments);
+  return `${locale ? `/${locale}` : ""}${path}${suffix}`;
+}
+
+/**
+ * Normalize an internal docs href and apply the locale of the current route.
+ * The helper is used by client links because Fumadocs page URLs are generated
+ * on the server while the active locale is a dynamic route segment.
+ */
+export function localizeDocsHref(
+  href: string | undefined,
+  locale: string | undefined,
+): string | undefined {
+  if (!href || !isDocsLocale(locale)) {
+    return href;
+  }
+
+  const match = href.match(/^([^?#]*)([?#].*)?$/);
+  if (!match) {
+    return href;
+  }
+
+  const [, pathname, suffix = ""] = match;
+  const parts = pathname.split("/").filter(Boolean);
+  if (isDocsLocale(parts[0])) {
+    parts.shift();
+  }
+  if (parts[0] !== "docs") {
+    return href;
+  }
+
+  const segments = isDocsVersionSlug(parts[1])
+    ? parts.slice(2)
+    : parts.slice(1);
+  return `${docsPathForLocale(locale, ...segments)}${suffix}`;
 }
 
 export function stripDocsVersion(slugs: string[] | undefined): string[] {
@@ -102,9 +153,12 @@ export function stripDocsVersion(slugs: string[] | undefined): string[] {
 
 export function docsSegmentsFromPathname(pathname: string): string[] {
   const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "docs") {
+  const offset = isDocsLocale(parts[0]) ? 1 : 0;
+  if (parts[offset] !== "docs") {
     return [];
   }
 
-  return isDocsVersionSlug(parts[1]) ? parts.slice(2) : parts.slice(1);
+  return isDocsVersionSlug(parts[offset + 1])
+    ? parts.slice(offset + 2)
+    : parts.slice(offset + 1);
 }

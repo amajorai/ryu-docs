@@ -17,8 +17,10 @@ Ryu is **not** a separate engine. It is a managed configuration of Pi that:
 2. **Routes every model call through the Gateway** — firewall, budget, evals, and audit apply.
 3. **Uses an isolated config directory** — `~/.ryu/pi-agent`, completely separate from any Pi you
    have installed yourself.
-4. **Exposes Core's MCP tools to Pi** — via the `ryu-mcp.ts` extension, Pi can call any tool Core
-   knows about.
+4. **Exposes Core's tools to Pi** — the managed extension lists and calls tools through Core. Core
+   enforces the Ryu agent's allowlist, permissions, approvals, and identity bindings. The built-in
+   flagship is seeded with the explicit `*` grant; newly-created agents start with no executable
+   tools until you grant a specific tool or `*` in their card.
 5. **Manages its own Pi binary** — installed at `~/.ryu/pi/`, downloaded and version-checked by
    Core's onboarding.
 
@@ -28,7 +30,7 @@ flowchart TD
   C -->|"agent_id = ryu"| R[Ryu Agent Route]
   R --> SP["Spawn Pi subprocess<br/>~/.ryu/pi/bin/pi"]
   SP --> PI[Pi Agent]
-  PI -->|"OPENAI_BASE_URL"| GW[Gateway :7981]
+  PI -->|"model requests"| GW[Gateway]
   GW --> ENG[Engine<br/>Gemma 4 / OpenAI / etc]
   PI -->|"ryu_call_tool"| MCP[MCP Bridge]
   MCP --> CT[Core Tool Registry]
@@ -42,7 +44,7 @@ flowchart TD
 | **Config directory** | `~/.pi/agent` | `~/.ryu/pi-agent` (isolated) |
 | **Gateway routing** | **On by default** for the routable ACP entry; direct-egress opt-out | **On by default** (`gateway_bypass: false`) |
 | **Model calls** | Gateway-governed by default (unless opted out) | Always through Gateway |
-| **MCP tools** | Pi's built-in only | Core's full tool registry via `ryu-mcp.ts` |
+| **MCP tools** | Pi's built-in only | Core's allowlisted tool registry via `ryu-mcp.ts` |
 | **Skills** | Pi's own skill system | Core's skill catalog (progressive disclosure) |
 | **Context management** | Pi's own (llama.cpp context-shift) | Ryu's trim/compact layer (opt-in) |
 | **Update lifecycle** | Manual | Core manages Pi binary updates |
@@ -54,15 +56,19 @@ When a chat message arrives with `agent_id = "ryu"`, Core follows this path:
 1. **`agent_route()`** (`apps/core/src/sidecar/adapters/mod.rs:1202`) matches the `"ryu"` id and
    calls `ryu_agent_route()`.
 2. **`ryu_agent_route()`** (line 1115) calls `acp::ryu_pi_acp_cmd()` to build the spawn command.
-3. **`ryu_pi_acp_cmd()`** (`acp.rs:2814`):
-   - Resolves the managed Pi binary at `~/.ryu/pi/node_modules/.bin/pi`.
-   - Calls `pi_config::ensure_managed_defaults()` to write `settings.json` and `models.json`.
-   - Injects env vars: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `PI_CODING_AGENT_DIR`,
-     `PI_ACP_PI_COMMAND`, `RYU_MCP_CORE_URL`, `RYU_MCP_AGENT_ID`, `RYU_MCP_CORE_TOKEN`.
-   - Returns the full spawn command: `npx -y pi-acp`.
-4. The ACP adapter spawns Pi, which reads its isolated config and loads the `ryu-mcp.ts` extension.
-5. Pi runs its full tool loop (LLM → tool calls → tool results → continue) via ACP protocol.
+3. Core prepares the managed Pi runtime and isolated configuration, then starts it through ACP.
+   No node-wide bearer or user JWT is passed into the agent process.
+4. The managed extension receives a short-lived capability for that exact ACP session. Core accepts
+   it only on the dedicated tool broker, resolves caller, conversation, agent, and narrowing scopes
+   from its server-side record, and forwards calls through the normal governed dispatcher.
+5. Pi runs its full tool loop (model → tool calls → tool results → continue) via ACP protocol.
 6. Core forwards ACP events (text, tool calls, results, usage) to the client.
+
+The extension is a proxy, not an authorization bypass. It does not submit caller, agent,
+conversation, or profile-scope values as authority; Core recovers them from the session record and
+rechecks ownership and current agent policy on every call. The capability expires, is revoked when
+the session is replaced or closed, and is invalidated when the node token rotates. It cannot
+authenticate to other Core routes.
 
 ## The Gateway integration
 
@@ -206,7 +212,7 @@ The Ryu agent exposes independent settings for its model, voice, tools, memory, 
 | Voice Recognition engine | Whisper / Parakeet | Yes |
 | Audio engine | OuteTTS / Kokoro | Yes |
 | Image model | stable-diffusion.cpp | Yes |
-| Tools / MCP | Core's full registry | Yes — via MCP registry and plugin system |
+| Tools / MCP | Core's allowlisted registry | Yes — via MCP registry and plugin system |
 | Memory / Spaces | Long-term memory + RAG | Yes |
 | Persona | System prompt | Yes |
 | Gateway Policy | Default firewall + budget | Yes |

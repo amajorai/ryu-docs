@@ -20,7 +20,7 @@ test("Secret Vault docs publish scopes, precedence, and consumer boundaries", as
 	}
 	expect(vault).toContain("User → Node → Team → Organization");
 	expect(vault).toContain("exact MCP binding");
-	expect(vault).toContain("does not make an Identity Vault login profile organization-shared");
+	expect(vault).toContain("does not make a Passport login profile organization-shared");
 	expect(mcp).toContain("secret:NAME");
 	expect(skills).toContain("secret:NAME");
 });
