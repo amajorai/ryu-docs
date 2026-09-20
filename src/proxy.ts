@@ -13,6 +13,8 @@ const { rewrite: rewriteMarkdown } = rewritePath(
   "/llms.mdx/docs{/*path}",
 );
 const i18nMiddleware = createI18nMiddleware(i18n);
+type I18nRequest = Parameters<typeof i18nMiddleware>[0];
+type I18nEvent = Parameters<typeof i18nMiddleware>[1];
 
 function markdownDestination(pathname: string): string | undefined {
   const segments = pathname.split("/").filter(Boolean);
@@ -39,7 +41,14 @@ export function proxy(request: NextRequest, event: NextFetchEvent) {
     }
   }
 
-  return i18nMiddleware(request, event);
+  // The monorepo's hoisted install can expose a second Next.js type instance
+  // under apps/fumadocs. Both requests are the same runtime Web API object;
+  // keep this compatibility cast at the package boundary instead of leaking
+  // duplicate-Next nominal types through the app.
+  return i18nMiddleware(
+    request as unknown as I18nRequest,
+    event as unknown as I18nEvent,
+  );
 }
 
 export const config = {
