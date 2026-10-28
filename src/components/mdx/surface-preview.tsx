@@ -50,6 +50,7 @@ import {
   Workflow,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import styles from "./surface-preview.module.css";
 
 export type SurfacePreviewSurface =
   | "chat"
@@ -57,10 +58,7 @@ export type SurfacePreviewSurface =
   | "plugin"
   | "workflow";
 
-export const SURFACE_PREVIEW_METADATA: Record<
-  SurfacePreviewSurface,
-  { label: string; source: string }
-> = {
+export const SURFACE_PREVIEW_METADATA = {
   chat: {
     label: "Chat workspace",
     source: "Message + Bubble + Input",
@@ -77,7 +75,7 @@ export const SURFACE_PREVIEW_METADATA: Record<
     label: "Workflow run",
     source: "TodoList + AgentActivity + ToolResult",
   },
-};
+} satisfies Record<SurfacePreviewSurface, { label: string; source: string }>;
 
 const SURFACE_NAVIGATION: Array<{
   icon: LucideIcon;
@@ -117,7 +115,7 @@ export function SurfacePreview({
 
   return (
     <figure
-      className="not-prose my-8 overflow-hidden rounded-2xl bg-fd-secondary p-2 sm:p-3"
+      className={`my-8 overflow-hidden rounded-2xl bg-fd-secondary p-2 sm:p-3 ${styles.root}`}
       data-surface={surface}
       data-testid="surface-preview"
     >
@@ -128,7 +126,9 @@ export function SurfacePreview({
           </span>
           {metadata.label}
         </span>
-        <span className="font-mono text-[10px] text-fd-muted-foreground uppercase tracking-[0.12em]">
+        <span
+          className={`font-mono text-fd-muted-foreground uppercase ${styles.eyebrow}`}
+        >
           Live UI composition
         </span>
       </figcaption>
@@ -141,7 +141,7 @@ export function SurfacePreview({
             <span className="size-1.5 rounded-full bg-success/80" />
           </span>
           <span className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
-            Ryu Console
+            Ryu · Agent
           </span>
           <Badge className="hidden sm:inline-flex" variant="secondary">
             @ryu/ui
@@ -203,7 +203,7 @@ function PreviewSidebar({ active }: { active: SurfacePreviewSurface }) {
         })}
       </nav>
 
-      <div className="mt-8 rounded-lg bg-background/75 p-2.5 text-[10px]">
+      <div className="mt-8 rounded-lg bg-background/75 p-2.5">
         <div className="flex items-center gap-1.5 font-medium text-foreground">
           <span className="size-1.5 rounded-full bg-success" />
           Local node
@@ -240,19 +240,17 @@ function ChatSurface() {
         <StatusBadge kind="active" label="Running on local node" />
       </div>
 
-      <MessageGroup className="gap-3">
+      <MessageGroup spacing="relaxed">
         <Message>
-          <MessageAvatar className="bg-primary/10 text-primary text-xs">
-            R
-          </MessageAvatar>
+          <MessageAvatar variant="primary">R</MessageAvatar>
           <MessageContent>
-            <MessageHeader className="px-0">Ryu Agent · just now</MessageHeader>
+            <MessageHeader inset="none">Ryu Agent · just now</MessageHeader>
             <Bubble variant="secondary">
               <BubbleContent>
                 I found three release checks and grouped them into one safe run.
               </BubbleContent>
             </Bubble>
-            <MessageFooter className="px-0">2 steps · 8s</MessageFooter>
+            <MessageFooter inset="none">2 steps · 8s</MessageFooter>
           </MessageContent>
         </Message>
 
@@ -261,7 +259,7 @@ function ChatSurface() {
             <Bubble align="end" variant="default">
               <BubbleContent>Run the read-only pass first.</BubbleContent>
             </Bubble>
-            <MessageFooter className="px-0">You · delivered</MessageFooter>
+            <MessageFooter inset="none">You · delivered</MessageFooter>
           </MessageContent>
         </Message>
       </MessageGroup>
@@ -269,12 +267,13 @@ function ChatSurface() {
       <div className="flex items-center gap-2 rounded-3xl bg-muted p-1.5">
         <Input
           aria-label="Message composer preview"
-          className="border-0 bg-transparent shadow-none"
-          placeholder="Ask the agent..."
+          variant="composer"
+          placeholder="Ask the agent…"
         />
         <Button
           aria-label="Send message"
-          className="size-8 rounded-full"
+          className="size-8"
+          radius="pill"
           size="icon"
           type="button"
         >
@@ -304,7 +303,7 @@ function WorkflowSurface() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(13rem,0.9fr)]">
-        <Card className="bg-card/80">
+        <Card appearance="translucent">
           <CardHeader>
             <div className="flex items-center justify-between gap-2">
               <CardTitle>Run graph</CardTitle>
@@ -399,7 +398,7 @@ function MiniNode({
       )}
     >
       <p className="m-0 truncate font-medium text-xs">{label}</p>
-      <p className="mt-1 mb-0 truncate font-mono text-[10px] text-muted-foreground">
+      <p className="mt-1 mb-0 truncate font-mono text-muted-foreground">
         {detail}
       </p>
     </div>
@@ -409,7 +408,7 @@ function MiniNode({
 function PluginSurface() {
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(13rem,0.9fr)]">
-      <Card className="bg-card/80">
+      <Card appearance="translucent">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -424,7 +423,7 @@ function PluginSurface() {
             <Badge variant="secondary">Ready</Badge>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent spacing="relaxed">
           <p className="m-0 text-muted-foreground text-sm">
             Draft release notes from the workspace, then ask before anything
             leaves the node.
@@ -439,7 +438,7 @@ function PluginSurface() {
             <ProgressValue />
           </Progress>
         </CardContent>
-        <CardFooter className="justify-end gap-2">
+        <CardFooter className="justify-end" spacing="actions">
           <Button size="sm" type="button" variant="outline">
             Review manifest
           </Button>
@@ -449,12 +448,12 @@ function PluginSurface() {
         </CardFooter>
       </Card>
 
-      <Card className="bg-muted/55">
+      <Card appearance="subtle">
         <CardHeader>
           <CardTitle>Permission preview</CardTitle>
           <CardDescription>Reviewable before install</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
+        <CardContent spacing="compact">
           <PermissionRow label="Read workspace files" />
           <PermissionRow label="Call Gateway" />
           <PermissionRow label="Write files" allowed={false} />
@@ -514,7 +513,7 @@ function GovernanceSurface() {
       />
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Card className="bg-muted/55">
+        <Card appearance="subtle">
           <CardHeader>
             <div className="flex items-center gap-2">
               <ShieldCheck
@@ -526,7 +525,7 @@ function GovernanceSurface() {
             </div>
             <CardDescription>Policy is visible at the edge</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent spacing="compact">
             <StatusLine label="Firewall" value="Passed" />
             <StatusLine label="Budget" value="Within limit" />
             <StatusLine label="Audit" value="Recorded" />

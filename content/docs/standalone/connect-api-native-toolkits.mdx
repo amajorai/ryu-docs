@@ -1,0 +1,183 @@
+---
+title: "Connect Native Toolkits"
+description: "The GitHub, Linear, Notion and Slack actions Ryu Connect serves itself, how each provider's OAuth differs, and how a tenant links through its own OAuth app"
+tags: ["Standalone", "Connect", "OAuth", "Linear", "Notion", "Slack", "BYO app"]
+---
+
+Ryu Connect serves GitHub, Linear, Notion and Slack itself instead of through
+Composio. Every action keeps the ID Composio publishes for the same
+operation, so a caller's `composio.<ACTION>` keeps working when an operator
+moves a toolkit to Connect. Routing, grants, linking, refusals and billing work
+exactly as described in
+[natively served toolkits](/docs/standalone/connect-api-composio#natively-served-toolkits).
+
+Each action accepts the parameters Composio documents for it. A few that only
+describe Composio's own paging repair are accepted and ignored, as the tables
+note. Requests go only to the provider's own API host, redirects are never
+followed, each request times out after 30 seconds, and an answer larger than
+768 KiB is refused with a message asking for a smaller page.
+
+## GitHub
+
+Requests go only to `https://api.github.com`. A successful call returns
+GitHub's JSON response unchanged. A failed call returns only the HTTP `status`,
+GitHub's `message`, and `retry_after_seconds` when GitHub is rate limiting.
+
+| Action | Required | Optional |
+|---|---|---|
+| `GITHUB_GET_THE_AUTHENTICATED_USER` | None | None |
+| `GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER` | None | `page`, `per_page`, `sort`, `type`, `since`, `before`, `direction` |
+| `GITHUB_LIST_REPOSITORY_ISSUES` | `owner`, `repo` | `page`, `per_page`, `sort`, `type`, `since`, `state`, `labels`, `creator`, `assignee`, `direction`, `mentioned`, `milestone` |
+| `GITHUB_GET_AN_ISSUE` | `owner`, `repo`, `issue_number` | None |
+| `GITHUB_CREATE_AN_ISSUE` | `owner`, `repo`, `title` | `body`, `labels`, `assignee`, `assignees`, `milestone` |
+| `GITHUB_CREATE_AN_ISSUE_COMMENT` | `owner`, `repo`, `issue_number`, `body` | None |
+| `GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS` | `q` | `page`, `per_page`, `sort`, `order`, `response_detail` |
+| `GITHUB_LIST_ISSUES_ASSIGNED_TO_THE_AUTHENTICATED_USER` | None | `page`, `per_page`, `sort`, `since`, `state`, `filter`, `labels`, `direction` |
+
+`response_detail` is accepted for compatibility, and the full GitHub response
+is always returned, which can differ from what the same action returns through
+Composio. Timestamps use ISO 8601 with a time zone, and `per_page` is at most
+100. Invalid arguments return `successful: false` with the names of the
+invalid fields, without contacting GitHub, and are not charged.
+
+## Linear
+
+Connect calls Linear's GraphQL API. Every action sends a fixed query and passes
+your arguments only as GraphQL variables, so arguments cannot change what is
+asked. A successful call returns Linear's `data` object.
+
+| Action | Required | Optional |
+|---|---|---|
+| `LINEAR_GET_CURRENT_USER` | None | None |
+| `LINEAR_LIST_LINEAR_TEAMS` | None | `after`, `first`, `project_id` |
+| `LINEAR_LIST_LINEAR_ISSUES` | None | `after`, `first`, `project_id`, `assignee_id` (a user ID or `me`), `include_transitions`, `original_cursor` and `cursor_was_corrupted` (ignored) |
+| `LINEAR_GET_LINEAR_ISSUE` | `issue_id` (an ID or a key such as `ENG-123`) | None |
+| `LINEAR_SEARCH_ISSUES` | `query` | `after`, `first` (1 to 50, default 25), `include_archived` |
+| `LINEAR_CREATE_LINEAR_ISSUE` | `title`, `team_id` | `cycle_id`, `due_date`, `estimate`, `priority`, `state_id`, `label_ids`, `parent_id`, `project_id`, `assignee_id`, `description` |
+| `LINEAR_UPDATE_ISSUE` | `issueId` | `title`, `teamId`, `cycleId`, `dueDate`, `stateId`, `estimate`, `labelIds`, `parentId`, `priority`, `projectId`, `assigneeId`, `description` |
+| `LINEAR_CREATE_LINEAR_COMMENT` | `body`, `issueId` | None |
+
+With `include_transitions`, a page holds at most 25 issues, and `first` above
+50 is refused. Due dates are sent as dates; a time of day is dropped. Linear
+reports a GraphQL error at HTTP 200 or 400: Connect returns its message and
+charges the call, as for any refusal caused by the arguments. A rate limit
+returns `retry_after_seconds` and is not charged.
+
+## Notion
+
+Connect calls Notion's REST API with `Notion-Version: 2022-06-28`, the last
+version that serves database queries at `/v1/databases/{id}/query`. A
+successful call returns Notion's JSON unchanged. Notion IDs are accepted with
+or without dashes.
+
+| Action | Required | Optional |
+|---|---|---|
+| `NOTION_SEARCH_NOTION_PAGE` | None | `query`, `direction` and `timestamp` (together), `page_size` (default 25), `filter_value`, `filter_property`, `start_cursor`, `filter_properties` |
+| `NOTION_RETRIEVE_PAGE` | `page_id` | None |
+| `NOTION_QUERY_DATABASE` | `database_id` | `sorts` (`property_name`, `ascending`), `page_size` (default 100), `start_cursor` |
+| `NOTION_FETCH_BLOCK_CONTENTS` | `block_id` | `page_size`, `start_cursor` |
+| `NOTION_CREATE_COMMENT` | `comment` (`content`, optional `link`) and one of `parent_page_id` or `discussion_id` | None |
+| `NOTION_LIST_USERS` | None | `page_size`, `start_cursor` |
+| `NOTION_GET_ABOUT_USER` | `user_id` | None |
+
+`filter_properties` is applied by Connect: page results keep only the named
+properties. A `400`, `404` or `409` from Notion is charged; `401` marks the
+connection expired, and `429` returns `retry_after_seconds` without a charge.
+
+## Slack
+
+Connect calls Slack's Web API with the app's bot token. Message search needs a
+user token, so it is not served.
+
+| Action | Required | Optional |
+|---|---|---|
+| `SLACK_TEST_AUTH` | None | None |
+| `SLACK_SEND_MESSAGE` | `channel`, and one of `markdown_text` or `blocks` | `thread_ts`, `reply_broadcast`, `unfurl_links`, `unfurl_media`, `fallback_text` (only with `blocks`) |
+| `SLACK_LIST_ALL_CHANNELS` | None | `limit`, `types`, `cursor`, `team_id`, `exclude_archived` |
+| `SLACK_FETCH_CONVERSATION_HISTORY` | `channel` (an ID) | `limit`, `cursor`, `oldest`, `latest`, `inclusive`, `include_all_metadata` |
+| `SLACK_FETCH_MESSAGE_THREAD_FROM_A_CONVERSATION` | `channel` (an ID), `ts` | `limit`, `cursor`, `oldest`, `latest`, `inclusive`, `include_all_metadata` |
+| `SLACK_LIST_ALL_USERS` | None | `limit`, `cursor`, `team_id`, `include_locale` |
+| `SLACK_RETRIEVE_DETAILED_USER_INFORMATION` | None | `user` (a `U…` or `W…` ID), `include_locale` |
+| `SLACK_ADD_REACTION_TO_AN_ITEM` | `channel`, `timestamp`, `name` | None |
+
+Slack answers most failures with HTTP 200 and `{"ok": false, "error": "…"}`.
+Connect returns the error code. A refusal caused by the arguments (such as
+`channel_not_found`) is charged. A refused or expired token marks the
+connection expired; a missing scope, a rate limit and Slack's own failures are
+not charged.
+
+## How each provider's OAuth differs
+
+Connect records each provider's OAuth behavior from the provider's own
+documentation and links each toolkit accordingly:
+
+| Toolkit | Scopes | PKCE | Token request | Token lifetime and refresh |
+|---|---|---|---|---|
+| GitHub | Space-separated | S256 | Form, client ID and secret as parameters | No expiry unless the app turns on expiring tokens (eight hours, single-use refresh tokens) |
+| Linear | Comma-separated | S256 | Form, client ID and secret as parameters | 24 hours; every refresh returns a new refresh token |
+| Notion | None (the user picks pages in Notion) | Not sent | JSON, HTTP Basic | No published lifetime; Connect uses the token until Notion refuses it, then asks the user to link again |
+| Slack | Comma-separated bot scopes | Not sent | Form, HTTP Basic | No expiry unless the app turns on token rotation (12 hours, single-use refresh tokens) |
+
+Where PKCE is not sent, the single-use `state` and the authenticated completion
+step still bind the callback to the tenant that started the link. A refresh
+token the provider refuses marks the connection expired, and calls answer
+`403 precondition_required` with `kind: "authorization"` until the user links
+again.
+
+## What each provider requires of your app
+
+Connect performs no app registration. Before linking, create an OAuth app with
+each provider and register Connect's callback URL
+(`<your Connect URL>/v1/oauth/callback/<toolkit>`):
+
+- **Linear** - create an OAuth application in Linear's API settings. Linear
+  suggests a dedicated workspace for it, because every admin of that workspace
+  can manage the app. Request `read`, plus `write` (or `issues:create` and
+  `comments:create`) for the write actions.
+- **Notion** - create a public connection in Notion's developer portal and set
+  its redirect URI. The installation scope (any workspace, or selected ones)
+  cannot be changed later. A Notion Marketplace listing is separate and
+  optional.
+- **Slack** - create a Slack app with the bot scopes the actions need (for
+  example `chat:write`, `channels:read`, `channels:history`, `groups:history`,
+  `users:read` and `reactions:write`). An app that is not publicly distributed
+  installs only in the workspace that created it, and a Slack Marketplace app
+  can be installed only with scopes Slack has approved. Turning on token
+  rotation cannot be undone.
+- **GitHub** - create an OAuth app; expiring user tokens are optional.
+
+## Link through your own OAuth app
+
+By default a tenant links through the operator's app from
+`RYU_CONNECT_OAUTH_APPS`. An operator can instead let a tenant bring its own
+OAuth app by setting `"oauthClient": "tenant"` on that tenant's grant in
+`RYU_CONNECT_NATIVE_GRANTS`, and setting `RYU_CONNECT_OAUTH_CALLBACK_BASE` to
+Connect's public URL. Such a grant never falls back to the operator's app.
+
+The tenant registers its client with its **management** bearer.
+
+```bash
+curl -X PUT "$CONNECT_URL/v1/oauth/clients/linear" \
+  -H "Authorization: Bearer $CONNECT_MANAGEMENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"clientId":"…","clientSecret":"…","scopes":["read","write"],"returnUrl":"https://app.example.com/connected"}'
+```
+
+- `GET /v1/oauth/clients` lists the tenant's own-app toolkits, each with the
+  `redirectUri` to register in the app, the provider's recorded OAuth rules,
+  and the saved client (ID, scopes, return URL and generation), or `null`.
+- `GET /v1/oauth/clients/<toolkit>` returns one; `DELETE` removes it.
+- The client secret is stored encrypted and is never returned.
+- `returnUrl` must be HTTPS (plain HTTP only to `localhost`, `127.0.0.1` or
+  `[::1]`), without credentials, a query or a fragment.
+
+Then link as usual with `POST /v1/composio/link`. Until a client is saved, the
+link answers `403 connection_denied`. Replacing the client while a user is on
+the provider's page fails that callback. A connection made with an earlier
+client keeps working until its token expires, but it cannot be refreshed or
+revoked with the new client, so it then asks the user to link again. Deleting
+the client ends its connections at once. They ask the user to link again, and
+you can register a client and link again straight away. Revoke the old tokens at
+the provider yourself if the old app should lose access.
+
+Continue with the [Connect API overview](/docs/standalone/connect-api).

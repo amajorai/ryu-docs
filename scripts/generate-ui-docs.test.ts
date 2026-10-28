@@ -1,11 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
+import ts from "typescript";
+import { z } from "zod";
+import { getUiComponentModuleLoader } from "../src/components/mdx/ui-component-modules.generated";
 
 import {
   buildUiCatalog,
   componentNavigationPages,
   hasVariantOrSizeOptions,
+  previewMetadataSource,
+  previewModulesSource,
 } from "./generate-ui-docs";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
@@ -14,14 +19,17 @@ const COMPONENTS_ROOT = path.join(
   "apps/fumadocs/content/docs/ui/components",
 );
 
-type PackageJson = {
-  exports?: Record<string, string>;
-};
+const packageJsonSchema = z.object({
+  exports: z.record(z.string(), z.string()).optional(),
+});
+type PackageJson = z.output<typeof packageJsonSchema>;
 
 async function readPackageJson(): Promise<PackageJson> {
-  return JSON.parse(
-    await readFile(path.join(REPO_ROOT, "packages/ui/package.json"), "utf8"),
-  ) as PackageJson;
+  return packageJsonSchema.parse(
+    JSON.parse(
+      await readFile(path.join(REPO_ROOT, "packages/ui/package.json"), "utf8"),
+    ),
+  );
 }
 
 function isExported(importPath: string, packageJson: PackageJson): boolean {
@@ -33,12 +41,80 @@ function isExported(importPath: string, packageJson: PackageJson): boolean {
   );
 }
 
+// One catalog build parses every @ryu/ui source file with the TypeScript
+// compiler, which takes several seconds on a shared CI host. Build it once for
+// the suite so each case reads the same generator output instead of racing
+// Bun's five-second default per test.
+const CATALOG_BUILD_TIMEOUT_MS = 120_000;
+type UiCatalog = Awaited<ReturnType<typeof buildUiCatalog>>;
+
 describe("Ryu UI documentation catalog", () => {
+  let catalog: UiCatalog = [];
+
+  beforeAll(async () => {
+    catalog = await buildUiCatalog();
+  }, CATALOG_BUILD_TIMEOUT_MS);
+
+  test("lazy registry reproduces static imports and safely rejects unknown paths", async () => {
+    const generated = previewModulesSource(catalog);
+    const checkedIn = await readFile(
+      path.join(
+        REPO_ROOT,
+        "apps/fumadocs/src/components/mdx/ui-component-modules.generated.ts",
+      ),
+      "utf8",
+    );
+    expect(checkedIn).toBe(generated);
+    const metadata = await readFile(
+      path.join(
+        REPO_ROOT,
+        "apps/fumadocs/src/components/mdx/ui-component-preview-metadata.generated.ts",
+      ),
+      "utf8",
+    );
+    expect(metadata).toBe(previewMetadataSource(catalog));
+    const ast = ts.createSourceFile(
+      "registry.ts",
+      generated,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const imports: string[] = [];
+    function visit(node: ts.Node): void {
+      if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword
+      ) {
+        const argument = node.arguments[0];
+        if (!argument || !ts.isStringLiteral(argument)) {
+          throw new Error(
+            "Lazy imports must remain literal for Next's bundler",
+          );
+        }
+        imports.push(argument.text);
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(ast);
+    expect(imports).toEqual(
+      catalog.map((component) => `@ryu/ui/${component.importPath}`),
+    );
+    for (const component of catalog) {
+      expect(getUiComponentModuleLoader(component.importPath)).toBeFunction();
+    }
+    for (const path of [
+      "components/missing",
+      "__proto__",
+      "constructor",
+      "toString",
+      "",
+    ]) {
+      expect(getUiComponentModuleLoader(path)).toBeUndefined();
+    }
+  });
+
   test("contains unique component pages backed by package exports", async () => {
-    const [catalog, packageJson] = await Promise.all([
-      buildUiCatalog(),
-      readPackageJson(),
-    ]);
+    const packageJson = await readPackageJson();
     const pageSlugs = catalog.map((component) => component.pageSlug);
 
     expect(catalog.length).toBeGreaterThan(80);
@@ -51,10 +127,13 @@ describe("Ryu UI documentation catalog", () => {
   });
 
   test("checked-in pages match the generated catalog", async () => {
-    const catalog = await buildUiCatalog();
-    const metadata = JSON.parse(
-      await readFile(path.join(COMPONENTS_ROOT, "meta.json"), "utf8"),
-    ) as { pages?: string[] };
+    const metadata = z
+      .object({ pages: z.array(z.string()).optional() })
+      .parse(
+        JSON.parse(
+          await readFile(path.join(COMPONENTS_ROOT, "meta.json"), "utf8"),
+        ),
+      );
     const expectedPages = componentNavigationPages(catalog);
     expect(metadata.pages).toEqual(expectedPages);
 
@@ -68,8 +147,7 @@ describe("Ryu UI documentation catalog", () => {
   });
 
   test("every component page has previews, conditional variants, settings, and a lazy loader", async () => {
-    const [catalog, previewSource, metadataSource] = await Promise.all([
-      buildUiCatalog(),
+    const [previewSource, metadataSource] = await Promise.all([
       readFile(
         path.join(
           REPO_ROOT,

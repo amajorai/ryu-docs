@@ -1,0 +1,159 @@
+---
+title: Document loaders
+description: Load web pages, sitemaps, GitHub repositories, Notion, Google Drive, Confluence, RSS/Atom feeds, CSV/JSON/JSONL, and local files as Markdown documents with the TypeScript SDK.
+tags: ["loaders", "rag", "ingestion", "sdk", "notion", "github", "confluence"]
+---
+
+`@ryuhq/sdk/loaders` turns a source into plain documents your code can split, embed, or send to
+a Space. Every loader returns the same shape.
+
+```typescript
+interface LoadedDocument {
+  content: string; // Markdown or plain text
+  metadata: { source: string; [key: string]: JsonValue };
+}
+```
+
+```typescript
+import { SitemapLoader, NotionLoader, loadAll } from "@ryuhq/sdk/loaders";
+
+const docs = await loadAll([
+  new SitemapLoader("https://docs.example.com", { include: ["/guides/"], maxPages: 40 }),
+  new NotionLoader({ token: process.env.NOTION_TOKEN ?? "", pageIds: [handbookUrl] }),
+]);
+```
+
+Each loader has `load()` (all documents in memory) and `lazyLoad()` (an async iterator, for
+large sources). Subclass `BaseLoader` and implement `lazyLoad()` to add your own.
+
+<Callout type="warn">
+  `@ryuhq/sdk/loaders` is newer than `@ryuhq/sdk` 0.3.0, the current npm release.
+  [What you can install today](/docs/standalone/sdk/choose-an-sdk#what-you-can-install-today) lists
+  what each published version includes.
+</Callout>
+
+## Loaders
+
+| Loader | Reads | One document per |
+|---|---|---|
+| `WebPageLoader(urls)` | HTML pages (converted to Markdown), plain text, Markdown | URL |
+| `SitemapLoader(url)` | A site's sitemap(s), then each page | Page |
+| `GitHubRepoLoader({ owner, repo })` | Repository files through the REST API | Text file |
+| `NotionLoader({ token, pageIds, databaseIds })` | Notion pages (block tree) and database rows | Page or row |
+| `GoogleDriveLoader({ accessToken, fileIds, folderIds })` | Docs (as Markdown), Sheets (CSV), Slides (text), files | File |
+| `ConfluenceLoader({ baseUrl, ... })` | Pages by id, by space, or by CQL | Page |
+| `FeedLoader(urls)` | RSS 2.0, RSS 1.0, and Atom | Entry |
+| `CsvLoader(input)` | Delimited text | Row |
+| `JsonLoader(input)` / `JsonLinesLoader(input)` | JSON (optionally at a JSON Pointer) / NDJSON | Array element / line |
+| `LocalFileLoader(paths)` | Files and directories; PDF and Office through a Ryu node | File |
+
+`CsvLoader`, `JsonLoader`, and `JsonLinesLoader` take `{ path }`, `{ url }`, or
+`{ text, source? }`.
+
+### Web pages and sitemaps
+
+`WebPageLoader` converts HTML to Markdown (headings, lists, links, code, tables), drops scripts,
+forms, and page chrome (`nav`, `header`, `footer`, `aside`; pass `keepNavigation: true` to keep
+them), and records the page title, description, and language in metadata.
+
+`SitemapLoader` starts from a site root or a sitemap URL. It reads `robots.txt` for `Sitemap:`
+lines, honors `Allow`/`Disallow` for its user agent (`RyuDocumentLoader`) and `Crawl-delay`,
+walks sitemap indexes and gzipped sitemaps, and stops at `maxSitemaps` (default 10) and
+`maxPages` (default 50). Only URLs on the start host are followed unless `sameHost: false`.
+Filter pages with `include` and `exclude` (substrings or regular expressions). If `robots.txt`
+answers with a server error or cannot be reached, the crawl is treated as disallowed. Gzipped
+sitemaps are inflated up to `maxBytes`, and with `continueOnFailure: true` a sitemap that cannot
+be read is skipped instead of ending the crawl.
+
+### GitHub
+
+```typescript
+new GitHubRepoLoader({
+  owner: "acme",
+  repo: "handbook",
+  path: "docs",
+  extensions: [".md", ".mdx"],
+  token: process.env.GITHUB_TOKEN, // optional for public repositories
+});
+```
+
+The tree is listed once and filtered by `path`, `extensions`, `include`, `exclude`,
+`maxFileBytes` (default 1 MiB), and `maxFiles` (default 200). Binary files are skipped. Set
+`apiUrl` for GitHub Enterprise Server.
+
+### Notion
+
+Share the pages or databases with your integration, then pass its token. A page becomes one
+Markdown document. Each database row becomes a document whose metadata holds the flattened
+properties (`properties.Status`, `properties.Tags`, ...); set `loadRowContent: false` to skip
+reading each row's page body.
+
+### Google Drive
+
+Pass an OAuth access token with a Drive read scope (`accessToken` can be a function that refreshes
+it). Folders load their direct children, or every descendant with `recursive: true`. PDF and
+Office files need a `parser`, such as `coreDocumentParser` below; without one they are skipped.
+
+### Confluence
+
+Use `email` and `apiToken` for Confluence Cloud (`baseUrl: "https://<site>.atlassian.net/wiki"`),
+or `personalAccessToken` for Data Center. Select pages with `pageIds`, `spaceKey`, or `cql`.
+
+### Local files
+
+Text formats (Markdown, plain text, source code, JSON, YAML, CSV) are read directly and HTML is
+converted to Markdown. Binary documents go to a parser. `coreDocumentParser` sends them to a Ryu
+node's `document.parse` capability, so PDF, Word, PowerPoint, and Excel files are read by
+whichever parser app that node has bound:
+
+```typescript
+import { LocalFileLoader } from "@ryuhq/sdk/loaders";
+
+const docs = await new LocalFileLoader(["./handbook", "./q3-report.pdf"], {
+  core: { baseUrl: "http://127.0.0.1:7980", token: process.env.RYU_CORE_TOKEN },
+  skipUnsupported: true,
+}).load();
+```
+
+Hidden files and directories are skipped. Without a parser, a binary file fails the load unless
+`skipUnsupported` is set.
+
+## Credentials
+
+Loaders never read environment variables or stored secrets on their own. Every credential option
+accepts a string or a function returning one, so you can refresh tokens. To use a secret stored in
+a Ryu node's vault, pass the result of `ryuVaultSecret()`.
+
+```typescript
+import { NotionLoader, ryuVaultSecret } from "@ryuhq/sdk/loaders";
+
+new NotionLoader({
+  token: ryuVaultSecret({ baseUrl: nodeUrl, token: nodeToken, name: "NOTION_TOKEN" }),
+  databaseIds: [roadmapId],
+});
+```
+
+The secret is read when the loader runs and is not cached. Your node token needs read access to
+it.
+
+## Network safety
+
+All network loaders share one policy:
+
+- Only `http` and `https` URLs, with no embedded credentials.
+- `localhost`, `*.local`, `*.internal`, and cloud metadata hosts are refused. Every DNS answer is
+  checked, and loopback, private, link-local, CGNAT, multicast, and reserved addresses are
+  refused.
+- Redirects are followed one hop at a time (at most `maxRedirects`, default 5), each hop is
+  checked again, and `Authorization` and `Cookie` are dropped when a redirect leaves the
+  original origin.
+- Bodies are capped (`maxBytes`, default 10 MiB) and each request times out (`timeoutMs`,
+  default 30 s).
+
+To reach an internal host on purpose, list it in `allowedHosts` (prefer `host:port`), or set
+`allowPrivateNetwork: true`. Pass `fetch` and `lookup` to supply your own transport and resolver,
+which is also how tests run without the network.
+
+`fetch` cannot pin the address it connects to, so DNS rebinding between the check and the
+request is still possible. For untrusted URLs, import through a Space instead: Core pins the
+addresses it checked. See [Spaces and RAG](/docs/core/spaces-ingestion#connector-imports).

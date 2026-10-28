@@ -1,57 +1,73 @@
 ---
-title: Loopback and internal routes
-description: Gateway endpoints that are not part of the standard OpenAI-compatible client surface — passthrough proxies, sandbox metering, and route aliases.
+title: Loopback and Internal Routes
+description: Reference for Gateway endpoints outside the standard OpenAI-compatible client surface, including passthrough proxies, sandbox metering, and route aliases.
 ---
 
-The [interactive Gateway API reference](/docs/extend/develop/api-reference/gateway) documents every route a normal client should call. A handful of additional routes exist for Core integration, subscription-preserving agent proxies, or convenience aliases. This page explains what they are, who may call them, and why they are not interchangeable with the public `/v1/*` surface.
+The [interactive Gateway API reference](/docs/extend/develop/api-reference/gateway) documents every route a normal client should call. The routes below serve Core integration, subscription-preserving agent proxies, or convenience aliases. They are not interchangeable with the standard `/v1/*` client surface.
 
 ## Route coverage summary
 
 | Route | Caller | Auth | Documented in |
 |---|---|---|---|
 | `POST /sandbox/tick` | Core sandbox heartbeat | Trusted-forwarder or master key | [OpenAPI](/docs/extend/develop/api-reference/gateway/audit/sandboxTick) |
+| `POST /sandbox/quote` | Core Box credit check | Trusted-forwarder or master key | [OpenAPI](/docs/extend/develop/api-reference/gateway/audit/sandboxQuote) |
+| `POST /sandbox/complete` | Core sandbox completion | Trusted-forwarder or master key | This page |
 | `GET /v1/savings` | Core community-stats beacon (opt-out) | None (public aggregate) | [OpenAPI](/docs/extend/develop/api-reference/gateway/health/getCommunitySavings) |
-| `GET /v1/cursor/chat/completions` | Cursor (OpenAI-compat alias) | Bearer API key (when auth enabled) | [OpenAPI](/docs/extend/develop/api-reference/gateway/inference/createCursorChatCompletion) |
+| `POST /v1/cursor/chat/completions` | Cursor (OpenAI-compatible alias) | Bearer API key (when auth enabled) | [OpenAPI](/docs/extend/develop/api-reference/gateway/inference/createCursorChatCompletion) |
 | `POST /v1/messages` | Claude Code / Anthropic-format clients | Bearer API key (when auth enabled) | [Protocol compat](/docs/extend/integrate/protocol-compat) |
 | `POST /v1beta/models/{model}:generateContent` | Gemini CLI / Gemini-format clients | Bearer API key (when auth enabled) | [Protocol compat](/docs/extend/integrate/protocol-compat) |
-| `GET /v1/traffic` | Live-traffic SSE dashboard | Admin-gated | This page (not OpenAPI) |
+| `GET /v1/traffic` | Live-traffic SSE dashboard | Admin-gated | This page (schema `TrafficEvent` in the Gateway OpenAPI spec) |
 | `ANY /passthrough/anthropic/*` | Claude Code (loopback subprocess) | Caller's subscription OAuth bearer | This page (not OpenAPI) |
 | `ANY /passthrough/openai-responses/*` | Codex ChatGPT-login (loopback subprocess) | Caller's OAuth bearer + `ChatGPT-Account-ID` | This page (not OpenAPI) |
 
 ## Passthrough proxies (loopback-only)
 
-Claude Code and Codex (ChatGPT-login mode) speak native wire formats and authenticate with the user's own subscription credentials. The regular OpenAI-compat chat path cannot govern them without substituting the gateway's provider key.
-
-Instead, the gateway runs a **transparent reverse proxy** (`apps/gateway/src/passthrough/mod.rs`):
+Claude Code and Codex (ChatGPT-login mode) speak native wire formats and authenticate with the user's own subscription credentials. The OpenAI-compatible chat path cannot govern them without substituting the Gateway's provider key, so the Gateway runs a transparent reverse proxy (`apps/gateway/src/passthrough/mod.rs`).
 
 | Route | Upstream default | Wire format |
 |---|---|---|
 | `/passthrough/anthropic/*` | `api.anthropic.com` | Anthropic Messages |
 | `/passthrough/openai-responses/*` | `chatgpt.com/backend-api/codex` | OpenAI Responses |
 
-Core points the agent subprocess at these routes via `ANTHROPIC_BASE_URL` or an isolated `CODEX_HOME` provider `base_url`. The proxy applies request-side DLP, forwards the caller's own auth headers unchanged, streams the response through response-side DLP, and emits an audit row.
+Core points the agent subprocess at these routes through `ANTHROPIC_BASE_URL` or an isolated `CODEX_HOME` provider `base_url`. The proxy redacts every prompt-bearing request field (including tool results and tool arguments), enforces control-plane locked guardrails and the approved-model list, forwards the caller's own auth headers unchanged, applies response-side DLP, and writes an audit row.
+
+Endpoint handling is deny-by-default:
+
+- **Provider and region policy** applies to every passthrough endpoint, inert ones included, before the request body is read. The upstream provider (`anthropic` for Claude Code, `openai` for Codex) must be on the organization's approved-provider list. Neither upstream has verified data-region metadata, so while the policy sets allowed regions both routes return `403 Forbidden`. When a trusted forwarder vouches for the caller, the caller's own provider, region and model rules narrow the node policy first.
+- **Prompt endpoints** (`v1/messages` and `v1/messages/count_tokens` for Anthropic, `responses` and `responses/compact` for Codex) get the model allowlist and request-side DLP. A prompt that names no model is refused while the approved-model list is set.
+- **Message Batches** (`POST v1/messages/batches`) get the same checks on every `requests[].params` entry. One refused entry refuses the whole batch.
+- **Inert endpoints** with no request body (model listing, and batch status, results, cancel and delete) are proxied without inspection.
+- **Any other endpoint** returns `403 Forbidden` while the local firewall, a locked guardrail or the approved-model list is in force. Paths with empty segments (`v1//messages`) return `400 Bad Request`.
 
 <Callout type="warn">
-  **Loopback-only.** Both passthrough routes return `403 Forbidden` for non-loopback peers. A remote gateway never carries a user's subscription bearer. New/routable ACP agents use them by default; a per-agent direct-egress switch is the explicit opt-out. They are **not** part of the standard client API — do not point external integrations at them.
+  **Loopback-only.** Both passthrough routes return `403 Forbidden` for non-loopback peers. A hosted Gateway does not mount them at all, so they return `404 Not Found` there. A remote gateway never carries a user's subscription bearer. The routes take no Gateway credential, so attribution headers (`x-ryu-user-id`, `x-ryu-agent-id`, `x-ryu-feature`) are recorded only alongside a trusted forwarder credential, and `x-ryu-*` headers are never forwarded upstream. New and routable ACP agents use them by default; a per-agent direct-egress switch is the explicit opt-out. They are **not** part of the standard client API. Do not point external integrations at them.
 </Callout>
 
-Upstream hosts are overridable via `RYU_PASSTHROUGH_ANTHROPIC_UPSTREAM` and `RYU_PASSTHROUGH_CODEX_UPSTREAM`. For enablement, redaction behavior, and limitations, see [Gateway for any agent — subscription-preserving passthrough](/docs/gateway/gateway-for-any-agent#subscription-preserving-passthrough-claude-code-codex).
+Upstream hosts are overridable via `RYU_PASSTHROUGH_ANTHROPIC_UPSTREAM` and `RYU_PASSTHROUGH_CODEX_UPSTREAM`. For enablement, redaction behavior, and limitations, see [subscription-preserving passthrough](/docs/gateway/gateway-for-any-agent#subscription-preserving-passthrough-claude-code-codex).
 
 ## Sandbox metering (`POST /sandbox/tick`)
 
-When Core runs a billed sandbox workspace, its heartbeat loop posts one tick per interval to `{gateway_url}/sandbox/tick` with the elapsed second-delta, provisioned `spec`, and monotonic `tick_index`. The gateway:
+When Core runs a billed sandbox workspace, its heartbeat loop posts one tick per interval to `{gateway_url}/sandbox/tick` with the elapsed second-delta, provisioned `spec`, and monotonic `tick_index`. The Gateway then does the following.
 
 1. Accrues the marked-up micro-USD cost for the delta.
 2. Debits the org wallet (when `org_id` is present and credits are active).
 3. Returns `{ accrued_micro_usd, balance_micro_usd, verdict }` where `verdict` is `continue`, `warn`, `kill_budget`, `kill_balance`, or `kill_accounting`. `kill_accounting` stops an org-bound sandbox when the debit cannot be confirmed.
 
-Authentication matches other Core→Gateway control calls (`POST /v1/exec/audit`): trusted-forwarder or master key only. Unlike `POST /v1/exec/tool`, sandbox ticks are **not** refused under mesh mode.
+A kill verdict is final for that run. Later ticks for the same `run_id` return the same kill verdict without accruing or debiting anything, so a workspace whose first stop attempt failed cannot start a fresh budget window. Core keeps retrying the stop and refuses further commands in that workspace.
 
-Implementation: `apps/gateway/src/api/sandbox.rs`, caller: `apps/core/src/sidecar/sandbox/heartbeat.rs`.
+When Core stops metering a run (a normal completion after its final charge, or a kill whose workspace stop is confirmed) it posts `{ "run_id": "..." }` to `{gateway_url}/sandbox/complete`. The gateway releases that run's accrual state and answers `{ run_id, removed }`; repeating the call is harmless. As a fallback for a lost completion, a run with no tick for six hours is dropped, and the gateway tracks a bounded number of runs at once: a new run beyond that bound receives `kill_accounting` instead of evicting another run's accrual.
+
+Authentication for these routes matches other Core→Gateway control calls (`POST /v1/exec/audit`): trusted-forwarder or master key only. Unlike `POST /v1/exec/tool`, sandbox ticks, completions and quotes are **not** refused under mesh mode.
+
+Implementation: `apps/gateway/src/api/sandbox.rs`. Caller: `apps/core/src/sandbox_host.rs`.
+
+## Sandbox rate quote (`POST /sandbox/quote`)
+
+Before Core starts a Box it bills itself, it asks the Gateway what the Box will cost. The body is the shape a tick would carry, `{ "spec": {…}, "size": "small" | "default" | "large" }`, and the answer is `{ "rate_micro_usd_per_hour": N }`. The Gateway prices the quote exactly as it prices ticks: from its per-size Box rates when those are configured, otherwise from its per-resource sandbox rates plus the sandbox markup. Core keeps no price table of its own, so when the Gateway cannot answer, Core refuses the new Box with `503 session_box_rate_unavailable` instead of guessing. Authentication is the same as `POST /sandbox/tick`.
 
 ## Community savings (`GET /v1/savings`)
 
-A public, ungated aggregate of compression and cache savings:
+A public, ungated aggregate of compression and cache savings.
 
 ```json
 {
@@ -63,31 +79,79 @@ A public, ungated aggregate of compression and cache savings:
 }
 ```
 
-Core's opt-out community-stats beacon (`apps/core/src/stats_beacon.rs`) reads this endpoint and forwards anonymous totals to the control plane when the user has not disabled sharing. The gateway exposes the same handler at `GET /savings` (no `/v1` prefix). Unlike `GET /v1/metrics`, this response intentionally omits per-provider maps, quota state, and any secret material.
+Core's opt-out community-stats beacon (`apps/core/src/stats_beacon.rs`) reads this endpoint and forwards anonymous totals to the control plane when the user has not disabled sharing. The Gateway also serves the same handler at `GET /savings`. Unlike `GET /v1/metrics`, this response omits per-provider maps, quota state, and any secret material.
 
 ## Cursor chat alias (`POST /v1/cursor/chat/completions`)
 
-Cursor's "Override OpenAI Base URL" setting already emits the standard OpenAI `/v1/chat/completions` JSON shape. The gateway registers a labelled alias at `/v1/cursor/chat/completions` that dispatches to the same governed chat pipeline — point Cursor at `<gateway>/v1/cursor` instead of `/v1`. A future Cursor-specific protocol translation could diverge here without breaking the primary path.
+Cursor's "Override OpenAI Base URL" setting already emits the standard OpenAI `/v1/chat/completions` JSON shape. The Gateway registers an alias at `/v1/cursor/chat/completions` that dispatches to the same governed chat pipeline. Point Cursor at `<gateway>/v1/cursor` instead of `/v1`.
 
 ## Live traffic (`GET /v1/traffic`)
 
-A live-only observability overlay: Server-Sent Events streaming each completed request as a small,
-redacted JSON event — the API key is truncated to its prefix at the source, never broadcast in full.
-The feed is deliberately **not** a backend: nothing is persisted, the SQLite audit store remains the
-system of record, and a slow subscriber is dropped (broadcast semantics). Late joiners receive a
-bounded 200-event ring-buffer tail of recent history.
+A live-only Server-Sent Events stream that sends each completed request as a small, redacted JSON
+event. The API key is truncated to its prefix at the source and never broadcast in full. Nothing is
+persisted: the SQLite audit store remains the system of record, and a slow subscriber is dropped
+(broadcast semantics). Late joiners receive a bounded 200-event ring-buffer tail of recent history.
 
-Every request that reaches the gateway's audit sink is published to this bus, so the desktop's
-live-traffic dashboard renders requests as they complete without re-querying the audit store. The
-feed is admin-gated like `/v1/audit` (trusted-forwarder or master key).
+Every request that reaches the Gateway's audit sink is published to this bus, so Desktop's
+live-traffic dashboard renders requests as they complete without re-querying the audit store.
+Guardrail blocks, sanitized requests, rate limits and provider calls (`POST /v1/providers/call`)
+are published even when the audit store is switched off. The feed is admin-gated like `GET /v1/audit` and requires the master key, or a
+loopback peer when auth is disabled. A trusted-forwarder key is not accepted.
 
-The desktop never holds the gateway master key, so Core exposes a proxied SSE stream at
-`GET /api/gateway/traffic` that fans out the gateway's `/v1/traffic` using Core's own gateway token.
-Point a live-traffic dashboard at that route.
+### Event fields
+
+Each `data:` line is one JSON event. The original fields (`request_id`, the truncated `api_key`,
+`provider`, `model`, token counts, `cache_hit`, `latency_ms`, `error`, `event_type`, `session_id`,
+`user_id`, `agent_id`, `managed_inference`, `provider_cost_micro_usd`, `ts`) are unchanged. Newer
+gateways add:
+
+| Field | Meaning |
+|---|---|
+| `seq` | Strictly increasing number per gateway process. |
+| `kind` | `completion`, `verdict` (a guardrail decision), `cache_hit` or `failure`. |
+| `route` | The matched route template, for example `/v1/chat/completions`. |
+| `custody` | `fleet` (hosted Ryu Gateway), `managed_node` or `self_hosted`. |
+| `credential_origin` | Whose credential the request spent: `ryu_vault`, `ryu_fallback`, `node_operator`, `caller_subscription`, `local`, or `unknown` when it was refused before a provider was chosen. |
+| `org_id`, `team_ids` | The organization and teams the request was charged to. |
+| `credential_id_prefix` | The first characters of the hosted credential id, followed by `***`. |
+| `status` | The HTTP status the client received (empty on a `verdict` row). |
+| `verdict` | `decided_by` (`platform_floor`, `node`, `org`, `agent`, `evaluator`, `inspector`, `rate_limit`, `budget`, `standing`, `upstream` or `none`; `upstream` is a [provider safety refusal](/docs/gateway/account-standing#provider-safety-refusals)), `action` (`allow`, `warn`, `sanitize` or `block`), `detector_ids`, `evaluator_ids`, the error catalogue `code` when the request failed, and `event_id`, the [violation event](/docs/gateway/audit#violation-events) the decision recorded, when it recorded one. |
+| `stage_latency_ms` | `screen` (checks before dispatch) and `upstream` (the rest of the request), in milliseconds. |
+
+One request can produce several events, for example an inspector `verdict` row and then the
+`failure` it caused, or a sanitized request's `completion`. Every route reports its verdict the same
+way: chat and its compatible routes, image, embedding and rerank requests, and provider calls. A
+check on the response (an outbound block or sanitize) is reported like a check on the request, and
+the row a tool loop writes for the provider rounds it paid for before failing carries the request's
+route and verdict.
+
+Deduplicate on `seq`, not on
+`request_id`. Events never carry prompt or response text, a full key, matched text or an end-user
+hash. A decision by Ryu's platform policy names only the detection kind (for example `secret`),
+never the pattern, and its `error` is a fixed summary such as `blocked by platform_floor`; an
+inspector or evaluator decision is summarized the same way, because its reason can quote the
+prompt.
+
+### Filtering by organization
+
+`GET /v1/traffic?org=<organization id>` streams only that organization's events, filtered on the
+gateway. The master key sees every organization and may narrow with `org`. Any other caller that is
+bound to an organization only ever receives that organization's events, and asking for another one
+is refused with `403`. An event with no organization never reaches an organization-scoped stream.
+
+Desktop never holds the Gateway master key, so Core exposes a proxied SSE stream at
+`GET /api/gateway/traffic` that fans out the Gateway's `/v1/traffic` using Core's own Gateway token.
+Point a live-traffic dashboard at that route. On an organization node, the proxy requires the
+`audit.view` permission, because the feed shows every member's requests. Only the node owner token
+or a member's own signed-in session can open it, including the session Desktop and the CLI use to
+reach a managed node. Credentials delegated to an OAuth or MCP client and paired-device credentials
+are refused whatever scope they carry, even when an owner or admin authorized them. When Desktop's
+**API & traffic** tab is refused, it shows a permission note instead of the feed and stops
+reconnecting.
 
 ## Convenience aliases (same handler, alternate path)
 
-Several observability routes register twice for ergonomics:
+Several observability routes are registered at two paths.
 
 | Alias | Canonical route |
 |---|---|
@@ -95,4 +159,4 @@ Several observability routes register twice for ergonomics:
 | `GET /savings` | `GET /v1/savings` |
 | `GET /health` | `GET /v1/health` |
 
-Only the `/v1/*` forms appear in the interactive OpenAPI reference; the aliases behave identically.
+The aliases behave identically. The interactive API reference lists them as **(Alias)** entries.

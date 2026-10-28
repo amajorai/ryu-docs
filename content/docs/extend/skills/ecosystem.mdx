@@ -1,15 +1,15 @@
 ---
 title: "Skills Ecosystem"
-description: "How skills interact with tools, how progressive disclosure works, how skills are injected into requests, and how to build skill-tool integrations."
+description: "How skills interact with tools, how progressive disclosure loads them, how Core injects them into requests, and how skills combine with hooks."
 tags: ["skills", "progressive-disclosure", "tool-interaction", "skill-injection", "mcp"]
 ---
 
-Skills are more than prompt templates — they interact with the tool system, the Gateway, and the
-agent's context in specific ways. This page covers the full skills ecosystem.
+A skill interacts with the tool system, the Gateway, and the agent's context. The `SKILL.md`
+format is on [Skills](/docs/extend/skills).
 
 ## How skills interact with tools
 
-A skill can declare that it needs specific tools via the `allowed-tools` front-matter:
+A skill declares the tools it needs in the `allowed-tools` front-matter.
 
 ```yaml
 ---
@@ -21,7 +21,7 @@ allowed-tools:
 ```
 
 When the skill is active, Core surfaces those tools to the MCP bridge for the turn. The Gateway
-enforces the grant — if the plugin doesn't have `mcp:agentbrowser`, the tool is not callable.
+enforces the grant. A declared tool that the caller is not granted stays uncallable.
 
 ```mermaid
 flowchart LR
@@ -34,8 +34,7 @@ flowchart LR
 
 ## Progressive disclosure mechanics
 
-Progressive disclosure keeps the context small by only injecting skill metadata up front, loading
-full bodies on demand.
+Progressive disclosure injects only skill metadata up front and loads full bodies on demand.
 
 ### The flow
 
@@ -49,17 +48,9 @@ full bodies on demand.
 
 4. **Execution phase:** The model follows the skill's instructions, using the tools it declared.
 
-### Why progressive disclosure matters
+### Always-on skills
 
-| Without | With |
-|---|---|
-| All skill bodies injected up front | Only names + descriptions up front |
-| Context fills with unused instructions | Context stays small until needed |
-| Weak models starved of skills they can't self-load | `always-on` escape hatch for critical skills |
-
-### The `always-on` escape hatch
-
-Set `always-on: true` in the front-matter to inject the full body up front:
+Set `always-on: true` in the front-matter to inject the full body up front.
 
 ```yaml
 ---
@@ -73,7 +64,7 @@ Use this for critical skills or models that cannot reliably self-load skills.
 
 ## Skill injection into requests
 
-When a skill is active, Core injects it into the outgoing request body:
+When a skill is active, Core injects it into the outgoing request body.
 
 ```mermaid
 flowchart TD
@@ -81,8 +72,8 @@ flowchart TD
   INJ -->|"system message prepended"| BODY[Final request body]
 ```
 
-The injection happens **after** context trimming — the 512-token `SKILLS_RESERVE` in the context
-window manager accounts for this. The Gateway counts skill-tagged calls toward budget and audit
+The injection happens **after** context trimming. The context window manager reserves 512 tokens
+(`SKILLS_RESERVE`) for it. The Gateway counts skill-tagged calls toward budget and audit
 through the `x-ryu-skill-ids` header.
 
 ## Skill-tool interaction patterns
@@ -115,12 +106,12 @@ Analyze the user's data. Choose the right tool:
 - Database → use sql_runner
 ```
 
-The skill doesn't declare `allowed-tools` — the agent discovers tools via `tool_search` and picks
-based on the skill's instructions.
+The skill does not declare `allowed-tools`. The agent discovers tools through `tool_search` and
+picks one based on the skill's instructions.
 
 ### Pattern 3: Skill + turn hook
 
-A skill provides the instructions, a turn hook provides the automation:
+A skill provides the instructions, and a turn hook provides the automation.
 
 ```json
 {
@@ -128,53 +119,39 @@ A skill provides the instructions, a turn hook provides the automation:
     "turn_hooks": [{
       "id": "auto-review",
       "on": "post_assistant_turn",
-      "code": "// Check if code was modified, trigger review"
+      "code_file": "hooks/auto-review.js"
     }]
   }
 }
 ```
 
-The hook fires after the assistant turn, checks if code was modified, and injects a review
-follow-up if the "Code Reviewer" skill is active.
+The hook body in `hooks/auto-review.js` runs after the assistant turn. In this example it checks
+whether code was modified and injects a review follow-up when the "Code Reviewer" skill is active.
 
 ## Reviewing hooks in Gateway
 
-The desktop Gateway → Hooks tab is the management surface for these lifecycle contributions. It
-shows the hook's owner, phase, matcher, priority, handler kind, and source path without exposing the
-handler body to the client.
-
-Hooks use the same effective scope order as managed MCP and skill configuration:
-
-```text
-User → Team → Organization → Node
-```
-
-The effective value is resolved field by field. Trust and enablement are independent: a hook can be
-trusted but disabled, or enabled by a policy while still waiting for review. Core checks both values
-at dispatch time, in addition to plugin lifecycle state, approved grants, and sandbox availability.
-
-Third-party hooks require review by default. Use **Trust** only after reviewing the displayed
-metadata and source provenance. The Gateway tab does not edit arbitrary command or JavaScript bodies;
-hook authors change the manifest/config source, and the management surface is for review and policy.
+The Desktop **Gateway → Hooks** tab is where you review and trust hooks such as the one above. See
+[Review hooks in Gateway](/docs/extend/develop/extensions/hooks-authoring#review-hooks-in-gateway)
+for the scope order and the trust rules.
 
 ## Skill discovery by agents
 
-Agents discover skills through the MCP bridge:
+Agents discover skills through the `skills` MCP server.
 
-1. `skills.list` — returns all installed skills (name + description only)
-2. `skills.load` — loads a specific skill's full body
-3. The model decides which to load based on the current conversation
+1. `skills.search` returns matching installed skills (name and description only).
+2. The model decides which skill fits the current conversation.
+3. `skills.load` loads that skill's full body.
 
 ## Skill lifecycle
 
 | Phase | What happens |
 |---|---|
-| **Install** | SKILL.md scanned from dual roots (`~/.ryu/skills/` + `apps/skills/`) |
-| **Catalog** | `GET /api/skills/catalog` returns all available skills |
-| **Activate** | `POST /api/skills/:id/activate` enables a skill for the agent |
+| **Install** | SKILL.md scanned from the shared skills roots (`~/.claude/skills/`, then `~/.agents/skills/`; or `RYU_SKILLS_DIR`) plus the built-in defaults |
+| **List** | `GET /api/skills` lists installed skills; `GET /api/skills/catalog` lists catalog skills |
+| **Activate** | `POST /api/skills/activate` with `{ "id": "<id>", "active": true }` turns injection on |
 | **Inject** | On each turn, active skills' metadata is injected |
-| **Load** | Model calls `skills.load` → full body injected |
-| **Deactivate** | `POST /api/skills/:id/deactivate` disables |
+| **Load** | The model calls `skills.load`, and Core injects the full body |
+| **Deactivate** | `POST /api/skills/activate` with `"active": false` turns injection off |
 
 ## Related
 
@@ -184,6 +161,5 @@ Agents discover skills through the MCP bridge:
   <DocCard href="/docs/extend/skills/catalog" />
   <DocCard href="/docs/core/unified-tool-catalog" />
   <DocCard href="/docs/gateway/tools" />
+  <DocCard href="/docs/extend/develop/extensions/agent-skills" />
 </Cards>
-
-Continue with [Skills](/docs/extend/skills), [skill catalog](/docs/extend/skills/catalog), [skill authoring](/docs/extend/skills/authoring), [skill publishing](/docs/extend/skills/publishing), and [Agent Skills extension](/docs/extend/develop/extensions/agent-skills).

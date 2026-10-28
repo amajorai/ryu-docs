@@ -9,13 +9,18 @@ import {
 import { Button } from "@ryu/ui/components/button";
 import { Check, RotateCcw, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import styles from "./quiz.module.css";
 
 /**
  * A single multiple-choice question. `answer` is the zero-based index of the
  * correct option. `explain` is shown after the learner answers, regardless of
  * whether they got it right, so the quiz teaches rather than just grades.
+ * `id` optionally pins the certification exam id that
+ * `tools/generate-academy-questions.ts` derives from the question text; the
+ * quiz itself does not use it.
  */
 export type QuizQuestion = {
+  id?: string;
   q: string;
   options: string[];
   answer: number;
@@ -90,7 +95,7 @@ function QuizReview({
   return (
     <div
       aria-live="polite"
-      className="mt-4 rounded-xl bg-fd-background p-4 sm:p-5"
+      className="mt-4 border-[color:var(--border)] border-t pt-4"
     >
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
@@ -195,9 +200,11 @@ export function Quiz({ questions }: { questions: readonly QuizQuestion[] }) {
   return (
     <section
       aria-label="Knowledge check quiz"
-      className="not-prose my-6 rounded-2xl bg-fd-secondary p-4 sm:p-5"
+      className={`my-6 rounded-2xl bg-fd-muted/72 p-1 ${styles.root}`}
     >
-      <div className="mb-4 flex items-start justify-between gap-3">
+      {/* The frame style shared with docs tables: the header sits on the
+          muted tray and the questions sit in an inset card below it. */}
+      <div className="flex items-start justify-between gap-3 px-3 pt-2.5 pb-3">
         <div>
           <p className="m-0 font-medium text-fd-card-foreground text-sm">
             Check yourself
@@ -214,34 +221,36 @@ export function Quiz({ questions }: { questions: readonly QuizQuestion[] }) {
         </span>
       </div>
 
-      {questions.length === 0 ? (
-        <p className="m-0 text-fd-muted-foreground text-sm">
-          This lesson does not have a knowledge check yet.
-        </p>
-      ) : (
-        <>
-          <ApprovalCard
-            answers={answers}
-            className="bg-fd-background"
-            onAnswersChange={setAnswers}
-            onStepChange={setStep}
-            onSubmit={submit}
-            questions={submitted ? [] : approvalQuestions}
-            result={`You got ${correctCount} of ${questions.length}. Review the explanations below.`}
-            status={status}
-            step={step}
-            submitLabel="Finish check"
-            title={submitted ? "Knowledge check complete" : "Check yourself"}
-          />
-          {submitted && (
-            <QuizReview
+      <div className="rounded-xl border border-[color:var(--border)] bg-fd-background p-4 sm:p-5">
+        {questions.length === 0 ? (
+          <p className="m-0 text-fd-muted-foreground text-sm">
+            This lesson does not have a knowledge check yet.
+          </p>
+        ) : (
+          <>
+            <ApprovalCard
               answers={answers}
-              onReset={reset}
-              questions={questions}
+              appearance="docs"
+              onAnswersChange={setAnswers}
+              onStepChange={setStep}
+              onSubmit={submit}
+              questions={submitted ? [] : approvalQuestions}
+              result={`You got ${correctCount} of ${questions.length}. Review the explanations below.`}
+              status={status}
+              step={step}
+              submitLabel="Finish check"
+              title={submitted ? "Knowledge check complete" : "Check yourself"}
             />
-          )}
-        </>
-      )}
+            {submitted && (
+              <QuizReview
+                answers={answers}
+                onReset={reset}
+                questions={questions}
+              />
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }

@@ -1,0 +1,190 @@
+---
+title: Prompts
+description: Load versioned, labelled prompts from the Ryu prompt registry in the TypeScript SDK, compile their variables, and use them as agent instructions.
+---
+
+`@ryuhq/sdk/prompts` reads prompts from a Ryu prompt registry. A prompt has a name, numbered
+versions that never change once committed, and labels that point at one version each. Ship code
+that asks for `production`, then promote or roll back a prompt by moving the label instead of
+redeploying.
+
+```typescript
+import { prompts } from "@ryuhq/sdk/prompts";
+
+const triage = await prompts.get("support-triage", {
+  label: "production",
+  fallback: "Classify this ticket as billing, bug, or other: {{ticket}}",
+});
+
+const text = triage.compile({ ticket: "I was charged twice" });
+```
+
+## Registries
+
+The default `prompts` client reads the registry on the local Ryu node (`RYU_CORE_URL`, with
+`RYU_CORE_TOKEN`, else `RYU_TOKEN`, as the bearer token). That registry holds prompts saved on the
+node and, when the node is signed in to an organization, a copy of the organization's prompts, so
+lookups keep working offline.
+
+To use the organization registry on the hosted control plane directly, for example from a
+server-side job, create a client with `hosted: true` and a Ryu API key:
+
+```typescript
+import { createPromptClient } from "@ryuhq/sdk/prompts";
+
+// Reads RYU_API_URL (default https://api.ryuhq.com), RYU_API_KEY and RYU_ORGANIZATION_ID.
+const orgPrompts = createPromptClient({ hosted: true });
+
+// Or pass them explicitly.
+const explicit = createPromptClient({
+  apiKey: process.env.RYU_API_KEY,
+  organizationId: "your-org-id",
+});
+```
+
+Setting `hosted`, `organizationId`, or `apiKey` selects the hosted registry. The hosted client
+follows these rules:
+
+- **Origin.** `baseUrl`, then `RYU_API_URL`, then `https://api.ryuhq.com`. Point `RYU_API_URL` at
+  the final API origin, because the client never follows a redirect. A 3xx answer fails with a
+  `PromptRegistryError` whose code is `redirect_refused`, so your key never reaches the origin a
+  redirect names.
+- **API key.** The client sends `apiKey` (or `RYU_API_KEY`) as `x-api-key`, with the organization
+  in `X-Ryu-Organization`.
+- **Session token.** A signed-in session token also works. Pass it as `token` instead of `apiKey`
+  (passing both throws). The token goes only to the hosted origin, never to `RYU_CORE_URL`, and a
+  token equal to your Core token throws.
+- **No Core token.** The client never sends `RYU_CORE_TOKEN` or `RYU_TOKEN` to the control plane.
+- **Fail fast.** With no organization id, or with neither an API key nor a session token, the
+  client throws before it sends anything, even when you pass a `fallback`. A missing credential is
+  a configuration error, not an outage.
+
+Create the key in the console: open **Personal access tokens** from your account menu for a
+personal key, or **Access > API keys** (the Team API keys page) in the organization console for
+an organization key.
+
+| Scope | Allows |
+| --- | --- |
+| `prompts:read` | List and resolve prompts. |
+| `prompts:manage` | Create prompts, commit versions, move labels, and delete prompts. |
+
+A key never gets `prompts:manage` implicitly. A classic token, and a service-account key created
+without explicit scopes, include `prompts:read` only. Choose `prompts:manage` explicitly on a
+fine-grained token or when you create the key if it needs to write. An organization key works
+only in its own organization, and a personal key works in any organization its owner belongs to.
+OAuth (MCP) clients cannot request the prompt scopes.
+
+Reading needs the `agent.view` permission in the organization. Committing versions and moving
+labels need `agent.edit`, and deleting a prompt needs `agent.delete`. With an API key, these are
+checked on every call against what the key acts for: the owner of a personal key, the role of the
+service account that holds a service-account key, or the member who created any other
+organization key.
+
+An organization holds at most 5,000 prompts, and a prompt at most 1,000 versions; going over
+returns `409` with `prompt_quota_exceeded`. A member signed in to the console may make 60 prompt
+writes a minute (`429` with `Retry-After`); API keys use their own per-key limits. Prompt text is
+encrypted at rest on the node, and on the control plane wherever content sealing is enabled.
+
+## Resolving a version
+
+`get(name, options)` returns the version a label or number points at.
+
+| Option | Meaning |
+| --- | --- |
+| `label` | Label to resolve. Defaults to `production`. `latest` is always the newest version. |
+| `version` | An exact version number. Pass either `label` or `version`. |
+| `cacheTtlMs` | How long a resolved prompt is reused (default 60 seconds; `0` disables caching). |
+| `fallback` | A template string or chat message list used when the registry has never answered. |
+
+When a cached prompt expires and the registry cannot be reached, `get()` keeps returning the last
+copy it fetched. Without a cached copy it uses `fallback`, and the returned prompt has
+`isFallback: true` and `version: 0`. Without either, it throws `PromptRegistryError`, whose
+`status` and `code` (for example `prompt_not_found`) describe the failure.
+
+## Templates
+
+Templates use a small, logic-less mustache syntax. Nothing is HTML-escaped.
+
+| Syntax | Renders |
+| --- | --- |
+| `{{name}}`, `{{{name}}}`, `{{& name}}` | The value. Objects render as JSON; missing values render empty. |
+| `{{user.name}}` | A nested field. |
+| `{{#items}}…{{/items}}` | Once per list item (`{{.}}` is the item), once for any other truthy value. |
+| `{{^items}}…{{/items}}` | Only when the value is missing, false, empty, or an empty list. |
+| `{{! note }}` | Nothing (a comment). |
+
+A section or comment tag alone on its line removes that line from the output. Pass
+`{ strict: true }` to `compile()` to throw `MissingTemplateVariablesError` (with the missing names)
+instead of rendering blanks. `prompt.variables` lists every name the template can read.
+
+## Text and chat prompts
+
+A text prompt's `compile()` returns a string. A chat prompt's `compile()` returns messages, and
+placeholder entries are replaced by the messages you pass for them:
+
+```typescript
+const assistant = await prompts.get("support-chat");
+
+if (assistant.type === "chat") {
+  const messages = assistant.compile(
+    { team: "billing" },
+    { placeholders: { history: previousMessages } }
+  );
+}
+```
+
+Both kinds also have `toMessages()` and `toInstructions()`. For a chat prompt,
+`toInstructions()` joins its system and developer messages. Each version also carries its
+`modelConfig` (model, temperature, and similar settings) and the labels pointing at it.
+
+## Agent instructions
+
+An `Agent` accepts a prompt reference as `instructions`. The reference is resolved when each run
+starts, so the next run picks up a moved label.
+
+```typescript
+import { Agent } from "@ryuhq/sdk";
+
+const triageAgent = new Agent({
+  name: "triage",
+  model: "your-model-id",
+  instructions: {
+    prompt: "support-triage",
+    label: "production",
+    variables: { team: "billing" },
+    fallback: "You triage support tickets for {{team}}.",
+  },
+});
+```
+
+You can also pass a prompt you already fetched: `instructions: { prompt: triage, variables }`. If
+the reference cannot be resolved and there is no fallback, the run ends with an `error` event. A
+prompt reference works the same way for agents used in [multi-agent](/docs/extend/develop/sdk/multi-agent)
+handoffs and alongside [agent middleware](/docs/extend/develop/sdk/agent-middleware).
+
+## Managing prompts
+
+The client can also write to the registry it points at:
+
+```typescript
+await prompts.create({
+  name: "support-triage",
+  version: { type: "text", template: "Classify: {{ticket}}", labels: ["staging"] },
+});
+
+const next = await prompts.commit("support-triage", {
+  type: "text",
+  template: "Classify this ticket: {{ticket}}",
+  commitMessage: "Tighter wording",
+  expectedLatestVersion: 1,
+});
+
+await prompts.setLabel("support-triage", "production", next.version);
+```
+
+`expectedLatestVersion` makes a commit fail with a conflict if someone else committed first. Labels
+are lowercase letters, digits, `-`, and `_`. Organization prompts mirrored on a node are read-only
+there; commit them through an organization client.
+
+In the desktop app, the same registry is available from **Prompt library** in Prompt Studio; see
+[Agent observability and evals](/docs/surfaces/desktop/user-guide/agent-observability-and-evals).

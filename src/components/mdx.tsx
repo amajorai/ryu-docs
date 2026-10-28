@@ -8,13 +8,15 @@ import type { AnchorHTMLAttributes, ComponentProps } from "react";
 import { LocalizedAnchor } from "@/components/localized-anchor";
 import { LocalizedCard } from "@/components/localized-card";
 import { Architecture } from "@/components/mdx/architecture";
-import { ContributionSurfaces } from "@/components/mdx/contribution-surfaces";
 import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
-import { Mermaid } from "@/components/mdx/mermaid";
-import { Quiz } from "@/components/mdx/quiz";
-import { SurfacePreview } from "@/components/mdx/surface-preview";
+import {
+  ContributionSurfaces,
+  Mermaid,
+  Quiz,
+  SurfacePreview,
+  UiComponentPreview,
+} from "@/components/mdx/lazy-client";
 import { TryInRyu } from "@/components/mdx/try-in-ryu";
-import { UiComponentPreview } from "@/components/mdx/ui-component-preview";
 import { versionedDocsHref } from "@/lib/docs-version";
 import { DEFAULT_DOCS_LOCALE } from "@/lib/i18n";
 
@@ -23,6 +25,16 @@ export function VersionedAnchor({
   ...props
 }: AnchorHTMLAttributes<HTMLAnchorElement>) {
   return <LocalizedAnchor href={versionedDocsHref(href)} {...props} />;
+}
+
+/** Markdown tables sit in the landing's frame: header on a muted tray, rows in
+ * an inset card (global.css `.docs-table-frame`). */
+function FramedTable(props: ComponentProps<"table">) {
+  return (
+    <div className="docs-table-frame prose-no-margin">
+      <table {...props} />
+    </div>
+  );
 }
 
 function VersionedCard({
@@ -36,6 +48,8 @@ export function getMDXComponents(
   components?: MDXComponents,
   locale: string = DEFAULT_DOCS_LOCALE,
 ): MDXComponents {
+  // SAFETY: The supplied overrides already satisfy MDXComponents, and the
+  // returned literal preserves the installed components and their names.
   // Fumadocs' default map still exposes a few components as `Component<never>`
   // while the current MDX type expects the broader component signature. The
   // runtime map is the same object shape, so keep the adapter at this boundary
@@ -56,6 +70,7 @@ export function getMDXComponents(
     SurfacePreview,
     Step,
     Steps,
+    table: FramedTable,
     TryInRyu,
     UiComponentPreview,
     ...components,

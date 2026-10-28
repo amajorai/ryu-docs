@@ -4,8 +4,10 @@ description: "Publish, route, respond to, and deliver tenant-scoped notification
 tags: ["notify", "events", "api", "standalone"]
 ---
 
-The Notify API uses the `/v1/events` resource family. Every protected request
-must carry the bearer key for one Notify tenant.
+This page is the HTTP reference for Ryu Notify, for producers and consumers
+that call it directly. The API serves events, topics, activities, destinations,
+deliveries, preferences, silences, groups, analytics, and usage under `/v1`.
+Every protected request carries the bearer key for one Notify tenant.
 
 ## Authentication and limits
 
@@ -13,10 +15,43 @@ must carry the bearer key for one Notify tenant.
 Authorization: Bearer <RYU_NOTIFY_API_TOKEN>
 ```
 
-Request bodies are bounded to the service's JSON limit. Event data is redacted
-recursively for credential-shaped keys such as `token`, `apiKey`,
-`authorization`, `password`, `secret`, and `privateKey`. This reduces accidental
-exposure but is not a substitute for keeping credentials out of event payloads.
+JSON request bodies are limited to 128 KiB. Storage is limited per tenant.
+
+| Resource | Limit |
+|---|---|
+| Events | The newest 10,000 are kept; older events and their deliveries are removed |
+| Activities | The newest 1,000 are kept; ended activities are removed before running ones |
+| Recipient preferences | Up to 1,000 recipients; a new recipient beyond that returns `400` |
+| Silences | Up to 100 active; expired silences are deleted when a new one is created |
+| Destinations | Up to 50 |
+| Live streams | 64 per tenant; another returns `429 too_many_streams` |
+| Publishes | `POST /v1/events` and `POST /v1/topics/:topic` share a per-tenant budget of 10 per second with bursts of 200; over it returns `429 rate_limited` |
+| Invalid API keys | 30 per client address per minute; then the address is blocked for a minute, doubling per repeat up to 15 minutes, and gets `429 rate_limited` |
+
+A `429 rate_limited` response carries `Retry-After` in seconds; wait that long
+before retrying. When a publish limit is configured, every publish response,
+including its `429`, also carries the IETF `RateLimit-Policy` and `RateLimit`
+fields (draft-ietf-httpapi-ratelimit-headers-11) for the `publish` bucket:
+`RateLimit-Policy: "publish";q=<burst>;w=<seconds to refill>` and
+`RateLimit: "publish";r=<publishes left>;t=<seconds>`, where `t` is the time
+until the bucket is full again, or on a `429` the same delay as `Retry-After`.
+Operators can change both limits and configure trusted
+proxies; see [Abuse limits](/docs/standalone/notify#abuse-limits).
+
+On Ryu-hosted Notify, a publish from an organization whose Ryu credits are
+exhausted returns `402 insufficient_credits`; add credits and retry. Reads,
+acknowledgements, archives, streams, deletes, and usage reports keep working.
+Self-hosted Notify never returns this code. See
+[Pricing](/docs/standalone/notify#pricing).
+
+Event `data` and activity `data` are redacted recursively before storage. A key
+is normalized by lowercasing it and removing `-` and `_`; its whole value is
+replaced with `[REDACTED]` when the normalized key ends with `token`, `secret`,
+`password`, `passwd`, `passphrase`, `apikey`, `accesskey`, `privatekey`,
+`credential`, `credentials`, `authorization`, `cookie`, `bearer`, or
+`sessionid`. So `githubToken`, `x-api-key`, `AWS_SECRET_ACCESS_KEY`, and
+`db_password` are redacted, while `maxTokens` is not. Keep credentials
+out of payloads anyway.
 
 ## Publish an event
 
@@ -78,7 +113,7 @@ nullable `acknowledgedAt`, `archivedAt`, and `response` fields.
 curl -fsS "$NOTIFY_URL/v1/events?source=github-actions&limit=50" \
   -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
 
-curl -fsS -X POST "$NOTIFY_URL/v1/events/evt_replace/ack" \
+curl -fsS -X POST "$NOTIFY_URL/v1/events/<event-id>/ack" \
   -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
 ```
 
@@ -93,7 +128,7 @@ Acknowledgement is tenant-scoped and idempotent. A missing event returns
 ## Topics and interactions
 
 For a small producer, publish plain text directly to a topic. JSON is also
-accepted on the same path and the path topic wins over a body topic:
+accepted on the same path, and the path topic wins over a body topic.
 
 ```sh
 curl -fsS -X POST "$NOTIFY_URL/v1/topics/deployments" \
@@ -108,19 +143,109 @@ curl -fsS -X POST "$NOTIFY_URL/v1/topics/deployments" \
 An interactive event starts with a `response` object. Reply with
 `POST /v1/events/:id/respond` and `{"status":"approved"}`,
 `{"status":"yes"}`, or `{"status":"replied","value":"…"}` as appropriate.
-Responses are single-use, tenant-scoped, and can call an optional HTTPS
-callback after the response is durably stored. Use `POST /v1/events/:id/cancel`
-to cancel a still-pending interaction.
+Use `POST /v1/events/:id/cancel` to cancel a still-pending interaction.
+
+Responses are single-use and tenant-scoped. The first answer, cancellation, or
+expiry that is stored wins; any later answer or cancel returns `409 conflict`
+with the stored event in `error.details.event`, and only the winning answer
+triggers a callback.
+
+```json
+{
+  "title": "Release approval",
+  "response": {
+    "type": "approval",
+    "prompt": "Ship build 184?",
+    "callbackUrl": "https://deploy.example.com/notify/callback",
+    "callbackSecret": "<long random secret>"
+  }
+}
+```
+
+After an answer is stored, Notify POSTs
+`{"type":"notification.response","eventId":…,"response":…}` to `callbackUrl`
+with these headers:
+
+| Header | Value |
+|---|---|
+| `X-Ryu-Notify-Event` | The event id |
+| `X-Ryu-Notify-Timestamp` | Unix seconds when the callback was sent |
+| `X-Ryu-Notify-Signature` | `sha256=` HMAC-SHA256 of `<timestamp>.<raw body>` keyed with `callbackSecret`; sent only when a secret was set |
+
+Verify the signature with a constant-time comparison and reject old timestamps.
+Before acting on an approval, read `GET /v1/events/:id` and check the stored
+response.
+`callbackSecret` requires `callbackUrl`, is stored privately, and is never
+returned by any read, stream, or delivery.
+
+Event responses include `response.callbackUrlPreview`, the callback's origin
+followed by `/…` (`null` with no callback). Display it. `response.callbackUrl`
+is still returned whole but deprecated, because the URL can carry a
+capability; a future release returns `null` for it in event reads, history,
+and stream frames. Destination deliveries set both fields to `null`.
 
 ## Destinations and delivery history
 
 Create a destination with `POST /v1/destinations` using `kind: "webhook"`,
 `"ntfy"`, or `"buzzkit"`. Webhooks receive JSON with an `event` and delivery
 identifier. When a secret is configured, `X-Ryu-Notify-Signature` carries an
-`sha256=` HMAC of the request body. ntfy destinations receive the event body
-with `Title`, `Priority`, `Tags`, `Click`, and `Actions` headers. A BuzzKit
-destination is an HTTP bridge adapter; it does not claim to implement Buzz's
-Nostr signing or workspace identity.
+`sha256=` HMAC of the request body, and the delivery also carries
+[Standard Webhooks](https://www.standardwebhooks.com/) headers, which add
+replay protection:
+
+| Header | Value |
+|---|---|
+| `webhook-id` | The delivery id, the same as `X-Ryu-Notify-Delivery`; a retry of the same delivery keeps it |
+| `webhook-timestamp` | Unix seconds when this attempt was sent |
+| `webhook-signature` | `v1,` then the base64 HMAC-SHA256 of `<webhook-id>.<webhook-timestamp>.<raw body>`, keyed with the UTF-8 bytes of the destination secret |
+
+Verify `webhook-signature` with a constant-time comparison, reject timestamps
+more than a few minutes from your clock, and deduplicate on `webhook-id`. A
+Standard Webhooks library expects a `whsec_` secret: pass `whsec_` followed by
+the base64 encoding of your destination secret. `X-Ryu-Notify-Signature` is
+unchanged and signs only the body, so it has no replay protection; a verifier
+should rely on `webhook-signature` and treat a delivery without the `webhook-*`
+headers as unsigned.
+
+Custom destination `headers` cannot use `Host`, `Content-Length`, `X-Ryu-Notify-*`,
+or the three `webhook-*` names above; Notify never forwards a stored
+`webhook-*` value.
+
+ntfy destinations receive the event body with `Title`, `Priority`, `Tags`, `Click`, and `Actions` headers. Actions use
+ntfy's `view, <label>, <url>` order, line breaks become spaces, and a value
+with non-ASCII text, such as an emoji or CJK title, is sent as an RFC 2047
+UTF-8 encoded word (`=?UTF-8?B?…?=`), which ntfy decodes. A BuzzKit
+destination is an HTTP bridge adapter. It does not implement Buzz's Nostr
+signing or workspace identity.
+
+The topic route accepts an `Actions` header as a JSON array, in ntfy's simple
+`view, <label>, <url>[, clear=true]` syntax (quote a value that contains a
+comma or semicolon), or as `action=view, label=…, url=…`. Notify actions are
+links, so ntfy `http` and `broadcast` actions return `400 invalid_request`.
+
+HTTP header values are byte strings, so send topic-route text outside Latin-1
+in `Title`, `Tags`, `Click`, or `X-Ryu-Source` as RFC 2047 encoded words:
+`=?UTF-8?B?<base64>?=` or `=?UTF-8?Q?<quoted-printable>?=`. Notify decodes
+every encoded word in those headers and drops the whitespace between adjacent
+decoded words, so `Title: =?UTF-8?B?6YOo572y?= =?UTF-8?B?5a6M5oiQ?=` stores the
+title `部署完成`.
+
+As in ntfy, UTF-8, ISO-8859-1, and US-ASCII words are decoded. A word Notify
+cannot decode (another charset, a malformed payload, or invalid bytes) is
+stored as sent. A word that decodes to a
+control character (such as a line break; tab is allowed) or a bidirectional
+text control (U+202A to U+202E, U+2066 to U+2069) returns
+`400 invalid_request`, as do more than 64 encoded words, or a header longer
+than 8,192 characters that contains an encoded word. The decoded values still
+have the event limits, such as 256 bytes for a title.
+
+`Actions` is never decoded, because a decoded word could change the structure
+of the JSON or ntfy syntax around it. Escape non-ASCII text in a JSON
+`Actions` header as `\uXXXX`.
+
+The TypeScript and Python SDKs encode a topic title, tags, or click URL with
+characters outside Latin-1, or containing `=?`, as one UTF-8 encoded word, and
+send `Actions` as ASCII-escaped JSON.
 
 Each new event creates at most one delivery per enabled destination. Delivery
 attempts are durable, bounded, retried with backoff, and available from
@@ -129,16 +254,64 @@ failed or suppressed attempt. Destination URLs and custom header values are
 never returned by list or read endpoints; read `urlPreview`, `hasSecret`, and
 `headerNames` instead.
 
-Delivery is HTTPS-only and rechecks DNS immediately before each attempt. The
-connection is pinned to the screened public address, redirects are not followed,
-private/mapped/reserved destinations are rejected, and response bodies are
-bounded. Destination delivery also fails closed when the configured egress
-screen cannot complete.
+Delivery is HTTPS-only and rechecks DNS immediately before each attempt. Every
+attempt opens a new connection pinned to the screened public addresses, and
+the certificate is checked against the destination hostname. Redirects are not
+followed, private/mapped/reserved destinations are rejected, and response
+bodies are bounded. Destination delivery also fails closed when the configured
+egress screen cannot complete.
+
+A failed attempt records one of a fixed set of messages in the delivery's and
+destination's `lastError`, and `POST /v1/destinations/:id/test` returns the same
+message with status `502`. The messages are `destination unreachable` (blocked address, DNS failure, or
+connection error), `destination timed out`, `destination returned HTTP <n>`, or
+`destination response exceeded its size cap`.
+
+## Preferences
+
+`PUT /v1/preferences` replaces the default or recipient record: an omitted
+`muted` becomes `false` and an omitted `quietHours` is cleared. `PATCH` changes
+only the fields in the body and keeps the rest; send `"quietHours": null` to
+clear quiet hours. Pass the recipient as `?recipient=` or in the body.
+
+## Usage reports
+
+`GET /v1/usage` reports how many events the bearer's tenant had accepted in a
+window of whole UTC hours:
+
+```sh
+curl -fsS "$NOTIFY_URL/v1/usage?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z" \
+  -H "Authorization: Bearer ${RYU_NOTIFY_API_TOKEN}"
+```
+
+```json
+{
+  "type": "usage.report",
+  "ok": true,
+  "from": "2026-10-01T00:00:00.000Z",
+  "to": "2026-10-02T00:00:00.000Z",
+  "meters": { "events": 1834 }
+}
+```
+
+`events` counts each event accepted by `POST /v1/events` or
+`POST /v1/topics/:topic`, in the hour it was accepted, for hours that start at
+or after `from` and before `to`. An idempotent replay returns the stored event
+and is not counted again. Requests refused by validation, authentication, the
+publish rate limit, or an idempotency conflict are not counted.
+
+`from` and `to` are RFC 3339 timestamps with a time zone on a whole hour, with
+`to` later than `from` and at most 31 days after it; anything else returns
+`400 invalid_request`. Counts are kept for at least 400 days, separately from
+event history, so trimming old events does not change them. The response window
+is clipped to no earlier than 400 days ago and no later than the end of the
+current hour. Usage reads do not count against the publish rate limit.
 
 ## Endpoint surface
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/` | Describe the service; redirect only when `RYU_PRODUCT_DASHBOARD_URL` is set |
 | `GET` | `/health` | Read unauthenticated liveness and capabilities |
 | `POST` | `/v1/events` | Create one event |
 | `GET` | `/v1/events` | List bounded, filtered history |
@@ -160,6 +333,7 @@ screen cannot complete.
 | `POST` | `/v1/activities/:id/end` | End an activity |
 | `POST` | `/v1/destinations` | Create a delivery destination |
 | `GET` | `/v1/destinations` | List redacted destination projections |
+| `GET` | `/v1/destinations/:id` | Read one redacted destination projection |
 | `PATCH` | `/v1/destinations/:id` | Update a destination |
 | `DELETE` | `/v1/destinations/:id` | Delete a destination |
 | `POST` | `/v1/destinations/:id/test` | Send a bounded test delivery |
@@ -167,20 +341,102 @@ screen cannot complete.
 | `GET` | `/v1/deliveries/:id` | Read one delivery |
 | `POST` | `/v1/deliveries/:id/retry` | Requeue a failed or suppressed delivery |
 | `GET` | `/v1/preferences` | Read default or recipient preferences |
-| `PUT` | `/v1/preferences` | Set mute and quiet-hours preferences |
+| `PUT` | `/v1/preferences` | Replace mute and quiet-hours preferences |
+| `PATCH` | `/v1/preferences` | Change only the given preference fields |
 | `GET` | `/v1/silences` | List active silences |
 | `POST` | `/v1/silences` | Create a bounded matching silence |
 | `DELETE` | `/v1/silences/:id` | Remove a silence |
 | `GET` | `/v1/groups` | Read fingerprint groups |
 | `GET` | `/v1/analytics` | Read bounded event aggregates |
+| `GET` | `/v1/usage` | Read accepted-event counts for whole hours |
 
 Errors include a stable `code`, safe `message`, HTTP `status`, and `requestId`
 at the top level and inside `error`. All API responses include `X-Request-ID`.
 Clients should branch on `code`, not message text.
+
+Send `Accept: application/problem+json` to receive errors as
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details instead.
+The body has `type` (this page's URL with `#<code>`), `title`, `status`,
+`detail`, `instance` (the request path), `code`, and `docs`, plus `ok`,
+`message`, `requestId`, and `error` as above; only the legacy
+`type: "notify.error"` is replaced. Without that `Accept` value, errors keep
+the `application/json` envelope.
+
+A path in the table above called with a method it does not serve returns
+`405 method_not_allowed` with an `Allow` header that lists the methods it
+does serve. `HEAD` works wherever `GET` does and returns the same status and
+headers without a body, and `OPTIONS` on a known path returns `204` with
+`Allow`. Both need the API key except on `/` and `/health`. An unknown path
+returns `404 not_found`. Path validation runs first, so a malformed path
+segment returns `400 invalid_request` even with a wrong method.
+
+### Error codes
+
+#### `body_too_large`
+
+HTTP `413`. The request body is larger than the endpoint accepts.
+
+#### `conflict`
+
+HTTP `409`. The interaction is already complete or has expired; `details.event`
+carries its current state.
+
+#### `idempotency_conflict`
+
+HTTP `409`. An `Idempotency-Key` was reused with a different request.
+
+#### `insufficient_credits`
+
+HTTP `402`. On Ryu-hosted Notify, the organization has run out of Ryu credits.
+
+#### `invalid_cursor`
+
+HTTP `400`. A pagination cursor is not one Notify issued.
+
+#### `invalid_json`
+
+HTTP `400`. The request body is not valid JSON.
+
+#### `invalid_request`
+
+HTTP `400`. A field, query parameter, or path segment failed validation.
+
+#### `method_not_allowed`
+
+HTTP `405`. The path exists but does not serve this method; see `Allow`.
+
+#### `not_found`
+
+HTTP `404`. The path or resource does not exist for this tenant.
+
+#### `rate_limited`
+
+HTTP `429`. A limit above was hit; wait `Retry-After` seconds.
+
+#### `request_failed`
+
+HTTP `500`, `502`, or `503`. Notify, a destination, or the service itself failed;
+retry later.
+
+#### `secrets_unavailable`
+
+HTTP `500`. Notify has no usable `RYU_NOTIFY_SECRETS_KEY`, so it cannot store or
+open a destination or callback credential. Set the key and restart the service.
+
+#### `too_many_streams`
+
+HTTP `429`. Too many event streams are open; close one and retry.
+
+#### `unauthorized`
+
+HTTP `401`. The bearer API key is missing or invalid.
+
+#### `unsupported_media_type`
+
+HTTP `415`. The request `Content-Type` is not one the endpoint accepts.
 
 <Cards>
   <DocCard href="/docs/standalone/notify" />
   <DocCard href="/docs/standalone/notify-streams" />
 </Cards>
 
-Continue with [Ryu Notify](/docs/standalone/notify), [Notify streams](/docs/standalone/notify-streams), [HTTP API reference](/docs/extend/develop/api-reference), and [standalone services](/docs/standalone).

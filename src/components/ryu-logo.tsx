@@ -38,7 +38,7 @@ export function RyuLogo({ size = 22 }: { size?: number }) {
         setIsBlinking(true);
         setTimeout(() => setIsBlinking(false), 150);
       },
-      3000 + Math.random() * 2000
+      3000 + Math.random() * 2000,
     );
     return () => clearInterval(interval);
   }, []);
@@ -61,7 +61,10 @@ export function RyuLogo({ size = 22 }: { size?: number }) {
       const rect = svgRef.current.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
-      const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
+      const angle = Math.atan2(
+        event.clientY - centerY,
+        event.clientX - centerX,
+      );
       setGaze({
         x: Math.cos(angle) * MAX_GAZE,
         y: Math.sin(angle) * MAX_GAZE,

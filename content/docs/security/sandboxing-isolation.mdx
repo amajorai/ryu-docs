@@ -1,9 +1,9 @@
 ---
-title: "Sandboxing and isolation"
-description: "Swappable sandbox backends for tool execution, and what isolation each one actually provides today."
+title: "Sandboxing and Isolation"
+description: "The sandbox backends Core can run tool code in, what isolation each one provides, and the extra containment around managed Codex sessions and self-hosted deployments."
 ---
 
-Tools that execute code run inside a sandbox backend. Ryu treats the sandbox as swappable - you can pick a default and override it per call - so the isolation strength is a deployment choice rather than a hardcoded one. For the Core-side configuration surface, see [Sandbox](/docs/core/sandbox).
+Tools that execute code run inside a sandbox backend. The backend is swappable: you pick a node default and can override it per call, so isolation strength is a deployment choice. For the Core-side configuration surface, see [Sandbox](/docs/core/sandbox).
 
 ## Backends
 
@@ -13,45 +13,64 @@ Tools that execute code run inside a sandbox backend. Ryu treats the sandbox as 
 | `docker` | Explicit `backend` | Local container execution when the daemon is reachable |
 | `microsandbox` | Explicit `backend` | Local microVM execution when the runtime is reachable |
 | `opensandbox` | Explicit `backend` | Local isolated command execution when the runtime is reachable |
+| `mxc` | Explicit `backend`, on Windows 11 with MXC's `wxc-exec` installed | Windows AppContainer/BaseContainer process container with filesystem and network policy per run; not a VM boundary |
 | `daytona` | Explicit `backend`, or persistent workspace tools | Remote persistent workspace; metered and provider-dependent |
-| `box` | Explicit `backend`, or persistent workspace tools | Remote durable Box service; driver-dependent isolation with explicit stop/resume/fork |
-| `ssh`, `modal`, `vercel_sandbox`, `singularity` | Explicit provider slot | Recognized vocabulary; Core does not pretend to execute these without provider wiring |
-| `local` | Explicit provider slot | Recognized but not treated as an isolation boundary or implicit host fallback |
+| `box` | Explicit `backend`, persistent workspace tools, or a cloud environment with the **Fresh cloud box** backend | Remote durable Box service; driver-dependent isolation with explicit stop/resume/fork. **Fresh cloud box** tasks get one disposable Box per chat. That selection is strict and never falls back to another backend |
+| `ssh` | Explicit `backend`, with `RYU_SANDBOX_SSH_HOST` set | Remote execution over the system `ssh` client; the remote user account is the only boundary |
+| `local` | Explicit `backend`, after the operator sets `RYU_SANDBOX_LOCAL_ENABLE=1` | **No isolation**: a host subprocess in a temporary directory with a cleared environment; filesystem and network grants are not enforced; never an implicit fallback |
+| `singularity` | Explicit `backend`, with the `apptainer` or `singularity` CLI installed (Linux) | Local Apptainer container with `--containall`; network `none` unless granted; filesystem grants become bind mounts |
+| `modal`, `vercel_sandbox` | Explicit provider slot | Recognized vocabulary; reported as not implemented and refused when selected |
 
 The `backend` argument is strict. An explicit unknown or unavailable backend returns a visible error;
 Core does not silently substitute the node default. This lets a plugin implement a provider-backed
 slot such as Daytona without changing the meaning of another backend name.
 
-Availability and permission are different controls. A detected runtime only says that the host may
-be able to start it; it does not authorize a plugin, agent, or user to use it. Execution still passes
-through the relevant manifest grants, agent allowlist, approval policy, and resource limits. A
-provider or sandbox that is discoverable but disabled must remain unavailable to the caller.
-
 <Callout type="warn">
-  Runtime presence is not permission, and a provider slot is not an implementation. Every execution
-  still passes through manifest grants, agent allowlists, approval policy, resource limits, and the
-  selected backend's own credentials/quota checks. If those checks fail, the call must remain
-  unavailable; it must not fall back to a less isolated host process.
+  Runtime presence is not permission, and a provider slot is not an implementation. A detected
+  runtime only means the host may be able to start it. Every execution still passes through
+  manifest grants, agent allowlists, approval policy, resource limits, and the selected backend's
+  own credential and quota checks. If those checks fail, the call is refused; it does not fall back
+  to a less isolated host process. A discoverable but disabled provider stays unavailable.
 </Callout>
 
-## Why this matters
+## Fresh cloud box credential custody
 
-Because a tool call originates from untrusted model output, the selected backend is the containment
-layer for code the model decided to run. Wasmtime supplies the strongest built-in default-deny
-boundary; container, microVM, and remote backends add their own isolation semantics. Command approval
-(a human gates dangerous operations) and environment scrubbing (the child never inherits secrets)
-remain load-bearing controls around every backend.
+A [Fresh cloud box](/docs/surfaces/desktop/user-guide/cloud-environments#run-on-a-fresh-ryu-box)
+cloud task keeps the Box service credential in Core. Environment secrets reach the Box only as the
+environment of one command or one managed run. They are never placed in script text. Managed
+agents receive the environment variables without the GitHub token.
 
-## Subprocess protocol bounds
+To push a branch, Core first interrupts the processes in the Box. It commits as the unprivileged
+Box user, then copies the commits into a fresh repository that only root can read. It pushes from
+that copy, never with force, to the GitHub remote that Core stores. The push ignores Git hooks,
+system and global Git configuration, and the checkout's own repository configuration. Redaction
+covers the token and its encoded authorization header.
 
-The Deno and secure-exec tool runners exchange tagged, newline-delimited frames with Core. Each frame
-is limited to 64 KiB, including a frame that never sends a newline, so a noisy guest cannot make Core
-retain an ever-growing stdout buffer. Log previews are capped at 30,000 bytes and 1,024 entries;
-the entry limit also covers empty log lines, whose bytes alone would not consume the byte budget.
+<Callout type="warn">
+  The filesystem Box driver runs host processes. It is for development only and provides no
+  isolation. Managed agents can read every variable bound to their environment, including their
+  model API key.
+</Callout>
 
-Protocol writes and child termination/reaping use the execution's active deadline. Once a guest emits
-a terminal `DONE` or `ERROR` frame, Core kills and reaps the child within that bound, so timers left
-behind by guest code cannot hold the completed request open indefinitely.
+## Containment layers
+
+A tool call comes from untrusted model output, so the selected backend is the containment layer for
+code the model decided to run. Wasmtime is the strongest built-in default-deny boundary; container,
+microVM, and remote backends add their own isolation. [Command approval](/docs/security/command-approval)
+(a human gates dangerous operations) and [environment scrubbing](/docs/security/credential-scrubbing)
+(the child does not inherit secrets) apply around every backend.
+
+## JS sandbox protocol bounds
+
+Sandboxed JavaScript (code mode, plugin hooks, adapters, and inline tools) runs in a WebAssembly
+instance inside Core and talks to Core only through host calls. Each request or result the program
+hands Core is limited to 64 KiB, so a noisy guest cannot make Core allocate whatever it asks for. Log
+previews are capped at 30,000 bytes and 1,024 entries; the entry limit also covers empty log lines,
+whose bytes alone would not consume the byte budget.
+
+Every run has an active deadline, and the guest yields to Core every few milliseconds, so a tight
+loop is stopped on time. Once a program reports its result, Core discards the instance, so timers
+left behind by guest code cannot hold the completed request open.
 
 ## Managed agent process containment
 
@@ -63,7 +82,54 @@ Ryu-managed Codex sessions also pass through a Ryu-owned child runner before ACP
 | macOS | Seatbelt deletion-denial profile | Denies file unlink for the agent and its descendants; packaged App Sandbox or a VM is the stronger follow-up |
 | Windows | Native AppContainer runner | Ryu refuses to start managed Codex until an AppContainer deletion boundary is available |
 
-This runner is deliberately a lower-level backstop for the Codex hook and command scanner. It does
+Ryu recognizes a managed Codex launch by what the declaration would actually run. It reads these
+shapes:
+
+- Any program whose file name contains `codex` (the same rule a custom Codex command must meet),
+  or Node or Bun running the Codex ACP package's entry script.
+- A package runner (`npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, or `deno run` with an `npm:`
+  specifier) that resolves to the Codex ACP package, whatever its options. That includes
+  `-p`/`--package`, `--prefer-offline`, and omitting `-y` (npm assumes confirmation when an agent's
+  standard input is not a terminal).
+- Any command run by a `cmd /c`, `sh -c`, `eval`, or PowerShell `-Command` wrapper (including
+  abbreviated parameter names such as `-Comm`), including commands after `&`, `|`, or `;`, inside
+  `$(…)` or backticks, inside `{ … }`, `if`, and loop bodies, inside shell functions and `trap`
+  actions, inside PowerShell script blocks such as `ForEach-Object { … }`, and the targets of shell
+  and PowerShell aliases. Only an unquoted `)` outside a `${…}` expansion ends a `$(…)`. Text the
+  shell treats as data does not hide the commands after it: a here-document body runs to its
+  delimiter line (its `$(…)` still runs unless the delimiter is quoted), and bash `$'…'` strings,
+  PowerShell here-strings, and typographic quotes in PowerShell are read as the shell reads them.
+  Under `sh`, which may be bash or another shell, a script that uses `$'…'` is read both ways.
+- The command run by these launchers: `exec`, `command`, `nohup`, `nice`, `time`, `timeout`,
+  `sudo`, `doas`, `setsid`, `stdbuf`, `ionice`, `taskset`, `chrt`, `unbuffer`, `caffeinate`,
+  `xargs`, `watch`, `script`, cmd.exe `start`, and PowerShell `Start-Process`.
+- The command an `env -S` string spells out, and the script a PowerShell `-EncodedCommand` block
+  decodes to.
+
+What Ryu cannot read in these shapes, it cannot rule out, so it counts as Codex:
+
+- A program or package name that the wrapper expands at launch from a variable or a command
+  substitution, or that `xargs` reads from standard input.
+- A quote, `$(…)`, or backtick substitution that is never closed, a here-document that never
+  reaches its delimiter line or starts inside parentheses, and a `case` statement inside `$(…)`.
+- A shell that reads its commands from a script file (`sh agent.sh`, PowerShell `-File`), a sourced
+  file, or standard input, and a PowerShell encoded command that does not decode.
+- Inline interpreter code (`python -c`, `node -e` or `-p`, `bun -e`, `deno eval`, `ruby -e`,
+  `perl -e` or `-E`) and a program read from standard input: `python -`, `ruby -`, `perl -`, or
+  Python, Node, Deno, Ruby, or Perl started without a program.
+- A package.json or Deno task: `npm run`, `npm start`, `npm test`, `node --run`, `deno task`, and
+  `pnpm`, `yarn`, or `bun` given a script name.
+
+Arguments after the package or script are the agent's own input, so mentioning Codex there does
+not change how another agent is classified. Any other program is identified by its own name, not by
+what it starts: a script file run by an interpreter (such as an npm-installed command shim or
+`python agent.py`), a launcher not listed above, or code that starts a process itself (such as a
+PowerShell .NET call) runs without the Codex runner unless its own name contains `codex`. On
+Windows, every recognized shape is refused until the native runner is available. To run a different
+agent through one of the shapes above without the Codex runner, launch the agent's own program
+directly.
+
+This runner is a lower-level backstop for the Codex hook and command scanner. It does
 not make arbitrary host writes safe: overwriting or truncating an existing file can still destroy
 content. For work without system backups, use a disposable copy-on-write workspace or a VM and
 promote reviewed changes back to the host through a controlled file broker. The current Ryu runner
@@ -93,7 +159,7 @@ account.
 
 ## Scope
 
-This page covers the sandbox around **tool execution**. Plugin code is a separate question with a separate answer - see [Plugin isolation](/docs/security/plugin-isolation).
+This page covers the sandbox around **tool execution**. For plugin code, see [Plugin isolation](/docs/security/plugin-isolation).
 
 ## Related
 

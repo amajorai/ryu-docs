@@ -31,8 +31,8 @@ export default function ProofPage() {
               selects, including a short quote and its stable block identity.
             </p>
             <p>
-              The page-level form below remains available when feedback is
-              about the whole guide rather than one section.
+              The page-level form below remains available when feedback is about
+              the whole guide rather than one section.
             </p>
           </FeedbackText>
         </DocsBody>

@@ -1,16 +1,16 @@
 ---
-title: "Cap what an agent can spend with a budget"
-description: "Put a lifetime charged-spend cap on an individual agent, choose which spend categories count, then downgrade or reject once it is hit."
+title: "Cap What an Agent Can Spend with a Budget"
+description: "How-to for capping an agent's charged spend in the Gateway: set a daily, weekly, monthly, or lifetime limit, choose which spend categories count, and downgrade or reject once it is hit."
 ---
 
-An agent that loops or fans out can spend money quickly. The example adds a charged-spend budget to
-the Gateway. When the cap is reached, the Gateway swaps to a cheaper model or rejects the request,
-according to the configured action. Use it when an agent needs a hard USD ceiling.
+An agent that loops or fans out can spend money quickly. This recipe adds a charged-spend budget
+to the Gateway. When the cap is reached, the Gateway swaps to a cheaper model or rejects the
+request, according to the configured action.
 
 ## What you'll use
 
 - [Configuration](/docs/gateway/configuration): where keys and budgets are defined and how config is written.
-- [Security and governance](/docs/gateway/governance): the broader policy surface the gateway enforces.
+- [Security and governance](/docs/gateway/governance): the broader policy surface the Gateway enforces.
 
 ## Steps
 
@@ -20,37 +20,45 @@ according to the configured action. Use it when an agent needs a hard USD ceilin
 
 ### Pick the budget scope
 
-The gateway tracks charged spend at three scopes. Budget `limit` values are integer micro-USD:
-`1_000_000` is `$1.00`, and `0` disables that rule. This is a cost cap, not a token cap. Pick the
-scope that matches what you want to bound:
+The Gateway tracks charged spend per user, per agent, and per session. Budget `limit` values are
+integer micro-USD. `1_000_000` is `$1.00`, and `0` disables that rule. This is a cost cap, not a
+token cap. A user or agent rule measures `limit` over a UTC `window` (`daily`, `weekly`, `monthly`,
+or `lifetime`). Omit `window` and it defaults to `lifetime`.
 
-- **Per key**: a legacy lifetime token-count cap on a single gateway API key. Keep this separate from
-  the charged-spend budgets below; it is controlled by `token_budget_total`.
-- **Per user / per agent**: rules under `[budgets]`, keyed by the `x-ryu-user-id` / `x-ryu-agent-id`
-  a *trusted forwarder* passes (Ryu Core relaying a real end-user identity).
-- **Per session**: a running charged-spend cap per `x-ryu-session-id`, so a single conversation
-  cannot overrun.
+- **Per user or per agent** - rules under `[budgets.users]` and `[budgets.agents]`, keyed by the
+  `x-ryu-user-id` or `x-ryu-agent-id` that a *trusted forwarder* passes (Ryu Core relaying a real
+  end-user identity).
+- **Per session** - one global cap under `[budgets.session]` that applies to every
+  `x-ryu-session-id`, so a single conversation cannot overrun.
+
+A separate, legacy guard caps the lifetime token count of one Gateway API key with
+`token_budget_total`. It counts tokens, not charged spend.
 
 </Step>
 
 <Step>
 
-### Set a lifetime cap on a key
+### Optional: set a token cap on a key
 
 If you also need the legacy token-count guard on an API key, give it a `token_budget_total` and
-decide what happens when it is hit:
+choose what happens when it is hit:
 
 ```toml
 [[auth.api_keys]]
-key = "YOUR_GATEWAY_KEY"
+key = "<at-least-24-character-random-secret>"   # e.g. from `openssl rand -hex 24`
 name = "my-app"
 token_budget_total = 5000000     # legacy lifetime token cap, input + output (0 = unlimited)
 downgrade_to = "gpt-4o-mini"     # swap to this model once the cap is hit
 ```
 
+Gateway keys must be at least 24 printable characters with no whitespace. The Gateway refuses to
+start with a shorter key.
+
 With `downgrade_to` set, requests keep working on the cheaper model after the cap. Leave it unset and
-the gateway instead rejects the request with `BudgetExceeded` once the cap is reached, a hard stop
-rather than a quiet downgrade.
+the Gateway rejects the request with `BudgetExceeded` once the cap is reached. The cap applies to
+streamed and buffered chat, embeddings, and image, audio, and video requests alike, and so does a
+shared budget's exceeded verdict from the control plane. `downgrade_to` names a chat model, so an
+image, audio, or video request over the cap is rejected instead of downgraded.
 
 </Step>
 
@@ -58,13 +66,14 @@ rather than a quiet downgrade.
 
 ### Set an agent spend cap
 
-Put the agent rule under `[budgets.agents]`. This example stops the agent after `$1.00` of charged
-spend and excludes paid tool calls:
+Put the agent rule under `[budgets.agents]`, keyed by the agent id. This example stops the agent
+after `$1.00` of charged spend per UTC day and excludes paid tool calls.
 
 ```toml
 [budgets.agents.my-agent]
-limit = 1_000_000       # $1.00; charged micro-USD on the wire
-action = "stop"         # notify | downgrade | restrict | stop
+limit = 1_000_000       # $1.00, in charged micro-USD
+window = "daily"        # daily | weekly | monthly | lifetime (default)
+action = "stop"         # notify | downgrade | restrict | stop (default)
 alert = "warn"          # silent | warn | fanout | email
 
 [budgets.agents.my-agent.include]
@@ -73,14 +82,24 @@ media = true            # image, video, speech
 tools = false           # paid Composio actions
 ```
 
-The Gateway uses OpenRouter's response-reported `usage.cost` when a request is routed through
-OpenRouter, otherwise it uses the configured model or modality estimate. The charged amount
-includes the configured platform markup, so the cap matches what the wallet would debit.
-`downgrade` uses `downgrade_to`; `restrict` still uses `restrict_max_tokens` to limit the response
-after the spend cap is reached. Existing rules default all three categories to `true`.
+The actions do this once the cap is reached:
 
-The three controls are independent: model inference, media generation (image/video/speech), and
-paid tools (Composio actions). Turn off a category when it should not consume that agent's cap.
+| `action` | Effect |
+|---|---|
+| `notify` | Lets the request through and flags it. Never blocks |
+| `downgrade` | Swaps to the rule's `downgrade_to` model. Without `downgrade_to`, it acts as `restrict` |
+| `restrict` | Strips tool definitions and caps `max_tokens` at `restrict_max_tokens` (default 256) |
+| `stop` | Rejects the request with `402 budget_exceeded`. The default when `action` is omitted |
+
+When a request matches both a user rule and an agent rule, the most restrictive action wins.
+
+The three `include` categories are independent: model inference, media generation (image, video,
+speech), and paid tools (Composio actions). Turn off a category when it should not consume that
+agent's cap. A rule that omits `include` counts all three.
+
+The Gateway uses OpenRouter's response-reported `usage.cost` when a request is routed through
+OpenRouter. Otherwise it uses the configured model or modality estimate. The charged amount
+includes the configured platform markup, so the cap matches what the wallet would debit.
 
 </Step>
 
@@ -89,18 +108,18 @@ paid tools (Composio actions). Turn off a category when it should not consume th
 ### Drive per-user and per-agent budgets safely
 
 Per-user and per-agent budgets only apply when a *trusted forwarder* supplies the identity. By
-default the gateway ignores client-supplied `x-ryu-user-id` / `x-ryu-agent-id` headers, so an
+default the Gateway ignores client-supplied `x-ryu-user-id` / `x-ryu-agent-id` headers, so an
 untrusted caller cannot rotate identities to evade its quota. Set `trusted_forwarder = true` only on
 a key for an intermediary you control:
 
 ```toml
 [[auth.api_keys]]
-key = "ryu-sk-core-relay"
+key = "<at-least-24-character-random-secret>"
 name = "core-relay"
 trusted_forwarder = true   # this intermediary may pass x-ryu-user-id / x-ryu-agent-id
 ```
 
-The per-user and per-agent rules themselves live under `[budgets]`. See [Configuration](/docs/gateway/configuration-access#trusted-forwarders).
+See [trusted forwarders](/docs/gateway/configuration-access#trusted-forwarders).
 
 </Step>
 
@@ -108,16 +127,18 @@ The per-user and per-agent rules themselves live under `[budgets]`. See [Configu
 
 ### Apply it
 
-Budgets are hot-swapped live: a `PUT /api/gateway/config` (which relays `PUT /v1/config`) with a
-`budgets` patch takes effect without a restart, unlike routing. `GET /v1/config` returns the live
-budget view.
+Budgets hot-swap. A `PUT /api/gateway/config` (which relays `PUT /v1/config`) with a `budgets`
+patch takes effect without a restart. `GET /v1/config` returns the live budget view. User and agent
+spend is stored next to the audit database, so it survives a Gateway restart. The per-session
+counter is kept in memory only.
 
 <Callout type="info">
 On desktop, open an existing agent's edit page and use **Model & provider → Budget** to set that
-agent's cap, action, notification tier, and live spend. The Gateway dialog's **Budgets** card remains
-the overview for adding, editing, and removing every per-user and per-agent rule, plus the global
-per-session cap. You need the `gateway.configure` permission to change rules. You can also author
-budget rules through the gateway config (`PUT /api/gateway/config`) or the web dashboard.
+agent's cap, action, notification tier, and live spend. The Gateway dialog's **Spending limits**
+section is the overview for adding, editing, and removing every per-user and per-agent rule, plus the global
+per-session cap. You need the `gateway.configure` permission to change rules or read live spend.
+You can also write budget rules through the Gateway config (`PUT /api/gateway/config`) or Console
+on the web.
 </Callout>
 
 </Step>
@@ -128,32 +149,31 @@ budget rules through the gateway config (`PUT /api/gateway/config`) or the web d
 
 For OpenRouter-routed ACP and regular model calls, Ryu sends a stable agent identity with the
 request and records OpenRouter's inline `usage.cost` as soon as the response completes. OpenRouter's
-generation metadata can then be reconciled by matching its `external_user` to that identity; it is a
-reconciliation/reporting source, not a second hot-path debit.
+generation metadata can then be reconciled by matching its `external_user` to that identity. It is a
+reconciliation and reporting source, not a second debit on the request path.
 
-This does not make every ACP provider billable through OpenRouter. Claude/Codex subscription
+This does not make every ACP provider billable through OpenRouter. Claude and Codex subscription
 passthroughs remain subscription traffic, and direct-egress agents are outside the Gateway cap.
-Self-hosted/local inference has no provider invoice feed, so its cap uses the configured estimate.
+Self-hosted and local inference has no provider invoice feed, so its cap uses the configured estimate.
 Composio actions are separate tool charges and are counted only when **Paid tools** is enabled.
 
 ## Check your work
 
 - Set a low `limit` on a test agent, such as `1_000_000` for `$1.00`, and drive governed model calls
-  past the cap. With `downgrade_to` set, requests keep succeeding but on the cheaper model; leave it
-  unset and the gateway returns `BudgetExceeded` once the cap is hit.
+  past the cap. With `action = "stop"`, the Gateway returns `402 budget_exceeded`. With
+  `action = "downgrade"` and a `downgrade_to` model, requests keep succeeding on the cheaper model.
 - If you use the legacy API-key guard, set a low `token_budget_total` separately and verify its
-  token-count behavior; it is not the charged-spend budget.
+  token-count behavior. It is not the charged-spend budget.
 - `GET /v1/config` returns the live budget rules, so you can confirm each cap without a
-  restart; `GET /v1/budget/spend` returns the current in-memory per-agent usage as charged micro-USD
-  with `currency = "USD"` and `unit = "micro_usd"`.
-- Budgets hot-swap: a `PUT /api/gateway/config` with a `budgets` patch takes effect immediately,
-  unlike routing, which needs a refresh.
-- In the desktop, open the agent's edit page, set a cap in **Model & provider → Budget**, and check
-  its live spend as the agent makes governed model calls. The Gateway dialog's **Budgets** card
-  shows the same rule in the all-agents overview.
+  restart. `GET /v1/budget/spend` returns the current per-user, per-agent, and per-session spend as
+  charged micro-USD with `currency = "USD"` and `unit = "micro_usd"`. It uses the same admin gate as
+  `GET /v1/config`.
+- In Desktop, open the agent's edit page, set a cap in **Model & provider → Budget**, and check
+  its live spend as the agent makes governed model calls. The Gateway dialog's **Spending limits**
+  section shows the same rule in the all-agents overview.
 
 ## Going further
 
-- Pair budgets with smart routing so cheap requests never touch an expensive model in the first place: [Route by task](/docs/learn/cookbook/route-by-task).
-- Watch per-run cost and latency after the fact: [Evals and audit](/docs/gateway/evals-audit).
+- Pair budgets with routing so cheap requests never reach an expensive model: [Route by task](/docs/learn/cookbook/route-by-task).
+- Watch per-run cost and latency after the fact: [Gateway audit](/docs/gateway/audit).
 - Require a human to approve high-risk runs before they execute: the workflow HITL gates in [Workflows](/docs/core/workflows) and the approval step in [Schedule a workflow](/docs/learn/cookbook/schedule-a-workflow).

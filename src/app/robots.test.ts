@@ -9,5 +9,6 @@ test("all advertised crawler groups can read documentation preview images", () =
     expect(rule.allow).toBe("/");
     expect(rule.disallow).toEqual(["/api/"]);
   }
+  expect(rules.some((rule) => rule.userAgent === "OAI-SearchBot")).toBe(true);
   expect(result.sitemap).toBe("https://docs.ryuhq.com/sitemap.xml");
 });

@@ -1,0 +1,125 @@
+---
+title: "Workflow Code and Script Steps"
+description: "Reference for workflow code steps that run or check Lean 4, Bend, and BAML programs, and script steps that orchestrate sub-agents from JavaScript"
+tags: ["core", "workflows", "code", "script", "lean", "bend", "baml", "sub-agents"]
+---
+
+Two workflow node kinds carry code: `code` steps run or check a program, and `script` steps
+orchestrate sub-agents from JavaScript. For the node graph, runs, resumes, and durable execution,
+see [Workflows](/docs/core/workflows).
+
+## Code steps: Lean, Bend, and BAML
+
+A `code` node runs a program written in [Lean 4](https://lean-lang.org),
+[Bend](https://bend-lang.com), or [BAML](https://docs.boundaryml.com), or checks it without
+running it. `mode` is `run` (the default) or `check`.
+
+| `language` | `run` | `check` |
+|---|---|---|
+| `lean` | Runs `main` with the program input as its one argument; stdout is the node output | Fails unless Lean accepts every declaration; a `sorry` fails the check even though Lean only warns |
+| `bend` | Runs `main` with the program input as its one argument; stdout is the node output. Bend also checks every law in the file before running | Runs `bend --check-only` and fails unless Bend prints `ALL PROOFS CHECK` |
+| `baml` | Calls `function` with the named `args` and outputs the result: raw text for a `string`, JSON otherwise | Runs `baml-cli check` on the source |
+
+A successful check outputs a JSON receipt:
+`{"language":"lean","mode":"check","status":"checked","runner":"sandbox:docker"}`. It also
+includes the checker's `diagnostics` when the checker printed any.
+A failed check fails the node. Retries and `timeout_ms` apply as usual, and an unset timeout
+defaults to 120 seconds (300 seconds at most).
+
+`source` is used exactly as written. Ryu does not substitute template variables into it, so step
+data cannot change the program. Data reaches the program through templated fields instead:
+`input` for Lean and Bend (default `{{input}}`), and the string values of `args` for BAML.
+
+```json
+{
+  "id": "prove",
+  "type": "code",
+  "language": "lean",
+  "mode": "check",
+  "source": "theorem add_comm' (a b : Nat) : a + b = b + a := Nat.add_comm a b\n"
+}
+```
+
+```json
+{
+  "id": "extract",
+  "type": "code",
+  "language": "baml",
+  "source": "class Resume {\n  name string\n  skills string[]\n}\n\nfunction ExtractResume(resume: string) -> Resume {\n  client Ryu\n  prompt #\"Extract the resume. {{ ctx.output_format }} {{ resume }}\"#\n}\n",
+  "function": "ExtractResume",
+  "args": { "resume": "{{input}}" }
+}
+```
+
+**Where programs run.** Lean and Bend programs can read files and use the network, and Lean runs
+`#eval` code while it checks a file. Both therefore run in your configured
+[sandbox backend](/docs/core/sandbox) when it can run commands, and the sandbox image must include
+`lean` or `bend`. With no such backend, release builds refuse the step. Set
+`RYU_WORKFLOW_ALLOW_UNSANDBOXED_CODE=1` to accept running these programs directly on the host
+instead. Host runs get a cleared environment, so credentials in Core's environment are not passed
+to the program.
+
+**BAML model calls go through the Gateway.** BAML runs on the host, because its only side effect
+is a model call. Every function must use `client Ryu`. Ryu supplies that client and points it at
+the Gateway, so firewall, data-loss-prevention, budget, and audit policies apply. `model` picks the
+model, and an unset `model` uses the workflow default. Sources that declare their own
+`client<llm>` blocks, or shorthand clients such as `client "openai/gpt-4o"`, are refused.
+
+**Installing toolchains.** On the host, Ryu looks for each executable in this order: the
+`RYU_LEAN_BIN`, `RYU_BEND_BIN`, or `RYU_BAML_BIN` override; the installer's default location
+(`~/.elan/bin` for Lean, `~/.bend/bin` for Bend); then `PATH`. Install Lean with
+[elan](https://lean-lang.org/install), Bend with its install script, and BAML with
+`pip install baml-py` or `npm install -g @boundaryml/baml`.
+
+For Ryu's own pinned Lean proofs and Bend `LAWS.bend`/`PROOF.bend` projects, see
+[Formal verification](/docs/extend/develop/formal-verification).
+
+## Workflow scripts
+
+A `script` node is a workflow written as code. Its `code` is the body of an async JavaScript
+function that orchestrates sub-agents:
+
+```js
+phase("Research");
+const [a, b] = await parallel([
+  () => agent(`Survey approach A for ${args.topic}`),
+  () => agent(`Survey approach B for ${args.topic}`),
+]);
+phase("Decide");
+return await agent(`Compare these and recommend one:\n${a}\n---\n${b}`, {
+  label: "judge",
+});
+```
+
+| Helper | Behavior |
+|---|---|
+| `agent(prompt, opts?)` | Runs one sub-agent and resolves to its text. Options in `opts` - `label`, `phase`, `preset` (`research`, `code_read`, `code_write`, `summarise`), `agent_id`, `max_tokens`, `timeout_secs` (default 600, at most 3600), and `schema` or `json` to resolve to parsed JSON |
+| `parallel(thunks)` | Runs the thunks concurrently and resolves to their results; a thunk that throws yields `null` |
+| `pipeline(items, ...stages)` | Passes every item through the async stages, items concurrently; an item whose stage throws yields `null` |
+| `phase(title)` | Labels the sub-agents that follow |
+| `log(...values)` | Records a progress note |
+| `args` | The node input, parsed as JSON when it is JSON |
+
+The value the body returns becomes the node output: strings as they are, anything else as JSON. A
+body written as a module (`export const meta = {...}`) also runs.
+
+Scripts run in the same sandbox as plugin tools, with no file, network, or environment access;
+`agent()` is their only way to act. Without a node `agent_id`, `agent()` runs a clean-context
+model call under the `research` preset. Set the node's `agent_id` (or `preset: "code_write"`) to
+run a registered agent with its own tools. A node with an `agent_id` cannot switch agents per call.
+One script step can make at most 200 `agent()` calls, and one attempt can run for up to two hours.
+
+Every sub-agent that finishes is saved before the script sees its result. When the step runs
+again (after a crash, a restart, a retry, or a limit wait), each unchanged `agent()` call returns
+its saved result immediately, and only the calls that never finished run. Changing a call's
+prompt, preset, agent, or token limit runs it fresh. Agents can also start scripts from chat with
+the [dynamic-workflows](/docs/plugins/dynamic-workflows) plugin's `workflow.script` tool.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/workflows" />
+  <DocCard href="/docs/core/sandbox" />
+  <DocCard href="/docs/extend/develop/formal-verification" />
+  <DocCard href="/docs/plugins/dynamic-workflows" />
+</Cards>

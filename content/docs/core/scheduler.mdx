@@ -1,12 +1,12 @@
 ---
 title: "Scheduler"
-description: "Cron and interval jobs for workflows, agents, monitors, quests, and identity health that survive Core restarts"
+description: "Reference for Core's scheduler: persisted cron and interval jobs, job targets, agent routines, reconciled and app-owned jobs, the tick loop, history, and the /heartbeat/jobs routes"
 ---
 
 The scheduler is Core's always-on tick loop. It fires persisted jobs on a cron expression or a
-fixed interval and runs a workflow, an agent prompt, a website-monitor check, a quest detection
-pass, or a Passport health sweep. Per the Core-vs-Gateway rule it is Core - it decides
-*what runs and when*, and enforces no policy; each fired job hands its model calls to the normal
+fixed interval and runs a workflow, an agent prompt, an app's own scheduled job (such as a
+website-monitor check), a quest detection pass, a Passport health sweep, or a continual-learning
+cycle. Per the Core-vs-Gateway rule it is Core. It decides *what runs and when*, and enforces no policy. Each fired job hands its model calls to the normal
 chat and workflow routing path where the Gateway sits (`apps/core/src/scheduler/mod.rs`).
 
 Jobs are file-backed, so schedules survive a Core restart. On boot the scheduler reloads every job
@@ -31,7 +31,7 @@ history.
 | `last_outcome` | `success` \| `failure` | Outcome of the most recent run. |
 | `history` | `ExecRecord[]` | Bounded execution log, oldest first. |
 
-Each job is stored at `~/.ryu/scheduled-jobs/<id>.json`. The data folder root is configurable; see
+Each job is stored at `~/.ryu/state/scheduled-jobs/<id>.json`. The data folder root is configurable. See
 [Data and storage](/docs/surfaces/desktop/user-guide/data-and-storage).
 
 ## Schedules
@@ -48,24 +48,31 @@ malformed expression makes the job never due rather than crashing the loop. Inte
 to parse are treated the same way.
 
 <Callout type="info">
-On first boot, an interval job has no recorded last-fired instant, so it fires once immediately and
-then debounces to its interval. Anchoring the interval without an initial fire would require extra
-persisted state; firing once on start is the pragmatic always-on behavior (`is_due` in
-`scheduler/mod.rs`).
+An interval job that has never run fires once immediately and then debounces to its interval. After
+a Core restart, the interval is measured from the job's recorded `last_run_at`, so restarting Core
+(an update, a crash, or relaunching the desktop app) does not replay an interval job that ran
+recently. A cron job likewise does not fire a second time for a minute it already started a run in
+(`is_due` in `scheduler/mod.rs`).
 </Callout>
 
 ## Job targets
 
-`JobTarget` (`scheduler/store.rs`) is tagged on `type` and has six variants.
+`JobTarget` (`scheduler/store.rs`) is tagged on `type` and has seven variants.
 
 | Variant | Fields | What it runs |
 |---|---|---|
 | `workflow` | `workflow_id`, `input` map | Loads the persisted workflow and runs it (`workflow::executor::run_workflow`). Records the workflow run id on success. |
-| `agent` | `agent_id`, `prompt`, optional `model`, optional `conversation_id` | A durable chat turn against the configured agent. `conversation_id` appends to one existing chat; when omitted, every firing gets a new persistent chat. |
-| `monitor` | `monitor_id` | One website-monitor check (fetch then compare then alert) via the monitor engine. |
-| `quest` | `quest_id` | One quest detection pass (gather Shadow context, judge, suggest or auto-complete) via the quest engine. |
+| `agent` | `agent_id`, `prompt`, optional `model`, optional `conversation_id` | A durable chat turn against the configured agent. `conversation_id` appends to one existing chat. When omitted, every firing gets a new persistent chat. |
+| `app_job` | `plugin_id`, `job_id`, optional `payload` | One job an app owns, run through that app's `jobs.run` capability (see [App-owned jobs](#app-owned-jobs)). Website-monitor checks are app jobs of the Monitors app. |
+| `provider_account` | `provider_id`, `account_id`, `prompt`, optional `model` | One minimal turn on one saved subscription account of a provider pool, bypassing the pool's account selection. Used for usage-window warmups. |
+| `quest` | `quest_id` | One quest detection pass: Core gathers Shadow context and calls the Quests app's `quests.judge` capability (see [Quests](/docs/core/quests)). |
 | `identity_health` | none | Runs the configured Passport health sweep (or the embedded compatibility store) and flips stale connections to `NEEDS_AUTH`. |
 | `learning_cycle` | none | Runs the opted-in continual-learning sweep and dispatches eligible retraining work. |
+
+A job file written by an older Core with the retired `monitor` target (`{ "type": "monitor",
+"monitor_id": "<id>" }`) still loads: Core reads it as an `app_job` of the Monitors app and, at
+startup, rewrites the file in place with the same id, name, schedule, enabled state, and history.
+Downgrading to a Core that predates `app_job` is not supported, because it cannot read the migrated jobs.
 
 The `agent` target routes through `global_agent_runner()` so the configured agent handles the
 prompt on the real chat path. Scheduled agent runs persist both the instruction and response in
@@ -87,13 +94,45 @@ Agents have a built-in `routines` tool server for background work:
 
 Routine mutations are approval-gated by default under the normal agent approval policy. On an
 org-bound node, Core scopes routine visibility and existing-chat selection to the verified user
-who owns the current conversation. Only **Active** agents may run an enabled routine; pausing an
+who owns the current conversation. Only **Active** agents may run an enabled routine. Pausing an
 agent pauses its schedules without deleting their definitions.
 
 The Desktop agent editor's **Routines** view is the setup and operations surface. It shows an
 uptime-style 24-hour status strip, per-routine history, the last outcome, and controls to add,
 edit, pause, run now, or delete. The **Run history** view links automated entries back to their
 persistent transcripts, while **Calendar → Agenda** provides the cross-agent timeline.
+
+### Quick routines
+
+`POST /heartbeat/jobs` accepts an optional `quick_routine: true` for an agent
+target. Core saves one canonical quick routine per agent within the existing
+routine ownership scope. Concurrent requests and retries reuse its ID, creation
+time, and execution history. Requests without this field continue to create
+independent jobs, including multiple jobs for the same agent.
+
+On an update through this quick-routine contract, omitting
+`target.conversation_id` retains the existing destination after checking current
+access. An explicit `null` clears it, and a string selects an existing accessible
+transcript. Ambiguous legacy generated routines return `409` for review.
+Invalid targets or inaccessible destinations are refused before a slot is saved.
+Corrupt slot state fails closed. A refused file replacement leaves the original
+job available for readback and retry.
+
+Configuration updates merge execution records completed during validation.
+If the saved configuration changed, retry after reloading the routine; the
+stale update returns `409`. Deleting a routine invalidates in-flight saves and
+late execution completion cannot recreate it. A fresh quick-routine creation
+after deletion receives a new ID. If physical file removal is refused after
+the deletion marker is saved, the routine stays hidden and cannot be resumed
+by a late completion; retry deletion to finish removing the file.
+
+Each execution is bound to the saved routine configuration before work starts.
+A changed or deleted routine is refused before execution. Completion merges into
+the current history of that same routine identity, preserving edits made during
+the run. Approval-triggered runs use the same history recording contract. An approval
+covers its saved target, including the agent instructions, model, and chat
+destination. Changing that target while approval is pending refuses the old
+action before execution; request a new approval for the updated routine.
 
 ### Agent templates can carry several schedules
 
@@ -103,89 +142,104 @@ approval gate. Importing the template materializes one independent agent-target 
 single agent can do different work at different times. Exporting the agent includes the schedules
 currently attached to it; deleting the agent removes those jobs.
 
-The first-party marketplace includes templates for **Expiry Date Tracker**, **Brand Presence**,
-**Marketing Studio**, **Security Guard**, **Codex Quota Reset Watch**, and **Subscription Reset Watch**. Brand Presence starts
-each run with a brand-presence check and then watches the web for mentions. Marketing Studio
-declares the `hyperframes` and `remotion` skills. Security Guard ships an hourly quick scan plus a
-midnight deep configuration scan with separate instructions. Codex Quota Reset Watch checks [Tibo's announcements](https://x.com/thsottiaux) about every
-30 minutes through read-only [Composio Twitter actions](https://docs.composio.dev/toolkits/twitter).
-It verifies `@thsottiaux` with
-`TWITTER_USER_LOOKUP_BY_USERNAME`, searches with `TWITTER_RECENT_SEARCH`, and confirms candidate
-posts with `TWITTER_POST_LOOKUP_BY_POST_ID`.
+The first-party templates are listed in [Agent Templates](/docs/surfaces/desktop/user-guide/marketplace#agent-templates).
+Two show how templates use the scheduler:
 
-Composio's Twitter toolkit requires the user's configured integration and a customer-owned X
-developer app; managed Twitter credentials may be unavailable. If direct actions are unavailable,
-the template can use an authorized `composio_connect` read-only search tool or the Marketplace X
-MCP (`com.x/mcp`) when the user has connected it. It never posts, likes, follows, bookmarks,
-messages, deletes, or subscribes on X. Setup selects and pins the lowest-priced available
-monitoring model with the required tool support; the first setup turn uses the agent's configured
-model. Unknown pricing, a missing connection, or an unavailable action blocks setup instead of
-silently choosing an expensive fallback.
+- **Security Guard** ships two schedules with separate instructions: an hourly quick scan and a
+  midnight deep configuration scan.
+- **Codex Quota Reset Watch** runs about every 30 minutes. Once a reset time is confirmed, the agent
+  edits its own routine to a longer interval that ends after that time, then restores the 30-minute
+  cadence on waking. Because an interval starts when the current run finishes, the wake may be later
+  by that run's duration. Source failures back off from 30 minutes to at most four hours. Routine
+  edits made during a run survive its completion. Unknown model pricing, a missing connection, or an
+  unavailable action blocks setup instead of choosing an expensive fallback. The template never
+  posts on X, does not buy credits, and does not grant itself permissions.
 
-The template adds seven editable task presets to **Quests**, using its existing todo list and
-completion controls. Bind your Codex worker and project, then authorize the queue to run useful work
-as soon as an applicable upcoming reset is confirmed, including overnight. It tracks one active
-worker at a time and requires completion evidence before checking off a task.
-
-Once a reset time is confirmed, the agent changes its routine to a longer interval ending after that
-time and restores the 30-minute cadence on waking. The absolute date is retained for late/restarted
-checks. Because intervals start when the current run finishes, the wake may be later by that run's
-duration. Routine edits made during a run survive its completion. Source failures back off from
-30 minutes to at most four hours, and unchanged checks stay quiet. Announcement changes during
-backoff are only observed at the next check. An awake, running node is required; this does not wake
-an offline computer.
-
-Public forecasts are advisory and never prove that this account received a reset. Account checks and
-worker execution require connected tools; a blocked source or missing account connection is shown
-as unavailable. Automatic queued work and banked-reset redemption are separate authorizations.
-Redemption additionally requires an available connected redemption tool and verified account
-eligibility. The template does not buy credits, bundle a Codex account connector, or grant itself
-permissions. See [OpenAI's banked reset explanation](https://help.openai.com/en/articles/20001498-how-banked-codex-resets-work).
-
-**Subscription Reset Watch** uses the same account-aware usage seam for Codex, Claude Code,
-Copilot, Grok, and GLM. A user-triggered reset request is a bounded agent task: it first checks
-the live `resetAt`, then stops on an upcoming automatic reset, and only proceeds when the provider
-reports an available credit and a real idempotent action is configured. A missing action is a
-blocked result, not a guessed endpoint.
+A template grants only tools that Core registers, and mutating calls stay approval-gated under the
+normal agent approval policy. Scheduled runs need an awake, running node. The scheduler does not
+wake an offline computer.
 
 The desktop agent editor's **Routines** section lets you add, remove, pause, run, and edit several
 entries without creating a workflow for each one. The calendar shows each materialized job, and a
 routine created by an agent can explicitly stay in the current chat or start a new persistent chat
 for each firing.
 
-### Most jobs are created for you
+## Reconciled jobs
 
-Five of the six targets are never created by hand. They are reconciled automatically so they ride
-the same tick loop as everything else, using deterministic ids.
+`workflow` and `agent` jobs are created by hand (`provider_account` jobs come from warmup scheduling). The other targets are reconciled
+automatically so they ride the same tick loop as everything else, using deterministic ids.
 
 | Source | Deterministic id | Reconciled by |
 |---|---|---|
-| A workflow schedule trigger | `wf-sched-<workflow_id>-<idx>` | `apps/core/src/workflow/triggers.rs` |
-| A website monitor | `monitor-<id>` | `apps/core/src/server/monitors_api.rs` |
-| An open quest | `quest-<id>` | `apps/core/src/server/quests_api.rs` |
+| A workflow schedule trigger | `wf-sched-<workflow_id>-<idx>` | Core, from the workflow's triggers |
+| An app's scheduled job | `app-<hash>` (32 hex characters of a SHA-256 of the app id and job id) | Core, from the app's `jobs.list` |
+| A website monitor created before app jobs | `monitor-<id>` (kept for its existing history) | Core, from the Monitors app's `jobs.list` |
+| An open quest | `quest-<id>` | Core, from the Quests app's quest list |
 | Passport health | `identity-health` | Ensured once at startup |
 | Continual learning | `learning-cycle` | Ensured once at startup |
 
-The ids are stable across re-saves so reconciliation is idempotent: editing a workflow's triggers
+The ids are stable across re-saves, so reconciliation is idempotent. Editing a workflow's triggers
 converges the `wf-sched-*` jobs to the declared set and deletes stale ones, and deleting the
 workflow, monitor, or quest tears down its backing job. Quest jobs are enabled only while the
-quest is open; completing or dismissing a quest disables (and then removes) its backing job. See
+quest is open. Completing or dismissing a quest disables (and then removes) its backing job. See
 [Workflows](/docs/core/workflows) for trigger reconciliation and
 [Website monitoring](/docs/core/website-monitoring) for the monitor lifecycle.
+
+Core's declared workflow triggers, app jobs, quests, and built-in maintenance
+jobs may recreate their fixed IDs during authoritative reconciliation. Such
+recreation starts a fresh creation time and empty history. A completion from the
+deleted identity cannot appear in the recreated job. A refused recreation stays
+hidden until reconciliation retries successfully. Ordinary updates preserve
+history and cannot restore a deleted identity.
+
+### App-owned jobs
+
+An app that needs scheduled work does not write jobs itself. It provides two capabilities, and
+Core keeps one `app_job` per job the app lists:
+
+- `jobs.list` returns the app's jobs, each with an id, a name, a schedule and an enabled flag.
+  Every 30 seconds Core writes the jobs it has not seen, updates the ones that changed, and deletes
+  the ones the app no longer lists.
+- `jobs.run` runs one job when it is due. A non-2xx reply is recorded as that run's failure.
+
+Only first-party apps take part, and Core is the only caller of these capabilities.
+Deletions happen only on a complete, successful list. While the app is disabled, unreachable, or
+answering with an error, its jobs are kept as they are, and the tick skips them without recording
+anything. An `every` interval shorter than one minute is raised to one minute, and each run is
+bounded to two minutes. A job runs at most once at a time, an app may have at most two runs in
+flight, and four across all apps, so app jobs never take the whole run budget from agent and
+workflow jobs. **Run now** and approved runs count against the same limits. Run now answers
+`409 Conflict` while the job (or its app) is busy, and an approved run waits up to five minutes
+for a free slot. See
+[Scheduled job capabilities](/docs/extend/develop/sdk/plugin-sidecar-capabilities#scheduled-job-capabilities) for the
+contract.
+
+App jobs carry the app as their owner, so they appear in the app's uninstall inventory and stop
+while the app is off. Uninstalling the app removes its jobs with it. If you install it again, Core
+recreates them from the app's list on the next pass, with an empty run history.
+
+Through `/heartbeat/jobs` you can run an app job now, but you cannot create one, retarget one (to
+or from `app_job`), approval-gate one, or change its name, schedule, or enabled state. Those follow
+the app on every pass, so Core refuses the change instead of letting the next pass undo it. App jobs
+never wait for approval when they come due. Deleting one answers `409 Conflict` while its app is
+installed, because the next pass would recreate it with an empty run history; once the app is
+uninstalled, a job left behind can be deleted. To pause or remove an app job, pause or remove the
+item in the app that owns it (for example, the monitor in the Monitors app). Clients show these
+rows read-only.
 
 ## The tick loop
 
 The scheduler spawns one background loop that wakes on a fixed interval and evaluates every
 persisted job against the current time (`Scheduler::tick`).
 
-```
-TICK_INTERVAL    = 30s   // how often the loop wakes to evaluate due jobs
-MAX_CONCURRENT_JOBS = 8  // bound on jobs running concurrently
-```
+| Constant | Value | Meaning |
+|---|---|---|
+| `TICK_INTERVAL` | 30 seconds | How often the loop wakes to evaluate due jobs |
+| `MAX_CONCURRENT_JOBS` | 8 | Bound on jobs running concurrently |
 
 On each tick the loop lists all jobs from disk, skips the disabled ones, and fires those that are
 due. The 30-second cadence means a cron job that matches a given minute is caught within that
-minute; an interval finer than 30 seconds is effectively floored to the tick.
+minute. An interval finer than 30 seconds is effectively floored to the tick.
 
 Firing marks the job's last-fired instant *before* spawning the actual run, so a slow agent or
 workflow run never stalls other due jobs in the same tick. Spawned runs share a semaphore of
@@ -208,8 +262,13 @@ workflow run never stalls other due jobs in the same tick. Spawned runs share a 
 ### Once-per-slot semantics
 
 The scheduler holds no mutable in-memory job state beyond a per-job last-fired instant, used to
-avoid double-firing (`SchedulerInner.last_fired`). A cron job fires at most once per matching
-minute; an interval job fires only once its interval has elapsed since the last firing.
+avoid double-firing (`SchedulerInner.last_fired`). When that instant is missing after a restart, it
+falls back to the persisted run record, which is `last_run_at` for an interval job and the latest history
+entry's `started_at` for a cron job. A cron job fires at most once per matching minute. An interval
+job fires only once its interval has elapsed since the last firing. Because `last_run_at` records
+when a run finished, the first run after a restart can come up to one run's duration later than the
+interval alone would suggest. A run is recorded only when it finishes, so a run that a crash or
+restart interrupted leaves no record, and an interval job runs again after the restart.
 
 ## Execution history
 
@@ -223,7 +282,7 @@ records (`MAX_HISTORY`), oldest dropped first.
 | `run_id` | Workflow run id, or the persistent conversation id for an agent run. |
 | `error` | Human-readable error string, on failure. |
 
-A failed workflow or agent run records the failure and the loop continues; one failing job never
+A failed workflow or agent run records the failure and the loop continues. One failing job never
 blocks the others.
 
 ## The API
@@ -241,13 +300,19 @@ The scheduler is served under the `heartbeat` prefix (`apps/core/src/server/mod.
 
 Creating a job validates the cron expression or interval before persisting, so a malformed schedule
 is rejected up front rather than failing silently at run time. The list, update, delete, and manual
-run routes are scoped to the verified user on an org-bound node; personal nodes retain their
-single-user behavior.
+run routes are scoped to the verified user on an org-bound node. Personal nodes retain their
+single-user behavior. Running a job now while that job is already running (a scheduled firing or
+an earlier manual run) returns `409` instead of starting a second, overlapping run.
+
+`GET /heartbeat/jobs` leaves out `app_job` rows unless the request adds `?include=app_jobs`, and
+`provider_account` rows unless it adds `?include=provider_accounts`, so an older client keeps parsing
+the list. `GET /api/approvals` applies the same
+rule to approvals that run an app job.
 
 <Callout type="info">
 Most users never call these routes directly. You create scheduled work from an agent's **Routines**
 view, a [workflow](/docs/core/workflows), a [website monitor](/docs/core/website-monitoring), or a
-[quest](/docs/core/quests); Core persists the job and reconciles the backing jobs automatically.
+[quest](/docs/core/quests). Core persists the job and reconciles the backing jobs automatically.
 </Callout>
 
 ## Related

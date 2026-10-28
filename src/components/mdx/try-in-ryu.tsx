@@ -1,4 +1,5 @@
 import { ArrowUpRight } from "lucide-react";
+import styles from "./try-in-ryu.module.css";
 
 /**
  * The canonical `ryu://open/<page>` navigation keys, mirrored from
@@ -6,7 +7,7 @@ import { ArrowUpRight } from "lucide-react";
  * does not depend on the desktop protocol package, and a key that drifts simply
  * renders a link the app ignores rather than breaking the build.
  */
-const PAGE_LABELS: Record<string, string> = {
+const PAGE_LABELS = {
   chat: "Chat",
   agents: "Agents",
   models: "Models",
@@ -45,10 +46,14 @@ export function TryInRyu({
   page: string;
   children?: string;
 }) {
-  const label = children ?? `Open ${PAGE_LABELS[page] ?? page} in Ryu`;
+  const pageKey = Object.keys(PAGE_LABELS).find((key) => key === page);
+  const pageLabel = Object.entries(PAGE_LABELS).find(
+    ([key]) => key === pageKey,
+  )?.[1];
+  const label = children ?? `Open ${pageLabel ?? page} in Ryu`;
   return (
     <a
-      className="not-prose my-4 inline-flex items-center gap-2 rounded-lg bg-fd-primary/10 px-3.5 py-2 font-medium text-fd-primary text-sm no-underline transition-colors hover:bg-fd-primary/15"
+      className={`my-4 inline-flex items-center gap-2 rounded-lg bg-fd-primary/10 px-3.5 py-2 font-medium text-fd-primary text-sm no-underline transition-colors hover:bg-fd-primary/15 ${styles.root}`}
       href={`ryu://open/${encodeURIComponent(page)}`}
     >
       {label}

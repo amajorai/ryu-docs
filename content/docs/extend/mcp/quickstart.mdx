@@ -1,9 +1,9 @@
 ---
-title: "Quickstart"
-description: "Connect an MCP host to a local, self-hosted, or managed Ryu node."
+title: "MCP Quickstart"
+description: "Connect an MCP host to a local, self-hosted, or managed Ryu node through the stdio bridge, Core's direct HTTP endpoint, or hosted MCP OAuth."
 ---
 
-Start with the access path you need:
+This page connects an MCP host to a Ryu Core node. Choose the access path that fits your host.
 
 - Use the stdio bridge when your MCP host only accepts a command.
 - Use Core's HTTP endpoint for a direct node connection.
@@ -11,9 +11,9 @@ Start with the access path you need:
 
 ## Local node with the stdio bridge
 
-Start Ryu Desktop or Core. The default local Core URL is `http://127.0.0.1:7980`.
+Start Desktop or Core. The default local Core URL is `http://127.0.0.1:7980`.
 
-The bridge reads the local node credential automatically when `RYU_CORE_URL` is loopback. You can also set `RYU_CORE_TOKEN` explicitly.
+The bridge reads the local node credential automatically when `RYU_CORE_URL` is loopback. You can also set `RYU_CORE_TOKEN` explicitly. All bridge variables are on [Configuration](/docs/extend/mcp/configuration).
 
 ```json
 {
@@ -33,13 +33,13 @@ The host speaks MCP over stdio to `apps/mcp`. The bridge speaks HTTP to Core and
 
 ## Direct HTTP MCP
 
-Configure an MCP host with the Core URL plus a known agent id:
+Configure an MCP host with the Core URL and a known agent id.
 
 ```text
 https://<node>/mcp/<agent-id>
 ```
 
-Send the node credential as:
+Send the node credential in the `Authorization` header.
 
 ```text
 Authorization: Bearer <node-or-paired-token>
@@ -47,28 +47,59 @@ Authorization: Bearer <node-or-paired-token>
 
 Core checks the token, the exact agent id, the MCP method capability, and the agent's allowlist before it runs a tool.
 
-Desktop's managed-node picker is a separate direct path: the control plane
-returns a short-lived `userJwt`, and Desktop sends it as the bearer plus
-`x-ryu-user-jwt`. A managed Core accepts that JWT only for the user's matching
-organization, team, or personal node scope. Local and self-hosted nodes do not
-use this shortcut.
+### Protocol versions
+
+Core negotiates MCP `2026-07-28` with `server/discover`. Modern HTTP requests carry
+`MCP-Protocol-Version`, `Mcp-Method`, and, for named tool, resource, or prompt requests,
+`Mcp-Name`. Each request also carries client capabilities in `params._meta`.
+Older hosts can continue to use the `2025-06-18` initialize flow.
+
+The 2026 request model is stateless: clients send protocol metadata with every
+request instead of initializing a connection. Core's MCP client discovers the
+server's supported versions and sends the required metadata on every modern
+request. For HTTP tool calls, it reads the latest `tools/list` schema and mirrors
+parameters annotated with `x-mcp-header` into `Mcp-Param-*` headers. Values that
+need encoding use the protocol's Base64 sentinel format.
+
+Modern results include `resultType`. A tool, prompt, or resource request can ask
+the client for more information with `resultType: "input_required"`. The client
+retries that request with `inputResponses` and the opaque `requestState`. Cacheable
+lists and resource reads include `ttlMs` and `cacheScope`. Core's registry honors
+those hints for public tool lists and widget resources. Private or zero-TTL results
+are not shared. Legacy results without hints keep the older cache behavior.
+
+Core can consume the optional `io.modelcontextprotocol/tasks` extension from a
+remote server that advertises it. The task-aware client path returns a durable
+`taskId` and provides `tasks/get`, `tasks/update`, and `tasks/cancel` operations
+for resuming, answering, or cancelling the task. Core's own direct and hosted
+servers do not advertise Tasks because their tools run synchronously.
+
+See the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+for the complete wire contract.
+
+### Desktop managed-node picker
+
+Desktop's managed-node picker is a separate direct path that uses a short-lived
+managed user JWT. Local and self-hosted nodes do not use this shortcut. See
+[MCP Credentials and Security](/docs/extend/mcp/security#direct-local-or-self-hosted-mcp)
+for how Core checks that JWT.
 
 ## Self-hosted remote node
 
 Expose Core through a private LAN address, Tailscale, Headscale, Tailcat, or an HTTPS reverse proxy. Give the
-host the node URL and a token issued for that node. Tailcat supplies a temporary encrypted TCP path; the
-Tailcat address is not a Core URL by itself, so run a Tailcat client/proxy on the MCP host and point the host at
+host the node URL and a token issued for that node. Tailcat supplies a temporary encrypted TCP path. The
+Tailcat address is not a Core URL by itself, so run a Tailcat client or proxy on the MCP host and point the host at
 the resulting local Core address.
 
 If the client cannot read the node's local token, pair it:
 
 1. The client calls `POST /api/pair/code` and displays the short user code.
-2. An already trusted client approves the request in Gateway → Connections.
+2. An already trusted client approves the request in **Gateway → Connections**.
 3. The client polls `POST /api/pair/token` and receives its scoped bearer.
 4. The client uses that bearer for `/mcp/<agent-id>`.
 
-Pairing is verified by Core itself. It does not require a Ryu account or a control-plane round trip. Tailscale,
-Headscale, and Tailcat supply the network path; they do not replace Core authentication.
+Core verifies pairing itself. Pairing does not need a Ryu account or a control-plane round trip. Tailscale,
+Headscale, and Tailcat supply the network path. They do not replace Core authentication.
 
 ## Managed or organization-bound node
 
@@ -82,6 +113,9 @@ The MCP host completes Better Auth OAuth 2.1 with PKCE. The hosted service check
 
 The original Better Auth token never goes to the node. Core verifies the delegation locally with the public key it received during node enrollment.
 
+Hosted MCP also relays Core's authenticated [MCP Events](/docs/extend/mcp/events)
+methods. Event subscriptions remain scoped to the exact agent and verified user.
+
 ## Optional account sign-in for the stdio bridge
 
 `ryu-mcp login` uses the same Ryu `/device` approval page and Better Auth device grant as Desktop and CLI. It is only for the bridge's account tools such as `ryu_whoami`. It does not replace `RYU_CORE_TOKEN` for direct node calls.
@@ -91,7 +125,7 @@ bun run apps/mcp/src/index.ts login
 bun run apps/mcp/src/index.ts whoami
 ```
 
-The bridge stores this session in `~/.ryu/mcp-auth.json`. That file is separate from Desktop's encrypted credential store and from Core's node token.
+The bridge stores this session in `<data dir>/secrets/mcp-auth.json` (for example `~/.ryu/secrets/mcp-auth.json`). That file is separate from Desktop's encrypted credential store and from Core's node token.
 
 <Callout type="warn">
   Treat a node or paired token like a password. Use a separate pairing for each host so one integration can be revoked without rotating the node owner credential.

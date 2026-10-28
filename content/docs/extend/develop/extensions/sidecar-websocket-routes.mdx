@@ -1,6 +1,6 @@
 ---
-title: "Sidecar WebSocket routes"
-description: "Core's generic WebSocket ext-proxy tunnel (`/api/ext/ws/<plugin>/<route>`), which carries interactive sidecar streams like the Virtual Desktop."
+title: "Sidecar WebSocket Routes"
+description: "How Core's WebSocket ext-proxy at /api/ext/ws/<plugin>/<route> tunnels live sidecar streams such as the Virtual Desktop, and what the sidecar must implement"
 ---
 
 The HTTP ext-proxy serves a sidecar's REST routes at `/api/ext/<plugin>/<route>`. Some features need
@@ -10,7 +10,7 @@ a live VNC session.
 A WebSocket is a live, two-way stream. The HTTP proxy uses `reqwest`, which cannot upgrade to a
 WebSocket. Core therefore exposes a WebSocket version of the ext-proxy at:
 
-```
+```text
 GET /api/ext/ws/:plugin_id/*rest
 ```
 
@@ -20,30 +20,34 @@ check, and lazy sidecar start. An undeclared path returns 404 before the WebSock
 
 ## How it works
 
-1. A client upgrades `wss://<node>/api/ext/ws/@ryu/desktop/ws` (browsers cannot set custom headers
-   on a WS upgrade, so the node token rides `?token=`, or an `Authorization: Bearer` header for
-   non-browser clients).
-2. Core resolves the manifest → sidecar → matched route exactly like the HTTP proxy, then upgrades
-   the socket.
-3. Core dials the sidecar's loopback WS endpoint (`ws://127.0.0.1:<port><route>`), re-stamps the
+1. The client asks Core for a one-use ticket. It sends `POST /api/ws/ticket` with the node bearer
+   and the body `{"route": "ext", "path": "/api/ext/ws/@ryu/desktop/ws"}`. The ticket expires after
+   60 seconds (`apps/core/src/server/ws_ticket.rs`).
+2. The client upgrades `wss://<node>/api/ext/ws/@ryu/desktop/ws?ticket=<ticket>`. A protected route
+   requires the ticket. Core rejects a `?token=` or `?jwt=` query parameter with 401, so a node
+   bearer or user JWT never appears in a URL.
+3. Core resolves the manifest, sidecar, and matched route the same way as the HTTP proxy. It checks
+   the route permission against the caller stored in the ticket, then upgrades the socket.
+4. Core dials the sidecar's loopback WS endpoint (`ws://127.0.0.1:<port><route>`), re-stamps the
    plugin's minted hop token, and **pumps bytes both ways** until either side closes.
 
-The sidecar owns the wire format: Core is a dumb pipe that knows nothing about VNC, RFB, or the
-sidecar's protocol — the same decoupling as the HTTP lane. A sidecar that wants an interactive
+The sidecar owns the wire format. Core forwards bytes and does not parse VNC, RFB, or any other
+sidecar protocol, the same as the HTTP lane. A sidecar that wants an interactive
 surface declares the route and serves a WebSocket there.
 
 ## What the sidecar must do
 
 The sidecar's route handler is a plain WebSocket endpoint on its loopback control server:
 
-- It must accept the upgrade and validate the **hop token** (the `Authorization: Bearer <token>`
-  Core stamped — the per-plugin secret from `RYU_EXT_TOKEN`) before doing anything. Core
-  authenticates the *client*; the sidecar authenticates Core's hop, exactly like the host-API
-  callbacks.
+- It must accept the upgrade and validate the **hop token** before doing anything else. The hop
+  token is the `Authorization: Bearer <token>` header Core sets, which carries the per-plugin
+  secret from `RYU_EXT_TOKEN`. Core authenticates the client; the sidecar authenticates Core's hop,
+  the same as for host-API callbacks.
 - It should bind **loopback only** (`127.0.0.1`). The only path to it is Core's authenticated
   tunnel; nothing exposes the port to the network.
 - The route must be declared in the manifest's `sidecars[].http.routes[]`, like any HTTP route, so
-  Core's allowlist admits the upgrade. Example (`apps-store/desktop/manifest.json`):
+  Core's allowlist admits the upgrade. This example is trimmed from
+  `apps-store/desktop/manifest.json`. It shows the route declaration:
 
 ```jsonc
 "sidecars": [{
@@ -52,7 +56,7 @@ The sidecar's route handler is a plain WebSocket endpoint on its loopback contro
   "http": {
     "routes": [
       { "path": "/health" },
-      { "path": "/ws" }
+      { "path": "/ws", "permission": "desktop.control" }
     ]
   }
 }]
@@ -60,8 +64,8 @@ The sidecar's route handler is a plain WebSocket endpoint on its loopback contro
 
 ## The reference implementation: Virtual Desktop
 
-The `@ryu/desktop` app is the shipped example. Its sidecar brings up a headless X desktop (Xvfb +
-window manager + TigerVNC on loopback), and its `/ws` route is a **websockify-style bridge**: it
+The `@ryu/desktop` app is the shipped example. Its sidecar starts a headless X desktop (Xvfb, a
+window manager, and TigerVNC on loopback). Its `/ws` route is a **websockify-style bridge**: it
 accepts RFB-over-WebSocket from Core and pumps bytes onto the loopback VNC TCP port. The desktop
 panel connects a noVNC client to the tunnel, so pixels come down and mouse/keyboard go up on one
 socket.
@@ -71,12 +75,12 @@ See [Virtual Desktop](/docs/surfaces/desktop/user-guide/virtual-desktop) for the
 ## Why not WebRTC
 
 A low-latency interactive desktop could be streamed over WebRTC instead. WebRTC needs a signaling
-channel, TURN/STUN for NAT traversal, and a media encoder on the node — infrastructure that does
-not fit a self-contained sidecar behind Core's single authenticated port, and that would have to be
-proxied through Core anyway. VNC-over-WebSocket (noVNC) is a mature, interactive protocol that
-works through the existing auth model with no signaling or media server.
+channel, TURN/STUN for NAT traversal, and a media encoder on the node. That infrastructure does not
+fit a self-contained sidecar behind Core's single authenticated port, and it would have to be
+proxied through Core anyway. VNC over WebSocket (noVNC) works through the existing auth model with
+no signaling or media server.
 
-## See also
+## Related
 
 <Cards>
   <DocCard href="/docs/core/app-manifest-lifecycle" />

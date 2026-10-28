@@ -1,0 +1,86 @@
+---
+title: "Rate Limits"
+description: "The RateLimit-Policy, RateLimit, and Retry-After header fields of the hosted Ryu API, which routes send them, and how a client should back off."
+---
+
+The hosted Ryu API limits how often a client can call its sign-in and OAuth routes under
+`https://api.ryuhq.com/api/auth/`, and how often an organization API key with its own limit can
+call `/api/v1`. Those responses describe the limit with the IETF RateLimit
+header fields ([draft-ietf-httpapi-ratelimit-headers](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/),
+revision 11). For the error body of a refused request, see [Errors](/docs/reference/api/errors).
+
+## Header fields
+
+These are the fields for the `/api/auth/...` routes. API key limits are described in
+[API key limits](#api-key-limits).
+
+| Field | Sent on | Example | Meaning |
+|---|---|---|---|
+| `RateLimit-Policy` | Every `/api/auth/...` response that a fixed rule covers | `"auth";q=100;w=60` | The policy name, the quota `q` (requests), and the window `w` (seconds). |
+| `RateLimit` | `429` responses | `"auth";r=0;t=42` | The policy name, the remaining quota `r` (always `0` on a `429`), and the seconds `t` until the quota resets. |
+| `Retry-After` | `429` responses | `42` | Seconds to wait before the next attempt. |
+
+Allowed `/api/auth/...` requests carry `RateLimit-Policy` only. That limiter does not report a
+remaining count for requests that it allows. A `429` also keeps the older `X-Retry-After` field. Browsers can read
+all of these fields cross-origin.
+
+## Policies
+
+The limiter applies the most specific matching rule. A later row wins over an earlier one.
+
+| Policy name | Paths under `/api/auth` | Quota | Window |
+|---|---|---|---|
+| `auth` | Every path without a more specific rule | 100 | 60 s |
+| `auth-credentials` | `/sign-in...`, `/sign-up...`, `/change-password...`, `/change-email...` | 3 | 10 s |
+| `auth-email` | Password reset and verification email requests | 3 | 60 s |
+| `auth-plugin` | Paths with a rule set by an authentication plugin | Per rule | Per rule |
+| `auth-oauth2-token` | `/oauth2/token` | 30 | 60 s |
+| `auth-oauth2-register` | `/oauth2/register` | 10 | 60 s |
+| `auth-device-code`, `auth-device-token`, `auth-device-approve`, `auth-device-deny` | `/device/code`, `/device/token`, `/device/approve`, `/device/deny` | 10 | 60 s |
+| `auth-scim-v2` | `/scim/v2/*` | 120 | 60 s |
+
+Read the policy from the response instead of hard-coding this table. The values can change.
+
+## Back off
+
+1. On a `429`, wait for the number of seconds in `Retry-After` (or `t` in `RateLimit`).
+2. Retry the same request once. For a write to the Admin API, reuse the same
+   [`Idempotency-Key`](/docs/reference/api/idempotency).
+3. If the next attempt also returns `429`, double the wait before each further attempt.
+
+## API key limits
+
+An organization can give each of its API keys a requests-per-minute limit. The `/api/v1` routes
+that accept an organization API key, such as `GET /api/v1/me`, count every request against that
+key in a fixed one-minute window and describe it with the `key` policy. Admin API keys
+(`/api/v1/organizations/...`) have no limit of this kind. Managed Agents
+(`/api/v1/managed-agents`) enforce the same limit but answer in their own error format, with
+`Retry-After` and without the RateLimit fields; see
+[Managed Agents API](/docs/standalone/managed-agents-api#rate-limits).
+
+| Field | Sent on | Example | Meaning |
+|---|---|---|---|
+| `RateLimit-Policy` | Every response to a key that has a limit | `"key";q=120;w=60` | The quota `q` is the key's requests per minute. The window `w` is 60 seconds. |
+| `RateLimit` | Every response to a key that has a limit | `"key";r=37;t=18` | The requests `r` left in the current window and the seconds `t` until it resets. |
+| `Retry-After` | `429` responses | `18` | Seconds left in the key's window. |
+
+When the key has no requests left, the API answers `429` with an `application/problem+json` body
+whose `code` is `rate_limited` (see [Errors](/docs/reference/api/errors#rate_limited)). On that
+response `RateLimit` reports `r=0`. Keys without a limit get none of these fields.
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/problem+json
+Retry-After: 18
+RateLimit-Policy: "key";q=120;w=60
+RateLimit: "key";r=0;t=18
+
+{"type":"https://docs.ryuhq.com/docs/reference/api/errors#rate_limited","title":"Too Many Requests","status":429,"detail":"api key rate limit reached","code":"rate_limited","docs":"https://docs.ryuhq.com/docs/reference/api/errors#rate_limited","error":"api key rate limit reached","hint":"Wait for the number of seconds in Retry-After before retrying."}
+```
+
+Back off as described above. Browsers can read these fields cross-origin.
+
+## Other routes
+
+The public website MCP server and the NLWeb `/ask` endpoint have their own best-effort limits; see
+[Website MCP and NLWeb](/docs/extend/mcp/website).

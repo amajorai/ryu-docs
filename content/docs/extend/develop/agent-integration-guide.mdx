@@ -3,20 +3,16 @@ title: "Agent Integration Guide"
 description: "Build an agent that calls Ryu through HTTP or MCP, with tools, governance, and SDKs."
 ---
 
-Use this reference to connect an AI agent to Ryu. It covers the Gateway HTTP API, the Core HTTP
-API, MCP (Model Context Protocol) tool access, governance, and the SDK.
-
-<Callout type="info">
-This page works for human readers and AI agents. If an agent reads it through `/llms.txt` or the
-`.md`/`.mdx` projection or content-negotiated URL, the sections below show how to call Ryu, find tools, and keep calls governed.
-</Callout>
+An AI agent can reach Ryu through the Gateway HTTP API, the Core HTTP API, or MCP (Model Context
+Protocol). This guide shows each path, how to find tools, how calls stay governed, and how to
+package an agent with the SDK.
 
 ## Quick start: connect to Ryu
 
 ### 1. Point at the Gateway (recommended)
 
-The Gateway exposes an OpenAI-compatible API on `:7981`. Any tool or framework that speaks the
-OpenAI protocol works out of the box.
+The Gateway exposes an OpenAI-compatible API on `127.0.0.1:7981` (release profile). Any tool or
+framework that speaks the OpenAI protocol can call it with no Ryu-specific setup.
 
 ```bash
 # List available models
@@ -36,7 +32,7 @@ curl http://localhost:7981/v1/chat/completions \
 
 ### 2. Use Core for the full agent lifecycle
 
-Core on `:7980` provides the full agent lifecycle: conversations, memory, tools, workflows.
+Core on `127.0.0.1:7980` (release profile) runs conversations, memory, tools, and workflows.
 
 ```bash
 # Chat with the default agent
@@ -50,7 +46,7 @@ curl http://localhost:7980/api/chat/stream \
   }'
 ```
 
-### Select the response mode
+#### Select the response mode
 
 `POST /api/chat/stream` accepts `response_mode` with the values `everyday` and
 `developer`. Omit the field for `everyday`.
@@ -91,6 +87,10 @@ exchanged for a short-lived node-and-agent delegation. `ryu-mcp login` signs the
 bridge into the Ryu account for `whoami`; it does not replace the target node
 credential.
 
+An agent-bound delegation also applies when opening an MCP-backed app through
+`POST /api/widgets/open`. Its `agentId` must match the signed agent binding; Core rejects
+a mismatch before creating an app conversation or dispatching its tool.
+
 ## From the desktop editor
 
 Open a saved agent, choose **Integrations**, and copy an example with its agent id and node URL
@@ -108,52 +108,34 @@ policies still apply. Keep a protected node's token in `RYU_TOKEN`, never in the
 
 ## Discover available tools
 
-### Via the Gateway tool search
-
-The Gateway provides a search-based tool discovery API:
-
-```bash
-# Search for tools
-curl http://localhost:7981/v1/tools/search \
-  -H "Authorization: Bearer $RYU_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "web browsing", "limit": 5}'
-
-# Describe a specific tool
-curl http://localhost:7981/v1/tools/search \
-  -H "Authorization: Bearer $RYU_TOKEN" \
-  -d '{"query": "agentbrowser"}'
-```
-
 ### Via Core's unified tool catalog
 
 ```bash
-# Search all registered tools
-curl http://localhost:7980/api/tools/search \
-  -H "Authorization: Bearer $RYU_TOKEN" \
-  -d '{"query": "file operations"}'
+# Search all registered tools (ranked)
+curl "http://localhost:7980/api/tools/search?q=file%20operations&limit=5" \
+  -H "Authorization: Bearer $RYU_TOKEN"
 
-# List MCP server tools
-curl http://localhost:7980/api/mcp/tools/search \
-  -H "Authorization: Bearer $RYU_TOKEN" \
-  -d '{"query": "screenshot"}'
+# Describe one tool's argument schema
+curl "http://localhost:7980/api/tools/describe?id=web_fetch.get" \
+  -H "Authorization: Bearer $RYU_TOKEN"
+
+# List registered MCP tools
+curl http://localhost:7980/api/mcp/tools \
+  -H "Authorization: Bearer $RYU_TOKEN"
 ```
 
-### Via the MCP server
+### Inside a chat plane
 
-If your agent uses MCP, the tools are available to it:
-
-```bash
-# List all tools from a connected MCP server
-ryu-mcp serve  # then use the MCP protocol to list tools
-```
+An agent on the Gateway's OpenAI-compatible plane gets a `tool_search` meta-tool. An ACP agent gets
+`tool_search` and `describe` through the MCP bridge. An MCP host connected to `ryu-mcp serve` lists
+tools with the MCP `tools/list` request.
 
 See [Unified tool catalog](/docs/core/unified-tool-catalog) and [MCP tools](/docs/extend/mcp/tools) for
 the full tool inventory.
 
 ## Stay governed
 
-The Gateway enforces policy on every model call. To ensure your agent stays governed:
+The Gateway enforces policy on every model call that it routes.
 
 ### OpenAI-compat agents (Plane A)
 
@@ -164,25 +146,27 @@ When your agent uses the Gateway's `/v1/chat/completions`, all governance is aut
 - **Evals** score response quality
 - **Audit** logs every request
 
-No extra configuration needed — the Gateway handles it.
+No extra configuration is needed.
 
 ### ACP agents (Plane B)
 
-ACP agents (Claude Code, Codex, Pi, etc.) run as subprocesses. Their LLM calls are self-routed,
+ACP agents (such as Claude Code, Codex, and Pi) run as subprocesses. Their LLM calls are self-routed,
 but **tool egress** is governed via the MCP bridge. New and auto-installed routable ACP agents
-are routed through the Gateway by default; the direct-egress choice is an explicit per-agent
-opt-out:
-
-```bash
-# Explicitly opt one agent out of gateway routing
-curl http://localhost:7980/api/agent-routing \
-  -H "Authorization: Bearer $RYU_TOKEN" \
-  -d '{"agent_id": "my-agent", "via_gateway": false}'
-```
+are routed through the Gateway by default. Direct egress is an explicit per-agent opt-out through
+the `agent-gateway-routing` preference (`apps/core/src/agent_routing/mod.rs`): a missing entry stays
+Gateway-routed, and an explicit `false` opts the agent out.
 
 The default injects `OPENAI_BASE_URL` pointing at the Gateway into a routable agent's subprocess.
-Not all agents honour this — it works for BYO OpenAI-compatible agents but is a no-op for
-Gemini/OpenClaw/Hermes.
+
+<Callout type="warn">
+Not every agent reads `OPENAI_BASE_URL`. It works for BYO OpenAI-compatible agents but has no effect
+on Gemini, OpenClaw, or Hermes, whose chat calls bypass the Gateway.
+</Callout>
+
+ACP subprocesses receive a small safe runtime environment plus values declared in their
+ACP configuration. Core's ambient credentials, including `RYU_TOKEN`, provider keys, and
+Gateway keys, are not inherited; configure a per-agent credential explicitly when that
+agent needs one.
 
 See [Gateway for any agent](/docs/gateway/gateway-for-any-agent) and
 [Routing planes](/docs/gateway/routing-planes).
@@ -226,15 +210,19 @@ const weatherTool = defineTool({
     required: ["city"],
   },
   run: async (input) => {
-    const res = await fetch(`https://api.weather.com/${input.city}`);
-    return res.json();
+    return { city: input.city, forecast: "sunny" };
   },
 });
 ```
 
+A shipped tool body runs in Core's JS sandbox with only `input` and `host` in scope. `host` is the
+capability bridge (`host.sideModel`, `host.storage`, `host.log`), each gated by the plugin's grants.
+The body cannot capture outer variables or imports, and `ctx.gateway` is not available there, so a
+shipped tool reaches models through `host.sideModel`.
+
 ### Bundle into a plugin
 
-Create a `manifest.json`:
+Create a `manifest.json` file.
 
 ```json
 {
@@ -252,35 +240,18 @@ Create a `manifest.json`:
 Pack and install:
 
 ```bash
-bun run pack     # creates the bundle
-ryu plugins install ./dist/  # install into Core
+bunx ryu pack ./my-plugin               # validate and pack the bundle
+bunx ryu install ./my-plugin --enable   # install into Core and enable it
 ```
 
 See [SDK Reference](/docs/extend/develop/sdk) for the full API surface.
 
-## Available built-in tools
+## Built-in tools
 
-Ryu registers these tools in the MCP registry by default when their sidecars are active:
-
-| Tool | Source | Description |
-|---|---|---|
-| `web_fetch` | Core | Fetch a URL and return its content |
-| `exa` | Core | Web search via Exa |
-| `research` | Core | Deep research with multi-source gathering |
-| `screenshot` | Shadow | Capture screen content |
-| `ocr` | Shadow | Extract text from images |
-| `ghost_snapshot` | Ghost | Desktop screen perception |
-| `ghost_type` | Ghost | Simulate keyboard input |
-| `ghost_click` | Ghost | Simulate mouse clicks |
-| `ghost_record` | Ghost | Record a recipe of actions |
-| `spider` | Core | Web scraping |
-| `sandbox` | Core | Execute code in a sandboxed environment |
-| `notify` | Core | Send notifications |
-| `delegate` | Core | Delegate to sub-agents |
-| `skills` | Core | List and search agent skills |
-
-See [MCP tools](/docs/extend/mcp/tools) for the complete list and
-[Unified tool catalog](/docs/core/unified-tool-catalog) for the full registry.
+Core registers built-in tool servers such as `sandbox`, `notify`, `delegate`, `skills`, and
+`web_fetch`. Plugins add more, such as `exa` and `spider`. See
+[Built-in tools](/docs/core/built-in-tools) for the list and
+[Unified tool catalog](/docs/core/unified-tool-catalog) for how search and describe work.
 
 ## Configuration quick reference
 
@@ -288,8 +259,8 @@ See [MCP tools](/docs/extend/mcp/tools) for the complete list and
 
 | Variable | Purpose |
 |---|---|
-| `RYU_TOKEN` | Node admittance token (required for non-loopback) |
-| `RYU_DIR` | Data directory (default `~/.ryu`) |
+| `RYU_TOKEN` | Node bearer token. Without it, Core reads `secrets/node-auth.token` or mints one |
+| `RYU_DIR` | Data directory (default `~/.ryu` on the release profile, `~/.ryu-<profile>` otherwise) |
 | `RYU_DEFAULT_AGENT` | Default agent ID (default `ryu`) |
 | `RYU_BIND` | Bind address (default `127.0.0.1:7980`) |
 
@@ -317,9 +288,9 @@ variable reference.
 | Memory | `GET/POST /api/memory` |
 | Spaces | `GET/POST /api/spaces`, `POST /api/spaces/:id/search` |
 | Tools | `GET /api/tools/search`, `POST /api/tools/exec` |
-| Workflows | `GET/POST /api/workflows`, `POST /api/workflows/:id/run` |
+| Workflows | `GET/POST /workflows`, `POST /workflows/:id/run` (no `/api` prefix) |
 | Models | `GET /api/models/catalog`, `GET /api/models/engines` |
-| MCP | `GET /api/mcp/servers`, `GET /api/mcp/tools/search` |
+| MCP | `GET /api/mcp/servers`, `GET /api/mcp/tools` |
 | Health | `GET /api/health` |
 
 ### Gateway (`:7981`)
@@ -332,32 +303,47 @@ variable reference.
 | Evals | `GET /v1/evals`, `POST /v1/evals/run`, `POST /v1/evals/score` |
 | Config | `GET/PUT /v1/config` |
 | Audit | `GET /v1/audit` |
-| Health | `GET /v1/health` |
+| Health | `GET /health` (alias `GET /v1/health`) |
 
 See [Core API Reference](/docs/extend/develop/api-reference/core) and
 [Gateway API Reference](/docs/extend/develop/api-reference/gateway) for the full interactive reference.
 
 ## LLM-friendly documentation
 
-Ryu's docs are served in machine-readable formats for agent consumption:
+Ryu's docs are also served in machine-readable formats.
 
 | Endpoint | Format | Use case |
 |---|---|---|
-| `GET /llms.txt` | Plain text index | Discover all pages |
-| `GET /llms-full.txt` | Full text dump | Bulk consumption (large) |
+| `GET /llms.txt` | Compact Markdown index | Find a section, its main pages, and its folder indexes |
+| `GET /llms/{folder}.txt` | Markdown index of one folder | List every page in a folder; large folders continue at `?page=N` |
+| `GET /llms-full.txt` | Full text of every page | Bulk consumption of the complete content (large) |
 | `GET /llms.mdx/docs/{slug}` | Per-page Markdown | Targeted page fetch |
 | `GET /docs/{path}.md` or `.mdx` | Per-page Markdown | Explicit Markdown suffix |
 | `GET /docs/{path}` with `Accept: text/markdown` | Per-page Markdown | Content negotiation on the canonical docs URL |
 
-These endpoints are designed for agents that need to read documentation programmatically. See [LLM-friendly docs](/docs/extend/mcp/llms) for the full list, per-page fetch examples, and how the [Docs MCP server](/docs/extend/mcp/docs-server) exposes the same content as tools.
+`/llms.txt` lists only each section's overview and direct children, so follow a folder index such
+as `/llms/extend/develop.txt` to see every page in that folder. Each split folder index links its
+previous and next `?page=N`. Only `/llms-full.txt` carries the page content itself.
+
+On the main website, `https://ryuhq.com`, a page that does not exist returns HTTP `404` for both
+HTML and Markdown requests. The website MCP server's `read_page` tool reports a missing page as not
+found and a moved page with its new URL. See
+[Website discovery and authentication](/docs/extend/mcp/llms#website-discovery-and-authentication).
+
+See [LLM-friendly docs](/docs/extend/mcp/llms) for the full list, per-page fetch examples, and how the [Docs MCP server](/docs/extend/mcp/docs-server) exposes the same content as tools.
+
+Each documentation page also links its Markdown version from the HTML head. A locale URL may show
+English fallback content while a translation is being prepared; search metadata points that
+fallback page to the English canonical. Use the page's canonical URL when citing it, and use a
+localized URL when its content is translated.
 
 ## Related
 
 <Cards>
-  <DocCard href="/docs/extend/develop/sdk" title="SDK Reference" description="Full TypeScript SDK API surface." />
-  <DocCard href="/docs/extend/mcp" title="MCP" description="Model Context Protocol integration." />
-  <DocCard href="/docs/gateway/gateway-for-any-agent" title="Gateway for any agent" description="Point any OpenAI-compatible agent at the Gateway." />
-  <DocCard href="/docs/gateway/routing-planes" title="Routing planes" description="Plane A vs Plane B routing." />
-  <DocCard href="/docs/core/unified-tool-catalog" title="Unified tool catalog" description="All available tools in one registry." />
-  <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" title="Plugin manifests" description="The manifest.json schema and lifecycle." />
+  <DocCard href="/docs/extend/develop/sdk" />
+  <DocCard href="/docs/extend/mcp" />
+  <DocCard href="/docs/gateway/gateway-for-any-agent" />
+  <DocCard href="/docs/gateway/routing-planes" />
+  <DocCard href="/docs/core/unified-tool-catalog" />
+  <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
 </Cards>

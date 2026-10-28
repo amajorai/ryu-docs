@@ -5,7 +5,8 @@ description: Back up an entire Ryu node, individual Spaces, or app data to AWS S
 
 Ryu can encrypt and upload backups directly to your own S3-compatible bucket. Configure them in
 the active node's **Storage → S3 backups** settings. A Space also exposes backups in its settings.
-Node administrators manage destinations and schedules; on shared nodes this requires `nodes.manage`.
+Node administrators manage destinations and schedules. On a shared node this requires the
+`nodes.manage` permission.
 
 ## Connect a destination
 
@@ -26,8 +27,12 @@ Create a bucket in your storage provider, then select **Add destination** in Ryu
 does not save the destination. Access credentials and the recovery key are sealed in Ryu's local
 secret boundary and are not returned by destination listings.
 
-Keep the recovery key outside your Ryu node. Losing both the node and this key makes the backups
-unrecoverable. You can reconnect a replacement node using the same bucket, prefix and recovery key;
+<Callout type="warn">
+  Keep the recovery key outside your Ryu node. If you lose both the node and this key, the backups
+  cannot be recovered.
+</Callout>
+
+You can reconnect a replacement node using the same bucket, prefix and recovery key;
 **Browse backups** reads the authenticated catalog from S3.
 
 ### Amazon S3
@@ -46,7 +51,10 @@ the S3 access key ID and secret from an R2 token with object read and write acce
 ### Other S3-compatible services
 
 Supply their endpoint and region. Path-style requests are enabled by default. HTTP requires an
-explicit opt-in for a trusted private S3 service. TLS certificate validation remains enabled.
+explicit opt-in for a trusted private S3 service. TLS certificate validation remains enabled and
+uses your operating system's trust store, so a server certificate from a private CA you have
+installed there is accepted.
+
 Ryu does not create buckets, manage provider accounts, or depend on a deployment dashboard.
 
 ## Choose what to back up
@@ -58,8 +66,8 @@ Ryu does not create buckets, manage provider accounts, or depend on a deployment
 | App | A JSON snapshot submitted through the granted app primitive | Returns the snapshot to the same app and tenant |
 
 Node backups omit downloaded runtimes, caches, logs, process handles, reusable node admission
-credentials, provider-account credentials, backup settings and backup staging. External project folders and remote
-app services are outside the node data folder and need their own backups. Symlinked source paths
+credentials, provider-account credentials, backup settings and backup staging. External project
+folders and remote app services are outside the node data folder and need their own backups. Symlinked source paths
 are refused rather than followed outside the backup boundary.
 
 SQLite databases use SQLite's online backup mechanism so committed WAL data is included. Each
@@ -79,9 +87,17 @@ keep, and select **Enable schedule**. The default `0 2 * * *` runs daily at 02:0
 be running at the scheduled time; missed offline runs are not replayed. You can pause or resume
 the schedule and use **Back up now** at any time.
 
-Retention runs after a successful upload and applies only to that source node, destination and scope. It never
-removes unrelated bucket objects. If pruning fails, the uploaded backup stays available and recent
+Retention runs after a successful upload and applies only to that source node, destination and
+scope. It never removes unrelated bucket objects. If pruning fails, the uploaded backup stays available and recent
 activity reports the failure. Removing a destination from Ryu keeps the objects already in S3.
+
+Catalogs keep node, Space, and app scopes separate, so one app's backup history does not use up
+another scope's catalog limit. A scoped catalog supports up to 2,000 entries. An oversized or
+unreadable catalog fails as a whole, and retention never prunes from an incomplete list.
+
+Node and Space settings browse their own catalogs. API clients can request
+`scope=node` for node backups or `spaceId` for a Space; omitting both keeps the
+all-scope catalog view.
 
 ## Restore
 
@@ -105,6 +121,15 @@ injects a master key, remove that override or replace it with the recovered key 
 an unrelated key cannot decrypt the recovered data. Reconnect accounts, providers and node access
 after recovery. Keep the original data folder until you have checked the restored node.
 
+In the recovery folder, that key is written to `secrets/` as an owner-only file, because the folder
+starts in file-key mode. Ryu does not remove recovery folders; delete one yourself once you have
+started from it or no longer need it, since it is a second full copy of the node with its key.
+
+While a backup or restore runs, Ryu stages it in the data folder's owner-only `tmp/backups/`, never
+in the shared system temporary folder. The unencrypted archive exists only as a temporary file with
+no name, which the OS removes even if Ryu is killed, and it is dropped as soon as it is encrypted,
+before the upload starts. Anything an interrupted job left there is removed when Ryu next starts.
+
 ## Apps and APIs
 
 Apps use the [backup primitive](/docs/extend/develop/sdk/primitives#backupsclient) with the
@@ -113,6 +138,6 @@ allowed-app list. This does not give apps access to node backups, another app's 
 filesystem paths, S3 credentials, or the recovery key.
 
 The [Core API reference](/docs/extend/develop/api-reference/core/backups) documents destination,
-schedule and operation endpoints. Manual requests carry an `idempotencyKey`: retrying the same
+schedule and operation endpoints. Manual requests carry an `idempotencyKey`, so retrying the same
 request returns the same operation. Reusing a key with a different request fails. The node keeps
 the latest 1,000 operation records; use a new request ID after that history has expired.

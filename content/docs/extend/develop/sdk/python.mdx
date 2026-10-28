@@ -1,0 +1,374 @@
+---
+title: "Python SDK (ryu-sdk)"
+description: "Build tool-calling agents, typed tools, structured output, and Core workflows in Python, and drive durable harness runs and Managed Agents sessions."
+---
+
+The `ryu-sdk` package has two layers:
+
+- **The authoring surface** (pure Python, needs `httpx`): `Agent`, the `@tool` decorator,
+  structured output with validation and repair, middleware, a workflow DSL that compiles to Core
+  workflows, and clients for Core harness runs and the hosted Managed Agents API.
+- **The kernel binding**: `ModelClient`, `EmbeddingClient`, and the manifest validators, generated
+  from the shared Rust kernel. See [Language bindings](/docs/extend/develop/sdk/language-bindings).
+
+```bash
+python -m pip install "ryu-sdk[pydantic]"
+```
+
+<Callout type="warn">
+`ryu-sdk` is not published to PyPI yet, so the install command above works only after the first
+release that publishes it. See [SDK Publishing](/docs/extend/develop/sdk/publishing). The hosted
+services' Python client, `ryu_sdk.services`, ships in the same package and is described in
+[Choose an SDK](/docs/standalone/sdk/choose-an-sdk).
+</Callout>
+
+The `pydantic` extra is optional. Without it, tool arguments and structured outputs are described
+with type hints, dataclasses, `TypedDict`, or JSON Schema dicts. With it, pydantic models work
+everywhere a type is accepted, and validated values come back as model instances. The package
+supports Python 3.9 and later.
+
+Every model call goes to the Ryu Gateway's OpenAI-compatible endpoint. A base URL that points at
+a model provider directly (for example `api.openai.com`) is rejected, so provider keys stay in the
+Gateway.
+
+## Agents
+
+`Agent` owns the tool-calling loop, like the TypeScript `Agent`. It calls the model with your
+tools, runs the tools the model asks for, feeds the results back, and stops when the model answers
+without a tool call or after `max_steps` model rounds (default 10).
+
+```python
+from typing import Annotated
+
+from ryu_sdk import Agent, tool
+
+
+@tool
+def get_weather(city: Annotated[str, "City name"], units: str = "c") -> dict:
+    """Look up the current weather for a city."""
+    return {"city": city, "temperature": 21, "units": units}
+
+
+agent = Agent(
+    "assistant",
+    model="your-model-id",
+    instructions="Answer briefly.",
+    tools=[get_weather],
+)
+
+result = agent.generate("What's the weather in Lisbon?")
+print(result.text, result.steps, result.usage)
+```
+
+| Method | Returns |
+|---|---|
+| `agent.generate(prompt)` | `GenerateResult` (synchronous; uses `httpx.Client`) |
+| `await agent.agenerate(prompt)` | `GenerateResult` (asynchronous) |
+| `async for event in agent.stream(prompt)` | Events as they happen, including per-token text |
+| `for event in agent.stream_sync(prompt)` | The same events synchronously, including per-token text (with a `wrap_model_call` middleware, each round's text arrives when that round returns) |
+
+`prompt` is a string or a list of OpenAI-style messages. Events carry a `type`, one of `text`,
+`tool_call`, `tool_result`, `approval_requested`, `auth_required`, `output_repair`, `error`, and a
+final `result`.
+
+The Gateway and Core endpoints default to `RYU_GATEWAY_URL` / `RYU_GATEWAY_TOKEN` and
+`RYU_CORE_URL` / `RYU_CORE_TOKEN` (then the older `RYU_TOKEN`), then to the local node. Pass
+`gateway_url`, `gateway_token`, `core_url`, and `core_token` to override them.
+
+### Tools
+
+`@tool` turns a function into a tool. The JSON Schema comes from its type hints: builtins,
+`Optional`, `Union`, `Literal`, `Enum`, `list`/`dict`/`tuple`, dataclasses, `TypedDict`, and
+pydantic models. The description is the docstring summary, and argument descriptions come from a
+Google-style `Args:` section or `Annotated[T, "description"]`. Parameters with defaults are
+optional.
+
+```python
+from pydantic import BaseModel
+
+from ryu_sdk import tool
+
+
+class Ticket(BaseModel):
+    title: str
+    priority: int
+
+
+@tool(needs_approval=True)
+def open_ticket(ticket: Ticket) -> str:
+    """Open a support ticket."""
+    return f"opened {ticket.title}"
+
+
+@tool(name="search", args_schema={"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+async def search_docs(q: str) -> list:
+    """Search the docs."""
+    return []
+```
+
+Arguments are validated before the function runs. A validation error, or any exception the tool
+raises, is sent back to the model as `{"error": "..."}` so it can correct itself. Async tools work
+with every method; with `generate()` they run on a fresh event loop.
+
+To use a tool that already exists in Ryu (for example a Composio action), reference it by id with
+`ryu_tool`. Core runs it and applies the agent's allowlist, so the agent needs its Core
+`agent_id`.
+
+```python
+from ryu_sdk import Agent, ryu_tool
+
+agent = Agent(
+    "mail",
+    model="your-model-id",
+    agent_id="your-core-agent-id",
+    tools={"search_mail": ryu_tool("composio.GMAIL_SEARCH_EMAILS", parameters={"type": "object", "properties": {"query": {"type": "string"}}})},
+)
+```
+
+If the account behind a remote tool is not connected yet, the run stops with an `auth_required`
+event that carries the connection URL, and `generate()` returns it as `result.auth_required`.
+
+### Approvals
+
+A tool created with `needs_approval=True` pauses before it runs. Pass `approval_handler` to decide
+in your own code: return `True` to run the tool, or `False` to send the model a "not approved"
+result. Without a handler, the run ends with an `approval_requested` event, and `generate()`
+returns it as `result.approval_required`.
+
+```python
+agent = Agent(
+    "ops",
+    model="your-model-id",
+    tools=[open_ticket],
+    approval_handler=lambda request: input(f"Run {request.name}({request.input})? ") == "y",
+)
+```
+
+### Structured output
+
+Set `output_schema` to a pydantic model, a type hint, or a JSON Schema dict. The schema is sent as
+the model's `response_format`, and the final reply is parsed and validated. JSON inside a code
+fence or surrounded by text is accepted. When the reply does not validate, the agent asks the
+model again with the problems it found, up to `max_repair_attempts` times (default 2). Repair
+rounds do not count against `max_steps`.
+
+```python
+from pydantic import BaseModel
+
+from ryu_sdk import Agent, StructuredOutputError
+
+
+class Forecast(BaseModel):
+    city: str
+    high: float
+    low: float
+
+
+agent = Agent("forecaster", model="your-model-id", tools=[get_weather], output_schema=Forecast)
+try:
+    forecast = agent.generate("Forecast for Lisbon").output  # a Forecast instance
+except StructuredOutputError as error:
+    print(error.attempts, error.issues, error.text)
+```
+
+### Middleware
+
+Middleware wraps each model call and tool call in your own process, like the TypeScript
+[agent middleware](/docs/extend/develop/sdk/agent-middleware). Entries run in list order, first
+outermost. Pass functions to `Middleware(...)` or subclass it:
+
+```python
+from ryu_sdk import Middleware, ToolCallResult
+
+
+def read_only(request, next_call):
+    if request.name.startswith("delete"):
+        return ToolCallResult(output={"error": "This agent may not delete anything."})
+    return next_call(request)
+
+
+def cheaper_model_first(request, next_call):
+    return next_call(request.replace(model="your-small-model") if request.step == 1 else request)
+
+
+def double_check(summary):
+    return {"continue": "Check your answer once more."} if summary.step == 1 else None
+
+
+agent = Agent(
+    "support",
+    model="your-model-id",
+    tools=[open_ticket],
+    middleware=[Middleware("policy", wrap_tool_call=read_only, wrap_model_call=cheaper_model_first, after_turn=double_check)],
+)
+```
+
+- `wrap_model_call(request, next)` can change `messages`, `model`, or `tools`, or return a
+  `ModelCallResult` without calling `next`.
+- `wrap_tool_call(request, next)` can block a call or change its output.
+- `after_turn(summary)` returns `{"continue": "..."}` to run another turn, still bounded by
+  `max_steps`.
+
+With `generate()` and `stream_sync()`, hooks must be synchronous. With `agenerate()` and `stream()`,
+hooks may be `async def`, and `next` must be awaited.
+
+### Durable runs on Core
+
+Give the agent a `session_id` to run on an existing Core harness session instead of in your
+process. The prompt starts a durable run, and its events are translated into the same agent
+events. Approvals go to `approval_handler`. Middleware does not apply to these runs; use a plugin
+hook in Core instead.
+
+```python
+agent = Agent("triage", model="your-model-id", session_id="your-session-id")
+
+async for event in agent.stream("Triage new issues"):
+    ...
+
+# Re-attach to a run after the last event you saw, without starting a new attempt.
+async for event in agent.stream_run(run_id, after=last_seq):
+    ...
+
+# Start a new attempt of a finished run, keeping its lineage.
+async for event in agent.resume(run_id, "Try again with the new logs"):
+    ...
+```
+
+`stream_run_sync()` and `resume_sync()` are the synchronous forms. Without an `approval_handler`,
+answer an `approval_requested` event yourself with `agent.resolve_permission(approval_id,
+option_id)` (or `await agent.aresolve_permission(...)`). Cancelling the task that consumes
+`agent.stream()` or `agent.resume()` also cancels the Core run it started.
+
+## Workflows
+
+The workflow DSL builds a Core workflow graph. Every step is a Core node, so the whole workflow
+runs on Core with its durable checkpoints, retries, and human gates. Python functions do not run
+inside a Core workflow; give an agent a Python tool instead.
+
+```python
+from ryu_sdk.workflow import (
+    RetryPolicy,
+    Workflow,
+    WorkflowClient,
+    agent_step,
+    human_step,
+    mcp_step,
+    prompt_step,
+    when,
+)
+
+research = Workflow("research").then(agent_step("search", "researcher", task="Find sources: {{input}}"))
+
+report = (
+    Workflow("report", name="Weekly report")
+    .then(agent_step("triage", "classifier", retry=RetryPolicy(max_attempts=3)))
+    .branch(
+        [(when.contains("urgent"), agent_step("escalate", "on-call"))],
+        otherwise=prompt_step("summarize", "Summarize: {{input}}"),
+    )
+    .parallel([research, prompt_step("tldr", "One line: {{input}}")])
+    .foreach(mcp_step("fetch", "spider", "crawl", {"url": "{{input}}"}), items="{{state.urls}}", concurrency=4)
+    .dountil(agent_step("refine", "editor"), when.gte(0.9), max_iterations=5)
+    .then(human_step("review", "Approve the report?"))
+)
+
+client = WorkflowClient(base_url="http://127.0.0.1:7980", token="your-node-token")
+client.deploy(report)
+result = client.start(report, {"topic": "release notes"})
+if result.status == "suspended":
+    result = client.resume(report, result.run_id, {"approved": True})
+print(result.status, result.result)
+```
+
+`base_url` defaults to `RYU_CORE_URL`, then `http://127.0.0.1:7980`, and the token to
+`RYU_CORE_TOKEN`, then `RYU_TOKEN`. `node_url` is the older name for `base_url` and still works.
+Passing both with different values raises `ValueError`.
+
+| Builder | Runs on Core as |
+|---|---|
+| `.then(step)` | The step's node. A nested `Workflow` becomes a `sub_workflow` node. |
+| `.parallel([...])` | One `parallel` node; the output is `{step_id: result}` |
+| `.foreach(step, items=..., concurrency=...)` | One `for_each` node; results stay in input order |
+| `.branch([(condition, step), ...], otherwise=step)` | `condition` nodes in an if/elif chain; with no match and no `otherwise`, the value passes through |
+| `.dowhile(step, condition)` / `.dountil(step, condition)` | One pass, then a `while` loop (at most 101 passes) |
+| `.sleep(ms)` | A durable `delay` |
+| `.map(template)` | A `template` transform (`{{input}}`, `{{nodes.<id>}}`, `{{state.<key>}}`) |
+
+Step helpers cover the common node kinds: `agent_step`, `prompt_step`, `tool_step`, `mcp_step`,
+`script_step` (JavaScript run in Core's sandbox), `skill_step`, `plugin_step`, `human_step`,
+`transform_step`, `set_state_step`, `guardrails_step`, and `webhook_step`. `step(id, type, ...)`
+creates any other node kind. Conditions come from `when` (`equals`, `contains`, `starts_with`,
+`lt`, `gte`, `empty`, ...) or a raw Core expression such as `'input == "yes"'`.
+
+`workflow.to_core()` returns the compiled definition and every child workflow it needs.
+`client.deploy()` saves the children first. `client.stream(workflow, input)` yields step events
+(`step-start`, `step-result`, `step-error`, `step-suspended`, `workflow-finish`) while the run is
+in progress, then the `WorkflowResult`. Pass `output_schema=` to `Workflow` to validate the final
+output. `AsyncWorkflowClient` has the same methods as coroutines and async iterators.
+
+<Callout type="info">
+  `.parallel()` and `.foreach()` compile to Core's `parallel` and `for_each` node kinds. Deploy
+  them to a node whose Core version includes those kinds.
+</Callout>
+
+## Durable harness client
+
+`HarnessClient` (and `AsyncHarnessClient`) wraps Core's [durable harness](/docs/extend/develop/sdk/harness)
+API: create sessions, start runs with an idempotency key, list and cancel runs, and resolve
+approval requests.
+
+```python
+from ryu_sdk import HarnessClient
+
+with HarnessClient("http://127.0.0.1:7980", token="your-node-token") as harness:
+    session = harness.create_session("your-agent-id", "agent", title="Nightly triage")
+    started = harness.start_run(session["id"], {"prompt": "Triage new issues"}, idempotency_key="triage-2026-10-21")
+    for event in harness.events(started["run"]["id"]):
+        if event["type"] == "text_delta":
+            print(event["delta"], end="")
+```
+
+`events(run_id, after=0)` streams a run's typed events. If the connection drops before the run
+ends, it reconnects from the last `seq` it received and skips events it already returned. Save the
+last `seq` and pass it as `after` to continue the stream from another process.
+
+## Managed Agents client
+
+`ManagedAgentsClient` (and `AsyncManagedAgentsClient`) calls the hosted Managed Agents API with an
+API key, which is sent as a header and never in a URL. It has the same resources as the TypeScript
+client: `agents`, `environments`, `credentials` (read-only), and `sessions`.
+
+```python
+from ryu_sdk import ManagedAgentsClient
+
+with ManagedAgentsClient("your-api-key", "https://your-control-plane.example") as api:
+    session = api.sessions.create({"agentId": "your-agent-id", "environmentId": "your-environment-id"})
+    api.sessions.send_message(session["id"], "Summarize the open incidents.", idempotency_key="msg-1")
+    for event in api.sessions.stream(session["id"]):
+        if event["type"] == "agent.message":
+            print(event["content"])
+```
+
+`sessions.stream()` replays the event log and then follows it. A dropped connection resumes with
+`Last-Event-ID`, and repeated events are skipped. Iteration ends at the server's end frame or after
+the session reaches a terminal status. Errors raise `ManagedAgentsError` with a stable `code`,
+`status`, `request_id`, and `retry_after_seconds`. The client never follows redirects.
+
+## Testing your code
+
+Every agent and client accepts an `httpx` transport, so you can test against
+`httpx.MockTransport` without a running node:
+
+```python
+import httpx
+
+from ryu_sdk import Agent
+
+
+def gateway(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+
+
+agent = Agent("test", model="m", gateway_url="http://gateway.test", transport=httpx.MockTransport(gateway))
+assert agent.generate("hello").text == "hi"
+```

@@ -1,7 +1,11 @@
 ---
-title: Scoring & governance
-description: How RyuBench turns task outcomes into a credible number — pass^k, Wilson intervals, cost normalization, and the anti-gaming rules.
+title: Scoring and Governance
+description: How RyuBench turns task outcomes into a score with pass^k, Wilson intervals, cost normalization, and anti-gaming rules.
 ---
+
+RyuBench scores each run from persisted node state, then reports pass rate, pass^k, and cost
+beside a pinned configuration. This page describes how the score is built and the rules meant to
+keep it honest.
 
 ## The scorecard
 
@@ -9,18 +13,18 @@ Every run emits a JSON record (the machine artifact) and a Markdown scorecard (t
 both led by the **pinned config** so a reader can reproduce the number. A score is a tuple, never
 a bare scalar:
 
-```
+```text
 model · driver · docs condition · core version · gateway version · task-set version · k
 ```
 
 ## Two reliability numbers
 
-- **Pass rate** — fraction of attempts that passed. The headline.
-- **pass^k** — fraction of *tasks* whose every one of `k` repetitions passed. Stricter; it
-  catches tasks that pass once by luck and fail on repeat. Run with `--k 3` or higher for a
+- **Pass rate**: the fraction of attempts that passed. This is the headline.
+- **pass^k**: the fraction of *tasks* whose every one of `k` repetitions passed. It is stricter
+  and catches tasks that pass once by luck and fail on repeat. Run with `--k 3` or higher for a
   reliability read.
 
-Both come with a **Wilson 95% confidence interval**, so small task counts show honest error bars
+Both come with a **Wilson 95% confidence interval**, so small task counts show error bars
 instead of a falsely precise percentage.
 
 <Callout type="info">
@@ -30,28 +34,34 @@ instead of a falsely precise percentage.
 
 ## Cost normalization
 
-Ryu's Gateway already meters spend, so RyuBench reports **`$/task` and `tokens/task`** next to
-pass rate. Cost-normalized scoring is exactly what the 2026 benchmark pushback demands, and it
-is nearly free here because measurement is the Gateway's job. Prices are a swappable default
-(override with the `RYUBENCH_PRICES` env var, JSON of `{ "<model>": { "in": n, "out": n } }`);
-local models are priced at zero tokens — their real cost is compute, tracked elsewhere.
+RyuBench reports **`$/task` and `tokens/task`** next to pass rate. Token counts come from the
+usage that the node returns for each attempt. The dollar figure is an estimate: token counts
+multiplied by a built-in price table in USD per million tokens.
+
+Override or extend the table with the `RYUBENCH_PRICES` environment variable, as JSON of
+`{ "<model>": { "in": n, "out": n } }`. A model id matches a row exactly or by prefix. A model
+with no matching row, including a local model, is priced at zero. The real cost of a local model
+is compute, which RyuBench does not measure.
 
 ## LLM-judge is an auditor, not a scorer
 
-RyuBench never uses an LLM to grade a task. If you want to audit verifier quality, run an LLM
-judge *against the execution verifiers* and measure disagreement — the DeepSWE lesson was that
-purpose-written verifiers disagreed with a judge on 1.4% of rollouts versus 32.4% for inherited
-tests. A judge that disagrees with your verifier means your verifier is wrong, not the model.
+RyuBench never uses an LLM to grade a task. To audit verifier quality, run an LLM judge
+*against the execution verifiers* and measure disagreement. A disagreement is a reason to
+review the verifier, not to change the model's score.
 
-## Anti-gaming rules (open-core means the routes are public)
+## Anti-gaming rules
 
-Ryu's Core and Gateway are open source, so the task routes are known. The benchmark is designed
-for that:
+Ryu's Core and Gateway are open source, so the task routes are known. The governance design
+accounts for that:
 
-- **Inverted split.** The public task set is demonstration-only and **never scored** — you can
-  even ship a scripted solver that aces it, to prove it is not the benchmark. Only a **private,
-  out-of-distribution set** counts, and that set is hosted, not shipped. (v1 ships the public set;
-  the sealed private tier is staged next — see the spec.)
+<Callout type="warn">
+  The public/private split, the hosted private task tier, and the sandboxed Docker harness are
+  planned and not yet shipped. Today RyuBench ships the public task set only.
+</Callout>
+
+- **Inverted split.** The public task set is for demonstration and is not scored. A scripted
+  solver that passes it proves only that it is not the benchmark. Only a **private,
+  out-of-distribution set** counts, and that set is hosted, not shipped.
 - **Fresh, OOD private tasks.** New tasks are authored from scratch and preferentially allocated
   to the private set; the public and private tiers are difficulty-calibrated.
 - **Rotate hidden tasks.** Reusing the same hidden set across many releases leaks it through the
@@ -59,24 +69,24 @@ for that:
 - **Open-source-to-score.** Official standing requires publishing the harness config so a number
   can be reproduced.
 - **Pin everything.** Core/Gateway version and config, agent setup, model version and sampling
-  params, task-set version — all captured in the scorecard.
+  params, and task-set version are all captured in the scorecard.
 
-## Reproducibility &amp; the community harness
+## Reproducibility and the community harness
 
-Anyone can run RyuBench. The community-runnable target is a sandboxed `docker run` against a fresh
-pinned node: it seeds the reference agent setup, runs the
-public task set, and prints a scorecard (pass rate, `$/task`, `tokens/task`, pass^k). The scored
-run is offline and pinned so results are reproducible and not silently phoning a bigger model.
+The planned community harness is a sandboxed `docker run` against a fresh pinned node. It seeds
+the reference agent setup, runs the public task set, and prints a scorecard (pass rate, `$/task`,
+`tokens/task`, pass^k). The scored run is offline and pinned, so it cannot call a larger model
+unnoticed.
 
-## Drivers (the model-vs-harness split, operationally)
+## Drivers
 
 | Driver | Track | What it does |
 |---|---|---|
-| `direct-tool` | **model** | fixed minimal scaffold: one `ryu_request` HTTP proxy tool, OpenAI tool-calling loop against the node's governed `/v1/chat/completions`. Swap `--model` to compare models on equal footing. |
+| `direct-tool` | **model** | fixed minimal scaffold: one `ryu_request` HTTP proxy tool, OpenAI tool-calling loop against the node's `/v1/chat/completions` proxy (see [Local models](/docs/reference/benchmark/local-models#how-the-node-routes-a-model-id)). Swap `--model` to compare models on equal footing. |
 | `ryu-agent` | **native / harness** | drives the task through Ryu's real agent runtime (`POST /api/chat/stream`) on a frozen reference setup with only the `chat_model` setting swapped. |
 
 The scorecard records which driver produced a score, so a model-track number and a harness-track
-number can never be confused for each other. The current public task set is `0.2.0` (50 tasks);
-the scorecard's task-set version is part of the comparison key.
+number cannot be confused. The task-set version is part of the comparison key; see
+[Tasks](/docs/reference/benchmark/tasks) for the current set.
 
-Continue with [RyuBench](/docs/reference/benchmark), [task categories](/docs/reference/benchmark/tasks), [Gateway evals and audit](/docs/gateway/evals-audit), and [Gateway metering](/docs/billing/metering).
+Continue with [RyuBench](/docs/reference/benchmark), [task categories](/docs/reference/benchmark/tasks), [Gateway evals and audit](/docs/gateway/evals), and [Gateway metering](/docs/billing/metering).

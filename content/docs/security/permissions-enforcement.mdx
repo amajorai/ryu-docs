@@ -1,0 +1,119 @@
+---
+title: "Permission Enforcement by Surface"
+description: "Which Core handlers and control-plane surfaces each Ryu permission key gates, how API key scopes combine with permissions, and how to edit node resource exceptions."
+---
+
+This page lists where each key from the [permission vocabulary](/docs/security/permissions#the-permission-vocabulary) is enforced. For how Core decides whether a request reaches a handler at all, see [How Core gates a request](/docs/security/permissions#how-core-gates-a-request).
+
+## Handlers gated today
+
+Core wires `enforce_permission` into these handler families (call sites in `apps/core/src/server/mod.rs`):
+
+| Permission | Surface |
+|---|---|
+| `gateway.view` | Read gateway configuration, status, and Doctor reports |
+| `gateway.configure` | `PUT /api/gateway/config` and `GET /api/gateway/budget/spend` (live budget counters for any user, agent, or session) |
+| `audit.view` | `GET /api/gateway/traffic` (the live traffic feed, which names every member's requests, models, and cost) |
+| `workflow.view` / `run` / `edit` / `delete` | Workflow REST handlers |
+| `space.read` / `write` / `delete` | Space document REST handlers |
+| `agent.view` | Agent REST reads plus sync scans and status |
+| `agent.run` | Agent runs, ACP resume, and proactive openings |
+| `agent.edit` | Agent writes plus sync profiles, imports, exports, and conflict resolution |
+| `agent.delete` | Agent deletion |
+
+Invoking `POST /api/agent-sync/export` requires `agent.edit`. Core then filters the
+bundle to agent definitions the caller may view and conversations the caller may read.
+
+The live traffic and budget spend gates check the caller's own organization role. Only the node
+owner token or a member's own signed-in session reaches them, including the session Desktop and the
+CLI use to reach a managed node. Credentials delegated to an OAuth or MCP client and paired-device
+credentials are refused before the handler runs, whatever scope they carry, so a client authorized
+for `gateway:route` cannot inherit an owner's or admin's view of everyone's traffic and spend. A
+member's own spend remains available from `GET /api/usage/me`.
+
+`messaging.read` and `messaging.manage` gate Ryu Messaging reads and its sends, number purchases,
+and settings. An API key needs the matching `messaging:read` or `messaging:manage` scope as well. A
+personal key also needs its owner's permission on every call. An organization key can only be
+created with a Messaging scope its creator's own organization permissions grant. These two scopes
+exist only on the hosted control plane and are never delegated to a node.
+
+Hosted Mail API keys use `mail:read`, `mail:send`, and `mail:manage`. Each call also checks the
+`mail.read` permission (reads) or `mail.manage` permission (sends and changes) of what the key
+acts for: the owner of a personal key, the role of the service account that holds a
+service-account key, or the member who created any other organization key. An organization key
+can only be created with a Mail scope its creator's organization permissions grant. A classic token
+includes `mail:read` and `mail:send` but never `mail:manage`; choose it on a fine-grained token. An OAuth (MCP) grant gets `mail:manage` only when the client names it and you choose it on the consent screen, and it can then only create inboxes. The Mail scopes also exist only on the hosted control plane. See
+[Ryu Mail API](/docs/standalone/mail-api#hosted-mail-api-keys).
+
+The organization prompt registry uses `agent.view` (list and resolve prompts), `agent.edit`
+(create prompts, commit versions, move labels), and `agent.delete` (delete a prompt). An API key
+needs `prompts:read` for reads and `prompts:manage` for the rest, and each call also checks the
+permission of what the key acts for, as with Mail. An organization key can only be created with a
+prompt scope its creator's organization permissions grant. A classic token includes
+`prompts:read` but never `prompts:manage`. The prompt scopes exist only on the hosted control
+plane, and OAuth clients cannot request them. See
+[Prompts](/docs/extend/develop/sdk/prompts#registries).
+
+The `notifications.*` keys govern the organization notification page; `mail.*` gates hosted Agent
+Mail; `teams.manage`, `projects.manage`, `registry.manage`, and `nodes.manage` gate their matching
+control-plane mutations, and `registry.manage` also gates reading the organization's registry
+grants and each catalog entry's configuration. Other members see registry entry names and
+metadata only.
+
+A project's team sets which team policy applies to it and which team grants, keys, and nodes reach
+it. To create, rename, archive, or restore a team's project you need an organization-wide
+`teams.manage` grant or `projects.manage` inside that team, which a member has only while they
+belong to it. Moving a project to another team, or removing its team, needs organization-wide
+`teams.manage`, or a team-scoped `teams.manage` grant for every team the project leaves or joins.
+
+On the control plane, `gateway.configure` gates reading as well as changing the organization
+Gateway config, its config diff and revision history, the firewall rules, and organization API keys.
+The `channel.manage` key is enforced by the control plane for creating an organization-owned
+channel and for updates to one created by another member. The `marketplace.*` keys govern catalog
+visibility, publishing, and ownership transfer on the control plane. `features.manage` gates the organization's feature
+controls, member overrides, and app feature rollouts.
+
+The remaining keys (`tool.exec`, `members.manage`, `roles.manage`, `billing.manage`) are part of the
+shared vocabulary; member, role, and billing management remain behind their Better Auth and
+billing policy boundaries.
+
+`access.manage` gates the organization's security settings (IP allowlist, required two-factor, and
+session lifetime) and its SSO and SCIM configuration, including SCIM connection revocation.
+`data.manage` gates data controls: log retention and SIEM audit streaming, including its signing
+secret and test event. Owners and admins hold both; a custom role can grant either one without
+granting the other, and holding `members.manage` or `roles.manage` grants neither. Registering,
+updating, verifying, or deleting an SSO provider also needs the built-in owner or admin role,
+because the sign-in provider layer enforces that itself. Generating or rotating a SCIM token needs
+the owner or admin role and `members.manage` as well as `access.manage`, because a SCIM token can
+remove any member who is not an owner, admins included.
+
+`audit.view` gates the organization Audit log, which merges org control changes with reported
+Gateway control changes, the organization request audit search
+(`GET /api/aggregation/orgs/{orgId}/audit`), and Core's live traffic feed; the local Gateway audit
+endpoint retains its own master-key gate.
+
+## Editing node resource exceptions
+
+Desktop **Gateway → Permissions** lists only resources with custom ACL rules; select **Edit** to
+change one or choose a reported resource type and enter its identifier. The editor prefers the
+node's principal directory for roles, teams, and people. If that directory is unavailable, it keeps
+the saved rule and offers a warned identifier field; use the exact stable ID, because an unknown ID
+will save but match no principal. A failed resource-list or permission-vocabulary read shows a
+**Retry** action instead of presenting an empty rule set as if the read succeeded. The **Everyone in
+the org** target is available only when the selected node reports an organization ID; an unbound
+personal node has no organization scope to grant. Saving an all-Inherit rule removes that exception
+so normal role permissions apply again.
+
+Switching nodes or resources loads that selection's permissions. A delayed reply from a previous
+selection does not replace the current editor or show its save result. If you edit a rule while
+**Save** is still in progress, those newer changes stay unsaved after the earlier save completes;
+choose **Save** again to apply them. A failed save reports the error and keeps your edits available
+for retry.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/security/permissions" />
+  <DocCard href="/docs/security/permissions-marketplace" />
+  <DocCard href="/docs/security/organization-admin-controls" />
+</Cards>

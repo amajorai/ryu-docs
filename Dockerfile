@@ -4,7 +4,7 @@
 # build context is this repo's root (no `apps/fumadocs` prefix, no workspace install).
 # The monorepo keeps its own root-context Dockerfile at `apps/fumadocs/Dockerfile`;
 # this one replaces it in the mirror (tools/mirror-satellites.sh overlays it).
-FROM oven/bun:1.3.14 AS builder
+FROM oven/bun:1.4.4 AS builder
 WORKDIR /app
 ENV SKIP_ENV_VALIDATION=1
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -22,17 +22,22 @@ RUN bun run generate:docs \
  && bun x next build \
  && mkdir -p public
 
-# Lean runtime. node:22-trixie-slim (glibc, NOT alpine/musl) so the native
+# Lean runtime. node:22.23.4-trixie-slim (glibc, NOT alpine/musl) so the native
 # @takumi-rs/image-response OG-image binary loads at runtime.
-FROM node:22-trixie-slim AS runner
+FROM node:22.23.4-trixie-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3002
 ENV HOSTNAME=0.0.0.0
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
-RUN chown -R node:node /app
+COPY --chown=node:node --from=builder /app/.next/standalone ./
+COPY --chown=node:node --from=builder /app/.next/static ./.next/static
+# fumadocs-openapi resolves the API reference specs from /app at request time,
+# so they must be in the runtime image as well as in the builder.
+COPY --chown=node:node --from=builder /app/specs ./specs
+COPY --chown=node:node --from=builder /app/public ./public
+# Copied as node above; only the WORKDIR itself still needs handing over. A
+# recursive chown here would duplicate every copied file into a new layer.
+RUN chown node:node /app
 EXPOSE 3002
 USER node
 CMD ["node", "server.js"]

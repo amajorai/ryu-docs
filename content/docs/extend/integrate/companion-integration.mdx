@@ -1,15 +1,15 @@
 ---
 title: "Desktop Companion Integration"
-description: "Build an in-desktop overlay panel that interacts with the chat, memory, and tools — the companion surface for plugins."
+description: "Reference for the plugin companion surface in Desktop and the host APIs it can call: background processes, toasts, and the extension host."
 tags: ["companion", "desktop", "plugin", "overlay", "panel", "ui", "integration"]
 ---
 
-A companion is an in-desktop overlay panel declared by a plugin. It renders inside the desktop app
-and can interact with the chat, memory, tools, and Gateway.
+A companion is a panel that a plugin declares and Desktop renders. For a step-by-step build, see
+[Build a Desktop Companion](/docs/extend/develop/extensions/desktop-companion).
 
 ## The companion surface
 
-Declare a companion in `manifest.json`:
+Declare a companion in `manifest.json` (`CompanionSurface` in `crates/core/kernel-contracts/src/manifest.rs`).
 
 ```json
 {
@@ -27,27 +27,22 @@ Declare a companion in `manifest.json`:
 
 | Field | Required | Description |
 |---|---|---|
-| `label` | yes | Display name in the sidebar |
-| `icon` | no | Lucide icon name |
-| `shortcut` | no | Keyboard shortcut to toggle the panel |
+| `label` | yes | Display label for the panel tab or tooltip |
+| `icon` | no | Icon id: an Iconify `prefix:name`, a bare Hugeicons name, or an image URL (see [Icon](/docs/ui/icon)) |
+| `shortcut` | no | Keyboard shortcut to toggle the panel, for example `"ctrl+shift+m"` |
 
 ## How it connects
 
-The companion panel is rendered by the desktop shell. It communicates with Core through the
-same HTTP API every other surface uses:
-
-- **Chat** — `POST /api/chat/stream` for conversations
-- **Memory** — `GET /api/memory/recall` for long-term context
-- **Tools** — `GET /api/tools/search` for tool discovery
-- **Spaces** — `POST /api/spaces/:id/search` for RAG
-
-All calls are Gateway-governed.
+Plugin code is untrusted, so Desktop renders the companion in a sandboxed iframe. The iframe has no
+direct network access to Core. It calls host methods on `window.ryu`, and the capability-gated RPC
+bridge (`packages/app-host/src/rpc.ts`) checks each call against the plugin's approved grants before
+it reaches Core. Model and tool calls behind the bridge still go through the Gateway.
 
 ## Background process bridge
 
 Companion apps that need to show or stop long-running work can use the shared background-process
 bridge. Add the `background:control` grant to the plugin's approved permissions, then call the
-host-provided API:
+host API.
 
 ```json
 {
@@ -66,16 +61,17 @@ if (process) {
 ```
 
 The list and stop calls are scoped to the verified caller. On an organization-bound node, an
-anonymous bridge call is refused and a signed-in caller can see or control only processes registered
-under that user; a process id from another user cannot be substituted. `background.stop` queues a
-request for the process owner and returns immediately. The owner is responsible for performing its
-safe cleanup and publishing the finished snapshot, so callers should list again rather than assuming
-the process has already exited. The desktop pinned summary uses the same bridge and registry.
+anonymous bridge call is refused. A signed-in caller can see or control only processes registered
+under that user, and a process id from another user cannot be substituted.
+
+`background.stop` queues a stop request for the process owner and returns immediately. The owner
+runs its own safe cleanup and publishes the finished snapshot, so list again instead of assuming
+the process has already exited. The Desktop pinned summary uses the same bridge and registry.
 
 ## Ephemeral toast feedback
 
-Apps, frontend plugins, and inline widgets can show short feedback in the desktop shell. Request the
-`ui:toast` grant, then use the host API under `window.ryu.ui.toast`:
+Apps, frontend plugins, and inline widgets can show short feedback in the Desktop shell. Request the
+`ui:toast` grant, then use the host API under `window.ryu.ui.toast`.
 
 ```json
 {
@@ -108,8 +104,8 @@ description clears the previous description.
 
 The supported variants are `default`, `success`, `info`, `warning`, `error`, and `loading`. Titles
 can contain up to 120 characters, descriptions up to 500 characters, and an explicit duration must
-be between 1 and 60 seconds. Frontend plugin activation code can call the same methods through
-`context.plugin.host.ui.toast`.
+be between 1 and 60 seconds (`TOAST_LIMITS` in `packages/app-host/src/rpc.ts`). Frontend plugin
+activation code can call the same methods through `context.plugin.host.ui.toast`.
 
 A toast is temporary feedback for the screen the user is looking at. It does not create an Inbox
 entry, a native system notification, or a durable record. Use the app's notification or approval
@@ -118,27 +114,38 @@ flow when the message must survive dismissal, a restart, or the user leaving the
 ## Desktop extension host
 
 For richer integration, the SDK exposes a desktop extension host API
-(`packages/sdk/src/plugin/ryu-plugin.ts`):
+(`packages/sdk/src/plugin/ryu-plugin.ts`). `RyuPlugin` offers `registerCommand`, `registerPanel`,
+`registerRoute`, `registerSettingsSection`, and `registerStoreSection`, plus host services under
+`host` (for example `listAgents`, `gateway.chat`, and `spaces.ingestDocument`).
 
 ```typescript
 import type { RyuPlugin } from "@ryuhq/sdk/plugin";
 
-export function activate(context: RyuPlugin): void {
-  // Register commands
-  context.registerCommand("my-action", () => { /* ... */ });
-  
-  // Register a panel
-  context.registerPanel("My Panel", MyPanelComponent);
-  
-  // Access host services
+export async function activate(context: RyuPlugin): Promise<void> {
+  // Register a command-palette entry
+  context.registerCommand({
+    id: "my-action",
+    title: "Run my action",
+    run: () => {
+      /* ... */
+    },
+  });
+
+  // Register a panel backed by a webview entry
+  context.registerPanel({
+    id: "my-panel",
+    region: "chat-side-panel",
+    title: "My Panel",
+    webview: { entry: "panel.html" },
+  });
+
+  // Host services
   const agents = await context.host.listAgents();
-  await context.host.gateway.chat(messages);
-  await context.host.spaces.ingestDocument(spaceId, doc);
 }
 ```
 
 <Callout type="warn">
-  The desktop extension host is **partly live**. The manifest carries `contributes` blocks and
+  The desktop extension host is partly live. The manifest carries `contributes` blocks and
   activation events, and the activation runtime wakes plugins on `onStartup`. But the full
   in-process plugin API (registering commands, panels, routes) is still being built. See
   [Plugin Runtime](/docs/extend/develop/extensions/plugin-runtime) for the current state.

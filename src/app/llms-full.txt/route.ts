@@ -11,12 +11,19 @@ export async function GET(request: Request) {
     return new Response("Unsupported documentation locale", { status: 400 });
   }
 
-  const scan = source.getPages(locale).map(getLLMText);
+  // Release notes are a multi-megabyte changelog archive that grows every
+  // release. They stay reachable through llms.txt and
+  // /llms-sections/release-notes instead of inflating every full-text fetch.
+  const scan = source
+    .getPages(locale)
+    .filter((page) => page.slugs[0] !== "release-notes")
+    .map(getLLMText);
   const scanned = await Promise.all(scan);
 
   const header = `# Ryu Documentation (Full Text)
 
-This file contains every page of the Ryu documentation in plain Markdown.
+This file contains every page of the Ryu documentation in plain Markdown, except the
+release notes archive (GET /llms-sections/release-notes).
 Each page is delimited by "--- END OF PAGE ---" and starts with a Source/Title/Description header.
 
 Locale: ${locale}
@@ -25,7 +32,8 @@ Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
 
 ## Other LLM-friendly endpoints
 
-- GET /llms.txt                    — Index of all pages (title + URL)
+- GET /llms.txt                    — Compact navigation index (sections and their direct children)
+- GET /llms/{folder}.txt           — Complete page index for one docs folder, e.g. /llms/extend/mcp.txt
 - GET /llms-full.txt               — This file (all pages concatenated)
 - GET /llms.mdx/docs/{version}/{slug} — Single English page as processed Markdown
 - GET /llms.mdx/docs/{locale}/{version}/{slug} — Localized page projection
@@ -35,7 +43,7 @@ Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
 - GET /llms-sections/{section}?locale={locale} — Locale-specific section projection
 - GET /schemas/plugin.json         — JSON Schema for manifest.json manifests
 
-Valid sections: start-here, showcase, surfaces, mobile, browser-extension, hardware, core, gateway, standalone, providers, ci, extend, ui, apps, programs, plugins, security, legal, billing, reference, learn, roadmap (legacy names like desktop, develop, mcp, cookbook, and academy still work)
+Valid sections: start-here, showcase, surfaces, mobile, browser-extension, hardware, core, gateway, standalone, providers, ci, extend, ui, apps, programs, plugins, security, legal, billing, reference, learn, roadmap, rsi, release-notes (legacy names like desktop, develop, mcp, cookbook, and academy still work)
 
 ---
 

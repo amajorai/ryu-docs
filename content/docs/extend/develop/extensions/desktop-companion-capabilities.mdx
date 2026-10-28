@@ -1,0 +1,161 @@
+---
+title: "Companion Media, HTTP, and Navigation"
+description: "Generate media, read app-owned HTTP routes, and open external links from a sandboxed Desktop Companion."
+---
+
+These host methods extend the
+[Companion capability table](/docs/extend/develop/extensions/desktop-companion#capabilities). Each
+one runs through the trusted host, so the null-origin frame never makes its own network request.
+
+## Media generation and vision
+
+The `media:generate` grant covers image, video and audio generation. The trusted host makes the
+request on the app's behalf, waits for a cloud job to finish, and returns `data:` URLs that the
+sandboxed frame can render. Reference media also travels as base64 `data:` URIs, because the
+frame has no network access.
+
+```ts
+const [clip] = await window.ryu.media.video({
+  prompt: "Continue the shot into a slow push-in",
+  provider: "fal",
+  model: "<a first/last-frame video model>",
+  input_images: [firstFrame, lastFrame],
+  provider_input: {
+    start_image_url: "$input_images.0",
+    end_image_url: "$input_images.1",
+  },
+});
+```
+
+Besides `prompt`, `provider`, `model` and `request_id`, `media.video` accepts these fields:
+
+| Field | Accepted value |
+|---|---|
+| `input_images` | At most two frames, `[first, last?]`, as `data:image/png`, `jpeg` or `webp` URIs |
+| `input_video` | One `data:video/*` source clip |
+| `input_audio` | One `data:audio/*` track |
+| `duration_s` | Seconds, greater than 0 and at most 600 |
+| `provider_input` | A JSON object of the model's own fields, at most 64 keys |
+
+For `media.video` and `media.audio`, the inline inputs and `provider_input` together are limited
+to 40 MiB. `provider_input` cannot set
+`model`, `provider`, `prompt`, `request_id`, `n`, `project_id`, `kind`, `duration_s` or the input fields. The host
+refuses these requests before they leave the app. Core then maps each input for the selected
+provider, or refuses the request with a reason that reaches your call as an error. The mapping
+rules, including the `$input_*` and `$duration_s` references, are described in
+[image and video providers](/docs/providers/image-and-video#video-reference-inputs).
+`media.image` also accepts `provider_input` for cloud image models. The local image engine
+refuses it.
+
+For `media.image`, the reference images and `provider_input` together are limited to
+22 MiB, which keeps the request inside the image route's 24 MiB limit. `provider_input` keys
+cannot be `__proto__`, `constructor` or `prototype`. The host refuses them rather than dropping
+them.
+
+`media.audio` generates music or a sound effect. There is no local audio engine, so `provider`
+(`fal` or `replicate`) and `model` are required:
+
+```ts
+const [sound] = await window.ryu.media.audio({
+  prompt: "A heavy wooden door slams shut",
+  kind: "sfx",
+  duration_s: 3,
+  provider: "fal",
+  model: "<an audio model>",
+  provider_input: { seconds_total: "$duration_s" },
+});
+```
+
+A refused request, a failed job, or a job that finishes without a file is returned as an error.
+It never returns an empty or placeholder result.
+
+`model.complete` accepts an `images` list of at most eight `data:image/png`, `jpeg` or `webp` URIs, 1.5 MiB
+in total. Ryu sends them to the model as image parts. A model that cannot read images returns the
+provider's error.
+
+Call `host.capabilities()` and check its `bridge` flags before you show these controls. Older hosts
+do not report them:
+
+```ts
+const { bridge } = await window.ryu.host.capabilities();
+const canUseReferences = bridge?.["media.video.inputs"] === true;
+const canGenerateAudio = bridge?.["media.audio"] === true;
+const canSendImages = bridge?.["model.vision"] === true;
+```
+
+## App-owned HTTP reads
+
+With the `app:http` grant, `window.ryu.app.request({ path: "/status" })` reads from
+your app's own sidecar through the trusted host. The method defaults to `GET`.
+The desktop host aborts pending GET requests when the companion document closes
+or reloads, including any startup retry wait. Switching to another tab while the
+document remains mounted does not cancel the read. Closing the document does not
+roll back writes that have already started.
+
+To call **another** app's sidecar, pass its id as `app`. For example:
+
+```ts
+const reply = await window.ryu.app.request({
+	app: "@ryu/recipes",
+	method: "GET",
+	path: "/",
+});
+```
+
+This needs the per-target grant `app:http:<app id>` (here `app:http:@ryu/recipes`) in
+`permission_grants`. The target must be a concrete scoped id such as `@ryu/recipes`; patterns
+like `app:http:*` are refused. Each target grant is reviewed individually, so a grant the Gateway
+has not reviewed blocks the app from being enabled. Plain `app:http` still covers only your own
+sidecar, and a target grant does not include it. The path stays inside the target app's own
+mount and must be a route that app declares; a request to a disabled app fails. Hosts without
+this option (Host API before 1.18) ignore `app` and call your own sidecar, so check the reply.
+
+### In the web app
+
+Apps opened in the Ryu web app can call `window.ryu.app.request` with the same grant rules: your
+own sidecar with `app:http`, and another app only with its reviewed `app:http:<app id>` grant. The
+request goes through the signed-in web session to the same node that serves the web **Apps**
+page. The web app adds these limits:
+
+- The person needs an approved account, and the node must be bound to an organization. They must
+  be a member of that organization (or the node's personal owner) and hold the route's permission.
+- The node must run a Ryu version that supports web app requests. Until it does, every request
+  fails with `server_error` ("the node does not support web app requests yet") and nothing
+  reaches the app; update the node to enable them.
+- Both the calling app and the target app must support the web surface (`surfaces.web.support`
+  set to `full` or `limited`).
+- Only routes that declare a per-route `permission` are reachable from the web. Routes without
+  one return `not_found` there, while desktop and mobile companions can still call them:
+
+  ```json
+  "routes": [
+    { "path": "/list", "permission": "myapp.view" },
+    { "path": "/:id", "method": "DELETE", "permission": "myapp.edit", "resource_param": "id" }
+  ]
+  ```
+
+- Responses must be JSON. A route that answers with HTML, an image or a file fails with
+  `server_error`. Path segments containing `%`, `\`, `?`, `#` or control characters are refused;
+  send query parameters as the request's query, not inside a path segment.
+- `realtime.connect`, `finetune.stream` and `ghost.recipes` are not available in the web app.
+
+The first rule covers every other host call a web companion makes as well (storage, models, agent
+runs and the rest of `window.ryu`): the node must be bound to an organization, and the signed-in
+person must be a member of it or the node's personal owner. On an unbound node those calls fail
+with `denied`. A node running an older Ryu version does not apply this check.
+
+## External navigation
+
+Use `window.ryu.ui.openExternal({ href })` to hand a URL to the host. A trusted click on
+an `<a target="_blank">` HTTP(S) link is routed through the same host callback, so a companion can
+open external destinations without granting its sandbox popup access. Script-generated clicks and
+non-HTTP(S) destinations are blocked; the host validates the URL again before opening it. This
+local host capability requires no additional app manifest grant.
+
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/extend/develop/extensions/desktop-companion" />
+  <DocCard href="/docs/extend/develop/extensions/desktop-companion-runtime" />
+</Cards>

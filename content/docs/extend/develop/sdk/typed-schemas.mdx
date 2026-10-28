@@ -1,0 +1,193 @@
+---
+title: Typed schemas and structured output
+description: Define TypeScript SDK tools and agent outputs with zod, valibot, arktype, or JSON Schema, get inferred types, and let the agent repair invalid structured replies.
+---
+
+The TypeScript SDK accepts typed schemas wherever a value's shape is declared:
+
+- `defineTool({ schema })` and `ryuTool(id, { parameters })` for tool arguments.
+- `new Agent({ outputSchema })` for the agent's final structured reply.
+
+A typed schema is any [Standard Schema](https://standardschema.dev) validator, such as zod 4,
+valibot, or arktype. The SDK infers TypeScript types from it, uses it to validate values at run
+time, and converts it to JSON Schema for the model. Plain JSON Schema objects keep working
+everywhere they did before.
+
+For the rest of the SDK, see [SDK runnables and model clients](/docs/extend/develop/sdk/runnables) and
+[SDK primitives](/docs/extend/develop/sdk/primitives).
+
+The Python SDK covers the same ground with type hints and pydantic models. See
+[Python tools](/docs/extend/develop/sdk/python#tools) and
+[Python structured output](/docs/extend/develop/sdk/python#structured-output). To bundle typed
+tools into a plugin, see [definePlugin](/docs/extend/develop/sdk/builders#defineplugin).
+
+## Typed tools
+
+```typescript
+import { Agent, defineTool } from "@ryuhq/sdk";
+import { z } from "zod";
+
+const forecast = defineTool({
+  id: "forecast",
+  name: "Forecast",
+  description: "Daily high temperatures for a city",
+  schema: z.object({
+    city: z.string().describe("City name"),
+    days: z.number().int().min(1).max(7).default(3),
+  }),
+  async run({ city, days }) {
+    // city: string, days: number (the default is already applied)
+    return { city, highs: Array.from({ length: days }, () => 21) };
+  },
+});
+```
+
+- The `run()` argument is typed from the schema's parsed output. A misspelled field is a compile
+  error.
+- Before `run()` executes, the schema parses the input, applying defaults and transforms. Invalid
+  input throws an `Error` that lists every issue with its path, and the body does not run.
+- `forecast.schema` is the converted JSON Schema. It is what the model sees, what
+  `inlineToolRunnable` writes into a plugin manifest, and what Core receives.
+- The schema's root must describe an object, because tool arguments are always a JSON object.
+- Parsing (defaults, transforms, refinements) runs in your SDK process. When a tool is lowered into
+  a plugin manifest with `inlineToolRunnable`, only its JSON Schema and the `run` body travel, so
+  that body receives the arguments as sent. Do not rely on schema defaults there, and do not
+  reference variables from outside the `run` body.
+- A tool's `description` is sent to the model. When a tool has no description, its `name` is sent.
+
+Remote Ryu tools take a typed schema too. Core still validates and executes the call:
+
+```typescript
+import { ryuTool } from "@ryuhq/sdk";
+
+const gmailSearch = ryuTool("composio.GMAIL_SEARCH_EMAILS", {
+  description: "Search the user's Gmail",
+  parameters: z.object({ query: z.string() }),
+});
+```
+
+The hand-written `ToolSchema` form is unchanged. It validates required keys and top-level types:
+
+```typescript
+defineTool<{ query: string }>({
+  id: "search",
+  name: "Search",
+  schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  async run({ query }) {
+    return query;
+  },
+});
+```
+
+## Structured output
+
+Set `outputSchema` on an `Agent` to get a validated, typed value from `generate()`.
+
+```typescript
+const Invoice = z.object({
+  total: z.number().nonnegative(),
+  currency: z.enum(["USD", "EUR"]),
+});
+
+const extractor = new Agent({
+  name: "invoice-extractor",
+  model: "your-model-id",
+  outputSchema: Invoice,
+  maxRepairAttempts: 2, // the default
+});
+
+const { output } = await extractor.generate("Total due: 12.50 EUR");
+// output: { total: number; currency: "USD" | "EUR" } | undefined
+```
+
+The schema is sent as the model request's `response_format`. Strict mode is requested only when
+every object in the schema is closed and requires all of its properties, because providers reject
+strict requests that have optional fields.
+
+When the run finishes, the agent reads the final reply as JSON. It accepts a bare JSON document, a
+fenced code block, or one object or array inside other text. The value is then validated against
+the schema, and `result.output` holds the parsed value, with any transforms applied.
+
+### The repair loop
+
+If the reply is not JSON or fails validation, the agent does not give up right away:
+
+1. It emits an `output_repair` event: `{ type: "output_repair", attempt, issues }`.
+2. It keeps the invalid reply in the transcript and adds a user turn. That turn lists each issue
+   by path and restates the JSON Schema.
+3. It calls the model again. The model can still call tools on this turn.
+
+Repair rounds do not use up the `maxSteps` tool budget. Set `maxRepairAttempts: 0` to fail on the
+first invalid reply. If the run uses up `maxSteps` while the model is still calling tools, the last
+text is validated as it is, and an invalid value ends in the same error.
+
+When every repair attempt fails, `stream()` ends with an `error` event whose `code` is
+`"structured_output_invalid"` and which carries `issues`, `attempts`, and the last reply `text`.
+`generate()` throws a typed `StructuredOutputError`.
+
+```typescript
+import { StructuredOutputError } from "@ryuhq/sdk";
+
+try {
+  await extractor.generate("…");
+} catch (error) {
+  if (error instanceof StructuredOutputError) {
+    console.error(error.attempts, error.issues, error.text);
+  }
+}
+```
+
+A `sessionId` agent runs inside Core, so the SDK cannot add repair turns. Its final output is
+validated once, and an invalid output produces the same error.
+
+### JSON Schema outputs
+
+A plain JSON Schema `outputSchema` is validated with the SDK's built-in validator. The validator
+supports `type`, `enum`, `const`, the object, array, string, and number constraints, the
+combinators (`allOf`, `anyOf`, `oneOf`, `not`), and local `$ref`. It ignores annotation keywords
+such as `format`. To type the result, wrap the schema with `fromJsonSchema`.
+
+```typescript
+import { fromJsonSchema } from "@ryuhq/sdk";
+
+const agent = new Agent({
+  name: "answer",
+  model: "your-model-id",
+  outputSchema: fromJsonSchema<{ answer: string }>({
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
+    additionalProperties: false,
+  }),
+});
+```
+
+## Validators without JSON Schema export
+
+zod 4 (4.2 and later) and other libraries that implement Standard JSON Schema convert on their
+own. A validator that only validates, such as zod 3 or valibot without its JSON Schema package,
+needs a JSON Schema to send to the model. Pair the two with `withJsonSchema`.
+
+```typescript
+import { withJsonSchema } from "@ryuhq/sdk";
+
+const schema = withJsonSchema(myValidator, {
+  type: "object",
+  properties: { id: { type: "string" } },
+  required: ["id"],
+});
+```
+
+Validation and type inference still come from the validator. If a schema cannot be converted, the
+SDK throws a `SchemaConversionError` when the tool or agent is created, not partway through a run.
+This includes a converter-less validator and a zod field such as `z.date()` that has no JSON form.
+
+The `@ryuhq/sdk/schema` subpath exports the lower-level helpers for your own code:
+
+| Helper | Purpose |
+|---|---|
+| `toJsonSchema` | Convert a schema to JSON Schema for the wire. |
+| `validateWithSchema` | Validate a value with any Standard Schema. |
+| `validateJsonSchema` | Validate a value against a JSON Schema document. |
+| `parseJsonReply` | Read JSON from model text. |
+| `readStructuredReply` | Read JSON from model text and validate it. |

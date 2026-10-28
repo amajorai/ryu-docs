@@ -1,0 +1,126 @@
+---
+title: "Hono"
+description: "Use @ryuhq/services in a Hono app on Cloudflare Workers, Node.js, Bun, or Deno: read configuration with env(c), verify Mail webhooks in middleware, and map RyuError in one error handler"
+tags: ["sdk", "hono", "webhooks", "standalone"]
+---
+
+Hono runs on many runtimes, and each keeps configuration in a different
+place. On Cloudflare Workers it arrives as bindings in `c.env`. On Node.js,
+Bun, and Deno, `c.env` holds the server adapter's own objects, and the
+configuration is in the process environment. `env(c)` from `hono/adapter`
+returns the right one on Cloudflare Workers, Node.js, Bun, Deno, and Vercel
+Edge Functions, so the app below passes it to the client with
+`new Ryu({ env: env(c) })` and runs unchanged on those runtimes. The code is
+taken from a test that runs it against a stub service, once as Workers and
+once as Bun.
+
+Install the package as shown in the [SDK overview](/docs/standalone/sdk#install).
+
+## The app
+
+```ts title="src/index.ts"
+import { Hono } from "hono";
+import { env } from "hono/adapter";
+import { createMiddleware } from "hono/factory";
+import { isRyuError, Ryu } from "@ryuhq/services";
+import { type MailWebhookEvent, verifyMailWebhook } from "@ryuhq/services/webhooks";
+
+interface Env {
+  Bindings: {
+    RYU_NOTIFY_URL?: string;
+    RYU_NOTIFY_API_KEY: string;
+    MAIL_WEBHOOK_SECRET: string;
+  };
+  Variables: { mailEvent: MailWebhookEvent };
+}
+
+const app = new Hono<Env>();
+
+// Verifies the raw body before any handler reads it; failures reach onError.
+const verifiedMail = createMiddleware<Env>(async (c, next) => {
+  const event = await verifyMailWebhook({
+    payload: await c.req.text(),
+    headers: c.req.raw.headers,
+    secret: env<Env["Bindings"]>(c).MAIL_WEBHOOK_SECRET,
+  });
+  c.set("mailEvent", event);
+  await next();
+});
+
+app.post("/deploys", async (c) => {
+  // env(c) is c.env on Workers and the process environment on Node.js, Bun, and Deno.
+  const ryu = new Ryu({ env: env<Env["Bindings"]>(c) });
+  const event = await ryu.notify.publish({
+    title: "Deploy finished",
+    level: "success",
+  });
+  return c.json({ id: event.id }, 201);
+});
+
+app.post("/webhooks/mail", verifiedMail, (c) => {
+  const event = c.get("mailEvent");
+  // Deliveries can repeat: dedupe on event_id before acting on it.
+  return c.json({ ok: true, eventId: event.event_id });
+});
+
+app.onError((error, c) => {
+  if (isRyuError(error)) {
+    // 422: a signed body that is not a Mail event; 401: other verification errors.
+    const status =
+      error.code === "webhook_payload_invalid"
+        ? 422
+        : error.code.startsWith("webhook_")
+          ? 401
+          : 502;
+    return c.json({ code: error.code, requestId: error.requestId }, status);
+  }
+  return c.json({ code: "internal_error" }, 500);
+});
+
+export default app;
+```
+
+- `new Ryu({ env: env(c) })` reads `RYU_NOTIFY_API_KEY` (and `RYU_NOTIFY_URL`,
+  which defaults to `https://notify.ryuhq.com`) from the object `env(c)`
+  returns, which is the bindings on Workers and the process environment
+  elsewhere. Without the key, the call fails with a `RyuConfigurationError`
+  that names `RYU_NOTIFY_API_KEY`.
+- The `verifiedMail` middleware verifies the raw body, as Mail signed it,
+  before the route runs. A forged or stale delivery throws
+  `RyuWebhookVerificationError`, and the error handler answers `401`. A
+  signed delivery whose body is not Mail's JSON (`webhook_payload_invalid`)
+  answers `422`, as `webhookHandler()` does.
+- `app.onError` sees every `RyuError` the routes throw. Branch on
+  `error.code`, and pass `error.requestId` on so support can trace the call.
+
+In a route that should not throw, use `new Ryu({ env: env(c), result: "object" })`
+and check `error` in the `{ data, error, meta }` result instead. For a
+webhook route without middleware, `webhookHandler()` returns a handler you
+can mount with `app.post("/webhooks/mail", (c) => handler(c.req.raw))`; see
+[SDK webhooks](/docs/standalone/sdk/webhooks#a-ready-made-endpoint).
+
+## Where the configuration comes from
+
+On Workers, `c.env` holds your bindings. Set the keys as secrets rather than
+plain variables, so they stay out of your configuration files.
+
+On Node.js, Bun, and Deno, set them as environment variables; `env(c)` reads
+the process environment there (Deno needs `--allow-env`). Do not pass `c.env`
+on those runtimes, because it holds the server adapter's own objects, not your
+variables, so `new Ryu({ env: c.env })` fails with a `RyuConfigurationError`
+and the webhook secret reads as missing. A plain `new Ryu()` also works there,
+because it reads `process.env`.
+
+On a runtime `env(c)` does not recognise, such as Fastly Compute, it returns an
+empty object, so `new Ryu({ env: env(c) })` fails with a `RyuConfigurationError`
+and the webhook secret reads as missing. There, read the values yourself (on
+Fastly, from a Config Store or Secret Store) and pass them in, for example
+`new Ryu({ env: { RYU_NOTIFY_API_KEY: notifyKey } })`.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/frameworks/edge" />
+  <DocCard href="/docs/standalone/sdk/webhooks" />
+  <DocCard href="/docs/standalone/sdk/errors" />
+</Cards>

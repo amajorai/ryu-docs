@@ -1,0 +1,334 @@
+---
+title: "Managed Agents Events and Streams"
+description: "Read and stream a Managed Agents session log, answer tool calls, and reconnect without gaps"
+tags: ["managed-agents", "events", "sse", "standalone"]
+---
+
+Every Managed Agents session has an append-only event log. You send input as
+user events, and Ryu appends the agent's output, status changes, errors, and
+usage as further events. Read the log by page with
+`GET /sessions/{sessionId}/events`, or follow it live with the Server-Sent
+Events (SSE) stream at `GET /sessions/{sessionId}/stream`. Paths are relative
+to `/api/v1/managed-agents`. Authentication and errors are on the
+[Managed Agents API](/docs/standalone/managed-agents-api) page.
+
+## Event envelope
+
+Every event in the log and on the stream has these fields, plus the fields of
+its type.
+
+| Field | Meaning |
+|---|---|
+| `id` | The event id, `mevt_` followed by 32 hex characters. |
+| `sessionId` | The session id. |
+| `seq` | The position in the session log. It starts at 1, has no gaps, and only increases. |
+| `createdAt` | When Ryu appended the event. |
+| `type` | The event type. |
+
+Ignore event types and fields that you do not know. New event types, fields,
+stop reasons, and error codes can appear in v1. Treat an unknown `stopReason`
+as `end_turn` for flow control.
+
+## Event types
+
+| Type | Written by | Payload |
+|---|---|---|
+| `user.message` | You | `content` holds 1 to 16 text blocks with at most 100,000 characters in total. |
+| `user.interrupt` | You | No payload. Stops the current turn. Queued messages are kept. |
+| `user.custom_tool_result` | You | `toolUseId`, `content` (up to 16 text blocks), and `isError`. The `toolUseId` must be pending. |
+| `user.tool_approval` | You or Ryu | `toolUseId`, `decision` (`"allow"` or `"deny"`), and `message` (up to 1,024 characters, shown to the model with a denial, or `null`). Answers a pending `agent.tool_approval_request`. Ryu writes a denial itself when a request expires. |
+| `agent.message` | Ryu | `content` holds `text` blocks and `redacted` blocks. A provider message longer than 100,000 characters is split into consecutive events. |
+| `agent.tool_use` | Ryu | A tool that the backend runs itself. `name` is the backend's own tool name, such as `bash` or `code_interpreter`. `source` is `"builtin"` or `"mcp"`, and `server` names the MCP server. `input` is capped at 64 KiB; a larger input is sent as `{}` with `inputTruncated` set to `true`. |
+| `agent.tool_result` | Ryu | The result of the `agent.tool_use` with the same `toolUseId`. `content` holds up to 8 text blocks of up to 32,768 characters each. `isError` marks a failed call, and `truncated` is `true` when the output was cut. |
+| `agent.custom_tool_use` | Ryu | A call to one of the agent's custom tools, with `toolUseId`, `name`, and `input`. Answer it with `user.custom_tool_result`. |
+| `agent.tool_approval_request` | Ryu | A tool declared with `requireApproval` waits for your decision. `toolUseId` matches the `agent.tool_use` that carries the call's input; `name`, `source`, and `server` repeat it, and `expiresAt` is when Ryu denies it unanswered. Answer it with `user.tool_approval`. |
+| `session.status` | Ryu | A status change. Carries `status`, `stopReason`, `pendingToolUseIds`, `detail`, and `inputSeq`. |
+| `session.error` | Ryu | An error during the session. It does not change the status by itself. |
+| `session.usage` | Ryu | `cumulative` and `delta` usage totals, and the `billing` mode and amount. |
+| `agent.message.delta` | Never in v1 | Reserved. Agent messages arrive whole, because Ryu polls the provider. |
+
+Content is text only. A text block is `{"type":"text","text":"..."}`, and an
+agent can also send `{"type":"redacted"}`. Non-text output of a tool is shown
+as a `[non-text output omitted]` text block.
+
+## Session status
+
+| Status | Meaning | Terminal |
+|---|---|---|
+| `pending` | Ryu is preparing the session at the backend. | No |
+| `running` | The backend is working on an input. | No |
+| `idle` | The turn ended. `stopReason` says why. The session accepts new input. | No |
+| `completed` | The session was closed with `complete`, or after 7 days without activity. | Yes |
+| `failed` | No further input can succeed in this session, for example after the credential was rejected or the provider lost the session. | Yes |
+| `canceled` | The session was closed with `cancel`. | Yes |
+
+A new session starts as `pending`. When the backend is ready and no input is
+queued, the session becomes `idle` with `detail` set to `"provisioned"`. When
+input is already queued, the session goes straight to `running`, so no `idle`
+appears between an input and the turn that answers it. A session that is still
+`pending` after 5 minutes becomes `failed` with the error `provision_timeout`.
+
+The `detail` field is `"provisioning"`, `"provisioned"`, `"rescheduling"` (the
+provider retries the turn after a transient error), `"closing"` (a cancel or
+complete has started), or `null`. The `inputSeq` field is the highest user
+event `seq` that the backend had accepted. To match an `idle` to your input,
+wait for an `idle` whose `inputSeq` is at least the `seq` of your input.
+
+`cancel` and `complete` start a close. Ryu removes the provider resources,
+records the final usage, and then appends the terminal `session.status`. After
+60 seconds the terminal status is appended even if cleanup is still running.
+The terminal `session.status` is always the last event of a session.
+
+| `stopReason` | Meaning |
+|---|---|
+| `end_turn` | The turn finished normally. |
+| `requires_action` | `pendingToolUseIds` is not empty. Only `user.custom_tool_result`, `user.tool_approval`, and `user.interrupt` are accepted. |
+| `interrupted` | A `user.interrupt` or a close ended the turn. |
+| `retries_exhausted` | The provider stopped after transient errors. A `session.error` comes first. You can send a new message. |
+| `budget_reached` | The session budget or the provider-side ceiling was reached. When the session budget is used up (less than one cent of it is left), new messages get `409 session_budget_exhausted`. |
+| `insufficient_credits` | The wallet or a spend limit stopped Ryu-provided usage. New messages get `402` until the admission check passes again. |
+| `refusal` | The model refused. A `session.error` with the code `refusal` comes first. |
+| `max_tokens` | The provider returned a partial result. |
+| `error` | The turn failed with an error that does not end the session. A `session.error` comes first. |
+
+## Errors in the log
+
+A `session.error` event has these fields.
+
+| Field | Meaning |
+|---|---|
+| `code` | A stable code from the table below. |
+| `message` | Safe text of up to 1,024 characters. With BYOK credentials it is the provider's text with keys and bearer tokens removed. With Ryu-provided credentials it is always a Ryu-authored message. |
+| `retryable` | `true` when a later input can succeed without a configuration change. |
+| `source` | `"ryu"`, `"vendor"`, or `"node"`. |
+| `details` | Optional `vendorCode`, `vendorRequestId` (never with Ryu-provided credentials), `mcpServer`, `eventSeq`, and `refusalCategory`. |
+
+| Code | Retryable | Source |
+|---|---|---|
+| `vendor_error` | Yes | vendor |
+| `vendor_rate_limited` | Yes | vendor |
+| `vendor_overloaded` | Yes | vendor |
+| `vendor_billing_error` | No (with BYOK, fix the provider account) | vendor |
+| `credential_rejected` | No | vendor |
+| `credential_unavailable` | No | ryu |
+| `vendor_session_lost` | No | vendor |
+| `vendor_context_expired` | Yes | vendor |
+| `vendor_environment_expired` | No | vendor |
+| `vendor_create_unconfirmed` | Yes | ryu |
+| `vendor_redirect` | No | ryu |
+| `input_rejected` | No (`details.eventSeq` names the input) | vendor |
+| `input_delivery_failed` | Yes | ryu |
+| `refusal` | Yes (`details.refusalCategory`) | vendor |
+| `incomplete` | Yes | vendor |
+| `mcp_connection_failed` | Yes | vendor |
+| `mcp_authentication_failed` | No | vendor |
+| `tool_approval_unsupported` | Yes | ryu |
+| `tool_approval_timeout` | Yes | ryu |
+| `budget_reached` | No | ryu |
+| `insufficient_credits` | Yes | ryu |
+| `billing_unavailable` | Yes | ryu |
+| `usage_unavailable` | Not applicable | ryu |
+| `node_unreachable` | Yes | node |
+| `node_forbidden` | No | node |
+| `node_paused` | Yes | node |
+| `node_turn_failed` | Yes | node |
+| `node_auth_failed` | No | node |
+| `event_log_full` | No | ryu |
+| `provision_timeout` | No | ryu |
+| `idle_timeout` | Not applicable | ryu |
+| `teardown_incomplete` | Not applicable | ryu |
+| `internal_error` | Yes | ryu |
+
+## Usage events
+
+A `session.usage` event carries `cumulative`, the session total so far, and
+`delta`, the change since the previous `session.usage` event. Both have the
+same fields.
+
+| Field | Meaning |
+|---|---|
+| `inputTokens` | Uncached input tokens. Cache reads and writes are counted separately. |
+| `outputTokens` | Output tokens. |
+| `cacheReadInputTokens`, `cacheWriteInputTokens` | Cached input tokens read and written. |
+| `reasoningTokens` | Reasoning tokens. |
+| `webSearchRequests` | Web search calls. |
+| `activeSeconds` | Active runtime seconds where the provider reports them, otherwise 0. |
+| `listCostMicroUsd` | The vendor list price before any Ryu service fee, or `null` when unknown. |
+
+The `billing` object has `mode` (`"platform"`, `"byok"`, or `"none"`) and
+`amountMicroUsd`. With Ryu-provided credentials, `amountMicroUsd` is the exact
+amount charged to the wallet for this delta, including any Ryu service fee.
+With BYOK credentials and nodes it is 0. Usage that is measured after the
+terminal status is still billed, but it does not appear in the event log. See
+[Ryu Managed Agents](/docs/standalone/managed-agents) for who bills each mode.
+
+## Send input
+
+`POST /sessions/{sessionId}/events` takes `{"events": [...]}` with one of three
+shapes: 1 to 8 `user.message` events, exactly 1 `user.interrupt`, or 1 to 8
+answers (`user.custom_tool_result` and `user.tool_approval` events) with
+different `toolUseId` values. Any other mix gets `400 invalid_request`. The response is `202` with the appended events
+in `data`. Ryu appends each user event before the backend sees it, so every
+reaction to an input has a higher `seq` than the input.
+
+The checks run in this order.
+
+| Order | Condition | Result |
+|---|---|---|
+| 1 | The session is terminal or closing | `409 session_closed` |
+| 2 | A `user.message` when the session's backend is no longer available on this deployment | `503 backend_disabled` |
+| 3 | The backend does not support the input type | `422 unsupported_for_backend` |
+| 4 | A `user.message` while custom tool calls or tool approvals are pending | `409 tool_result_required` with `details.pendingToolUseIds` |
+| 5 | A `user.message` after the session budget is used up (less than one cent of it is left) | `409 session_budget_exhausted` |
+| 6 | A `user.message` with Ryu-provided credentials when the admission check fails | `402 insufficient_credits` |
+| 7 | A `user.message` while a charge for the session has been pending for more than 5 minutes | `503 billing_unavailable` |
+| 8 | A `user.custom_tool_result` or `user.tool_approval` whose `toolUseId` is not pending (a custom tool call for a result, an approval request for an approval) | `409 unknown_tool_use`, or `409 tool_result_already_submitted` when an answer for that call was already accepted |
+| 9 | A `user.message` when 32 inputs are already queued | `429 rate_limited` with `details.limit` `"queuedInputsPerSession"` |
+| 10 | The session log would leave fewer than 16 free events | `409 event_log_full` |
+| 11 | The organization's user event bytes for the day would pass 512 MiB | `429 rate_limited` with `details.limit` `"userEventBytesPerOrgPerDay"` |
+
+A `user.interrupt` on a session with pending custom tool calls or tool
+approvals abandons them. Ryu answers each pending call with an error result
+("interrupted by user") and denies each pending approval,
+empties `pendingToolUseIds`, and the session becomes `idle` with
+`stopReason` `"interrupted"`. An interrupt on an idle session is appended and
+has no other effect.
+
+## Custom tool round trip
+
+When the agent calls a custom tool, Ryu appends `agent.custom_tool_use` and
+adds its `toolUseId` to `pendingToolUseIds`. The turn then ends with
+`requires_action`. Send one `user.custom_tool_result` for each pending call.
+Ryu accepts only one result for each `toolUseId`; a second result gets
+`409 tool_result_already_submitted`.
+
+This illustrative log shows one round trip on the `anthropic` backend.
+
+```text
+seq 1  session.status          status pending, detail provisioning
+seq 2  user.message            "What is the weather in Oslo?"
+seq 3  session.status          status running, inputSeq 2
+seq 4  agent.custom_tool_use   name get_weather, input {"location":"Oslo"}, toolUseId mtool_…
+seq 5  session.usage           billing mode platform, amountMicroUsd 21000
+seq 6  session.status          status idle, stopReason requires_action, pendingToolUseIds [mtool_…], inputSeq 2
+seq 7  user.custom_tool_result toolUseId mtool_…, "4°C, rain", isError false
+seq 8  session.status          status running, inputSeq 7
+seq 9  agent.message           "It is 4°C and raining in Oslo."
+seq 10 session.usage           …
+seq 11 session.status          status idle, stopReason end_turn, pendingToolUseIds [], inputSeq 7
+```
+
+## Tool approvals
+
+A builtin tool or an MCP server declared with `"requireApproval": true` asks
+before each call. The `anthropic` backend supports this; creating a session of
+such an agent on another backend gets `422 unsupported_for_backend` with
+`details.field` `"tools"`.
+
+When the agent wants to run the tool, Ryu appends the `agent.tool_use` with the
+call's input, then an `agent.tool_approval_request` with the same `toolUseId`,
+and adds the id to `pendingToolUseIds`. The turn ends with `requires_action`.
+Send one `user.tool_approval` per request. `allow` runs the call and the turn
+continues; `deny` refuses it, and the model sees your `message` (or a default
+denial text). Ryu accepts one answer per `toolUseId`.
+
+A request that is not answered by its `expiresAt` (10 minutes after it was
+appended) is denied by Ryu: the log gets a `session.error` with the code
+`tool_approval_timeout` and a `user.tool_approval` with `decision` `"deny"`.
+
+```text
+seq 12 agent.tool_use              name bash, input {"command":"rm -rf build"}, toolUseId mtool_…
+seq 13 agent.tool_approval_request name bash, source builtin, expiresAt 2026-10-10T12:10:40Z
+seq 14 session.status              status idle, stopReason requires_action, pendingToolUseIds [mtool_…]
+seq 15 user.tool_approval          toolUseId mtool_…, decision deny, message "Do not delete build output."
+seq 16 session.status              status running, inputSeq 15
+```
+
+With `@ryuhq/client`, answer with `client.sessions.respondToApproval(sessionId,
+toolUseId, "allow")`. Backends other than `anthropic`, and agents that do not
+set `requireApproval`, keep the default: tools run without asking, and an
+unexpected provider approval request is denied with `tool_approval_unsupported`.
+
+## Read events by page
+
+`GET /sessions/{sessionId}/events` returns the events with a `seq` greater than
+`after`.
+
+| Query parameter | Meaning |
+|---|---|
+| `after` | The last `seq` you have. Default 0. An integer from 0 to 100,000; anything else gets `400 invalid_cursor`. |
+| `limit` | Events per page. Default 100, maximum 500. |
+| `types` | A comma-separated list of event types. An unknown type gets `400 invalid_request`. |
+
+The response is `{ "data": [...], "hasMore": boolean, "nextAfter": number, "headSeq": number }`.
+`nextAfter` is the last returned `seq`, or `after` when the page is empty.
+`headSeq` is the newest `seq` in the log when the page was read. A page also
+stops before the event that would take it past 4 MiB, and `hasMore` is then
+`true`. The first event of a page is always included.
+
+An `after` beyond the newest event is not an error. The page is empty, and
+`nextAfter` equals `after`. When a page of a live session is empty, Ryu can
+check the provider for new output and read the log once more before it
+answers.
+
+## Stream a session
+
+`GET /sessions/{sessionId}/stream` first sends every event with a `seq` greater
+than the resume position, then keeps sending new events as they arrive. Set the
+resume position with `?after=<seq>` or the `Last-Event-ID` header. When both
+are present, `Last-Event-ID` wins. An invalid position gets a JSON
+`400 invalid_cursor` before the stream starts. A position beyond the newest
+event is accepted, and the stream waits for new events.
+
+The response has `Content-Type: text/event-stream; charset=utf-8`,
+`Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and
+`X-Request-ID`. The frames look like this:
+
+```text
+retry: 2000
+
+id: 6
+event: session.status
+data: {"id":"mevt_…","sessionId":"msess_…","seq":6,"createdAt":"2026-10-10T12:00:03.000Z","type":"session.status","status":"idle","stopReason":"requires_action","pendingToolUseIds":["mtool_…"],"detail":null,"inputSeq":2}
+
+: keepalive
+
+event: end
+data: {"sessionId":"msess_…","status":"completed","headSeq":42,"reason":"terminal"}
+```
+
+| Frame | Meaning |
+|---|---|
+| `retry: 2000` | The first frame. It sets the client reconnect delay to 2 seconds. |
+| Event frame | One frame for each log event. `id` is the `seq`, `event` is the event type, and `data` is the full event as one line of JSON. |
+| `: keepalive` | A comment frame after 8 seconds without other output. |
+| `event: end` | The last frame. It has no `id` and is not a log event. `reason` is `"terminal"` when the session ended and every event was sent, or `"deleted"` when the session was deleted. |
+
+The server can close a stream without an `end` frame: after 600 seconds, when
+an API server restarts, or after a read error. Reconnect with `Last-Event-ID`.
+Concurrent streams are limited to 4 for each session, 8 for each caller, and
+16 for each organization on one API server, and 512 in total on one API
+server. Over a limit, the request gets `429 stream_limit_reached` with
+`Retry-After: 5`, and `details.scope` is `"session"`, `"principal"`,
+`"organization"`, or `"replica"`.
+
+## Reconnect and deduplicate
+
+1. Reconnect with `Last-Event-ID` set to the last `id` you received.
+2. Treat delivery as at least once for the frame in flight, and drop any event
+   whose `seq` you already have.
+3. Stop when the `end` frame arrives or when you see a terminal
+   `session.status`. The terminal status is always the last event, so both
+   are safe stopping points.
+4. After a long disconnect, page through `GET /sessions/{sessionId}/events`
+   with `after` instead of replaying a long stream.
+
+The log is deduplicated by `seq`, but your own input is not. Without an
+`Idempotency-Key`, a retried `POST /sessions/{sessionId}/events` can append the
+same `user.message` twice. Send a unique `Idempotency-Key` with each batch of
+input and reuse it only to retry that batch.
+
+<Cards>
+  <DocCard href="/docs/standalone/managed-agents" />
+  <DocCard href="/docs/standalone/managed-agents-api" />
+</Cards>

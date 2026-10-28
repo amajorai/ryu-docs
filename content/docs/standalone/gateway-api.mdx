@@ -4,38 +4,59 @@ description: "Authenticate clients and send governed model requests to a standal
 tags: ["gateway", "api", "standalone"]
 ---
 
-The standalone Gateway exposes a versioned HTTP surface on its configured
-bind. The default local URL is `http://127.0.0.1:7981`.
+This reference covers how clients authenticate to a standalone Ryu Gateway,
+its main routes, its error envelope, and the routing headers on each answer.
+The Gateway serves a versioned HTTP API on its configured bind; the default
+local URL is `http://127.0.0.1:7981`.
 
 ## Configure client authentication
 
-Set `require_auth` and add one API key in `gateway.toml`:
+Authentication is on by default (`require_auth = true`). If `gateway.toml`
+lists no keys and you set no key variables, the Gateway generates two
+credentials on first start. They are written to the same directory as `gateway.toml`.
+
+| File | Prefix | Use |
+|---|---|---|
+| `gateway-admin.key` | `gwadm_` | Administrator (master) key for `/v1/config`, audit and doctor routes |
+| `gateway-relay.key` | `gwrelay_` | Inference key for model calls from your apps |
+
+When the Gateway has a sealing key (from `RYU_MASTER_KEY`, or the key Ryu passes it), both files
+are stored sealed, so read a key with `ryu-gateway print-key admin` or `ryu-gateway print-key relay`
+run with the same environment as the Gateway. Without any key they stay plaintext, owner-only, and
+the Gateway warns at startup. See [Encryption at rest](/docs/core/encryption-at-rest).
+
+To pick your own client key instead, add it to `gateway.toml` as shown below.
 
 ```toml
 [auth]
 require_auth = true
 
 [[auth.api_keys]]
-key = "YOUR_GATEWAY_KEY"
+key = "<at-least-24-character-random-secret>"
 name = "my-app"
 ```
 
-Clients send that key as a Bearer token:
+Every key, including `GATEWAY_MASTER_KEY`, must be at least 24 printable ASCII
+characters with no whitespace; the Gateway refuses to start with a shorter key.
+Generate one with `openssl rand -hex 24`.
+
+Clients send their key as a Bearer token:
 
 ```text
-Authorization: Bearer YOUR_GATEWAY_KEY
+Authorization: Bearer $RYU_GATEWAY_KEY
 ```
 
-With `require_auth = false`, the local development default accepts requests
-without a key. A non-loopback deployment should enable authentication and use
-TLS at its network boundary.
+`require_auth = false` is an explicit opt-out for loopback-only development.
+The Gateway refuses to start with it on a non-loopback bind or in fleet mode.
+A non-loopback deployment should also terminate TLS at its network boundary.
 
-## Core routes
+## Main routes
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/health` | None | Read liveness and feature state |
+| `GET` | `/health` | None | Read liveness (`status`, `version`); with the master key, also providers, `auth_required` and `policy_version` |
 | `GET` | `/v1/models` | Gateway key when required | List routable models |
+| `GET` | `/v1/modalities` | Gateway key when required | List the configured provider and model for each modality |
 | `POST` | `/v1/chat/completions` | Gateway key when required | Run an OpenAI-compatible chat completion |
 | `POST` | `/v1/embeddings` | Gateway key when required | Create embeddings through the configured provider |
 | `POST` | `/v1/images/generations` | Gateway key when required | Generate an image through the configured modality route |
@@ -45,15 +66,58 @@ TLS at its network boundary.
 | `PUT` | `/v1/config` | Gateway master key | Persist an allowed runtime configuration patch |
 
 The exact route families and response fields are maintained in the [Gateway
-API reference](/docs/extend/develop/api-reference/gateway). Clients should
-branch on the stable error code and keep the `x-request-id` for support or
-audit correlation.
+API reference](/docs/extend/develop/api-reference/gateway), including
+`/v1/messages` (Anthropic Messages), `/v1beta/models/{model}:generateContent`
+(Gemini), `/v1/rerank` and the `/v1/web` routes.
+
+## Errors and request ids
+
+Every response, errors included, carries an `x-request-id` header. On a model
+call it matches the Gateway audit record, so log it with any failure.
+
+Errors use one JSON envelope. `type` and `code` carry the same stable code;
+branch on it rather than on the message. Browser callers on an allowed origin
+can read `x-request-id`, `Retry-After`, `RateLimit`, `RateLimit-Policy`,
+`x-provider` and `x-routed-model`.
+
+```json
+{"error":{"message":"Upstream provider request failed.","type":"provider_error","code":"provider_error","upstream_status":400}}
+```
+
+| Situation | Status | Code |
+|---|---|---|
+| Body is not JSON, has no JSON `Content-Type`, or has the wrong shape | 400, 415 or 422 | `invalid_request_error` |
+| Missing or invalid key | 401 | `invalid_api_key` |
+| No such route | 404 | `not_found` |
+| Wrong method for the route (with an `Allow` header) | 405 | `method_not_allowed` |
+| Body over the route's size limit | 413 | `request_too_large` |
+| The Gateway's own rate limit | 429 | `rate_limit_exceeded` |
+| The upstream provider's rate limit | 429 | `provider_rate_limited` |
+| The upstream provider failed or rejected the request | 502 | `provider_error` |
+| No response started within 300 seconds | 504 | `gateway_timeout` |
+
+A few older routes answer their own error shape: validation errors from
+`/v1/evals/run` and `/v1/evals/score` are `{"error":"<message>"}`, and those
+from `/v1/batches` are `{"error":{"code":"invalid_batch_request","message"}}`.
+Passthrough routes return the upstream body unchanged.
+
+An upstream provider failure is always a 502 `provider_error`, even when the
+provider answered 4xx. When the provider's status is known, it is in
+`error.upstream_status`; a 400 or 422 there usually means the request itself
+needs fixing, so retrying it unchanged will not help.
+
+When the per-key request or burst limit refuses a request, on any inference
+route, the `rate_limit_exceeded` 429 carries `Retry-After` (seconds until the
+limit admits another request), the IETF `RateLimit-Policy` and `RateLimit`
+headers (for example `"requests";q=60;w=60` and `"requests";r=0;t=1`) and
+`error.retry_after`. Organization and token-per-minute refusals carry none of
+these, so back off on your own schedule.
 
 ## Send a request
 
 ```sh
 curl -fsS http://127.0.0.1:7981/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Authorization: Bearer $RYU_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello from Ryu."}]}'
 ```
@@ -64,8 +128,14 @@ The response carries routing metadata when available:
 |---|---|
 | `x-provider` | Provider or local engine that handled the call |
 | `x-routed-model` | Model selected after routing |
-| `x-request-id` | Request id used by the Gateway audit record |
+| `x-request-id` | Request id used by the Gateway audit record (also sent on errors) |
 | `x-cache` | `HIT` or `MISS` on supported non-streaming responses |
+
+## Model policy, tool limits, and media billing
+
+- OpenRouter fallback candidates, including explicitly requested candidate models, must satisfy the caller's effective model policy.
+- Every accepted video-generation request has its own job and billing reference, even when callers reuse a correlation ID.
+- Responses API function tools are limited to 128 across all namespace groups.
 
 ## Native agent paths
 
@@ -78,6 +148,6 @@ separate because they use different wire formats and credential purposes.
   <DocCard href="/docs/gateway/gateway-for-any-agent" />
   <DocCard href="/docs/gateway/routing" />
   <DocCard href="/docs/gateway/reliability" />
+  <DocCard href="/docs/standalone/gateway" />
+  <DocCard href="/docs/extend/integrate/openai-compat" />
 </Cards>
-
-Continue with [standalone Gateway](/docs/standalone/gateway), [Gateway API reference](/docs/extend/develop/api-reference/gateway), and [OpenAI compatibility](/docs/extend/integrate/openai-compat).

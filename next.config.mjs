@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMDX } from "fumadocs-mdx/next";
 
@@ -13,7 +13,7 @@ const docsRouteAliases = Array.isArray(docsRouteAliasesModule)
     : [];
 const docsLocalePattern = "en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar";
 const localizedLegacyDocsRedirects = [
-  ["/docs", "/docs/0.4.0/start-here"],
+  ["/docs", "/docs/0.5.0/start-here"],
   ["/docs/using-ryu/recipes", "/docs/learn/cookbook"],
   ["/docs/using-ryu/recipes/:path*", "/docs/learn/cookbook/:path*"],
   ["/docs/using-ryu", "/docs/surfaces/desktop"],
@@ -46,6 +46,15 @@ const localizedLegacyDocsRedirects = [
 }));
 const appRoot = dirname(fileURLToPath(import.meta.url));
 const turbopackAssetLoader = join(appRoot, "turbopack-asset-loader.mjs");
+// Peer dependency copies must share the framework context across SSR and client.
+const fumadocsFrameworkAliases = Object.fromEntries(
+  [
+    "fumadocs-core/framework",
+    "fumadocs-core/framework/next",
+    "fumadocs-core/link",
+    "fumadocs-core/dynamic-link",
+  ].map((specifier) => [specifier, require.resolve(specifier)]),
+);
 const transformersWebEntry = join(
   dirname(require.resolve("@huggingface/transformers")),
   "transformers.web.js",
@@ -59,6 +68,14 @@ const buildWorkers =
   Number.isInteger(requestedBuildWorkers) && requestedBuildWorkers > 0
     ? Math.min(requestedBuildWorkers, 8)
     : undefined;
+const requestedStaticGenerationConcurrency = Number(
+  process.env.RYU_FUMADOCS_STATIC_GENERATION_MAX_CONCURRENCY,
+);
+const staticGenerationMaxConcurrency =
+  Number.isInteger(requestedStaticGenerationConcurrency) &&
+  requestedStaticGenerationConcurrency > 0
+    ? Math.min(requestedStaticGenerationConcurrency, 8)
+    : undefined;
 const disableBuildCache = process.env.RYU_FUMADOCS_DISABLE_BUILD_CACHE === "1";
 const tsConfigPath = process.env.RYU_FUMADOCS_TS_CONFIG;
 
@@ -67,31 +84,42 @@ const config = {
   // Self-contained server bundle for a lean Docker runtime (apps/fumadocs/Dockerfile).
   output: "standalone",
   distDir: buildDir,
-  ...(buildWorkers || disableBuildCache
-    ? {
-        experimental: {
-          ...(buildWorkers ? { cpus: buildWorkers } : {}),
-          ...(disableBuildCache
-            ? { turbopackFileSystemCacheForBuild: false }
-            : {}),
-        },
-      }
-    : {}),
-  ...(tsConfigPath ? { typescript: { tsconfigPath: tsConfigPath } } : {}),
   transpilePackages: [
     "@ryu/assistant-widget",
+    "@ryu/auth",
+    "@ryu/blocks",
     "@ryu/browser-local-ai",
+    "@ryu/portable-packages",
     "@ryu/ui",
   ],
   turbopack: {
+    // Turbopack import aliases need portable paths relative to this app.
+    resolveAlias: Object.fromEntries(
+      Object.entries(fumadocsFrameworkAliases).map(([specifier, path]) => [
+        specifier,
+        `./${relative(appRoot, path).replaceAll("\\", "/")}`,
+      ]),
+    ),
     rules: {
       "*.glb": {
         as: "*.js",
         loaders: [turbopackAssetLoader],
       },
+      // Next 16.4 dropped Turbopack's built-in `?raw`; the editor's DOCX export
+      // (@ryu/ui export-editor-docx.ts) imports docx-nodes.css?raw as a string.
+      "*.css": { condition: { query: "?raw" }, type: "text" },
     },
   },
   webpack(config) {
+    Object.assign(
+      config.resolve.alias,
+      Object.fromEntries(
+        Object.entries(fumadocsFrameworkAliases).map(([specifier, path]) => [
+          `${specifier}$`,
+          path,
+        ]),
+      ),
+    );
     if (disableBuildCache) {
       config.cache = false;
     }
@@ -133,7 +161,7 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.4.0/start-here",
+        destination: "/docs/0.5.0/start-here",
         permanent: false,
       },
       // Keep compatibility redirects and canonical sitemap exclusions together.
@@ -298,5 +326,24 @@ const config = {
     ];
   },
 };
+
+if (buildWorkers || staticGenerationMaxConcurrency || disableBuildCache) {
+  /** @type {NonNullable<import('next').NextConfig['experimental']>} */
+  const experimental = {};
+  if (buildWorkers) {
+    experimental.cpus = buildWorkers;
+  }
+  if (staticGenerationMaxConcurrency) {
+    experimental.staticGenerationMaxConcurrency =
+      staticGenerationMaxConcurrency;
+  }
+  if (disableBuildCache) {
+    experimental.turbopackFileSystemCacheForBuild = false;
+  }
+  config.experimental = experimental;
+}
+if (tsConfigPath) {
+  config.typescript = { tsconfigPath: tsConfigPath };
+}
 
 export default withMDX(config);

@@ -1,6 +1,6 @@
 ---
-title: "Gateway access and tools"
-description: "Configure API keys, authentication, concurrency, execution budgets, tools, and Composio."
+title: "Gateway Access and Tools"
+description: "Reference for Gateway API keys and authentication, outbound proxy pools, concurrency, execution budgets, tools, Composio, and upstream accounts."
 ---
 
 Part of the [Configuration & Auth](/docs/gateway/configuration) guide.
@@ -12,10 +12,10 @@ The `[auth]` block (`AuthConfig`, `apps/gateway/src/config.rs`) controls who may
 ```toml
 [auth]
 require_auth = true
-master_key = "ryu-master-secret"   # also GATEWAY_MASTER_KEY
+master_key = "<at-least-24-character-random-secret>"   # also GATEWAY_MASTER_KEY
 
 [[auth.api_keys]]
-key = "YOUR_GATEWAY_KEY"
+key = "<another-24-plus-character-random-secret>"
 name = "my-app"
 org_id = "org_abc"
 team_id = "team_xyz"
@@ -26,6 +26,13 @@ downgrade_to = "gpt-4o-mini"       # model used once the lifetime cap is hit
 trusted_forwarder = false          # honor x-ryu-user-id / x-ryu-agent-id for budgets
 ```
 
+Every key (`master_key`, each `api_keys` entry, and the `GATEWAY_*_KEY`
+variables) must be at least 24 printable ASCII characters with no whitespace,
+and the admin and client keys must differ. The Gateway refuses to start with an
+invalid key. Generate one with `openssl rand -hex 24`. With `require_auth = true`
+and no keys configured, the Gateway generates `gateway-admin.key` and
+`gateway-relay.key` next to `gateway.toml` instead.
+
 Every request carries its key as a bearer token:
 
 ```bash
@@ -35,11 +42,47 @@ curl http://localhost:7981/v1/chat/completions \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
 ```
 
+In Desktop, **Gateway → API & traffic → Gateway client API keys** creates and revokes local
+client keys. Give each CLI or app its own named key. The new value is shown once; later config reads
+show `***` and keep the key server-side when another key is added or revoked. Bootstrapped node
+credentials are marked **System relay** and have no Revoke action. Ryu manages them for its own
+connections and retains an existing relay across restarts when client keys are added. User-created
+client keys remain separate and revocable. These client keys
+authenticate calls **into** the Gateway; provider API keys and subscription OAuth accounts
+authenticate calls **out to** model providers.
+
+Under **Gateway → AI providers → Provider keys (BYOK)**, a local operator can add multiple credentials for a
+direct provider and remove individual accounts. Gateway configuration stores the first in
+`api_key` and further accounts in `api_keys`; later reads show only the count. If the first is
+removed, the next account becomes primary. Gemini and additional SDK connections use
+`providers.genai.accounts.<kind>.api_key` and `api_keys`. Existing Gemini configurations
+are migrated when edited. See [provider connections](/docs/gateway/provider-connections)
+for connection context, credential sources, and model namespaces.
+Gateway client keys above are managed separately from these upstream accounts.
+
+The Gateway's `/v1/responses` endpoint accepts client function tools, tool namespaces,
+and text custom tools. Calls keep their original client name and namespace through
+streaming and follow-up tool results. Custom regex constraints are bounded and
+validated; Lark grammar constraints are rejected before model inference.
+
+Hosted `web_search` calls require the client key's separate web-search permission
+and use the configured Gateway web provider and its budgets. A declaration alone
+does not grant that permission. When `external_web_access` is false, Gateway never
+contacts a live search provider. Its current search service has no cached-search
+backend, so an actual cached-only call reports unavailable results explicitly.
+
+Desktop can also write a client key into a local coding CLI's config. See
+[Connect a local CLI from Desktop](/docs/gateway/connect-a-cli).
+
+`require_auth` is enabled by default. If an operator explicitly disabled it in the Gateway's
+startup configuration, Desktop displays that state; issuing a key alone does not enable
+authentication. Re-enable it in the operator configuration and restart the Gateway.
+
 ### Field reference
 
 | Field | Type | Meaning |
 |---|---|---|
-| `require_auth` | bool | When `false`, all requests are accepted regardless of key. Default `false` (local dev) |
+| `require_auth` | bool | When `false`, requests do not require a key. Default `true`; disable only in an explicit local development setup |
 | `master_key` | string | A single key that bypasses all per-key limits and gates the admin surface |
 | `api_keys[].key` | string | The bearer token clients send |
 | `api_keys[].name` | string | Human label, surfaced in `GET /v1/config` |
@@ -54,17 +97,74 @@ curl http://localhost:7981/v1/chat/completions \
 
 By default a key's budgets are keyed to the key itself, and any client-supplied `x-ryu-user-id` /
 `x-ryu-agent-id` headers are ignored, so an untrusted caller cannot rotate identity headers to
-evade its quota. Set `trusted_forwarder = true` only for an intermediary you control (Ryu Core
-relaying a real end-user identity): those keys are allowed to pass `x-ryu-user-id` and
+evade its quota. Set `trusted_forwarder = true` only for an intermediary you control (Core
+relaying a real end-user identity). Those keys are allowed to pass `x-ryu-user-id` and
 `x-ryu-agent-id`, which then drive per-user and per-agent budgets (`apps/gateway/src/config.rs`,
 `ApiKeyConfig::trusted_forwarder`). Per-user and per-agent budget rules live under `[budgets]` and
 are documented on [Reliability](/docs/gateway/reliability).
 
 <Callout type="warn">
-`require_auth` and `master_key` are environment-variable-only by design. The runtime API will not
-change them (see below), preventing an accidental lockout where you disable auth or rotate the
-master key over the wire and lock yourself out.
+The runtime API does not change `require_auth` or `master_key`. Set them in the startup
+configuration. This prevents a lockout from disabling auth or rotating the master key over the wire.
 </Callout>
+
+## Outbound proxy pools
+
+An operator can assign an eligible direct provider to a pool of outbound HTTP or HTTPS
+proxies in `gateway.toml`. Chat sessions stay on their selected proxy; embedding, image, and speech
+requests rotate per request. A connection-establishment failure or rejected proxy authentication
+can try another eligible endpoint during the same request. After success, the session stays on that
+endpoint. A timeout or delivery failure after connecting returns an error without replaying the
+request or trying another provider, because the upstream may already have accepted it. These failures cool the affected
+endpoint so a later request can recover. Upstream status responses stay on the selected proxy and
+do not trigger transport failover.
+
+An outbound proxy connection failure does not open the upstream provider's circuit, so the next
+request can try a healthy proxy for the same provider.
+
+Gateway response caches are bypassed when an assigned pool rotates across multiple endpoints;
+session affinity still allows the selected upstream's prompt cache to be reused.
+
+Each proxy endpoint has a `priority` from 0 to 65535; lower values are preferred for new sessions.
+Endpoints at the best available priority rotate evenly. Healthy existing session/job bindings are
+retained until they fail. Enable `include_direct` plus `direct_fallback_only` to place direct
+connections behind all proxies for fresh work. Without `direct_fallback_only`, direct connections
+participate at priority 0. The Desktop pool editor exposes both controls and endpoint priorities.
+
+```toml
+[egress.assignments]
+openai = "private"
+mistral = "private"
+
+[egress.pools.private]
+include_direct = false
+
+[[egress.pools.private.endpoints]]
+id = "proxy-a"
+url = "http://127.0.0.1:8080"
+enabled = true
+username_env = "RYU_PROXY_USER"
+password_env = "RYU_PROXY_PASSWORD"
+```
+
+Set both named environment variables on the Gateway process when the proxy needs Basic auth.
+Values are never placed in `gateway.toml` or a proxy URL; URLs containing credentials are
+rejected. `include_direct = true` adds a direct connection as an equal rotating member with
+environment proxy settings disabled. Assignments currently support OpenAI, Anthropic, OpenRouter,
+Cohere, Deepgram, AssemblyAI, ElevenLabs, Inworld, Modal, Replicate, Fal, GenAI, Cloudflare Workers AI, Bedrock, Vertex AI, and the direct
+OpenAI-compatible providers (Voyage, Jina, Mistral, NVIDIA, Together, Fireworks, Qwen). An unsupported
+provider assignment fails Gateway startup with a configuration error.
+
+The authenticated
+`GET /v1/config` response includes the `egress` section, and `PUT /v1/config` accepts a
+complete replacement `egress` object. Gateway validates the pool before saving it; a restart
+applies the new clients. Through `PUT /v1/config`, a credential variable name made of uppercase
+letters, digits, and underscores must start with `RYU_PROXY_`, on enabled and disabled endpoints
+alike, unless `gateway.toml` already uses that name. This keeps a configuration edit from
+sending other Gateway environment values to a proxy. Names written directly in `gateway.toml`
+are not held to this prefix. Desktop's **Gateway → Model routing** settings can create pools, add endpoints, and
+assign connected providers, then request a Gateway restart. Edit `gateway.toml` and restart
+Gateway if you manage configuration as files.
 
 ## Concurrency
 
@@ -78,15 +178,17 @@ Gateway restart.
 enabled = true
 local_max_in_flight = 4   # match the engine's --parallel slot count
 local_max_queued = 64     # max waiting before 503 engine_overloaded
+# local_max_pending_per_org = 20  # per-org in flight + queued; unset = in_flight + queued/4
 ```
 
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch. When `false`, all local requests pass through ungated |
 | `local_max_in_flight` | `4` | Max concurrent requests to the local provider. Set to your engine's `--parallel`. `0` = unlimited |
-| `local_max_queued` | `64` | Max requests queued before the gateway returns `503 engine_overloaded` |
+| `local_max_queued` | `64` | Max requests queued before the Gateway returns `503 engine_overloaded` |
+| `local_max_pending_per_org` | unset (`local_max_in_flight + local_max_queued / 4`) | Max requests one organization may have in flight plus queued. Beyond it, that organization gets `503 engine_overloaded` while others can still queue. `0` = no per-organization cap. Requests without an organization are not counted against it |
 
-Interactive requests are served ahead of background fan-out (delegate calls, thread workers, scheduler). The gate is in the Gateway because it governs a shared resource; Core cannot see other callers' in-flight requests. Streaming output guardrails keep the permit while the local generation is being buffered, then release it before any re-entrant LLM judge runs; deterministic output evaluators never bypass admission.
+Interactive requests are served ahead of background fan-out (delegate calls, thread workers, scheduler). When several organizations share one node, a freed slot goes to the waiting organization with the fewest requests in flight, so one organization's backlog cannot hold the engine. The gate is in the Gateway because it governs a shared resource; Core cannot see other callers' in-flight requests. Streaming output guardrails keep the permit while the local generation is being buffered, then release it before any re-entrant LLM judge runs; deterministic output evaluators never bypass admission.
 
 ## Exec budget
 
@@ -111,7 +213,7 @@ action = "notify"         # "notify" | "stop"
 
 ## Tools
 
-`[tools]` controls the unified search-based tool loop on the OpenAI-compat plane. The loop is
+`[tools]` controls the unified search-based tool loop on the OpenAI-compatible plane. The loop is
 injected only when a request opts in via `x-ryu-tools` / `x-ryu-tool-search`; plain chat streams
 are unaffected.
 
@@ -120,6 +222,7 @@ are unaffected.
 enabled = true
 max_rounds = 6
 describe_top_n = 5
+parallel_reads = 4
 ```
 
 | Field | Default | Meaning |
@@ -127,6 +230,7 @@ describe_top_n = 5
 | `enabled` | `true` | Master switch. Also overridable via `GATEWAY_TOOLS_ENABLED` |
 | `max_rounds` | `6` | Maximum tool-call rounds before returning the last turn |
 | `describe_top_n` | `5` | How many top search hits to describe per `tool_search` call |
+| `parallel_reads` | `4` | How many adjacent read-only tool calls of one model step run at once. `1` (or `0`) runs every call in order; values above `8` are treated as `8` |
 | `always_on` | `[]` | Tool definitions always injected for every tool-active request |
 
 ## Composio
@@ -151,6 +255,77 @@ actions = ["GMAIL_SEND_EMAIL", "GITHUB_CREATE_ISSUE"]
 |---|---|---|
 | `enabled` | `false` | Auto-enabled when `COMPOSIO_API_KEY` is set |
 | `api_key` | - | Gateway-only Composio API key; app satellites never receive this value |
-| `entity_id` | `"default"` | Per-user entity scoping connected accounts. The pipeline prefers `x-ryu-user-id` at runtime |
+| `entity_id` | `"default"` | Fallback Composio identity for a standalone Gateway without an authenticated organization |
 | `max_rounds` | `3` | Max agentic loop rounds |
-| `actions` | `[]` | Allowlist of Composio action names the gateway may execute |
+| `actions` | `[]` | Allowlist of Composio action names the Gateway may execute |
+
+On a shared managed Gateway, Composio uses an identity scoped to the organization
+authenticated by the Gateway credential. A trusted forwarded user is scoped within
+that organization; a managed tenant credential without a verified user uses the
+organization's default connection. A caller-supplied `x-ryu-user-id` alone cannot
+select a connection. Gateway also checks that an explicitly selected connected
+account belongs to the authenticated organization before using or disconnecting it.
+
+Connections made under an older unscoped Composio identity are not migrated
+automatically. Reconnect them from the owning organization after upgrading; managed
+Gateway calls reject those older connected-account IDs. A standalone Gateway without
+an organization keeps the configured `entity_id` behavior.
+
+## Named upstream accounts
+
+In **Gateway → AI providers → Provider keys (BYOK)**, each connected account has a name, an
+**Enabled** switch, and a priority from 0 to 65535. Lower numbers are tried first;
+new sessions rotate evenly among available accounts at the best priority. Save
+an account to apply its settings. Disabled accounts retain their credentials but
+are excluded from new inference and media submissions. Already accepted BFL, Fal, Replicate, and Runway jobs retain their
+original account for status and result retrieval.
+
+Healthy sessions keep their selected account even when another account has a
+better priority. A quota cooldown or disabling that account allows reselection.
+This preserves provider prompt caching within a running Gateway. Credential and policy
+edits apply live to locally managed Gateways. Unchanged provider connections retain
+their account affinity and cooldown state. A changed connection uses its new account
+configuration for new requests; requests already running keep their original connection.
+Gateway response caches are isolated by runtime generation and bypassed for rotating
+or restricted account configurations.
+
+Names and policies belong to a stable opaque credential identity, so reordering
+keys does not move them to another account. Replacing a credential creates a new
+identity. Keys remain hidden on readback. Older configurations without account
+policies default to enabled accounts at priority 0.
+
+The provider-key API accepts `account_action: "configure"`, `accountId`, and
+`accountPolicy: { name, enabled, priority }`. Names must contain 1 to 80 characters
+without control characters. Configuration requires `gateway.configure`; managed
+Ryu Cloud accounts remain read-only. Stale or removed account IDs are rejected.
+
+The editor shows these controls when the node reports account metadata. Older
+Gateway versions do not enforce account policies; downgrading can re-enable
+credentials that were disabled through these settings.
+
+### Live account policy API
+
+`PUT /v1/config` accepts `providerAccountPolicies`, keyed by provider ID and the
+opaque account IDs returned in `providers.accounts`. Submit the complete
+`name`, `enabled`, and `priority` record for each account you change. Other
+accounts are preserved. The Gateway validates all entries before persistence,
+applies them live, and returns `providerAccountsApplied: true`. Requests require
+Gateway administration authority and can update 1 to 128 accounts. Unknown or stale
+account IDs are rejected. Gateway config API writes are serialized; a persistence
+failure leaves live settings unchanged.
+
+Priority changes preserve healthy account bindings. Disabling an account
+excludes it from subsequent selection, so its next conversation turn can select
+another eligible account. Name changes do not affect selection. Already accepted
+media jobs retain their original account for retrieval.
+
+### First provider sign-in
+
+On first use, provider Login prepares Ryu's private Pi runtime when its OAuth
+SDK is missing. You do not need to start the agent first. Setup uses Bun and
+requires access to the package registry; a ready runtime is reused. Concurrent
+setup requests share one installer, and an incomplete installation is retried.
+The dialog displays **Preparing sign-in…** during this step and shows Core's
+explanation if setup fails. A JavaScript runtime must be available on the node.
+Credentials remain separate from the runtime installation and are saved only
+after provider authorization completes.

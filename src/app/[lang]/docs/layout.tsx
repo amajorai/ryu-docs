@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
+import { compactPageTreeForClient } from "@/lib/client-page-tree";
 import { isDocsLocale } from "@/lib/i18n";
 import { baseOptions } from "@/lib/layout.shared";
 import { source } from "@/lib/source";
@@ -19,7 +20,10 @@ export default async function Layout({
   }
 
   return (
-    <DocsLayoutClient tree={source.getPageTree(lang)} {...baseOptions(lang)}>
+    <DocsLayoutClient
+      tree={compactPageTreeForClient(source.getPageTree(lang))}
+      {...baseOptions(lang)}
+    >
       {children}
     </DocsLayoutClient>
   );

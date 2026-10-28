@@ -1,28 +1,30 @@
 ---
-title: "Trust model"
-description: "What Ryu trusts, what it does not, and where the real boundaries sit."
+title: "Trust Model"
+description: "Ryu's threat model: what it trusts, what it treats as untrusted (model output, subprocesses, the network), and where the security boundaries sit."
 ---
 
-Ryu's threat model starts from one assumption - the language model is untrusted. It can be steered by prompt injection, a poisoned tool result, or a malicious document it reads. Everything downstream of the model is built to contain that.
+Ryu's threat model treats the language model as untrusted. Prompt injection, a poisoned tool result, or a malicious document can steer it. The components downstream of the model are built to contain that.
 
 ## The boundary
 
 ```mermaid
 flowchart TD
   User[You] -->|loopback HTTP| Core[Core 127.0.0.1:7980]
-  Core -->|every model call| Gateway[Gateway 127.0.0.1:7981]
+  Core -->|Gateway-routed model requests| Gateway[Gateway]
   Gateway --> LLM[LLM provider - untrusted output]
-  Core -->|spawns, scrubbed env| Sub[Subprocesses: MCP / ACP / Deno PTC]
+  Core -->|spawns, scrubbed env| Sub[Subprocesses and sandboxed code: MCP / ACP / JS sandbox]
   Core -->|encrypted at rest| Disk[(~/.ryu SQLite)]
 ```
 
-- **Core and Gateway bind loopback only by default.** Nothing is reachable off-box until you set `RYU_TOKEN` and choose to expose it. See [Network binding and auth](/docs/security/network-binding-auth).
-- **The LLM never receives raw secrets.** Credentials live in [Passport](/docs/standalone/passport) and are consumed at the execution boundary, not placed in the prompt. See [Credential and environment scrubbing](/docs/security/credential-scrubbing).
-- **Subprocesses are the primary attack surface.** MCP servers, ACP agents, and the Deno programmatic-tool-calling sandbox run real code on your machine. They are spawned with a scrubbed environment and, for shell commands, gated by command approval. See [Sandboxing and isolation](/docs/security/sandboxing-isolation) and [Command approval](/docs/security/command-approval).
-- **Plugins are contained unevenly, on purpose.** A plugin's hook, adapter, and UI code runs in a real sandbox; a plugin's sidecar or MCP server runs with Ryu's own privileges. Which one you get depends on what the plugin contributes, so publisher trust is what governs the uncontained half. See [Plugin isolation](/docs/security/plugin-isolation).
+- **Core and Gateway bind loopback only by default.** No other machine can reach them until you change the bind address. Core requires a node credential even on loopback. See [Network binding and auth](/docs/security/network-binding-auth).
+- **The LLM never receives raw secrets.** Login state lives in [Passport](/docs/standalone/passport) and named secrets live in the [Secret Vault](/docs/security/secret-vault). Both are consumed at the execution boundary, not placed in the prompt. See [Credential and environment scrubbing](/docs/security/credential-scrubbing).
+- **Subprocesses are the primary attack surface.** MCP servers and ACP agents run real code on your machine, and model- or plugin-authored JavaScript runs in Core's JS sandbox. They are spawned with a scrubbed environment and, for shell commands, gated by command approval. See [Sandboxing and isolation](/docs/security/sandboxing-isolation) and [Command approval](/docs/security/command-approval).
+- **Plugin containment depends on what the plugin contributes.** A plugin's hook, adapter, and UI code runs in a sandbox. A plugin's sidecar or MCP server runs with Ryu's own privileges, so publisher trust is the only control on that part. See [Plugin isolation](/docs/security/plugin-isolation).
 - **Data at rest is encrypted.** State under `~/.ryu/` uses SQLite with field-level encryption for sensitive columns. See [Encryption at rest](/docs/core/encryption-at-rest).
+- **A handed-off working tree is untrusted content.** When a chat continues on another computer with its working tree, the destination treats the result like a fresh clone: the folder is not trusted automatically, files whose names look like secrets are left out unless you tick them in the review, and the remote URL from the other computer is shown to you and must be a credential-free HTTPS or SSH URL that does not resolve to a private or loopback address. Git runs without repository hooks, filters, external diff drivers, or textconv on both ends. See [RNP continuity](/docs/extend/integrate/rnp#bring-the-working-tree).
+- **Rendered content is untrusted.** Links, Markdown, catalog records, citations, and dashboard widget data from users, agents, or external services are treated as untrusted. Browser surfaces allow only safe web URL schemes at the rendering boundary, and chart identifiers and colors are normalized before they become CSS. A rejected value renders as plain text or is dropped; it never becomes executable markup.
 
-## What is NOT a boundary today
+## What is not a boundary
 
 <Callout type="warn">
 Ryu is single-tenant and local-first. It does not provide multi-tenant isolation, and there is no per-tab sandbox around Shadow or the desktop surfaces - everything in one install shares one trust domain. The controls here harden the boundary between you and the outside world (untrusted model output, subprocesses, the network), not between two users of the same install. Do not run an untrusted second party inside a single Ryu install and expect isolation.

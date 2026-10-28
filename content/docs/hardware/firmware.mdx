@@ -1,9 +1,9 @@
 ---
-title: "Firmware"
-description: "Building and flashing the ESP32-S3 firmware: the shared components, the per-device apps, the ESP-IDF build and flash commands, and board configuration notes."
+title: "Hardware Firmware"
+description: "How to build and flash the ESP32-S3 firmware with ESP-IDF, plus the shared components, per-device apps, buttons, host tests, and board configuration."
 ---
 
-The firmware is one ESP-IDF codebase shared across all three devices. A set of reusable components in `apps/hardware/firmware/shared/` does the heavy lifting, and each device app (`watch/`, `necklace/`, `desk/`) supplies a `main.c`, a board config, and a display implementation, then calls `rhp_app_run()` with its capability profile.
+The firmware is one ESP-IDF codebase shared across all three devices. Reusable components live in `apps/hardware/firmware/shared/`. Each device app (`watch/`, `necklace/`, `desk/`) supplies a `main.c`, a board config, and a display implementation, then calls `rhp_app_run()` with its capability profile.
 
 ## Toolchain
 
@@ -11,31 +11,42 @@ The firmware is one ESP-IDF codebase shared across all three devices. A set of r
 - The first build auto-pulls managed components: `chmorgan/esp-libopus`, `espressif/esp_websocket_client`, `lvgl/lvgl ^9.2`, `espressif/esp_lcd_gc9a01`, `espressif/esp_lvgl_port`, `espressif/qrcode`, and (necklace only, when `CONFIG_RYU_NECKLACE_CAMERA` is set) `espressif/esp32-camera`.
 
 <Callout type="info">
-  CMake is also needed on the **node** side, not just for firmware. Core's `opus` crate vendors and builds libopus through CMake, and the repo's `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` so a too-new CMake 4.x still builds the old vendored libopus. Keep that file. See [Deployment](/docs/hardware/deployment).
+  The node also needs CMake. See the node prerequisites in [Hardware Deployment](/docs/hardware/deployment#prerequisites).
 </Callout>
 
 ## Shared components
 
-Each is an ESP-IDF component with a clean header so the three device apps reuse it.
+Each is an ESP-IDF component that the three device apps reuse.
 
 | Component | Responsibility |
 |---|---|
 | `protocol` | RHP JSON encode and decode (cJSON) plus binary framing. Mirrors the [protocol spec](/docs/hardware/protocol). |
-| `ws_client` | WebSocket connect, Bearer auth, send and receive text and binary, auto-reconnect with backoff. |
+| `rhp_crypto` | The small crypto interface the protocol code uses (X25519, AES-GCM, SHA-256, random), backed by the ESP-IDF mbedTLS library with the chip's hardware AES and SHA acceleration. |
+| `noise` | The end-to-end encrypted session: the Noise XX handshake, encrypted record framing, key rotation, and the packet splitting used over the BLE relay. |
+| `rhp_pair` | Press-to-confirm pairing: the code computation, the pairing state machine, and the necklace's code beeps. |
+| `capability` | Device tools: the tool table the device advertises and the checks on every call. |
+| `ws_client` | WebSocket connect, Bearer auth, send and receive text and binary, reconnect with backoff. |
 | `audio_io` | I2S mic capture and speaker playback, with a codec abstraction (ES8311, or INMP441 + MAX98357A). |
 | `opus_codec` | Opus encode at 16 kHz and decode at 24 kHz, fixed-point, low complexity. |
 | `vad` | Voice-activity gate plus the pre-roll ring buffer (WebRTC-style). |
-| `ble_prov` | The provisioning and relay GATT services (see [Pairing](/docs/hardware/pairing)). |
+| `ble_prov` | The provisioning and relay GATT services, the pairing steps, and encrypted relay packets (see [Pairing](/docs/hardware/pairing)). |
 | `wifi_mgr` | NVS creds, connect, reachability probe, and the Mode B versus Mode A selection signal. |
-| `pairing` | device_id and nonce generation, the QR payload, and NVS storage of the token and URL. |
-| `display` | Display abstraction: `none` (necklace), `lcd_round` (watch), `eink+lcd` (desk). |
+| `pairing` | device_id, key, and nonce generation, the QR payload, and NVS storage of the token, URL, and pinned node key. |
+| `display` | Minimal shared panel drivers and display factories. The watch and desk apps ship their own display backends in `main/`; the necklace passes `RHP_DISPLAY_NULL`. |
 | `face` | The island-eyes emotion renderer for LVGL displays, mapping state to animation. |
-| `app_core` | The device state machine (idle, chat, ambient) that wires every component together, exposing `rhp_app_run()`. |
-| `dash_client` | The TRMNL poll-bitmap client: HTTP poll, image fetch, and blit. Added for the [dashboard](/docs/hardware/dashboard). |
+| `app_core` | The device state machine (idle, chat, ambient) that wires every component together, runs the encrypted link and the pairing screens, and exposes `rhp_app_run()`. |
+| `dash_client` | The TRMNL poll-bitmap client for the [dashboard](/docs/hardware/dashboard): HTTP poll, image fetch, and blit. |
+
+The playback task drains bounded PCM chunks and keeps each item until the I2S driver
+acknowledges all bytes. A transient timeout retries the unwritten tail instead of
+silently dropping it. A persistent peripheral error applies back-pressure, and the
+item is released when the device shuts down.
+
+The `rhp_crypto`, `noise`, `rhp_pair`, and `capability` components, together with `protocol`, are plain C with no ESP-IDF dependencies beyond logging and randomness. That is what lets them be tested on an ordinary computer (see [Host tests](#host-tests)).
 
 ## Per-device apps
 
-Each device directory holds a `main.c`, a board config (SPI and I2S pins, codec selection), an `sdkconfig.defaults` (octal PSRAM, LVGL, and similar), and a display implementation. `EXTRA_COMPONENT_DIRS` already points at `../shared`, and the CMake `REQUIRES` are wired, so the per-device app is thin.
+Each device directory holds a `main.c`, a board config (SPI and I2S pins, codec selection), an `sdkconfig.defaults` (octal PSRAM, LVGL, and similar), and a display implementation. Each app's top-level `CMakeLists.txt` sets `EXTRA_COMPONENT_DIRS` to `../shared`, and `main/CMakeLists.txt` requires `app_core`.
 
 The reference panels assumed where unspecified are GC9A01 for the watch, Waveshare UC8179 7.5-inch e-ink plus optional ST7789 for the desk, and OV2640 for the necklace camera.
 
@@ -67,6 +78,22 @@ Run these per device, with `watch`, `necklace`, or `desk` as the target director
   </Step>
 </Steps>
 
+## Buttons while pairing and resetting
+
+- During pairing, a **short press** confirms the code shown on screen or beeped by the necklace. See [Pairing](/docs/hardware/pairing).
+- **Holding the button for 10 seconds** factory-resets the device: it forgets its node, credentials, and key, makes a new key, and returns to pairing. Use it to re-pair a legacy device or after your node's key changes.
+- The desk uses its BOOT button for these actions. The necklace keeps its long press for the camera.
+
+## Host tests
+
+The protocol, encryption, pairing, and device-tool code is tested on a regular Linux machine, without ESP-IDF or a board. The tests:
+
+- check the code against published Noise test vectors and the same shared Ryu test vectors the node and the mobile app use;
+- rerun the crypto tests against mbedTLS 3.6, the release line that recent ESP-IDF v5 versions bundle;
+- run a simulated device through a full encrypted session against the real node code.
+
+Host tests do not prove that the firmware builds for, or runs on, a device. The board-specific parts (BLE, flash storage, buttons, audio, and display) are not covered, and building the device apps needs ESP-IDF.
+
 ## Board configuration
 
 Adjust the board config to your actual hardware before flashing:
@@ -74,9 +101,11 @@ Adjust the board config to your actual hardware before flashing:
 - **Pins and codec** - each device's `main/` carries the SPI and I2S pin map and the codec choice. The reference values assume the reference panels; change them to match your board.
 - **PSRAM and LVGL** - `sdkconfig.defaults` enables octal PSRAM and LVGL. Keep these for displays and the camera path.
 - **Necklace camera** - the OV2640 path is gated behind `CONFIG_RYU_NECKLACE_CAMERA`. Enable it through `idf.py menuconfig` for a camera build, or leave it off for an audio-only necklace.
+- **Encryption and BLE security** - the default configuration enables the mbedTLS X25519, AES-GCM, and hardware AES and SHA options, plus BLE Secure Connections. Keep them; the encrypted session and pairing depend on them.
+- **Flash encryption** - for devices that leave your desk, enable ESP32-S3 flash encryption and NVS encryption so the device's key and tokens cannot be read out of a stolen device. See [Hardware Security](/docs/hardware/security#protect-the-devices-storage).
 
 <Callout type="warn">
-  The firmware is flash-ready but not yet hardware-tested. Treat these steps as first bring-up, not a proven appliance image. Verify pins against your board, and bring up [Mode B first](/docs/hardware/deployment) to isolate the core path before testing the BLE relay.
+  The shared components pass the host tests, but building the device apps for the ESP32-S3 is not part of the automatic checks, and the boards are not yet hardware-tested. Treat these steps as first bring-up, not a proven appliance image. Verify pins against your board, and bring up [Mode B first](/docs/hardware/deployment#first-end-to-end-smoke-test-do-mode-b-first) to isolate the core path before testing the BLE relay.
 </Callout>
 
 ## Related
@@ -86,4 +115,3 @@ Adjust the board config to your actual hardware before flashing:
   <DocCard href="/docs/hardware/pairing" />
   <DocCard href="/docs/hardware/dashboard" />
 </Cards>
-

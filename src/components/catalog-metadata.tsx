@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { CatalogAttributes } from "@/lib/catalog";
+import styles from "./catalog-metadata.module.css";
 
 type CatalogMetadataProps = {
   attributes?: CatalogAttributes;
@@ -18,12 +19,12 @@ function displaySurface(surface: string): string {
 function supportDotClass(support: string): string {
   const normalized = support.toLowerCase();
   if (normalized === "full") {
-    return "bg-emerald-500";
+    return "bg-catalog-supported";
   }
   if (normalized === "none") {
-    return "bg-rose-500";
+    return "bg-catalog-unsupported";
   }
-  return "bg-yellow-400";
+  return "bg-catalog-limited";
 }
 
 type CatalogField = {
@@ -67,21 +68,21 @@ function surfaceValue(surfaces: CatalogAttributes["surfaces"]): ReactNode {
         <span className="inline-flex items-center gap-1">
           <span
             aria-hidden="true"
-            className="size-1.5 rounded-full bg-emerald-500"
+            className="size-1.5 rounded-full bg-catalog-supported"
           />
           Full
         </span>
         <span className="inline-flex items-center gap-1">
           <span
             aria-hidden="true"
-            className="size-1.5 rounded-full bg-yellow-400"
+            className="size-1.5 rounded-full bg-catalog-limited"
           />
           Limited/list
         </span>
         <span className="inline-flex items-center gap-1">
           <span
             aria-hidden="true"
-            className="size-1.5 rounded-full bg-rose-500"
+            className="size-1.5 rounded-full bg-catalog-unsupported"
           />
           None
         </span>
@@ -121,7 +122,7 @@ export function CatalogMetadata({ attributes }: CatalogMetadataProps) {
   return (
     <section
       aria-labelledby="catalog-metadata-title"
-      className="not-prose mb-8 rounded-xl bg-fd-muted/40 p-4"
+      className={`mb-8 rounded-xl bg-fd-muted/40 p-4 ${styles.root}`}
       data-catalog-metadata
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">

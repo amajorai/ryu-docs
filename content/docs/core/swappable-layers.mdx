@@ -1,6 +1,6 @@
 ---
 title: Swappable Layers
-description: How Ryu swaps the provider behind web search, browsing, device control and memory without changing the tools an agent calls
+description: How Core swaps the provider behind web search, browsing, device control, memory, and verification without changing the tools an agent calls
 ---
 
 A **layer** is a capability with more than one provider you can pick between: web search, page
@@ -8,11 +8,15 @@ extraction, crawling, browser control, device control, memory. Selecting a diffe
 re-points a stable set of tools at it. The agent keeps calling `web.search`; only who answers
 changes.
 
-The desktop calls these **Toolkits** (the node dropdown's Toolkits block); "layer" and
-"capability" are the internal vocabulary in Core and in manifests. This page explains the
-mechanism. To change a provider, use that block or `PUT /api/capabilities/bindings`.
+Desktop calls these **Toolkits** (the **Toolkits** page of the expanded node selector); "layer" and
+"capability" are the names Core and manifests use. To change a provider, use that page or
+`PUT /api/capabilities/bindings`.
 
-## The facade is the whole idea
+Typed classification and choice models use the same provider-binding contract, but appear in the
+separate **Decision Models** layer. Their manifest `layerKind` keeps them out of Toolkits, and the
+stable `decision.predict` tool follows the selected provider. See [Decision Models](/docs/core/decision-models).
+
+## How the facade works
 
 Core registers a fixed table of **canonical verbs** (`apps/core/src/sidecar/mcp/capability_tools.rs`).
 `web.search`, `browser.snapshot`, `computer.click` and `memory.store` are Core's own tool ids
@@ -32,25 +36,25 @@ flowchart LR
   E -.-> F
 ```
 
-Because the verb id and its schema never move, a swap changes no prompt, no allowlist and no
-agent definition.
+The verb id and schema never move, so a swap changes no prompt, allowlist, or agent definition.
 
-## What ships today
+## Available capability providers
 
 | Capability | Providers | Notes |
 |---|---|---|
-| `web.search` | exa (default, **on by default**), tavily, brave, firecrawl, serper | exa needs no API key, see below |
-| `web.extract` | spider (default), tavily, firecrawl, serper | |
+| `web.search` | exa (default, **on by default**), Ryu Cloud Search (**on by default**), parallel, tavily, brave, firecrawl, serper, [DeepSeek](/docs/plugins/deepseek) | exa and Parallel support anonymous search; Exa is seeded as the default. Ryu Cloud Search is also seeded but stays unselected until you pick it, and agents cannot call it directly before then; it needs no key and bills your Ryu Cloud credits ([details](/docs/gateway/web-services#hosted-web-search)) |
+| `web.extract` | spider (default), tavily, firecrawl, serper, [DeepSeek](/docs/plugins/deepseek), [Jina Reader](/docs/plugins/jina-reader) | Jina Reader can read pages anonymously; an optional key raises its upstream limit |
 | `web.crawl` | spider (default), spidercloud, firecrawl | |
 | `memory` | @ryu/memory (default), mem0, honcho | |
-| `browser.control` | @ryu/browser (default), agentbrowser, Cloudflare Browser Run | Cloudflare is hosted; its canonical adapters are URL-scoped snapshot, navigate and screenshot operations |
-| `computer.control` | ghost (default), bytebot | The two drive **different machines**, see below |
+| `browser.control` | @ryu/browser (default), agentbrowser, Cloudflare Browser Run, [Kernel](/docs/plugins/kernel) | Cloudflare is hosted with URL-scoped snapshot, navigate and screenshot adapters; Kernel is hosted and session-scoped, see below. [Browser Use](/docs/plugins/browser-use) and [Steel](/docs/plugins/steel) are hidden previews that do not work as this layer yet |
+| `computer.control` | ghost (default), bytebot, [Codex Computer Use](/docs/plugins/codex-computer-use) | bytebot drives a **different machine**, see below; the other two drive this device |
+| `verify.claim` | [Automated Reasoning](/docs/apps/reasoning) (default) | Checks a claim against a source of truth; see [Verification layer](#verification-layer) |
 
 <Callout type="warn">
 Outside the Chromium browser sidecar, none of this has been driven against a live Core yet. The
 bindings are contract-tested and every field was checked against published vendor docs, but no
-provider swap has been performed in a running app. Cloudflare Browser Run is external and opt-in;
-it does not silently replace the local browser.
+provider swap has been performed in a running app. Cloudflare Browser Run and Kernel are external and
+opt-in; they do not silently replace the local browser.
 </Callout>
 
 ## A hosted browser provider
@@ -68,9 +72,37 @@ URL to Cloudflare's Browser Run MCP server:
 
 The provider also exposes Cloudflare's native HTML, Markdown, PDF, JSON, links, crawl, and browser
 session tools under the `cloudflare.*` namespace. Click/type/scroll and tab persistence remain
-native session operations until a session-backed adapter is selected, so the layer card describes
-exactly what is swappable rather than promising local-Chromium parity. The remote server uses OAuth
-and the external badge in the Store makes that boundary visible.
+native session operations until a session-backed adapter is selected; the layer card lists only
+the swappable verbs. The remote server uses OAuth, and the Store shows it with an external badge.
+
+## Local computer-use engine
+
+An opt-in `computer.control` provider brings OpenAI's Codex computer-use engine to this device. It
+is an explicit install and does not replace Ghost unless you select it:
+
+| Provider | Engine | How it acts | Verbs it serves |
+|---|---|---|---|
+| [Codex Computer Use](/docs/plugins/codex-computer-use) | OpenAI's signed Codex Computer Use engine from the ChatGPT macOS app, through the unofficial `codex-computer-use-mcp` bridge | In the background on one **target app** that you set in its settings, through the accessibility tree; your cursor is not moved | capture, click, type, key |
+
+A verb the provider does not serve, such as scroll, stays unavailable while it is selected; nothing
+falls back to another provider. The Codex bridge is unofficial and can break with a ChatGPT update.
+
+## Session-backed cloud browsers
+
+[Kernel](/docs/plugins/kernel) is a remote `browser.control` provider in which each cloud browser
+session is one Ryu tab: every `browser.navigate` creates a new Kernel browser on the URL and returns
+its session id, and the other verbs act on that session. Each new session starts without the
+cookies or sign-in state of earlier ones, and Kernel bills it until it is deleted or times out.
+Kernel drives its browsers by viewport coordinates, so it binds tabs, screenshot, `click_at`, key,
+scroll, and drag rather than the element-reference verbs. Where a provider cannot honour a canonical
+behavior, such as appending text or scrolling sideways, its adapter returns an error instead of
+doing something different; each plugin page lists those limits.
+
+[Steel](/docs/plugins/steel) (cloud) and [Browser Use](/docs/plugins/browser-use) (local) declare
+`browser.control` bindings too, but they are not usable as the Browser layer yet. Each tool call
+starts a fresh Steel or browser-use process, so the browser session that `browser.navigate` opens
+is gone before the next verb runs. Both are hidden from the Store while that is the case; do not
+select them in the Browser provider picker.
 
 ## Which provider gets picked
 
@@ -100,127 +132,79 @@ Providers of a machine-controlling capability therefore declare a `target` in th
 | `local-machine` | Acts on the machine Ryu is running on |
 | `remote-desktop` | Acts on a separate machine or virtual desktop |
 
-Absent means not applicable, which is the honest reading for `web.search` and `memory`. The picker
+Absent means not applicable, as for `web.search` and `memory`. The picker
 shows the label only when a capability's providers actually disagree, so `browser.control` (both
 local) stays quiet and `computer.control` reads "this device" against "remote desktop".
 
 On a node that runs the [Virtual Desktop](/docs/surfaces/desktop/user-guide/virtual-desktop), Ghost's
-`computer.control` tools drive the same headless X display the desktop panel streams — so an agent
-opening a browser or typing a command is something you can watch live and take over with your own
-mouse and keyboard.
+`computer.control` tools drive the same headless X display that the Virtual Desktop panel streams.
+You can watch the agent work live and take over with your own mouse and keyboard.
 
-## Binding a provider: declarative first
+## Verification layer
 
-Most providers are a rename plus a field map, and that is expressed as JSON in the provider's own
-`manifest.json` with no code:
+The verification layer gives agents one stable way to ask "is this claim backed?" whichever checker
+answers. It has two verbs:
 
-```json
-"provides": [
-  {
-    "capability": "web.search",
-    "version": "1.0.0",
-    "selectable": true,
-    "tools": {
-      "web.search": {
-        "tool": "firecrawl.search",
-        "args": { "limit": "limit" },
-        "response": {
-          "results": "data.web",
-          "fields": { "title": "title", "url": "url", "snippet": "description" }
-        }
-      }
-    }
-  }
-]
-```
+| Verb | Input | Result |
+|---|---|---|
+| `verify.claim` | `claim`, plus an optional `question` and `scope` | An overall `verdict`, a per-claim breakdown with the evidence that decided it, and any counterexample |
+| `verify.scopes` | none | The sources of truth `verify.claim` can check against, with their ids |
 
-| Field | Purpose |
+Every provider maps its own outcome onto the same five verdicts:
+
+| Verdict | Meaning |
 |---|---|
-| `tool` | The provider's own tool id this verb forwards to |
-| `args` | Canonical argument name to the provider's name. Map to `""` to drop it |
-| `arg_defaults` | Constant arguments merged into every call. A `pref:` value is read per install |
-| `arg_template` | A request body template for providers needing a nested shape |
-| `arg_clamp` | Per-argument numeric limits the provider can actually honour |
-| `response` | Where the result array lives and how to rename each item's fields |
+| `proved` | The source of truth entails every part of the claim |
+| `refuted` | The source contradicts the claim; a counterexample is included when the provider has one |
+| `undecided` | The claim is consistent with the source but not implied by it |
+| `inconsistent` | The source of truth contradicts itself, so nothing follows from it |
+| `unverifiable` | No verdict covers the whole claim: nothing or only part of it could be formalized, readings disagreed, a budget ran out, or no scope matched |
 
-## Adapters: when no JSON can express the shape
+Only `proved` means the claim is backed. Treat every other verdict, `unverifiable` especially, as
+unverified rather than as a pass. The overall verdict is folded from the per-claim breakdown: one
+refuted part refutes the claim, and a claim whose parts were proved but where something was left
+out of the check is `unverifiable`, with a `reason`, rather than `proved`.
 
-Some provider shapes are beyond any declarative field. An async job API starts work at one endpoint
-and reads results from another. A token vocabulary needs normalizing. A request body needs a value
-that only exists per install.
+[Automated Reasoning](/docs/apps/reasoning) is the first provider. A scope is one of its saved
+policies; when `scope` is omitted and exactly one policy exists, that policy is used, and with
+several the call returns `unverifiable` along with the policy ids to choose from. Translating the
+claim into logic uses the model set as the app's **Extraction model**, so the verdict is only as
+faithful as that translation; the solver step after it is deterministic. See
+[how its verdicts map](/docs/apps/reasoning#verification-verdicts).
 
-For those, a provider ships an **adapter**: JavaScript that receives the canonical arguments and
-returns the canonical result, running in the same Deno sandbox as an `inline_deno` plugin tool.
+## Binding a provider
 
-```json
-"web.crawl": {
-  "tool": "firecrawl.crawl_start",
-  "adapter": {
-    "tools": ["firecrawl.crawl_status"],
-    "code": "// starts the job, polls, returns pages"
-  }
-}
-```
-
-The adapter is handed three things:
-
-- `input` - the canonical arguments, layer defaults already applied
-- `defaults` - the provider's `arg_defaults` with `pref:` tokens **already resolved**. This is the
-  one thing `arg_template` cannot do, since a template expands from the caller's arguments and so
-  never sees a resolved preference
-- `callTool(args)` and `callNamed(id, args)` - the provider's own tools
-
-An adapter **replaces** the declarative mapping for its verb. Declaring both describes the same
-transformation twice and only one runs.
-
-### Why an adapter is not an escape hatch
-
-Its authority is a strict subset of the declarative path it replaces:
-
-- `callTool(args)` takes **no tool id**. The target is fixed from the manifest before the sandbox
-  starts, so sandboxed code cannot redirect the call.
-- `callNamed(id, args)` reaches only ids the manifest listed in `adapter.tools`, checked host-side
-  in `CapabilityAdapterBridge::resolve_target`. The facade itself is never re-enterable.
-- No `host.*` surface: no side model, no `runAgent`, no storage.
-- Deny-all sandbox with no network of its own. The provider's HTTP egress still happens inside the
-  bound tool, where the Gateway grant governs it.
-- Gated on the `tool:execute` grant, read from the Gateway-approved set for a Community-tier
-  plugin, so a third party cannot self-authorize shipping code.
-
-<Callout type="warn">
-The sandbox bounds **active compute** (`DEFAULT_DEADLINE_SECS`, 30s) and awaiting a tool call
-spends that budget. An adapter polling an async job cannot wait out a job larger than the budget:
-Firecrawl's crawl adapter returns the pages that completed, flagged `complete: false`, rather than
-being killed at the wall clock with nothing.
-</Callout>
+A provider maps each canonical verb onto its own tool in its `manifest.json` `provides` entry,
+with a declarative field map or, when JSON cannot express the shape, a sandboxed JavaScript
+adapter. See [Provider Bindings and Adapters](/docs/core/swappable-layers-adapters).
 
 ## Layer defaults
 
 Per-capability argument defaults ("web search returns 25 results", "crawl at most 50 pages") are
 merged **under** the caller's own arguments, so an explicit argument always wins. They are read
-per call rather than cached with the verb resolution, because preferences change through the
-generic preferences API which knows nothing about layers.
+per call, because preferences can change at any time through the generic preferences API.
 
 ## Reading the current state
 
 `GET /api/capabilities` returns every capability, its candidate providers, which one is bound and
-whether that came from an override, plus the verb ids the facade currently serves.
+whether that came from an override, plus the verb ids the facade currently serves. The computed
+`toolkit` and `decisionModel` flags keep the Toolkits and Decision Models pickers separate.
 
 ```bash
-curl http://localhost:7980/api/capabilities
+curl http://localhost:7980/api/capabilities \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN"
 ```
 
 A provider that serves **nothing** still joins resolution and can win the pick, which would make
 that layer disappear with no error. The read model reports two flags so a picker can show such a
-provider as unselectable instead — and it must read **both**:
+provider as unselectable instead. A picker must read **both**:
 
-- `serves_verbs` — the provider binds capability verbs (`web.search` and friends).
-- `serves_route` — the provider is served by Core calling its sidecar route directly, with no verbs
-involved. `document.parse` works entirely this way: all five parsers declare an empty `tools` map
-  and every one of them functions.
+- `serves_verbs` - the provider binds capability verbs such as `web.search`.
+- `serves_route` - Core serves the provider by calling its sidecar route directly, with no verbs.
+  `document.parse` works entirely this way: all five parsers declare an empty `tools` map.
 
-The question a picker asks is `serves_verbs || serves_route`. Gating on `serves_verbs` alone marks
-every route-backed provider dead, which is exactly what happened to the document parsers.
+A provider is selectable when `serves_verbs || serves_route`. Gating on `serves_verbs` alone marks
+every route-backed provider, such as the document parsers, as unselectable.
 
 ### Capabilities with no enabled provider still appear
 
@@ -228,30 +212,56 @@ every route-backed provider dead, which is exactly what happened to the document
 providers that serve the capability but are switched off. A capability whose providers are all
 disabled is still reported, with an empty `providers` and a populated `available`.
 
-That distinction is load-bearing. Most providers ship opt-in, so deriving the response from the
-enabled set alone made a whole toolkit vanish: `web.search` had five providers and none enabled by
-default, so on a fresh install there was no `web.search` tool, no row in the picker, and nothing
-telling you the Store had candidates. `web.extract` and `web.crawl` only escaped it because
-`spider` happens to ship on.
+Most providers ship opt-in. Because disabled candidates are still listed, a capability with no
+enabled provider keeps its row in the picker and shows which Store providers can serve it.
+
+## Web search access modes
+
+The Web search row under **Toolkits** → **Search** in the expanded node selector controls which web tools agents can discover and
+execute. Core enforces the selected mode during dispatch as well as tool listing.
+
+| Mode | Access |
+|---|---|
+| **Disabled** | Blocks web search, extraction, crawling, page fetch, and browser tools. |
+| **Cached** | Allows `web.search` through the selected provider's maintained search index. |
+| **Indexed** | Allows `web.search`, `web.extract`, and `web.crawl` through their selected providers. |
+| **Live** | Allows all web and browser tools, including direct page fetch and browser control. |
+
+Cached means the provider answers from its own maintained index. It is not a local result cache. The
+provider's search endpoint still receives the query. Indexed adds provider-backed extraction and
+crawling. Live also enables direct page access through `web_fetch.get` and the browser layer.
+
+The default is Live to preserve existing access on nodes without a saved mode. A malformed or
+unreadable saved preference fails closed and blocks web tools. Provider tools are called through
+their canonical `web.*` or `browser.*` facade, so a mode cannot be bypassed by calling a provider's
+raw tool id. This also covers installed providers that are not selected for a layer: while a mode
+blocks a verb, every enabled provider's tool bound to that verb is hidden and refused. Other tools
+those plugins expose stay available.
 
 ## Web search works with no API key
 
-`exa` is the only search provider seeded **enabled** on a fresh install, and it is the only one
-that needs no credential. Its `web.search` binding is an adapter that calls Exa's keyed REST API
-first and falls back to Exa's public MCP endpoint (`mcp.exa.ai`, free and rate-limited) when
-`RYU_EXA_API_KEY` is unset.
+`exa` is the default search provider on a fresh install. Ryu Cloud Search is seeded too (see the
+provider table above) but is never picked automatically, because each search bills your Ryu Cloud
+credits. Exa's `web.search` binding
+is an adapter that calls Exa's keyed REST API first and falls back to Exa's public MCP endpoint
+(`mcp.exa.ai`, free and rate-limited) when `RYU_EXA_API_KEY` is unset.
 
 The fallback fires **only** on the no-key signal: `fail_open` turns a 401/403 into
-`{available:false, …}`, and any other failure is passed through untouched, so a broken key or an
+`{available: false, ...}`, and any other failure is passed through untouched, so a broken key or an
 outage costs one request rather than two. Add a key in the Exa settings tab and every search uses
 the keyed path automatically, with higher limits and richer fields.
 
-The other four search providers are BYOK-only and stay opt-in, because enabling them unkeyed would
-ship a tool that can do nothing until you paste a key.
+`parallel` is another anonymous-search option. Install it and its `web.search` adapter tries the
+keyed REST API first, then calls Parallel's public Search MCP endpoint when no key is configured.
+Its `web.extract` provider still requires a key, so Parallel remains an opt-in swap rather than a
+second seeded default. The remaining search providers (tavily, brave, firecrawl, serper, and
+DeepSeek) need your own API key and stay opt-in, because enabling them without a key would ship a
+tool that can do nothing until you add one.
 
 ## Related
 
 <Cards>
+  <DocCard href="/docs/core/swappable-layers-adapters" />
   <DocCard href="/docs/extend/develop/extensions/capability-broker" />
   <DocCard href="/docs/core/unified-tool-catalog" />
   <DocCard href="/docs/core/memory" />

@@ -11,6 +11,11 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ["/api/"],
       },
       {
+        userAgent: "OAI-SearchBot",
+        allow: "/",
+        disallow: ["/api/"],
+      },
+      {
         userAgent: "GPTBot",
         allow: "/",
         disallow: ["/api/"],

@@ -4,6 +4,7 @@ import { buttonVariants } from "fumadocs-ui/components/ui/button";
 import { MessageSquare, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import { usePathname } from "next/navigation";
 import {
+  type CSSProperties,
   type FormEvent,
   type ReactNode,
   useEffect,
@@ -13,6 +14,7 @@ import {
 } from "react";
 
 import { cn } from "@/lib/cn";
+import styles from "./feedback.module.css";
 
 import {
   type ActionResponse,
@@ -31,6 +33,11 @@ const POPOVER_HEIGHT = 260;
 type FeedbackTextProps = {
   children: ReactNode;
   onSendAction: (feedback: BlockFeedback) => Promise<ActionResponse>;
+};
+
+type FeedbackPosition = CSSProperties & {
+  "--feedback-left": string;
+  "--feedback-top": string;
 };
 
 type SelectionTarget = {
@@ -128,7 +135,7 @@ function saveStoredSubmission(
 }
 
 function isDomNode(value: EventTarget | null): value is Node {
-  return typeof Node !== "undefined" && value instanceof Node;
+  return value instanceof Node;
 }
 
 function isExternalUrl(url: string): boolean {
@@ -247,6 +254,13 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
     setError(null);
   }
 
+  const popoverStyle: FeedbackPosition | undefined = target
+    ? {
+        "--feedback-left": `${target.left}px`,
+        "--feedback-top": `${target.top}px`,
+      }
+    : undefined;
+
   return (
     <>
       {children}
@@ -254,14 +268,13 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
         <div
           ref={popoverRef}
           aria-label="Feedback on selected documentation"
-          className="not-prose fixed z-50 w-full max-w-sm rounded-2xl bg-fd-popover p-4 text-fd-popover-foreground shadow-xl"
+          className={cn(
+            styles.popover,
+            "fixed z-50 w-full max-w-sm rounded-2xl bg-fd-popover p-4 text-fd-popover-foreground shadow-xl",
+          )}
           data-feedback-popover="true"
           role="dialog"
-          style={{
-            left: target.left,
-            top: target.top,
-            width: "min(22rem, calc(100vw - 1.5rem))",
-          }}
+          style={popoverStyle}
         >
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
@@ -344,7 +357,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                 <p
                   role="alert"
                   aria-live="polite"
-                  className="text-sm text-red-600 dark:text-red-300"
+                  className="text-sm text-feedback-error"
                 >
                   {error}
                 </p>

@@ -1,16 +1,16 @@
 ---
-title: "Client SDK (@ryuhq/core-client)"
-description: "The shared Core HTTP client that the desktop app, the CLI/TUI, and the mobile app run on - and why the browser extension talks to Core directly instead"
+title: "Core Client (@ryuhq/core-client)"
+description: "Reference for the shared typed HTTP client that Desktop, ryu-cli, mobile, web, and the browser extension use to operate a Core node."
 ---
 
-`@ryuhq/core-client` (`packages/core-client/`) is the **shared client every first-party Ryu surface
-ships on**. It is the programmatic way to talk to a running **Core** node: list and install plugins,
-manage agents, models, skills, MCP (Model Context Protocol) servers, Spaces, and workflows, read
-Gateway status, and more.
+`@ryuhq/core-client` (`packages/core-client/`) is the typed HTTP client that every first-party Ryu
+surface uses to talk to a running Core node. It lists and installs plugins, manages agents,
+models, skills, MCP (Model Context Protocol) servers, Spaces, and workflows, and reads Gateway
+status.
 
-Where [`@ryuhq/sdk`](/docs/extend/develop/sdk) is for **authoring** Runnables and packing them into a
-plugin, `@ryuhq/core-client` is for **operating** a Core node — the exact endpoints the desktop
-Store and Settings panels call, exposed as typed functions.
+[`@ryuhq/sdk`](/docs/extend/develop/sdk) authors Runnables and packs them into a plugin.
+`@ryuhq/core-client` operates a Core node. Its functions call the same endpoints as the Desktop
+Store and Settings panels.
 
 ## Which client does each surface use?
 
@@ -19,16 +19,15 @@ package carries that traffic:
 
 | Surface | Core HTTP layer | Why |
 |---|---|---|
-| **Desktop app** | `@ryuhq/core-client` (+ a thin app-local HTTP helper for identity/session headers) | Runs on or beside a local node whose token is readable from disk; shares one typed client keyed to `{ url, token }` |
-| **CLI / TUI** | `@ryuhq/core-client` | `ryu list / add / enable / disable / chat ...` are thin wrappers over `@ryuhq/core-client` domain modules |
-| **Mobile app** | `@ryuhq/core-client` | React Native has real `fetch`/`WebSocket` and no browser CORS, so it uses the shared client directly against the selected node (LAN IP or cloud URL) |
+| **Desktop** | `@ryuhq/core-client` (plus an app-local HTTP helper for identity and session headers) | Runs on or beside a local node whose token is readable from disk. Shares one typed client keyed to `{ url, token }` |
+| **`ryu-cli`** | `@ryuhq/core-client` | Commands such as `list`, `add`, `enable`, and `disable` wrap `@ryuhq/core-client` domain modules |
+| **Mobile app** | `@ryuhq/core-client` | React Native has `fetch` and `WebSocket` and no browser CORS, so it calls the selected node (LAN IP or cloud URL) directly |
 | **Web app** | `@ryuhq/core-client` | Shares the desktop React tree, so it inherits the same client |
-| **Browser extension** | hand-rolled `fetch` through the MV3 background worker | Browser sandbox constraints — see below |
+| **Browser extension** | Browser-safe `@ryuhq/core-client` modules and extension HTTP adapters | The shared dashboard uses browser-safe modules; content scripts reach Core through the MV3 background worker |
 
 ## React Native / Expo
 
-React Native is a supported client-library target. It has `fetch` and `WebSocket`, and it does not
-have browser CORS restrictions. For normal JSON calls, pass `{ url, token }`. For Expo response
+React Native is a supported target. For normal JSON calls, pass `{ url, token }`. For Expo response
 streaming, add `expo/fetch` to the target:
 
 ```tsx
@@ -45,36 +44,28 @@ const target: ApiTarget = {
 const agents = await fetchAgents(target);
 ```
 
-Store `nodeToken` with `expo-secure-store`. The token belongs to the selected Core node and should
-not be replaced with an OpenAI, Anthropic, or other provider key.
+Store `nodeToken` with `expo-secure-store`. The token belongs to the selected Core node. Never
+replace it with an OpenAI, Anthropic, or other provider key.
 
-## Why the browser extension does not use core-client
+The mobile app imports the shared domain modules directly (`@ryuhq/core-client/agents`,
+`/plugins`, `/models`, `/skills`, `/mcp`, `/spaces`, `/workflows`, `/meetings`, and others), tags
+each request `X-Ryu-Surface: mobile`, and reaches the node the user selects. `localhost` works only
+as an emulator loopback, never on a real device.
 
-The extension is the **exception**, and it is a deliberate one. Two constraints from the browser
-sandbox make the shared client unusable there:
+The mobile app's web build is a browser page, so its requests to the Ryu control plane are
+cross-origin and carry the same `X-Ryu-Surface` header. The control plane allows that header in
+CORS preflights from the origins it accepts. Other origins are refused.
 
-1. **Local token resolution is Node-only.** `@ryuhq/core-client`'s local-node helpers (e.g.
-   `resolveLocalNodeToken`) read the node-admittance token from disk via `node:fs`/`node:os`. A
-   browser extension has no filesystem. Browser surfaces must instead **pair with a node
-   explicitly** — the extension stores `{ url, token }` nodes and lets the user add one, exactly
-   like the mobile app.
-2. **CORS blocks extension pages from Core's loopback origin.** Extension pages and content scripts
-   cannot `fetch("http://127.0.0.1:7980/...")` because Core's CORS allowlist does not include the
-   `chrome-extension://` origin. The MV3 **background worker** declares `host_permissions` for
-   loopback and does the HTTP on the extension's behalf — a hand-rolled `fetch` layer for the small
-   set of endpoints the extension needs (chat stream, agents, catalog, preferences).
+## Browser extension connections
 
-So the extension reaches the **same** Core HTTP API with the **same** `{ url, token }` shape — it
-just cannot reuse the shared package's Node-only plumbing, and its worker-as-CORS-proxy model is
-small enough not to need the full client.
+The extension reuses browser-safe Core client modules and response schemas, including in its
+shared dashboard. It does not use Node-only local token helpers such as `resolveLocalNodeToken`,
+which read from disk. Pair with a node explicitly and supply its saved `{ url, token }` instead.
 
-## Why the mobile app does use it
-
-Mobile faces neither constraint: React Native has real `fetch`/`WebSocket` (no browser CORS) and
-secure storage (expo-secure-store) for the node token. So it imports the shared domain modules
-directly — `@ryuhq/core-client/agents`, `/plugins`, `/models`, `/skills`, `/mcp`, `/spaces`,
-`/workflows`, `/meetings`, ... — tagged `X-Ryu-Surface: mobile`, and reaches whichever node the user
-selects (a LAN IP or cloud URL; `localhost` is only an emulator loopback, never a real device).
+Content scripts use the MV3 background worker for Core HTTP calls. The worker's declared host
+permissions allow those requests without depending on the page's origin or CORS policy. Extension
+HTTP adapters and shared modules use the same Core API and node credentials. The browser bridge
+also carries the current signed-in member identity when required.
 
 ## Install and target
 
@@ -82,7 +73,7 @@ selects (a LAN IP or cloud URL; `localhost` is only an emulator loopback, never 
 bun add @ryuhq/core-client
 ```
 
-Every domain function takes an `ApiTarget`:
+Every domain function takes an `ApiTarget`.
 
 ```typescript
 import { fetchApps, installApp } from "@ryuhq/core-client/plugins";
@@ -95,28 +86,51 @@ const apps = await fetchApps(target);
 const status = await fetchGatewayStatus(target);
 ```
 
+## Agent identifiers
+
+Pass raw agent IDs to the functions in `@ryuhq/core-client/agents`. The client
+encodes IDs as a single URL path segment, so IDs containing `:`, `/`, `%`, `?`,
+or `#` cannot change the destination endpoint. Do not pre-encode an ID. The
+standalone IDs `.` and `..` are rejected before sending a request because URL
+parsers treat them as directory navigation.
+
 ## Root exports
 
-The package root exports only the HTTP primitives (domain modules are imported by subpath — there
-is no kitchen-sink barrel):
+The package root exports the HTTP primitives and the backups module (`packages/core-client/src/index.ts`).
+Import every other domain module by subpath.
 
 | Export | Purpose |
 |---|---|
-| `ApiTarget` | `{ url, token, fetch? }` — what every domain call is keyed to |
-| `request(target, path, options)` | typed JSON `fetch` wrapper |
-| `apiUrl(target, path)` | resolve a path against a target |
-| `makeHeaders(token)` | builds headers, attaching bearer + surface |
+| `ApiTarget` | `{ url, token, fetch?, userJwt? }`, the target every domain call is keyed to |
+| `RyuFetch` | the `fetch` signature a target can override |
+| `request(target, path, options, responseCodec)` | JSON `fetch` wrapper that parses the response with the supplied Zod codec |
+| `RequestOptions` | `method`, `headers`, `body`, and `signal` for `request` |
+| `apiUrl(target, path)` | resolves a path against a target |
+| `fetchForTarget(target)` | returns the target's `fetch`, or the global `fetch` |
+| `makeHeaders(token, userJwt?)` | builds headers with the bearer, user JWT, and surface |
 | `SURFACE_HEADER` | the `X-Ryu-Surface` request header name |
-| `setSurfaceProvider(fn)` | wire the calling surface's token once at app entry |
-| `setBuyerTokenProvider(fn)` | wire the marketplace buyer token, if any |
+| `setSurfaceProvider(fn)` | wires the calling surface name once at app entry |
+| `BUYER_TOKEN_HEADER`, `buyerTokenHeader` | the `X-Ryu-Buyer-Token` header for paid marketplace installs |
+| `setBuyerTokenProvider(fn)` | wires the marketplace buyer token, if any |
 
-The `X-Ryu-Surface` header matters: Core filters its plugin list/catalog/contributions to what
-actually runs on the calling surface. Each app wires it once at entry (`"desktop"`, `"cli"`,
-`"mobile"`, `"extension"`, ...). A request without it gets an unfiltered list.
+Every direct `request` call must supply a response codec as its fourth argument.
+Use the domain modules below when they already cover your endpoint. For a new
+endpoint, provide a Zod codec for its complete response contract. An endpoint
+that returns an empty body needs a codec that accepts `undefined`. Pass
+`undefined` for `options` when no request options are needed. An invalid response
+fails parsing instead of being returned under an unchecked TypeScript type.
+
+Validate the endpoint's actual fields and nested values. A permissive codec or a
+TypeScript assertion does not establish that a response follows its contract.
+
+Core filters its plugin list, catalog, and contributions by the `X-Ryu-Surface` header to what runs
+on the calling surface. Each app wires it once at entry, for example
+`setSurfaceProvider(() => "cli")`. Values include `"desktop"`, `"cli"`, `"mobile"`, and
+`"extension"`. A request without the header gets an unfiltered list.
 
 ## Domain modules
 
-One subpath per Core domain — import only what you need:
+Each Core domain has one subpath. Import only what you need.
 
 | Subpath | Notable functions |
 |---|---|
@@ -134,26 +148,28 @@ One subpath per Core domain — import only what you need:
 | `@ryuhq/core-client/chat` | `chatStreamUrl`, `chatHeaders` (streaming is direct-fetch in the apps) |
 | ... | `acp`, `approvals`, `btw`, `composio`, `downloads`, `engines`, `events`, `goals`, `hardware`, `inference`, `mesh`, `notifications`, `pairing`, `pi-config`, `quests`, `recipes`, `realtime`, `retrieval`, `runs`, `sessions`, `system`, `teams`, `uploads`, `voice`, `voice-session`, `node-compat`, `node-token` |
 
+### Space search results
+
+`SpaceMatch.distance` is `number | null`, matching Core's response. Preserve `null`
+when no numeric distance is available. Display results in the returned order:
+reranking can change that order without changing distances, and graph or linked
+document matches can carry placeholder distances. Do not sort, average, or apply
+a relevance threshold using this field.
+
 ## Embedded agent chat: @ryuhq/client
 
-If you only need to **embed agent chat** in an app — list agents, stream a turn, query sessions,
-search spaces — there is a lighter zero-dependency client: [`@ryuhq/client`](/docs/extend/develop/sdk/client).
-It covers the chat/session/spaces surface with three namespaces and nothing else, and works in Node,
-Bun, Deno, and browsers.
+To embed agent chat in an app (list agents, stream a turn, read sessions, search Spaces), use the
+smaller [`@ryuhq/client`](/docs/extend/develop/sdk/client). It has `agents`, `sessions`, `harness`,
+`spaces`, and `mail` namespaces plus an optional `notify` namespace.
 
 ## Which SDK when?
 
 | Job | Package |
 |---|---|
-| Author Runnables, pack & publish a plugin | [`@ryuhq/sdk`](/docs/extend/develop/sdk) |
+| Author Runnables, pack and publish a plugin | [`@ryuhq/sdk`](/docs/extend/develop/sdk) |
 | Operate a Core node (plugins, agents, models, ...) | `@ryuhq/core-client` |
 | Embed agent chat in an app | [`@ryuhq/client`](/docs/extend/develop/sdk/client) |
 | Validate against the exact Rust rules | `@ryuhq/sdk-native` (used by `@ryuhq/sdk` internally) |
 
-## See also
-
-<Cards>
-  <DocCard href="/docs/extend/develop/sdk" />
-  <DocCard href="/docs/extend/develop/sdk/client" />
-  <DocCard href="/docs/start-here/architecture/core-vs-gateway" />
-</Cards>
+For why Core operates nodes and the Gateway governs model traffic, see
+[Core vs Gateway](/docs/start-here/architecture/core-vs-gateway).

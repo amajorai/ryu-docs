@@ -1,0 +1,147 @@
+---
+title: "Build a Tunnel Adapter"
+description: "How to add a public tunnel or private VPN connector to the node's VPN menu by serving the network.tunnel capability from a plugin sidecar, with the route contract and limits"
+tags: ["tunnel", "network", "vpn", "capability", "provides", "sidecar", "plugin"]
+---
+
+Ryu ships Tailcat, Tailscale, Headscale, Cloudflare Quick Tunnel, and OpenTunnel as built-in network
+backends. A plugin can add any other tunnel service. A **tunnel adapter** is an app whose
+sidecar provides the `network.tunnel` capability. Once it is installed and enabled, it appears in the
+node selector's **Toolkits → VPN** page under its own name, next to the built-in backends.
+
+Core does not run your tunnel. It tells your sidecar which local port to expose, reads back the public URL,
+and asks the sidecar to stop when the user turns the tunnel off or picks another backend.
+
+## Declare the capability
+
+Add one `provides` entry served by a sidecar route:
+
+```json
+{
+  "id": "com.example.tunnel",
+  "name": "Example Tunnel",
+  "version": "0.1.0",
+  "runnables": [],
+  "provides": [
+    {
+      "capability": "network.tunnel",
+      "version": "1.0.0",
+      "title": "Tunnel",
+      "layerKind": "tunnel",
+      "selectable": true,
+      "sidecar": "tunnel",
+      "route": "/tunnel"
+    }
+  ],
+  "sidecars": [
+    {
+      "name": "tunnel",
+      "port": 8399,
+      "health_path": "/health",
+      "process": { "kind": "node", "entry": "index.js" },
+      "http": { "routes": [{ "path": "/health" }, { "path": "/tunnel" }] }
+    }
+  ]
+}
+```
+
+The manifest loader rejects a `network.tunnel` entry unless all of these are true:
+
+- `layerKind` is `"tunnel"`. `"tunnel"` is only valid on `network.tunnel`.
+- `selectable` is `true`, so several tunnel apps can be installed and the user picks one.
+- `sidecar` and `route` are set, and the route is declared in the sidecar's `http.routes`.
+- `tools` is empty. A tunnel is driven by Core over the route, not by agent tools.
+
+`layerKind: "tunnel"` keeps the capability out of the Toolkits list. It is shown only in the VPN menu.
+
+## Implement the route
+
+Core calls the declared route on your sidecar with three methods. Every call carries
+`Authorization: Bearer <token>`, where the token is your plugin's own sidecar credential, the same one the
+ext-proxy uses. Reject requests without it.
+
+| Method | Request body | Meaning |
+|---|---|---|
+| `POST` | `{ "port": 7980, "target": "http://127.0.0.1:7980" }` | Expose Core's port. Calling it again while running must be safe. `target` is the address Core listens on, which can be IPv6 loopback or a LAN address. Forward to `target`, not to a fixed host. |
+| `GET` | none | Report the current state. Core polls this for the menu. |
+| `DELETE` | none | Tear the tunnel down. |
+
+`POST` and `GET` respond with:
+
+```json
+{ "state": "running", "url": "https://abc123.example.net", "error": null }
+```
+
+| Field | Values |
+|---|---|
+| `state` | `starting`, `running`, `stopped`, or `error`. Any other value is treated as `stopped`. |
+| `url` | The public URL while `running`. Core publishes it only if it is an absolute `http` or `https` URL with a host, no username or password, and at most 2,048 characters. |
+| `error` | A short reason shown to the user when the tunnel is not running, or `null`. Core shows at most 500 characters. |
+
+A `running` state without an acceptable `url` is shown as an error, because nothing can reach Core
+through it. Return a non-2xx status with `{ "error": "..." }` when a request fails; Core shows that
+message to the user.
+
+`POST` may return before the tunnel is up. Answer `starting`, and report `running` with the URL from `GET`
+once it is ready. A `POST` answered with `stopped` or `error` counts as a failed start, and Core retries it
+for a short time.
+
+Keep each response under 64 KB. Core refuses larger bodies without reading them. A `GET` must answer within
+five seconds, including any time Core spends waking a lazy sidecar. After that, the menu shows an error
+for that poll.
+
+## Private VPN connectors
+
+The same contract works for a private network VPN, such as WireGuard, ZeroTier, NetBird, or a commercial
+VPN client. Nothing about the VPN is built into Core, and no Core change is needed:
+
+1. Ship the VPN client, or adopt one the user already installed, from your sidecar. Keep its keys,
+   tokens, or config files in your plugin's own settings or secrets.
+2. On `POST`, bring the connection up and forward from the node's VPN address to the `target` Core sends.
+   Answer `starting` until the connection is ready.
+3. On `GET`, report `running` with the address peers on that network use to reach the node, for example
+   `http://10.147.17.4:7980` or `https://node.example.internal`. Core accepts any absolute `http` or
+   `https` URL with a host, so a private address is fine.
+4. On `DELETE`, stop forwarding and leave the network.
+
+Your sidecar runs as a normal user process. If your VPN needs a kernel network interface or administrator
+rights, use the client's userspace mode or rely on a system service the user installed; Core does not
+grant elevated privileges to plugins.
+
+The isolated VPN used by [cloud environment](/docs/surfaces/desktop/user-guide/cloud-environments) setup
+checks is separate from this menu and accepts Tailscale auth keys only.
+
+## How selection works
+
+When the user picks your app in the VPN menu, Desktop pins the `network.tunnel` capability to your app
+and selects the `plugin` network backend. Core then wakes your sidecar if it is lazy and sends `POST`.
+If the user switches from another tunnel app to yours while the tunnel is on, Core sends `DELETE` to the
+app it started before and `POST` to yours, so two tunnels are never left running. The same happens when the
+`network.tunnel` binding changes some other way, for example through the capability bindings API or because
+the previous app was disabled.
+
+Turning the tunnel off, choosing a built-in backend, or quitting Core sends `DELETE` to the app that was
+started. Disabling your app stops its sidecar, which should also stop its tunnel.
+
+The capability binding follows the same rules as other swappable layers. See
+[Swappable Layers](/docs/core/swappable-layers) for how the provider is chosen when several are enabled.
+
+## Security expectations
+
+- Core requires a node token before any network backend can be enabled. Your public URL reaches Core's
+  public routes, and protected routes still need `Authorization: Bearer <RYU_TOKEN>`.
+- Most tunnels deliver remote traffic to Core from `127.0.0.1`. While a plugin tunnel is started, Core
+  stops treating loopback connections as local, so tunneled requests never get local-only access. Core
+  trusts loopback again only after your `DELETE` succeeds or your sidecar has stopped. If `DELETE` fails,
+  loopback stays untrusted.
+- Keep tunnel credentials in your plugin's own settings or secrets, never in the URL you return.
+- Expose only the `target` Core sends you. Do not forward other local ports through the same tunnel.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/extend/develop/extensions/capability-broker" />
+  <DocCard href="/docs/core/swappable-layers" />
+  <DocCard href="/docs/core/node-and-presence" />
+  <DocCard href="/docs/extend/develop/extensions/sidecar-ports" />
+</Cards>

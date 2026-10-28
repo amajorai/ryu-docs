@@ -11,8 +11,7 @@ type LocalizedCardProps = ComponentProps<typeof FumadocsCard>;
 /** Localize MDX cards using the locale from the dynamic route segment. */
 export function LocalizedCard({ href, ...props }: LocalizedCardProps) {
   const params = useParams<{ lang?: string }>();
-  const localizedHref =
-    typeof href === "string" ? localizeDocsHref(href, params.lang) : href;
+  const localizedHref = localizeDocsHref(href, params.lang);
 
   return <FumadocsCard {...props} href={localizedHref} />;
 }

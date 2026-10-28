@@ -1,0 +1,123 @@
+---
+title: "Website MCP and NLWeb"
+description: "Connect an agent to the public, read-only MCP server at ryuhq.com/mcp, render its MCP Apps Marketplace view, read its server card, and query the site with the NLWeb /ask endpoint."
+---
+
+The Ryu website publishes two anonymous, read-only agent endpoints. `https://ryuhq.com/mcp` is an
+MCP server for website pages, Marketplace listings, agent skills, and the Cloud instance catalog.
+`https://ryuhq.com/ask` answers natural-language questions about the site with the NLWeb
+protocol. Neither endpoint takes a credential or changes account state. Checkout tools exist
+only in the browser through [WebMCP](/docs/extend/mcp/webmcp). For the documentation itself, use
+the [Ryu Docs MCP](/docs/extend/mcp/docs-server) server at `https://docs.ryuhq.com/mcp`.
+
+## Website MCP server
+
+```bash
+claude mcp add --transport http ryuWebsite https://ryuhq.com/mcp
+```
+
+| Property | Value |
+|---|---|
+| Transport | Streamable HTTP, `POST` only. `GET` and `DELETE` return `405` with `Allow: POST, OPTIONS`. |
+| Sessions | None. The server issues no `Mcp-Session-Id` and ignores one that a client sends. |
+| Protocol revisions | `2026-07-28` (stateless, `server/discover`), and `2025-11-25`, `2025-06-18`, `2025-03-26` through `initialize` |
+| Response format | `application/json`. A client whose `Accept` allows only `text/event-stream` gets the answer as one SSE `message` event. An `Accept` that allows neither returns `406`. |
+| Notifications | `202 Accepted` with no body |
+| Limits | A best-effort per-client request limit. A `429` means wait and retry. |
+
+`initialize` returns the revision the client asked for when the server supports it, and
+otherwise the newest initialize-era revision. A request with an unsupported
+`MCP-Protocol-Version` header returns `400` with JSON-RPC error `-32022` and the supported list.
+For `2026-07-28` requests, an unknown method returns HTTP `404` with error `-32601`.
+
+### Tools and resources
+
+| Method | Result |
+|---|---|
+| `tools/list`, `tools/call` | `read_page`, `list_agent_skills`, `search_marketplace`, `get_marketplace_item`, `get_cloud_instance_catalog` |
+| `resources/list`, `resources/read` | The MCP Apps view `ui://ryu/marketplace-results` |
+| `resources/templates/list` | An empty list |
+
+The tools match the read-only tools in the [WebMCP tool table](/docs/extend/mcp/webmcp).
+
+### MCP Apps view
+
+The server declares the MCP Apps extension (`io.modelcontextprotocol/ui`) with the MIME type
+`text/html;profile=mcp-app`. `search_marketplace` and `get_marketplace_item` name the view
+`ui://ryu/marketplace-results` in `_meta.ui.resourceUri` (and in the older `ui/resourceUri` key).
+They also return the listings as `structuredContent.items`. Their text output is unchanged, so a
+host without MCP Apps support still gets a readable answer.
+
+The view is one HTML page with inline script and style. It loads nothing from the network, so it
+runs under the host's default content security policy. It renders the tool result, follows the
+host theme, and opens listing links through the host with `ui/open-link` (HTTPS links only).
+
+### Server card
+
+The MCP server card (`io.modelcontextprotocol/server-card`) describes the server before a client
+connects. It is served at two URLs with the same content:
+
+- `https://ryuhq.com/.well-known/mcp/server-card.json`
+- `https://ryuhq.com/mcp/server-card`
+
+The card names the server `com.ryuhq/mcp`, lists the Streamable HTTP remote
+`https://ryuhq.com/mcp`, and lists every supported protocol revision. It does not list tools; call
+`tools/list` for the live set. Send `Accept: application/mcp-server-card+json` to receive that
+media type. Responses allow cross-origin reads and carry an `ETag` for conditional requests.
+
+## NLWeb `/ask`
+
+`https://ryuhq.com/ask` implements the NLWeb `ask` method, version 0.55. It searches three public
+sources and does not run a model:
+
+| `query.site` | Source | Result `@type` |
+|---|---|---|
+| Omitted, `ryuhq.com`, or `www.ryuhq.com` | All three sources below | Mixed |
+| `site` or `pages` | The website's [llms.txt](https://ryuhq.com/llms.txt) index | `WebPage` |
+| `docs` or `docs.ryuhq.com` | The documentation [llms.txt](https://docs.ryuhq.com/llms.txt) index | `TechArticle` |
+| `marketplace` or `ryuhq.com/marketplace` | The public Marketplace catalog | `SoftwareApplication`, with an MCP action that calls `get_marketplace_item` |
+
+```bash
+curl -s https://ryuhq.com/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"text":"connect an MCP host","site":"docs"}}'
+```
+
+| Request member | Values |
+|---|---|
+| `query.text` | Required. The question. |
+| `query.site` | Optional. Narrows the sources, as in the table above. |
+| `query.itemType` | Optional. Keeps only results of one schema.org type. |
+| `prefer.response_format` | `conversational_search` (default) or `chatgpt_app` |
+| `prefer.mode` | `list` (default) or `summarize`. The summary only counts what was found. |
+| `prefer.streaming` | `true` streams Server-Sent Events. `Accept: text/event-stream` does the same. |
+
+`GET https://ryuhq.com/ask?query=...` accepts the same values as query parameters (`query` or
+`q`, `site`, `itemType`, `streaming`, `response_format`, `mode`).
+
+Answers carry `_meta` with `response_type`, `response_format`, and `version` `0.55`. A streamed
+answer sends `start`, one `result` event per item, an `error` event when nothing matched, and
+`complete`. A failure is an object with `error.code` and `error.message`, as below.
+
+| Code | HTTP status |
+|---|---|
+| `INVALID_QUERY` | `400` for a malformed request, `200` for an unknown `query.site` |
+| `NO_RESULTS`, `UNSUPPORTED_FORMAT`, `UNSUPPORTED_MODE` | `200` |
+| `RATE_LIMITED` | `429` with `Retry-After` |
+| `INTERNAL_ERROR` | `200` when every source failed, `500` for an unexpected failure |
+
+The endpoint allows cross-origin requests without credentials. It does not implement the NLWeb
+`/await` method.
+
+## Discovery
+
+Both endpoints are listed in the website's [llms.txt](https://ryuhq.com/llms.txt). The MCP server
+is also listed in the [API catalog](https://ryuhq.com/.well-known/api-catalog) and the
+[AI catalog](https://ryuhq.com/.well-known/ai-catalog.json). See
+[LLM-friendly docs](/docs/extend/mcp/llms) for the other discovery files.
+
+<Cards>
+  <DocCard href="/docs/extend/mcp/webmcp" />
+  <DocCard href="/docs/extend/mcp/docs-server" />
+  <DocCard href="/docs/extend/mcp/llms" />
+</Cards>

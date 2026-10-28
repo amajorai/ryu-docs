@@ -1,40 +1,57 @@
 ---
-title: Gateway for any OpenAI-compatible agent
-description: Point Mastra, LangChain, or the raw OpenAI SDK at the Ryu Gateway with a single base-URL swap.
+title: "Connect Any Agent"
+description: How to point the OpenAI SDK, Mastra, LangChain, or a BYO agent at the Gateway by changing the base URL, plus the subscription-preserving passthrough for Claude Code and Codex.
 ---
 
-The Ryu Gateway speaks the full OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`).
-Any framework that accepts a custom `baseURL` works without code changes: swap the URL, add
-your gateway API key, and every request runs through Ryu's firewall, PII/DLP, rate-limits,
-budgets, evals, and audit log before reaching the upstream provider.
+The Gateway serves an OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`). A framework
+that accepts a custom `baseURL` works without code changes. Change the URL and add a Gateway API
+key. Each request then runs through the Gateway firewall, PII/DLP, rate limits, budgets, evals, and
+audit log before it reaches the upstream provider.
 
 ## Prerequisites
 
-- Ryu Gateway running locally (default: `http://127.0.0.1:7981`)
-- A gateway API key configured in your `gateway.toml` (see [Auth config](#auth-config) below)
+- The Gateway running locally (default `http://127.0.0.1:7981`)
+- A Gateway API key configured in your `gateway.toml` (see [Auth config](#auth-config) below)
 
 ## Auth config
 
 Auth is controlled by `AuthConfig` in `apps/gateway/src/config.rs`. Add a static key to
-`gateway.toml`:
+`gateway.toml` as shown.
 
 ```toml
 [auth]
 require_auth = true
 
 [[auth.api_keys]]
-key  = "YOUR_GATEWAY_KEY"
+key  = "<at-least-24-character-random-secret>"   # e.g. from `openssl rand -hex 24`
 name = "my-app"
 ```
 
-All requests must include the key as a Bearer token:
+Keys shorter than 24 printable characters, or containing whitespace, stop the
+Gateway from starting. All requests must include the key as a Bearer token
+(`YOUR_GATEWAY_KEY` below stands for the value you configured):
 
-```
+```http
 Authorization: Bearer YOUR_GATEWAY_KEY
 ```
 
-When `require_auth = false` (the default for local dev) every request is accepted regardless
-of the header.
+When `require_auth = false` (an explicit local development override), every request is accepted
+regardless of the header. The [field reference](/docs/gateway/configuration-access#field-reference)
+lists every `[auth]` key.
+
+### Manage local keys in Desktop
+
+In Desktop, open **Settings → Gateway → API & traffic** to copy the OpenAI-compatible,
+Anthropic Messages, or Gemini endpoint URL for the selected node. Enter a name such as `Cursor`,
+then choose **Create key**. Desktop shows the plaintext key once; copy and save it before leaving
+that screen. The key list masks its value afterward. Choose **Revoke** to remove a local key.
+If a create or revoke request fails, the current key list remains visible so you can retry.
+
+## Connect a local CLI from Desktop
+
+Desktop can write the Gateway URL, a client key, and a model into the user-level config of Claude
+Code, Codex CLI, OpenCode, Gemini CLI, and other coding CLIs, and reset them later. See
+[Connect a coding CLI](/docs/gateway/connect-a-cli).
 
 ## OpenAI SDK (TypeScript)
 
@@ -61,7 +78,7 @@ console.log(response.choices[0].message.content);
 import { Mastra } from "@mastra/core";
 import { createOpenAI } from "@ai-sdk/openai";
 
-// Override the OpenAI provider to point at the gateway
+// Override the OpenAI provider to point at the Gateway
 const ryuGateway = createOpenAI({
   baseURL: "http://127.0.0.1:7981/v1",
   apiKey: "YOUR_GATEWAY_KEY",
@@ -91,74 +108,60 @@ console.log(response.content);
 
 ## Available models
 
-`GET /v1/models` returns the full list of routable models. As of this writing the built-in
-list includes:
-
-| Model ID | Provider |
-|---|---|
-| `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`, `o3-mini` | OpenAI |
-| `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5` | Anthropic |
-| `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022` | Anthropic |
-| `zeroclaw`, `openclaw` | Core agents |
-| `openrouter/auto` | OpenRouter (auto-select) |
-| `llama3.2:latest`, `mistral:latest`, `phi4:latest`, `deepseek-r1:latest` | Local (Ollama) |
-
-The list is driven by `builtin_model_list()` in `apps/gateway/src/router/mod.rs`. Add custom
-mappings via `[routing.model_map]` in `gateway.toml`.
+`GET /v1/models` returns the routable models. The built-in list and how to add custom mappings
+with `[routing.model_map]` are on [Routing](/docs/gateway/routing#the-model-list).
 
 ## Response headers
 
-The gateway adds diagnostic headers to every response:
+Chat responses carry these diagnostic headers:
 
 | Header | Content |
 |---|---|
 | `x-provider` | Which upstream provider handled the call (`openai`, `anthropic`, `local`, …) |
 | `x-request-id` | Unique request ID for the audit log |
 | `x-routed-model` | The actual model selected after routing (may differ from the requested model) |
-| `x-cache` | `HIT` or `MISS` — present on non-streaming responses only |
+| `x-cache` | `HIT` or `MISS`, on non-streaming responses only |
+
+Each accepted media generation receives a separate server-generated debit
+reference. Audit correlation remains available for matching project receipts;
+reusing a correlation ID does not deduplicate generation or its charges.
 
 ## Smoke test
 
-A runnable smoke script is checked in at `examples/gateway/openai-compat-smoke.ts`. It sends a
-chat completion to the locally running gateway and prints the `x-provider` header:
+Send one chat completion to the local Gateway and print the response headers:
 
 ```bash
-# Start the gateway first
-cargo run --manifest-path apps/gateway/Cargo.toml
-
-# Then run the smoke test
-bun run examples/gateway/openai-compat-smoke.ts
+curl -sS -D - http://127.0.0.1:7981/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
 ```
 
-Expected output (provider depends on your routing config):
-
-```
-> Sending chat completion to http://127.0.0.1:7981/v1 ...
-  x-provider: openai
-  Response: Hello! I'm running through the Ryu Gateway.
-> Smoke test passed.
-```
+The `x-provider` header names the upstream that handled the call. Its value depends on your routing
+config.
 
 ## Self-hosting checklist
 
 1. Set upstream API keys in environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …).
 2. Create `gateway.toml` with `[auth]` and at least one `[[auth.api_keys]]` entry.
-3. Run `cargo run --manifest-path apps/gateway/Cargo.toml -- --config gateway.toml`.
+3. Run `GATEWAY_CONFIG=gateway.toml cargo run --manifest-path apps/gateway/Cargo.toml`. Add
+   `-- --bind=<host>:<port>` to listen on another address.
 4. Set `baseURL = http://<host>:7981/v1` and `apiKey = <your-gateway-key>` in your agent.
 5. Verify with `curl -H "Authorization: Bearer <key>" http://localhost:7981/v1/models`.
 
 ## Subscription-preserving passthrough (Claude Code, Codex)
 
-The base-URL swap above works for any agent that speaks OpenAI-compatible JSON and authenticates
+The base-URL change above works for any agent that speaks OpenAI-compatible JSON and authenticates
 with an API key. Some agents do neither. Claude Code speaks the Anthropic Messages format and
 authenticates with the user's own Pro/Max OAuth bearer, and Codex (in ChatGPT-login mode) speaks the
 OpenAI Responses format and authenticates with an OAuth bearer plus a `ChatGPT-Account-ID` header.
-The regular OpenAI-compat chat path cannot govern either, because it would substitute the gateway's
-own provider key and flip the request off the user's subscription billing.
+The OpenAI-compatible chat path cannot govern either. It would substitute the Gateway's own
+provider key and move the request off the user's subscription billing.
 
-For those agents the gateway runs a **transparent reverse proxy** in the agent's native wire format,
+For those agents the Gateway runs a **transparent reverse proxy** in the agent's native wire format,
 `apps/gateway/src/passthrough/mod.rs`. See also [Loopback and internal routes](/docs/gateway/loopback-routes)
-for the full list of non-standard-client endpoints. The agent is pointed at the proxy through a base-URL env var.
+for the full list of non-standard-client endpoints. The agent is pointed at the proxy through a
+base-URL env var.
 The proxy accepts the native request, applies request-side DLP, forwards it upstream with the
 caller's own `Authorization` header (and `ChatGPT-Account-ID` for Codex) unchanged, then streams the
 response back through response-side DLP and audit. Because the format is never translated, the
@@ -174,62 +177,117 @@ Both upstreams are overridable without a rebuild, via `RYU_PASSTHROUGH_ANTHROPIC
 
 ### What the proxy redacts
 
-The proxy is governed by the same firewall as the OpenAI-compat path (see
-[Security](/docs/gateway/security)). The audit record is always emitted, even when the firewall is
-off and even when the upstream call fails, so with the firewall disabled the proxy is a transparent
-forwarder plus an audit log.
+The proxy uses the same firewall configuration as the OpenAI-compatible path (see
+[Security](/docs/gateway/security)), including organization and agent overlays and custom
+patterns, but it applies that configuration differently for agent traffic. The audit record is
+always emitted, even when the firewall is off and even when the upstream call fails, so with the
+firewall disabled the proxy is a transparent forwarder plus an audit log.
 
-- **Request side**: when the firewall is enabled, the outbound body is parsed and the prompt-bearing
-  fields are run through the firewall's `sanitize`. For Anthropic that is `system` and each message's
-  `content`, for Codex it is `instructions` and each `input` item's `content`. A non-JSON or
-  unparseable body is forwarded as-is (fail open).
-- **Response side**: when the firewall is enabled, the upstream SSE stream is reassembled across
-  network and UTF-8 chunk boundaries, and each assistant-text delta (`text_delta` for Anthropic,
-  `output_text.delta` for Responses) is rewritten to `[REDACTED:…]` before the bytes reach the
-  caller. Non-text events (`message_start`, `ping`, tool-call deltas) pass through verbatim and SSE
-  framing is preserved. The accumulated redacted text is scanned once at stream end to audit any
-  residual outbound violation. An unparseable event passes through verbatim (fail open).
+- **Request side**: when the firewall is enabled, the outbound body is parsed and every
+  prompt-bearing string is redacted. For Anthropic that is `system`, message text, `tool_use`
+  inputs, `tool_result` content (where file contents and command output arrive), document and
+  search-result text, and tool definitions. For Codex it is `instructions`, message content,
+  `function_call` arguments, `function_call_output` and custom tool output, local shell calls and
+  their output, and tool definitions. Signed or encrypted fields (thinking blocks, reasoning items,
+  `encrypted_content`) and IDs are forwarded unchanged so the upstream accepts the request. When
+  inspection is on, a compressed or non-JSON prompt body is refused instead of being forwarded
+  uninspected.
+- **Policy**: agent traffic is always redacted, whatever `firewall.policy` says. The proxy does not
+  block a turn because it contains PII or a secret, because the agent would resend the same history
+  on every later turn and the session would stall. The local firewall's prompt-injection patterns
+  are not enforced on this path. Two cases do refuse the request with a 403: a PII or secret match
+  that survives redaction (for example, one obfuscated with zero-width characters), and a
+  control-plane policy violation (a locked guardrail or a model outside the organization's approved
+  list). Locked guardrails are enforced even when the local firewall is off. Locked `pii` and
+  `secrets` guardrails are checked against every prompt-bearing field, including the agent's own
+  system prompt and tool definitions.
+
+  The other locked guardrails (`prompt_injection`, `code_injection`, `toxicity`, and `bias`) are
+  checked against the conversation only (messages, tool calls, and tool results), not the agent's
+  own system prompt or tool definitions, whose built-in wording (for example a shell tool's
+  `$(cat <<'EOF' …)` commit example) would otherwise match on every turn. Tool results are part of
+  the conversation, so a file or command output that matches one of those patterns still refuses
+  that turn and the later turns that replay it. With the local firewall off nothing is redacted
+  first, so a locked `pii` or `secrets` guardrail refuses any request that contains a match.
+- **Response side**: when the firewall is enabled, the upstream response is buffered (up to 8 MB)
+  and redacted in one contiguous pass before any bytes reach the caller, so a secret split across
+  two text-delta events is still rewritten to `[REDACTED:…]`. Non-text events (`message_start`,
+  `ping`, tool-call deltas) pass through verbatim and SSE framing is preserved. The redacted text
+  is scanned once more to audit any residual outbound violation. An unparseable event passes
+  through verbatim (fail open).
+- **Attribution**: the proxy takes no Gateway credential, so `x-ryu-user-id`, `x-ryu-agent-id`,
+  and `x-ryu-feature` are recorded on the audit row only when the request also carries a trusted
+  forwarder credential. `x-ryu-*` headers are never forwarded to the provider.
+
+### Response-side streaming DLP
+
+The response redactor (`redact_response_passthrough`) reassembles each complete
+`\n\n`-terminated SSE event from raw bytes, so a multibyte UTF-8 character split across network
+chunks is never corrupted. It then rewrites only the assistant-text delta:
+
+| Wire format | Event rewritten | Field redacted |
+|---|---|---|
+| Anthropic | `content_block_delta` | `delta.text` (the `text_delta`) |
+| OpenAI Responses | `output_text.delta` | top-level `delta` string |
+
+Each matched span runs through the firewall's `fw.sanitize()`, the same config-gated routine the
+request side uses, and becomes a `[REDACTED:NAME]` marker. A scanner-less config or an unparseable
+`data:` payload passes the raw event through unchanged.
+
+<Callout type="warn">
+  Streaming redaction is unit-tested across chunk boundaries. The full live round-trip needs a real
+  subscription agent and has not been exercised end to end.
+</Callout>
 
 ### Default and opt-out
 
-The passthrough is **on by default** for newly installed/routable ACP agents and remains
+The passthrough is **on by default** for newly installed and routable ACP agents and remains
 configurable per agent through Core preferences. Claude Code uses the
 `claude-gateway-routing` preference (`apps/core/src/claude_config/mod.rs`), which injects
-`ANTHROPIC_BASE_URL` pointed at the gateway's `/passthrough/anthropic` route. Codex uses
+`ANTHROPIC_BASE_URL` pointed at the Gateway's `/passthrough/anthropic` route. Codex uses
 `codex-gateway-routing` (`apps/core/src/codex_config/mod.rs`), which writes an isolated `CODEX_HOME`
 whose `config.toml` declares a custom provider with `wire_api = "responses"` and no `env_key` (so the
-subscription credential is what reaches upstream), pointed at `/passthrough/openai-responses`. Both
-default to Gateway-governed egress. Turning either switch off is the explicit direct-egress choice
-when you want the subscription credential to bypass Ryu; existing explicit choices are preserved
+subscription credential is what reaches upstream), pointed at `/passthrough/openai-responses`. That
+isolated home starts from a copy of your Codex CLI sign-in, and the newest explicit sign-in wins.
+
+Until you sign in, switch accounts, or sign out of Codex from Ryu, the copy follows your Codex CLI:
+signing in to another account there, or signing out, carries over on the next turn, and routine
+token refreshes on either side never stop it following. Once you sign in, switch, or sign out from
+Ryu, that choice changes only the isolated copy and stays in place through Codex CLI token refreshes
+and sign-outs; signing in to a different account in the Codex CLI afterwards is a newer choice, so
+Ryu follows the CLI again from then on. Your Codex CLI's own sign-in is never edited.
+
+Both switches default to Gateway-governed egress. Turning either switch off is the explicit
+direct-egress choice when you want the subscription credential to bypass Ryu; existing explicit choices are preserved
 across restarts and upgrades.
 
 <Callout type="warn">
-  The passthrough is built and compiling but a full live round-trip against a real subscription
-  agent has not yet been exercised. The proxy is **loopback-only**: it refuses requests from
-  non-loopback peers (`apps/gateway/src/passthrough/mod.rs`), so a remote gateway never carries a
-  user's subscription bearer. It is on by default for new/routable ACP agents; turn the per-agent
-  switch off only when direct subscription egress is intentional. Response-side redaction is per-delta,
-  so a secret split across two separate text-delta events is caught only by the end-of-stream audit,
-  not rewritten inline (a cross-delta hold-back buffer is a deliberate follow-on). The Gemini CLI is
-  **not wirable** through either mechanism, because it exposes no base-URL hook.
+  The passthrough has not been verified with a full live round trip against a real subscription
+  agent. The proxy is **loopback-only**: it refuses requests from
+  non-loopback peers (`apps/gateway/src/passthrough/mod.rs`), and it is disabled entirely on a
+  fleet (hosted) Gateway, so a remote Gateway never carries a user's subscription bearer. With
+  private networking (mesh) enabled, a tailnet peer can appear as a loopback caller and could relay
+  its own subscription traffic through the node; it cannot use your credentials or set audit
+  attribution. It is on by default for new and routable ACP agents; turn the per-agent switch off only
+  when direct subscription egress is intentional. The Gemini CLI is **not wirable** through either
+  mechanism, because it exposes no base-URL hook.
 </Callout>
 
-## Generic gateway routing for a BYO agent
+## Generic Gateway routing for a BYO agent
 
 For an OpenAI-compatible agent the user added themselves (`engine = "acp-exec:<command>"`), Core
 offers a generic per-agent toggle, `apps/core/src/agent_routing/mod.rs`. New and auto-installed
 routable ACP agents start with this toggle on; unless explicitly disabled,
-Core injects `OPENAI_BASE_URL` (the local gateway `/v1`) and `OPENAI_API_KEY` (the gateway token)
+Core injects `OPENAI_BASE_URL` (the local Gateway `/v1`) and `OPENAI_API_KEY` (the Gateway token)
 into that agent's spawn command via `openai_gateway_cmd`, so an agent whose HTTP client honours the
-OpenAI base URL routes its model calls through the gateway's firewall, budget, and audit pipeline
+OpenAI base URL routes its model calls through the Gateway's firewall, budget, and audit pipeline
 with no manual env wiring. The whole set lives under a single `agent-gateway-routing` preference
 holding a JSON object of agent id to enabled boolean. A missing entry means Gateway-governed egress;
 only an explicit `false` opts out to direct provider traffic.
 
-<Callout type="info">
-  This is the explicit M2 "point any agent at the gateway" lever, but it is honest about its limits.
-  It is a genuine no-op for agents that do not read `OPENAI_BASE_URL`: Gemini speaks Google format,
+<Callout type="warn">
+  The toggle has no effect on agents that do not read `OPENAI_BASE_URL`. Gemini speaks Google format,
   OpenClaw talks to its own gateway, Hermes uses its own credentials, and the managed Pi ignores the
-  env var (it routes through its own `models.json` instead). The toggle is surfaced primarily for the
-  `acp-exec:` BYO path, where it does exactly what was asked.
+  env var (it routes through its own `models.json` instead). The toggle is meant for the
+  `acp-exec:` BYO path.
 </Callout>

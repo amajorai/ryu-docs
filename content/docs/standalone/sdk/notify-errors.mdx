@@ -1,0 +1,111 @@
+---
+title: "Notify SDK Errors and Retries"
+description: "Notify error codes and their SDK error classes, and which Notify requests the SDK retries and keys with Idempotency-Key"
+tags: ["notify", "events", "errors", "idempotency", "sdk", "standalone"]
+---
+
+<Callout type="info">
+Early access: hosted at https://notify.ryuhq.com with keys provisioned by Ryu; the self-hosted service is not yet published.
+</Callout>
+
+This page lists the errors the Notify client raises and how it retries. The
+samples use the `ryu` client from the
+[Notify SDK quickstart](/docs/standalone/sdk/notify#first-call-with-the-sdk).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## Errors
+
+Notify errors carry `code`, `message`, `status`, and `requestId`, at the top
+level and inside `error`, and the request id is also in `X-Request-ID`. Each
+becomes a `RyuError` subclass with Notify's own `code`. Quote
+`error.requestId` when you contact support.
+
+| Status and code | SDK error | Notes |
+|---|---|---|
+| `400 invalid_request`, `invalid_cursor`, `invalid_json` | `RyuInvalidRequestError` | Read `error.message`. |
+| `401 unauthorized` | `RyuAuthenticationError` | A missing or unknown tenant key. |
+| `402 insufficient_credits` | `RyuPaymentRequiredError` | Ryu-hosted publishes only, when the organization's credits are exhausted. Never retried. |
+| `404 not_found` | `RyuNotFoundError` | The event, activity, or destination does not exist in this tenant. |
+| `409 idempotency_conflict` | `RyuConflictError` | The key was used with a different body. |
+| `409 conflict` | `RyuConflictError` | A response is already complete, or an activity sequence is stale. |
+| `429 rate_limited` | `RyuRateLimitError` | Retried after `Retry-After`. |
+| `429 too_many_streams` | `RyuRateLimitError` | Close a stream first. Never retried. |
+| `413 body_too_large` | `RyuInvalidRequestError` | The request body is over Notify's size limit. Send a smaller body. |
+| `415 unsupported_media_type` | `RyuInvalidRequestError` | A write body that is not `application/json`. The SDK always sends JSON. |
+| `500 request_failed`, `502 request_failed` | `RyuServerError` | An unexpected server failure, or a destination test whose request failed. |
+| `503 request_failed` | `RyuUnavailableError` | The Notify service is shutting down. |
+
+<Callout type="warn">
+  After repeated requests with a wrong key, Notify blocks the address they came
+  from and answers `429 rate_limited` with the message "Too many failed
+  authentication attempts from this address" and a `Retry-After` header. The
+  block applies before the key is checked, so a request with the correct key
+  from that address gets the same `429` until the block ends. The first block
+  lasts 60 seconds by default, and each further block for the same address
+  doubles, up to 900 seconds by default (see
+  [Ryu Notify](/docs/standalone/notify)). The SDK does not wait out a block:
+  its `Retry-After` of at least 60 seconds is over `maxRetryDelayMs` (30
+  seconds by default), so the call fails at once. Fix `RYU_NOTIFY_API_KEY`,
+  then wait for the `Retry-After` delay before calling again.
+</Callout>
+
+A missing key gives a `RyuConfigurationError` that names
+`RYU_NOTIFY_API_KEY`; an unparseable `RYU_NOTIFY_URL` gives one that names it. `requestApproval()` raises
+`RyuInvalidRequestError` (`invalid_timeout`) before publishing when
+`timeoutMs` or `pollIntervalMs` is not positive or is over 2,147,483,647 ms
+(about 24.8 days). In Python they are the `timeout=` and `poll_interval=`
+keyword arguments, in seconds. Python raises `RyuInvalidRequestError`
+(`invalid_request`) before publishing when the input dict carries `timeoutMs`,
+`pollIntervalMs`, or `waitMs`, and names the keyword argument to use instead.
+
+## Idempotency and retries
+
+The SDK adds an `Idempotency-Key` (a UUID) to the writes Notify deduplicates,
+and reuses it on every retry of that call:
+
+| Method | Path | Key |
+|---|---|---|
+| `POST` | `/v1/events` | Optional |
+| `POST` | `/v1/topics/{topic}` | Optional |
+| `POST` | `/v1/activities` | Required |
+
+To choose the key yourself, bind it for one call. `activities.create` takes
+the required key as its second argument. A key belongs to one request body:
+sending it again with a different body answers `409 idempotency_conflict`, so
+these samples use keys that the curl samples in the
+[Notify SDK quickstart](/docs/standalone/sdk/notify) and the CLI samples in
+[Notify CLI and MCP](/docs/standalone/sdk/notify-cli-mcp) do not:
+
+```ts tab="Node"
+await ryu.notify.with({ idempotencyKey: "deploy-4822" }).publish({ title: "Deployed" });
+await ryu.notify.activities.create({ title: "Build 184", progress: 0.1 }, "build-184");
+```
+
+```python tab="Python"
+ryu.notify.with_options(idempotency_key="deploy-4822").publish({"title": "Deployed"})
+ryu.notify.activities.create({"title": "Build 184", "progress": 0.1}, "build-184")
+```
+
+Reads and these publishes are retried on network errors, timeouts, and `5xx`
+responses; because the key is reused, Notify returns the stored event instead
+of publishing twice. Other writes, such as acknowledging or creating a
+destination, are not retried on those failures. A `429 rate_limited` is
+retried after `Retry-After` when that wait is at most `maxRetryDelayMs` (30
+seconds by default). The defaults are two retries and a 60-second
+timeout until response headers arrive; change them with `maxRetries` and
+`timeoutMs`.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/notify" />
+  <DocCard href="/docs/standalone/sdk/notify-cli-mcp" />
+  <DocCard href="/docs/standalone/notify-api" />
+</Cards>

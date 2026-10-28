@@ -1,5 +1,5 @@
 ---
-title: "Security"
+title: "MCP Credentials and Security"
 description: "Understand the separate user, node, hosted MCP, and third-party MCP credentials."
 ---
 
@@ -12,7 +12,7 @@ An MCP request crosses more than one boundary. Each boundary has its own credent
 | Better Auth session or device token | Ryu control plane | A signed-in user and their organization memberships |
 | Node bearer or paired token | Core | Access to one Core node, with paired capabilities and bindings |
 | Managed user JWT | An organization-bound Core node | The user's role plus organization, team, or personal-node scope for direct managed-node requests |
-| Hosted MCP OAuth grant | Hosted MCP service | Consent, resource audience, and requested MCP scopes |
+| Hosted MCP OAuth grant | Hosted MCP service | Consent, resource audience, and requested MCP scopes; hosted Mail tools also need the organization to allow the app's client id on its Security page |
 | Ed25519 node delegation | Core | One hosted request, one node, one agent, and a short expiry |
 | Third-party provider credential | Core MCP registry / Passport | Core's request to one configured external MCP server |
 
@@ -20,7 +20,7 @@ These values are not interchangeable. Website sign-in does not pair a node. A no
 
 ## Direct local or self-hosted MCP
 
-The direct endpoint is:
+The direct endpoint takes a node or paired bearer.
 
 ```text
 POST https://<node>/mcp/<agent-id>
@@ -32,23 +32,40 @@ Core checks the bearer before it reads the JSON-RPC message. For `tools/list`, t
 For a managed node selected by Desktop, the bearer can instead be the short-lived
 `userJwt` returned by `GET /api/control-plane/nodes`. Desktop also sends it as
 `x-ryu-user-jwt`; Core verifies the signature, matches the organization, and
-checks team or personal ownership before applying the route capability. This
+checks team or personal ownership before applying the route capability. Desktop
+gets the JWT with the user's Better Auth session, refreshes it before it expires,
+and keeps it in memory; it is not written into `nodes.json` as a node secret. This
 managed shortcut is not available on an unbound local or self-hosted node.
 
 Local Core creates `node-auth.token` on first boot. A local stdio bridge can read it when the target URL is loopback. A browser or another machine cannot read that file, so it uses the node pairing flow instead. Pairing approval happens on the node and can work without a control-plane account.
 
 ## Managed or organization-bound MCP
 
-The hosted endpoint is:
+The hosted endpoint takes a Better Auth OAuth token.
 
 ```text
 POST https://<ryu-service>/mcp/<node-id>/<agent-id>
 Authorization: Bearer <Better-Auth-OAuth-token>
 ```
 
-The hosted service:
+A client that asked for a sender-constrained (DPoP, RFC 9449) access token presents it under the
+`DPoP` scheme, with a fresh proof signed by the key the token is bound to:
 
-1. Validates the OAuth token, client, session, resource audience, and expiry.
+```text
+POST https://<ryu-service>/mcp/<node-id>/<agent-id>
+Authorization: DPoP <Better-Auth-OAuth-token>
+DPoP: <proof JWT for this method and URL>
+```
+
+The proof names the request method and URL, carries the hash of the token, and is accepted once.
+A DPoP-bound token sent as a bearer token is refused, as is a bearer token sent under the `DPoP`
+scheme. Such a refusal, or a refused proof, answers `401` with a `DPoP` challenge that lists the
+accepted proof algorithms, the same ones the protected-resource metadata advertises.
+
+The hosted service does the following.
+
+1. Validates the OAuth token (and, for a DPoP-bound token, its proof), client, session, resource
+   audience, and expiry.
 2. Checks organization membership, personal or team ownership, and requested scopes.
 3. Intersects the OAuth grant with the user's organization role.
 4. Signs a short-lived Ed25519 delegation bound to the exact node and agent.
@@ -56,7 +73,7 @@ The hosted service:
 
 The hosted service never forwards the original OAuth token to Core. Core verifies the delegation locally using the public key pinned during node enrollment. It also checks the node id, organization, team, agent, issuer, scope, and expiry.
 
-The Desktop node selector uses a related direct path. It asks the control plane for reachable nodes with the user's Better Auth session, receives a short-lived managed user JWT, and sends that credential to the selected organization-bound Core node. It refreshes the JWT before it expires; the JWT is kept in memory and is not written into `nodes.json` as a node secret.
+The Desktop node selector uses a related direct path with a managed user JWT. See [Direct local or self-hosted MCP](#direct-local-or-self-hosted-mcp).
 
 ## Tool execution after authentication
 
@@ -64,13 +81,18 @@ Authentication only admits the request. Core still applies the MCP method capabi
 
 The Gateway is not the node-discovery service. For model calls, Core sends traffic through the Gateway, where routing, firewall rules, budgets, billing, and audit apply. Core's MCP registry then connects to the configured external MCP server over stdio, Streamable HTTP, or legacy SSE.
 
+When Ryu screens and pins an outbound MCP destination, it connects directly to the checked addresses instead of handing destination resolution to a system HTTP proxy. Explicitly exempt destinations keep their configured transport behavior.
+
 ## Revocation and storage
 
-- Revoke a paired client from the node's Connections settings. This does not rotate the node owner's credential.
+- Revoke a paired client in the node's **Gateway → Connections** settings. This does not rotate the node owner's credential.
 - Revoke a managed node or organization membership in the control plane. Future hosted delegations stop, and existing delegations expire quickly.
 - Keep direct node tokens out of source control and MCP host prompts.
-- `ryu-mcp login` stores its user session in `~/.ryu/mcp-auth.json`. It is separate from Desktop's encrypted credential store and does not replace the node bearer used for Core calls.
+- `ryu-mcp login` stores its user session in `<data dir>/secrets/mcp-auth.json`. It is separate from Desktop's encrypted credential store and does not replace the node bearer used for Core calls.
+
+MCP Event subscriptions inherit the exact agent and verified caller from the authenticated request. Core checks the selected thread before creating a subscription and again before delivery. Callback URLs must use public HTTPS; Core rejects local/private destinations, does not follow redirects, and verifies the callback challenge before sending event data. Signing secrets are encrypted at rest.
 
 The public website MCP endpoint is a separate anonymous, read-only service. It has no account session and no node access.
 
 Continue with [MCP](/docs/extend/mcp), [MCP configuration](/docs/extend/mcp/configuration), [MCP tools](/docs/extend/mcp/tools), [authentication and pairing](/docs/security/authentication-and-pairing), and [Gateway security](/docs/gateway/security).
+

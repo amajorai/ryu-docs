@@ -1,79 +1,94 @@
 ---
 title: Context Compression
-description: Auto-compress every gateway-routed agent's context with headroom, applied as a Gateway egress transform.
+description: "How to enable headroom context compression for eligible OpenAI-format Gateway requests, which paths it covers, how it fails, and its env and gateway.toml settings."
 ---
 
-Long conversations and large tool outputs burn tokens. Ryu can compress the
-messages of **every model call** before they reach the provider - automatically,
-for every agent that routes through the Gateway - using the
-[headroom](https://github.com/chopratejas/headroom) engine (60-95% fewer tokens,
-same answers).
+The Gateway can compress the messages of eligible OpenAI-format model calls before they reach the
+provider. It uses the [headroom](https://github.com/chopratejas/headroom) engine and applies to every
+agent whose calls take that path. Results depend on workload and configuration, so measure token usage
+and answer quality on representative requests.
+
+<Callout type="warn">
+  Compression is off by default. It applies to the default OpenAI-compatible chat path when enabled.
+  Gateway routing alone does not give compression coverage for every ACP runtime or protocol, and
+  provider-native passthrough and direct-egress paths do not use this transform. Compression coverage
+  is separate from firewall and audit coverage. Check
+  [runtime routing](/docs/surfaces/desktop/engines/agent-runtimes) and test the actual request path
+  before you rely on compression.
+</Callout>
 
 ## Why it lives in the Gateway
 
-Compressing what gets sent to the model is deciding *what is shared* with the
-provider - a **Gateway** concern, not a Core one (see the Core-vs-Gateway rule in
-the architecture docs). So compression is a **swappable egress transform** on the
-Gateway pipeline, applied just before the upstream provider call. Nothing is
-hardcoded: it is one config toggle pointing at a compression service.
-
-Because the default OpenAI-compat chat path and the `ryu`, `pi`, and `codex` ACP
-agents already route their egress through the Gateway, enabling compression
-**auto-wraps all of them** - no per-agent setup, no editing each agent's config.
-This is the Ryu-native form of `headroom wrap`: one switch, every agent.
-
-<Callout type="warn">
-  Claude Code (Anthropic `/v1/messages`) and Gemini CLI run as ACP subprocesses
-  that speak non-OpenAI provider formats and currently **bypass the Gateway**, so
-  they are not yet covered. Routing them through a translating ingress is tracked
-  as a follow-up.
-</Callout>
+Compressing a request changes what is shared with the provider. That is a Gateway concern, not a
+Core one (see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)). Compression is an
+egress transform on the Gateway pipeline, applied just before the upstream provider call. The
+compression service is set by configuration, so any service that implements headroom's
+`/v1/compress` contract works.
 
 ## Enable it
 
-1. Install the headroom proxy (the minimal extra - no serena, no ML stack):
+1. Install the headroom proxy (the minimal extra, without serena or the ML stack):
 
    ```bash
    pipx install --python python3.13 "headroom-ai[proxy]"
    ```
 
-2. Turn it on for Core:
+2. Enable the [Headroom Compression](/docs/plugins/headroom) plugin. The plugin's enabled state is
+   the switch. For a headless run, `RYU_HEADROOM_ENABLED=1` seeds the default before the plugin
+   state is read:
 
    ```bash
    export RYU_HEADROOM_ENABLED=1
    ```
 
-That's it. On startup Core launches the headroom proxy (`headroom proxy`) and
-tells the Gateway to compress against it. Every gateway-routed model call now
-flows through `POST /v1/compress` before going upstream.
+On startup Core launches the headroom proxy (`headroom proxy`) and tells the Gateway to compress
+against it. Eligible OpenAI-format requests then call `POST /v1/compress` on the compression service
+before going upstream, subject to `min_messages`.
 
 ## How it works
 
-- **Core** decides *what runs*: it manages the optional `headroom proxy` process
-  (`apps/core/src/sidecar/headroom.rs`) and, when enabled, sets the Gateway's
+- **Core** decides what runs. It manages the optional `headroom proxy` process
+  (`apps/core/src/sidecar/headroom.rs`) and, when compression is enabled, sets the Gateway's
   compression env on spawn.
 - **Gateway** owns the *transform*: `apps/gateway/src/compression.rs` posts the
   request messages to the compression service and swaps in the compressed result
   before the provider call - after routing/budgets, once for the whole fallback
   chain, so routing, caching, and budgets stay intact.
-- **Fails open**: if headroom is absent, unhealthy, or slow, the Gateway leaves
-  the original messages untouched and the call proceeds normally. Enabling
-  compression can never break chat.
+- **Screened**: the text the compression service changed or added is scanned by the
+  inbound firewall and locked guardrails before the provider call, so the service
+  cannot add content the original request would have been refused for. A media
+  URL (such as an `image_url`) is not scanned inbound, so one the service moves
+  into message text counts as new text and is scanned there. A match
+  is refused with a 403 under the `block` and `sanitize` policies (see
+  [Security](/docs/gateway/security)).
+- **Fails open on your own Gateway**: if headroom is absent, unhealthy, slow, or
+  returns an unusable response, a desktop or self-hosted Gateway leaves the
+  original messages untouched and the call proceeds normally. This fallback does not guarantee unchanged answer quality or rule out other request failures.
+- **Fails closed on the hosted Gateway**: Ryu's hosted Gateway refuses the
+  request instead, with a 503 whose `error.code` is `screening_unavailable` and a
+  `Retry-After` header. Retry after the stated delay.
+- A service that answers `compressed: false` has declined to compress, which is
+  not a failure: every Gateway sends the original messages.
+
+Compression reuses the Gateway's HTTP connections across requests. The compression timeout applies to
+each request. Conversations with fewer than `min_messages` messages skip the compression service.
 
 ## Configuration
 
 | Setting | Env var | Default |
 |---|---|---|
-| Enable compression (Core) | `RYU_HEADROOM_ENABLED` | off |
+| Seed for compression on (Core) | `RYU_HEADROOM_ENABLED` | off |
 | Headroom proxy URL (Core) | `RYU_HEADROOM_URL` | `http://127.0.0.1:8787` |
 | Core-managed proxy | `RYU_HEADROOM_MANAGED` | on |
+| Headroom binary (Core) | `RYU_HEADROOM_BIN` | `headroom` on `PATH` |
 | Gateway compression toggle | `GATEWAY_COMPRESSION_ENABLED` | set by Core |
 | Gateway compression URL | `GATEWAY_COMPRESSION_URL` | set by Core |
-| Min messages before compressing | `gateway.toml [compression] min_messages` | 4 |
+| Gateway compression bearer token | `GATEWAY_COMPRESSION_TOKEN` | none |
+| Per-request timeout (ms) | `GATEWAY_COMPRESSION_TIMEOUT_MS` or `gateway.toml [compression] timeout_ms` | 4000 |
+| Min messages before compressing | `GATEWAY_COMPRESSION_MIN_MESSAGES` or `gateway.toml [compression] min_messages` | 4 |
 
-The Gateway settings are normally managed by Core, but the Gateway is
-self-contained: you can run it standalone and enable compression directly with
-`GATEWAY_COMPRESSION_ENABLED=1` + `GATEWAY_COMPRESSION_URL` pointed at any
-service that implements headroom's `/v1/compress` contract.
+Core normally manages the Gateway settings. To run the Gateway standalone, set
+`GATEWAY_COMPRESSION_ENABLED=1` and point `GATEWAY_COMPRESSION_URL` at any service that implements
+headroom's `/v1/compress` contract.
 
-Continue with [Gateway](/docs/gateway), [reliability](/docs/gateway/reliability), [routing](/docs/gateway/routing), and [Gateway tools](/docs/gateway/tools).
+See also [Reliability & Budgets](/docs/gateway/reliability) and [Routing](/docs/gateway/routing).

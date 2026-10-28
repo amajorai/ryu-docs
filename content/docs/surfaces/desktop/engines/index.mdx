@@ -1,158 +1,31 @@
 ---
-title: Engines and sidecars
+title: Engines and Sidecars
 description: How Core downloads, runs, and health-checks the engines and runtimes behind every agent.
 ---
 
-Ryu drives agents through their real runtimes. Each runtime, provider, and tool process is a
-**sidecar**: a separate process that Core downloads, checksum-verifies, installs, starts, and
-health-checks for you (`apps/core/src/sidecar/`). You never touch a terminal or a package manager.
+Each runtime, provider, and tool process that Ryu runs for an agent is a **sidecar**. A sidecar is
+a separate process that Core downloads, checksum-verifies, installs, starts, and health-checks
+(`apps/core/src/sidecar/`). You do not need a terminal or a package manager.
 
-Nothing is hardcoded. Every engine, model, and strategy is a swappable default resolved through one
-registry — environment variables and, for the subset of settings whose readers open it,
-`~/.ryu/registry.json` — never a lock. Model weights and embedding settings are environment
-variables **only**; see [Chat](/docs/surfaces/desktop/engines/chat-engines) for which is which and
-why.
+Every engine, model, and strategy is a default that you can replace. Core resolves it from
+environment variables and, for the settings whose readers open it, `~/.ryu/state/registry.json`.
+Model weights and embedding settings come from environment variables only. See
+[Defaults](/docs/reference/defaults) for each default and its override.
 
-## The lifecycle
-
-Every sidecar implements one trait with `start`, `stop`, `health_check`, and `uninstall`. The
-`SidecarManager` orchestrates them.
-
-- **Download and verify** - the download manager fetches the right asset for your platform, verifies
-  its SHA-256, retries with backoff, extracts archives, and installs atomically.
-- **Storage** - binaries go to `~/.ryu/bin/`, model weights to `~/.ryu/models/`, and per-sidecar data
-  to `~/.ryu/data/<name>/`. Installed versions are tracked in `~/.ryu/versions.json` so an up-to-date
-  binary is not re-downloaded.
-- **Startup order** - a defined boot sequence starts the installed sidecars. Voice engines are
-  deliberately not in the startup order; they start on demand.
-- **Health** - each sidecar is health-checked on an interval. Health is observable but Core does not
-  auto-restart on degradation.
-
-## Managing sidecars
-
-| Action | Endpoint |
-|---|---|
-| Install progress for all sidecars | `GET /api/catalog` |
-| Full install status | `GET /api/setup/status` |
-| Install a sidecar | `POST /api/setup/:name/install` |
-| Uninstall a sidecar | `POST /api/setup/:name/uninstall` |
-| Running status of all sidecars | `GET /api/sidecar/status` |
-| Start, stop, restart one | `POST /api/sidecar/:name/{start,stop,restart}` |
-| Start or stop all | `POST /api/sidecar/{start-all,stop-all}` |
-
-Installation and removal routes accept `dryRun=true` as a query parameter. A preview reports the
-node support, current installed state, and whether data would be removed without downloading,
-changing install status, stopping a process, or deleting files.
-
-## Per-engine resource usage
-
-Core samples how much each engine is using so the desktop can answer "what is this engine costing me
-right now". A background sampler on the `SidecarManager` refreshes per-process resident memory (RSS)
-and CPU usage every two seconds for the sidecars Core owns a child process for
-(`apps/core/src/sidecar/resources.rs`, `apps/core/src/sidecar/manager.rs`).
-
-The sampler holds one long-lived `sysinfo::System` for its whole lifetime and refreshes only the
-known sidecar PIDs, never a full process scan. This matters for CPU: `sysinfo` reports CPU usage as a
-delta since the previous refresh of that PID, so a one-shot refresh always reads `0`. Reusing the same
-`System` across ticks is why the second sample onward yields real CPU numbers.
-
-The numbers ride the existing status poll. `GET /api/sidecar/status` gains optional `pid`,
-`memory_bytes`, and `cpu_percent` fields per sidecar (`apps/core/src/sidecar/mod.rs`), each omitted
-when absent, so no new endpoint is needed.
-
-| Field | Meaning |
-|---|---|
-| `pid` | OS process id, present only when Core owns a resident child for the sidecar |
-| `memory_bytes` | Resident-set memory of that process, in bytes |
-| `cpu_percent` | CPU usage as a percentage of one core |
-
-The desktop surfaces these in the node selector's Engines block, grouped by modality
-(`apps/desktop/src/components/shell/NodeSelector.tsx`). Engines that adopt an external server, run
-serverless, or run in-process report no `pid` and render running-but-usage-omitted. Chat rows are
-status-only there: swapping Chat is a Store action, not a sidecar start/stop, so the panel shows only
-the active Chat, not the installed-but-idle alternatives.
-
-<Callout type="warn">
-`cpu_percent` uses `sysinfo`'s per-core convention, so a busy multi-threaded engine can read above
-100. The fields appear only for sidecars Core owns a PID for, and only after a Core rebuild and
-restart, since the sampler ships with the new binary.
-</Callout>
-
-## Image and video generation
-
-The `sdcpp` media engine wraps stable-diffusion.cpp for text-to-image and text/image-to-video
-(`apps/core/src/sidecar/providers/sdcpp/mod.rs`). It is a generative-media engine, so like the voice
-engines it runs **alongside** Chat rather than instead of it. It is opt-in: not in
-the startup order, installed and started from the Store.
-
-| Property | Value |
-|---|---|
-| Sidecar name | `sdcpp` |
-| Default port | `8083` |
-| Image model | SDXL base Q4_K (`sd_xl_base_1.0_0_Q4_K.gguf` + optional CLIP-L / CLIP-G / VAE) by default, or any diffusion model via `RYU_SD_MODEL` |
-| Video model | Wan2.1 T2V 1.3B (`wan2.1_t2v_1.3b-q8_0.gguf` + `umt5-xxl` encoder + Wan VAE), provisioned lazily, or via `RYU_SD_MODEL` |
-| Lifecycle | Adopt an already-running `sd-server` on the port, otherwise spawn one from `~/.ryu/bin` |
-
-The bundled defaults ship with the engine: a stable-diffusion.cpp-compatible SDXL base Q4_K model for images and Wan2.1 T2V 1.3B for video.
-The spawn command is model-kind-aware — SDXL loads with `--clip_l --clip_g --vae`, Wan with
-`--t5xxl --vae` — so each default resolves the encoder and VAE files it needs. Override either with
-`RYU_SD_MODEL`; the engine resolves the diffusion architecture from the model path (`sd`, `wan`,
-`ltx`, `ltx-video`, …) and picks the matching flags.
-
-The lifecycle mirrors whisper.cpp: if an `sd-server` is already answering on the port, Core adopts it
-and leaves it running on stop; otherwise it spawns `sd-server` with the resolved model. Diffusion
-weights take a while to load, so startup allows a generous timeout.
-
-Two data paths consume the engine (`apps/core/src/server/media.rs`):
-
-```
-POST /api/images/generate
-POST /api/video/generate
-```
-
-`POST /api/images/generate` proxies an OpenAI-style body to the engine's OpenAI-compatible
-`/v1/images/generations` endpoint and returns the upstream JSON, with image bytes as base64 in
-`data[].b64_json`. `POST /api/video/generate` proxies to the same engine's native `/sdcpp/v1/vid_gen`
-endpoint. Both forward the request body as-is, with only a sensible default merged in when absent, so
-the full sd-server parameter surface stays reachable without Core hardcoding a schema.
-
-The desktop Store surfaces `sdcpp` under the Engines tab's Image group with install, start, and stop
-(`apps/desktop/src/components/store/EnginesCatalogSection.tsx`).
-
-<Callout type="warn">
-The engine must be installed and running before these endpoints work. Image generation (SDXL base
-Q4_K) and video generation (Wan2.1 T2V 1.3B) both ship bundled defaults that provision on first use;
-the Wan video model is larger and GPU-preferred, so the first video request downloads it lazily.
-</Callout>
-
-## The categories
-
-Sidecars fall into four groups, each with its own page.
+## Engine categories
 
 <Cards>
   <DocCard href="/docs/surfaces/desktop/engines/chat-engines" />
+  <DocCard href="/docs/surfaces/desktop/engines/docker-model-runner" />
   <DocCard href="/docs/surfaces/desktop/engines/voice-engines" />
+  <DocCard href="/docs/surfaces/desktop/engines/image-engines" />
   <DocCard href="/docs/surfaces/desktop/engines/agent-runtimes" />
   <DocCard href="/docs/surfaces/desktop/engines/infrastructure" />
 </Cards>
 
-## First-run install
+## Run and tune engines
 
-On first launch Core installs a local stack so chat works immediately
-(`apps/core/src/sidecar/onboarding.rs`). Each step is non-fatal: a failure warns and never blocks
-chat.
-
-1. The llama.cpp binary.
-2. The bundled Gemma 4 chat GGUF (only if the binary installed).
-3. The whisper.cpp voice engine and its `ggml-base.en` model (download only; voice is opt-in to run).
-
-The nomic embedding model is owned by the `llamacpp-embed` sidecar, which auto-starts on first boot
-and downloads its own model. This keeps it out of the first-run stack to avoid a concurrent
-double-download.
-
-## Engine logos
-
-Marketplace and Library show the engine’s project logo when one is available. The same
-logo appears in its detail view. Engines without project artwork keep a generated icon,
-so they remain easy to distinguish. Logos are bundled with Ryu and work offline. They appear without background tiles;
-monochrome marks adapt to light and dark mode.
+<Cards>
+  <DocCard href="/docs/surfaces/desktop/engines/sidecar-lifecycle" />
+  <DocCard href="/docs/surfaces/desktop/engines/advanced-inference" />
+</Cards>

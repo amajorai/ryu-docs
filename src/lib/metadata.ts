@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 
 import {
   DEFAULT_DOCS_LOCALE,
-  DOCS_LANGUAGES,
   localizedPath,
   openGraphLocale,
 } from "@/lib/i18n";
@@ -29,14 +28,37 @@ export const siteConfig = {
   url: process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com",
 };
 
+export const RYU_ORGANIZATION_URL = "https://ryuhq.com";
+export const RYU_ORGANIZATION_ID = `${RYU_ORGANIZATION_URL}#organization`;
+
+/** The docs and website describe the same publisher across both origins. */
+export function docsIdentityNodes() {
+  return [
+    {
+      "@id": RYU_ORGANIZATION_ID,
+      "@type": "Organization",
+      name: "Ryu",
+      url: RYU_ORGANIZATION_URL,
+      sameAs: ["https://github.com/amajorai"],
+    },
+    {
+      "@id": `${siteConfig.url}/#website`,
+      "@type": "WebSite",
+      name: siteConfig.name,
+      publisher: { "@id": RYU_ORGANIZATION_ID },
+      url: siteConfig.url,
+    },
+  ];
+}
+
 export function generateMetadata(
-  locale: string = DEFAULT_DOCS_LOCALE,
+  _locale: string = DEFAULT_DOCS_LOCALE,
 ): Metadata {
-  const image = "/opengraph-image";
-  const pageUrl = localizedPath("/", locale);
-  const languages = Object.fromEntries(
-    DOCS_LANGUAGES.map((language) => [language, localizedPath("/", language)]),
-  );
+  const image = "/opengraph-image?v=7";
+  // The home content is English in every locale; localize navigation without
+  // advertising twelve identical home pages as translated search results.
+  const pageUrl = localizedPath("/", DEFAULT_DOCS_LOCALE);
+  const languages = { [DEFAULT_DOCS_LOCALE]: pageUrl };
 
   return {
     title: {
@@ -79,7 +101,7 @@ export function generateMetadata(
       description: siteConfig.description,
       url: pageUrl,
       siteName: siteConfig.name,
-      locale: openGraphLocale(locale),
+      locale: openGraphLocale(DEFAULT_DOCS_LOCALE),
       type: "website",
       images: [
         {

@@ -1,0 +1,121 @@
+---
+title: "Mail SDK Errors and Retries"
+description: "Mail error codes and their SDK error classes, send-key conflicts, and which Mail sends the SDK retries and keys with Idempotency-Key"
+tags: ["mail", "email", "errors", "idempotency", "sdk", "standalone"]
+---
+
+<Callout type="info">
+Available: hosted with a Ryu API key that has Mail scopes or a Ryu node gateway key, or self-hosted.
+</Callout>
+
+This page lists the errors the Mail client raises and how it retries sends.
+The samples use the `ryu` client from the
+[Mail SDK quickstart](/docs/standalone/sdk/mail#first-call-with-the-sdk).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## Errors
+
+The SDK asks for problem+json first, so hosted Mail answers errors as problem+json; a few
+routes answer `{ "error", "code" }` or `{ "message" }`. Self-hosted Mail
+answers `{ "error", "code"? }`. Each becomes a `RyuError` subclass with a
+stable `code`. Hosted Mail sends an `X-Request-ID` header on every response,
+so `error.requestId` holds it; quote it when you contact support. Self-hosted
+Mail sends none, so there `error.requestId` is always
+`null`; give the `code`, the `status`, and the time of the call instead.
+
+| Status and code | SDK error | Notes |
+|---|---|---|
+| `400 organization_required` | `RyuInvalidRequestError` | A personal `ryu_` key was sent without `X-Ryu-Organization`. Set `RYU_ORGANIZATION_ID` (or `organizationId`). |
+| `400 bad_request` | `RyuInvalidRequestError` | Read `error.message`. On self-hosted Mail, `email transport is not configured` means the server has no outbound transport: `error.hint` names the `RYU_SMTP_*` settings and `error.docs` links the setup steps (the `mail_send` tool result carries the same hint). `mail.status()` reports this beforehand as `sendConfigured: false`. |
+| `401 unauthenticated` | `RyuAuthenticationError` | A missing or invalid `ryu_` key, gateway key or bearer token. |
+| `403 organization_mismatch` | `RyuPermissionError` | `X-Ryu-Organization` names another organization than the organization key's own. |
+| `403 insufficient_scope` | `RyuPermissionError` | The `ryu_` key lacks the Mail scope the route needs: `mail:read` for reads, `mail:send` for sends and drafts, `mail:manage` for inboxes, domains, webhooks and deletes. |
+| `403 forbidden` | `RyuPermissionError` | For example a team or personal node credential, Mail is off for the organization, or the member a key acts for lacks the Mail permission. |
+| `404 not_found` | `RyuNotFoundError` | The inbox, message, or draft does not exist or is not visible to this key. |
+| `409` codes such as `address_taken` | `RyuConflictError` | Also the send-key conflicts below. |
+| `413 payload_too_large` | `RyuInvalidRequestError` | The message or attachments are too large. |
+| `429 send_rate_limited` | `RyuRateLimitError` | Hosted Mail refused a send burst for the inbox or account. Retried after `Retry-After`. |
+| `429 rate_limited` | `RyuRateLimitError` | Any other `429`. Retried after `Retry-After`. |
+| `503 service_unavailable` | `RyuUnavailableError` | Hosted Mail is not configured on this deployment. |
+
+Some failures happen before any request. A missing key or self-hosted URL
+gives a `RyuConfigurationError` that names the variable. `mail.send()` also
+raises `inbox_not_found` when no visible inbox has the `from` address,
+`conflicting_content` when both `html` and `react` are set, and
+`react_renderer_missing` as described in
+[First call with the SDK](/docs/standalone/sdk/mail#first-call-with-the-sdk). Every method fails with `invalid_id`
+(`RyuInvalidRequestError`) when an inbox, message, draft, or other id
+argument is not 1 to 128 letters, digits, `_`, and `-`.
+
+Mail reports send-key conflicts only as a message. The SDK gives them a code:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `idempotency_in_progress` | `409` | The first request with this key is still running. The SDK retries it with the same key; if retries run out, `error.retryable` is `true` and you can retry the same call shortly. |
+| `idempotency_key_reused` | `409` | The key was already used for a different request. Use a new key. |
+| `outcome_unknown` | `409`, `500`, or `502` | The message may already have gone out. Never retried; `error.retryable` is `false`. |
+
+After `outcome_unknown`, check the inbox's sent messages before you send again
+with a new key.
+
+## Idempotency and retries
+
+The SDK adds an `Idempotency-Key` (a UUID) to the sends the server
+deduplicates, and reuses it on every retry of that call. Neither deployment
+requires the key. Hosted Mail deduplicates every route in this table;
+self-hosted Mail has no send approval or agent routes, so the last three rows
+apply to hosted Mail only:
+
+| Method | Path |
+|---|---|
+| `POST` | `/api/mail/inboxes/{id}/send` |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/reply` |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/reply-all` |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/forward` |
+| `POST` | `/api/mail/inboxes/{id}/drafts/{draftId}/send` |
+| `POST` | `/api/mail/drafts/{id}/approve` |
+| `POST` | `/api/mail/agents/{agentId}/send` |
+| `POST` | `/api/mail/agents/{agentId}/messages/{messageId}/reply` |
+
+To choose the key yourself, pass it as the second argument of `mail.send()`,
+or bind it for one call:
+
+```ts tab="Node"
+await ryu.mail
+  .with({ idempotencyKey: "ticket-1234-reply" })
+  .messages.reply("<inbox-id>", "<message-id>", { text: "Thanks, on it." });
+```
+
+```python tab="Python"
+ryu.mail.with_options(idempotency_key="ticket-1234-reply").messages.reply(
+    "<inbox-id>", "<message-id>", {"text": "Thanks, on it."}
+)
+```
+
+Reads and the sends in this table are retried on network errors, timeouts, and
+`5xx` responses other than `outcome_unknown`; because the key is reused, the server answers from the first
+attempt, or with a `409`, instead of sending twice. Mail does not mark those
+answers as replays, so `meta.replayed` is always `false` for Mail. Other writes, such as
+creating an inbox, are not retried on those failures. A `429` is retried for
+any method when the server says how long to wait. The defaults are two retries
+and a 60-second timeout until response headers arrive; change them with
+`maxRetries` and `timeoutMs`.
+
+The SDK never sends Mail credentials to another origin. When an attachment
+download answers with a signed storage URL, that URL is fetched without the
+`ryu_` key, gateway key, bearer token or `X-Ryu-Organization`.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/mail" />
+  <DocCard href="/docs/standalone/sdk/mail-resources" />
+  <DocCard href="/docs/standalone/mail-api" />
+</Cards>

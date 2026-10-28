@@ -1,0 +1,82 @@
+---
+title: "Idempotency Keys"
+description: "Retry Admin API writes safely with the Idempotency-Key header: which routes accept it, how keys are matched and stored, and the errors a reused key returns."
+---
+
+An idempotency key lets a client retry a write without doing it twice. Send the same
+`Idempotency-Key` with the same request, and the hosted Ryu API returns the stored result of the
+first attempt instead of running the write again. The header follows
+[draft-ietf-httpapi-idempotency-key-header](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/)
+(revision 07). For the error format, see [Errors](/docs/reference/api/errors).
+
+## Routes
+
+The header applies to `POST` and `PATCH` requests under
+`https://api.ryuhq.com/api/v1/organizations/{orgId}/` (the organization Admin API):
+
+| Method | Path |
+|---|---|
+| `POST` | `/invites` |
+| `POST` | `/teams` |
+| `POST` | `/projects` |
+| `PATCH` | `/projects/{projectId}` |
+| `POST` | `/projects/{projectId}/archive` |
+| `POST` | `/projects/{projectId}/unarchive` |
+| `PATCH` | `/members/{userId}` |
+
+The request must also carry an API key in `Authorization` or `x-api-key`. Other routes and
+methods ignore the header. The [OpenAPI document](https://ryuhq.com/openapi/v1.json) marks the
+operations that accept it.
+
+## Send a key
+
+```bash
+curl -X POST "https://api.ryuhq.com/api/v1/organizations/$ORG_ID/teams" \
+  -H "Authorization: Bearer $RYU_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -H 'Idempotency-Key: "5f0c2c6e-6c1f-4a8e-9a54-2d4f0f0d7a11"' \
+  -d '{"name":"Platform"}'
+```
+
+The value is a Structured Field string (a quoted string). A bare token without quotes is also
+accepted. A key is 1 to 255 printable ASCII characters. Use a new random value, such as a UUID,
+for each distinct write.
+
+## Matching
+
+- The API key is authenticated before anything is stored or replayed, exactly as the route
+  authenticates it. A request whose key is missing, revoked, expired, or not allowed gets the
+  route's own refusal (for example `401` for a revoked key), never a stored response.
+- A key is scoped to the authenticated API key's id, the HTTP method, and the path. The same
+  `Idempotency-Key` sent with another API key starts a new record.
+- When a request carries both `x-api-key` and `Authorization: Bearer`, the `x-api-key` value is
+  the credential, as it is for the route.
+- The request fingerprint is the query string, the `Content-Type`, and the body. Bodies larger
+  than 1 MB are not tracked.
+
+## Results
+
+| Situation | Response |
+|---|---|
+| First request with the key | The route runs normally. |
+| Same key, same request, first attempt finished | The stored response, with `Idempotent-Replayed: true`. |
+| Same key, different request | `422` `idempotency_key_reused` |
+| Same key while the first attempt is still running | `409` `idempotency_in_progress` with `Retry-After: 1` |
+| Key that is not valid | `400` `idempotency_key_invalid` |
+
+Only results that do not change on retry are stored: `2xx`, `400`, `404`, `409`, and `422` with a
+JSON or empty body of at most 64 KB. Authentication, authorization, rate-limit, and server
+failures are not stored, so a retry with the same key runs the request again.
+
+## Retention
+
+A stored result is kept for 24 hours after the first attempt. After that the key can be used
+again. If a first attempt stops responding, another request can take over the key after
+60 seconds.
+
+<Callout type="info">
+A replayed response is returned only to the same API key that produced it, while that key is
+still valid. Revoking an API key does not delete the results it already stored, but they can no
+longer be replayed: requests with the revoked key get `401`. The stored results expire on the
+24-hour schedule.
+</Callout>

@@ -3,33 +3,31 @@ title: "Build a Desktop Companion"
 description: "Contribute UI into the desktop app from a plugin, in a sandboxed, grant-gated iframe."
 ---
 
-A **Companion** is a plugin surface that renders its own UI inside the desktop app: a sidebar
-panel, an overlay, or a settings pane. Because plugin code is untrusted, the desktop runs it in a
-sandboxed iframe and lets it reach Core only through a capability-gated RPC bridge. This guide
-walks the contribution path end to end, using the built-in example plugin
-(`apps/desktop/src/contributions/host/example-plugin.ts`) as the worked example.
+A **Companion** is a plugin surface that renders its own UI inside Desktop: a sidebar panel, an
+overlay, or a settings pane. Plugin code is untrusted, so Desktop runs it in a sandboxed iframe.
+The iframe reaches Core only through a capability-gated RPC bridge. The steps below use the
+built-in example plugin (`packages/app-host/src/example-plugin.ts`) as the worked example.
 
 `Companion` is one of the eight `RunnableKind` variants
-(`apps/core/src/runnable/mod.rs`), so a Companion is declared in a `manifest.json` manifest like any
+(`crates/core/kernel-contracts/src/runnable.rs`), so a Companion is declared in a `manifest.json` manifest like any
 other Runnable. For the manifest schema and grant strings, see
 [the manifest.json manifest reference](/docs/extend/develop/extensions/plugin-json-manifest).
 
 <Callout type="warn">
-The desktop extension host's RPC dispatch, handshake, and companion document policy are covered by
-unit tests plus Chromium certificates (`e2e/companion-host.spec.ts` and
-`e2e/artifact-csp.spec.ts`). Provider accounts, node permissions, and your own sidecar still need
-an environment-specific end-to-end check.
+Unit tests and Chromium end-to-end tests cover the Desktop extension host's RPC dispatch,
+handshake, and Companion document policy. Provider accounts, node permissions, and your own sidecar
+still need an end-to-end check in your environment.
 </Callout>
 
 ## The three-tier UI model
 
-Plugin UIs in Ryu follow a three-tier model, each with different trust and capability levels:
+Plugin UIs use three tiers. Each tier has a different trust level and capability set:
 
 | Tier | Trust level | What it can do | Example |
 |---|---|---|---|
-| **Widget** (in-chat) | Lowest — sandboxed iframe, null origin | Render data from a tool call; call companion tools via `callTool` through the host | Checklist, chart, data grid |
-| **Companion** (sidebar/overlay) | Medium — sandboxed iframe, capability-gated RPC | Read agent lists, call Core APIs through the gated bridge | Settings panel, extension page |
-| **Full-page app** | Highest — iframe with host bridge | Deep Core integration via the RPC bridge; the host holds the node token | Extension pages, whiteboard |
+| **Widget** (in-chat) | Lowest - sandboxed iframe, null origin | Render data from a tool call; call companion tools via `callTool` through the host | Checklist, chart, data grid |
+| **Companion** (sidebar/overlay) | Medium - sandboxed iframe, capability-gated RPC | Read agent lists, call Core APIs through the gated bridge | Settings panel, extension page |
+| **Full-page app** | Highest - iframe with host bridge | Deep Core integration via the RPC bridge; the host holds the node token | Extension pages, whiteboard |
 
 All three tiers share the same security model: the iframe is null-origin, the host is the single
 trusted proxy, and every RPC method is gated by a declared capability. The difference is the surface
@@ -49,16 +47,14 @@ maintain state, subscribe to resource changes, and call multiple Core APIs.
 
 ### Full-page app tier
 
-Full-page apps (also called "extension pages") render in the desktop's main content area. They
-use the same ExtensionHost iframe and RPC bridge, but can present a richer UI since they have the
-full page to work with. The host routes their RPC calls through the same capability-gated bridge.
+Full-page apps (also called "extension pages") render in the Desktop main content area. They use
+the same `ExtensionHost` iframe and capability-gated RPC bridge, with the full page for their UI.
 
 ## The security model
 
 The host renders your plugin in an `<iframe sandbox="allow-scripts">` **without**
 `allow-same-origin`, so the frame runs at a **null origin**
-(`apps/desktop/src/contributions/host/ExtensionHost.tsx`). That has three consequences your plugin
-must design around:
+(`packages/app-host/src/ExtensionHost.tsx`). Design your plugin around these consequences:
 
 - The frame cannot read the parent DOM, cannot touch app storage, and does **not** receive
   `window.__TAURI__`. Tauri injects IPC into the app's own webview, never into a null-origin
@@ -71,6 +67,13 @@ must design around:
 - Full-HTML companions and model-generated artifact documents receive their CSP and bridge shell
   before any app-controlled HTML is parsed, including scripts placed before a `<head>` element.
   Keep the frame's `connect-src 'none'` policy; direct network access is not a companion API.
+
+There is one narrow addition for client-side form handlers: compiled-in first-party full-HTML
+Companions may receive `allow-forms` when their host-built CSP contains both
+`connect-src 'none'` and `form-action 'none'`. This allows a React or browser submit handler to
+run, while the CSP still blocks network access and native form navigation or POSTs. Third-party
+plugin frames, widgets, and module bundles keep the base `allow-scripts` sandbox without
+`allow-forms`.
 
 ```mermaid
 sequenceDiagram
@@ -90,8 +93,8 @@ sequenceDiagram
 <Callout type="info">
 Because the frame is null-origin, `event.origin` is the literal string `"null"` and is useless as
 an auth boundary - any null-origin context matches it. The real identity check is
-`event.source === iframe.contentWindow` plus the host-generated nonce. Do not "harden" this with an
-origin allowlist; it would be security theatre here.
+`event.source === iframe.contentWindow` plus the host-generated nonce. An origin allowlist adds no
+protection here.
 </Callout>
 
 ## Step 1 - Announce readiness from your frame
@@ -130,7 +133,7 @@ otherwise force on every message.
 ## Step 3 - Call Core over the gated bridge
 
 Send a request envelope over the port and correlate the reply by `id`. The envelope shape is
-defined in `apps/desktop/src/contributions/host/rpc.ts`:
+defined in `packages/app-host/src/rpc.ts`. A minimal client looks like this:
 
 ```js
 let nextId = 1;
@@ -170,118 +173,52 @@ envelope is dropped before it reaches dispatch.
 
 ## Capabilities
 
-Every callable method is mapped to a required capability in `METHOD_CAPABILITY` (`rpc.ts`). A
-method that is not in that map is **unknown** and always rejected (never default-allow).
+Every callable method maps to a required capability in `METHOD_CAPABILITY` (`rpc.ts`). The map is
+derived from the host API contract (`crates/core/kernel-contracts/schemas/host-api.json`). A method
+that is not in the map is **unknown** and always rejected. There is no default-allow path.
 
-| Method | Capability | Result |
-|---|---|---|
-| `core.listAgents` | `core.listAgents` | The agents on the active node |
-| `catalog.snapshot` | `core.listAgents` | The shared provider, model, agent, app, and hook catalog |
-| `catalog.models` | `core.listAgents` | Server-side model discovery for one provider lane |
-| `model.complete` | `model.complete` | One Gateway-governed model completion |
-| `agent.run` | `agent.run` | One bounded, Core-mediated agent task |
+| Method | Capability | Manifest grant | Result |
+|---|---|---|---|
+| `core.listAgents` | `core.listAgents` | `core:list_agents` | The agents on the active node |
+| `catalog.snapshot` | `core.listAgents` | `core:list_agents` | The shared provider, model, agent, app, and hook catalog |
+| `catalog.models` | `core.listAgents` | `core:list_agents` | Server-side model discovery for one provider lane |
+| `subscriptions.list` | `subscriptions.read` | `subscriptions:read` | Each subscription provider with its saved accounts and their usage |
+| `subscriptions.usage` | `subscriptions.read` | `subscriptions:read` | The usage reading for one saved account of one provider |
+| `model.complete` | `model.complete` | `hook:side-model` | One Gateway-governed model completion |
+| `agent.run` | `agent.run` | `hook:run-agent` | One bounded, Core-mediated agent task |
+| `media.image` | `media.generate` | `media:generate` | Generated or edited images as `data:` URLs |
+| `media.video` | `media.generate` | `media:generate` | Generated clips as `{ url, mediaType }` with `data:` URLs |
+| `media.audio` | `media.generate` | `media:generate` | Generated music or sound effects as `{ url, mediaType }` |
+| `ui.openExternal` | `ui.displayMode` | none (local host capability) | Opens an HTTP(S) URL through the trusted host |
+| `assistant.publishContext`, `assistant.clearContext` | `assistant.context` | `assistant:context` | Replace or clear this app's context chips in the Ask Ryu assistant |
+| `assistant.registerSurface`, `assistant.clearSurface` | `assistant.context` | `assistant:context` | Lend the Ask Ryu assistant this page's label, instructions, starter prompts, and optional `thread` (one conversation per topic), or hand it back |
+| `assistant.open` | `assistant.context` | `assistant:context` | Show the Ask Ryu assistant, optionally asking a question attributed to the app |
 
-### App-owned HTTP reads
+The app's approved `hook:run-agent` grant does not replace the signed-in caller's `agent.run`
+permission. Core resolves an omitted or routed agent id, then checks permission for that concrete
+agent before dispatching the task.
 
-With the `app:http` grant, `window.ryu.app.request({ path: "/status" })` reads from
-your app's own sidecar through the trusted host. The method defaults to `GET`.
-The desktop host aborts pending GET requests when the companion document closes
-or reloads, including any startup retry wait. Switching to another tab while the
-document remains mounted does not cancel the read. Closing the document does not
-roll back writes that have already started.
+A streamed `agent.run` follows the same grant rule as `host.runAgent`. With `hook:run-agent`
+alone, the agent is **read-only**: it is offered only tools annotated `readOnlyHint: true`, gets
+no client or Composio actions, and must run on a Core-governed model route. An agent whose runtime
+executes its own tools (for example an ACP coding agent) is refused. Agents that can edit files
+or run commands need `hook:run-agent:write` as well.
 
-### App-owned realtime rooms
+The [media, HTTP, and navigation reference](/docs/extend/develop/extensions/desktop-companion-capabilities)
+covers `media.*`, app-owned HTTP reads, and `ui.openExternal`. The
+[runtime catalog and resources reference](/docs/extend/develop/extensions/desktop-companion-runtime)
+covers `catalog.*`, speech generation, `subscriptions.*`, and realtime app resources.
 
-An app that needs a live room may request the `app:realtime` capability and use the typed
-`window.ryu.tokenTable` bridge. `connect({ roomId })` returns the room id, access level, member id,
-and initial presence; the returned handle exposes `publish`, `publishPresence`, and `close`, while
-callbacks receive named events, presence snapshots, close notifications, and errors. The host
-keeps the opaque connection handle, node token, and realtime credentials out of the null-origin
-frame. The host also bounds queued events and coalesces replaceable presence snapshots, so a
-stalled companion is closed instead of retaining an unbounded stream.
+## Reference implementation
 
-Unknown methods (not in the capability map) are always rejected — there is no default-allow path.
-
-## The shared runtime catalog
-
-Apps that need a model, provider, or agent choice should consume the same Ryu catalog instead of
-calling a provider API or building a private list. Declare the read-only `core:list_agents` grant,
-then read the catalog through the host bridge:
-
-```ts
-const catalog = await window.ryu.catalog.snapshot();
-
-for (const provider of catalog.providers) {
-  console.log(provider.label, provider.authKind, provider.suggestedModels);
-}
-
-const liveModels = await window.ryu.catalog.models({ providerId: "openai" });
-```
-
-The projection includes provider authentication kind (`subscription`, `api-key`, or another
-host-defined value), configured/managed state, routing hints, model suggestions,
-agents, enabled app summaries, and hook/event declarations with enabled state. Providers whose
-models are discovered dynamically still appear as provider lanes even when their suggestion list
-is empty; `catalog.models` asks Core to discover that lane server-side and returns only model ids
-and display names. It never includes API keys, OAuth tokens, provider endpoints, hook code, or
-plugin grants, provider account identifiers, account labels, or account timestamps.
-The shared Ryu model/agent picker consumes
-this projection and returns a controlled selection value; it does not change provider settings.
-
-Valid plugins held back by an unmet host-version floor also appear as `compatible: false` metadata
-with disabled hook/event rows. They are discoverable for explanation, but never runnable until the
-host can satisfy their declared floor.
-
-Execution remains a separate decision. `model.complete` sends a model intent through Ryu's normal
-Core/Gateway route. `agent.run` asks Core to run a bounded agent and is the lane that can preserve
-an authorized native agent session. BYOK and managed providers are resolved behind Core/Gateway;
-subscription-preserving passthrough is not a URL an app can call. It remains a loopback-only,
-Core-controlled agent transport as described in [the Gateway route guide](/docs/gateway/loopback-routes).
-
-The catalog also exposes safe metadata about enabled apps and hooks so a shared picker or workflow
-surface can discover the ecosystem. Hook execution stays ownership-bound: an app can run its own
-declared hook when separately granted, and an app event can be emitted only by its declaring app.
-The catalog does not turn one app into a caller for another app's code or secrets.
-
-## Realtime app resources
-
-Apps that edit shared resources can use the generic application-room bridge instead of polling. Add
-`app:realtime` to the manifest's `permission_grants`, then join a room whose id is stable for that
-resource. The trusted host owns the node token, user identity, and WebSocket; the sandbox receives
-only the opaque `window.ryu.realtime` connection.
-
-The `@ryu/app-host/realtime` helper keeps your governed API authoritative. A realtime event tells
-peers to refetch, suppresses the exact sender's echo, and automatically refetches after a lag signal:
-
-```tsx
-import { openRealtimeResource } from "@ryu/app-host/realtime";
-
-const channel = await openRealtimeResource({
-  roomId: documentId,
-  onChanged: () => loadDocument(documentId),
-  onPresence: (presence) => showCollaborator(presence),
-});
-
-await saveDocument(documentId, nextDocument);
-await channel.publishChanged();
-```
-
-Call `channel.close()` when the resource unmounts. Use `publishPresence()` only for ephemeral state
-such as the active selection or pointer; durable state still belongs in your app API. Canvas,
-Whiteboard, Workflows, and Dashboards use this same contract.
-
-## Try it
-
-The example plugin runs live in the desktop today. Open **Extensions**
-(`apps/desktop/src/pages/ExtensionsPage.tsx`): the panel at the top is the example plugin running
-in its sandboxed null-origin iframe. Click **List agents** to watch a real `core.listAgents` call
-travel over the gated bridge and render the result.
-
-<TryInRyu page="extensions" />
+`packages/app-host/src/example-plugin.ts` is a complete Companion document. It runs the handshake,
+accepts the port, and calls `core.listAgents` from a **List agents** button.
 
 ## Next steps
 
 <Cards>
+  <DocCard href="/docs/extend/develop/extensions/desktop-companion-capabilities" />
+  <DocCard href="/docs/extend/develop/extensions/desktop-companion-runtime" />
   <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
   <DocCard href="/docs/extend/develop/extensions/typescript-sdk" />
   <DocCard href="/docs/core/app-manifest-lifecycle" />

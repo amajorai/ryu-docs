@@ -1,0 +1,180 @@
+---
+title: "Mail SDK Resources"
+description: "The ryu.mail resource namespaces, list limits, realtime sockets, and inbox iteration in @ryuhq/services and ryu_sdk.services"
+tags: ["mail", "email", "sdk", "realtime", "standalone"]
+---
+
+<Callout type="info">
+Available: hosted with a Ryu API key that has Mail scopes or a Ryu node gateway key, or self-hosted.
+</Callout>
+
+This page lists every `ryu.mail` method beyond the first send. The samples
+use the `ryu` client and the variables from the
+[Mail SDK quickstart](/docs/standalone/sdk/mail#first-call-with-the-sdk).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## Resource namespaces
+
+Everything beyond `ryu.mail.send()` is grouped by resource, the same way as
+the other `ryu.*` namespaces. Each resource has `list`, `get`, `create`, `update`, and `delete`
+where Mail supports them, plus its own verbs:
+
+| Namespace | Methods |
+|---|---|
+| `ryu.mail.inboxes` | `list`, `get`, `create`, `update`, `delete`, `rotateSecret`, `checkAddress`, `changeAddress`, `getForAgent`, `ensureForAgent` |
+| `ryu.mail.messages` | `list`, `iterate`, `search`, `get`, `update`, `delete`, `send`, `reply`, `replyAll`, `forward`, `downloadRaw`, `downloadAttachment` |
+| `ryu.mail.threads` | `list`, `get`, `update`, `delete` |
+| `ryu.mail.drafts` | `list`, `get`, `create`, `update`, `delete`, `send` |
+| `ryu.mail.webhooks` | `list`, `get`, `create`, `update`, `delete`, `rotateSecret`, `headers.list`, `headers.update`, `deliveries.list` |
+| `ryu.mail.events` | `list` |
+| `ryu.mail.pods` | `list`, `get`, `create`, `delete` |
+| `ryu.mail.domains` | `list`, `get`, `create`, `update`, `delete`, `verify` |
+| `ryu.mail.lists` | `entries`, `add`, `remove` (allow and block list entries) |
+
+`drafts.list`, `events.list` and `webhooks.deliveries.list` take an optional
+`limit`, the most items to return. It must be a positive integer: the SDK
+refuses `0`, a negative number, a fraction, `NaN` or a boolean with
+`invalid_limit` before it sends anything, in Node and Python alike. These
+routes have no cursor, so each call returns one page, newest first, and there
+is no `iterate`; only `messages.iterate` pages through a list. The server caps
+a larger `limit` - drafts at 200 (default 50); events and deliveries at 200 on
+hosted Mail (defaults 50 and 100) and at 1000 on self-hosted Mail (default 100).
+
+`events.list` lists one inbox's events when you pass an inbox id, or every
+inbox's when you pass none (`undefined` in Node, `None` in Python). An empty
+string is refused with `invalid_id`. `eventType` is sent only for the
+every-inbox list, because the inbox route has no event-type filter, and only
+hosted Mail applies it: self-hosted Mail ignores it and returns every type.
+
+```ts tab="Node"
+const drafts = await ryu.mail.drafts.list(inboxId, { limit: 20 });
+const events = await ryu.mail.events.list(undefined, "message.received", { limit: 100 });
+const deliveries = await ryu.mail.webhooks.deliveries.list(webhookId, { limit: 10 });
+```
+
+```python tab="Python"
+drafts = ryu.mail.drafts.list(inbox_id, limit=20)
+events = ryu.mail.events.list(event_type="message.received", limit=100)
+deliveries = ryu.mail.webhooks.deliveries.list(webhook_id, limit=10)
+```
+
+Only service-level calls stay at the top: `ryu.mail.send()`, `ryu.mail.status()`,
+and the realtime calls `ryu.mail.connectRealtime()`,
+`ryu.mail.connectRealtimeWithTicket()` and `ryu.mail.createRealtimeTicket()`.
+`ryu.mail.messages.send(inboxId, input, idempotencyKey?)`
+sends from an inbox id exactly as the `@ryuhq/client` `MailAPI.send` does:
+
+```ts tab="Node"
+const inboxes = await ryu.mail.inboxes.list();
+const inbox = inboxes.data?.[0];
+if (inbox) {
+  await ryu.mail.messages.send(inbox.id, {
+    to: ["person@example.com"],
+    subject: "Hi",
+    text: "Hello",
+  });
+}
+```
+
+```python tab="Python"
+inboxes = ryu.mail.inboxes.list()
+inbox = inboxes.data[0] if inboxes.data else None
+if inbox:
+    ryu.mail.messages.send(inbox["id"], {"to": ["person@example.com"], "subject": "Hi", "text": "Hello"})
+```
+
+### Realtime events
+
+With hosted Mail, a node gateway key (`rgw_`) or a `ryu_` key with
+`mail:read`, open the socket with `connectRealtimeWithTicket()`. It mints a
+one-use ticket with your key (`POST /api/mail/realtime/tickets`), then connects to
+`/api/mail/realtime`, offering `ryu-mail.v1` and `ryu-ticket.<ticket>` in the
+`Sec-WebSocket-Protocol` header. Neither the key nor the ticket goes in the
+URL. A ticket is valid for 30 seconds and opens one socket. Hosted Mail closes a
+socket with code `4001` after 15 minutes, and within about a minute of the key
+being revoked or losing `mail:read` (see
+[Hosted Mail realtime](/docs/standalone/mail-api-realtime#hosted-mail-realtime)). Call
+`connectRealtimeWithTicket()` again to reconnect, and replay any gap with
+`ryu.mail.events.list()`.
+
+`connectRealtimeWithTicket()` uses the runtime's global `WebSocket` (browsers,
+Bun, Deno and Node 22 or later). On older Node, pass a constructor such as the
+`ws` package's as the third argument's `WebSocket` option. Without either, the
+call throws a `RyuConfigurationError` with code
+`realtime_websocket_unavailable` before it mints a ticket.
+`createRealtimeTicket()` returns `ticket`, `expiresAt`, `expiresIn`, `path`,
+`protocols` and the absolute socket `url`, in both SDKs, for opening the socket
+with any WebSocket library.
+
+```ts tab="Node"
+const ryu = new Ryu(); // throw mode: the call resolves to the WebSocket
+const socket = await ryu.mail.connectRealtimeWithTicket(
+  (event) => console.info(event.eventType, event.inboxId),
+  { eventTypes: ["message.received"] },
+);
+socket.addEventListener("close", (event) => {
+  if (event.code === 4001) {
+    // Reconnect with a new ticket.
+  }
+});
+
+// Node 18 or 20 has no global WebSocket; pass one, e.g. from the ws package:
+//   import WebSocket from "ws";
+//   await ryu.mail.connectRealtimeWithTicket(onEvent, undefined, { WebSocket });
+```
+
+```python tab="Python"
+# The Python client opens no WebSocket: it mints the ticket and hands you the
+# URL and subprotocols for any WebSocket library.
+ryu = Ryu()
+ticket = ryu.mail.create_realtime_ticket()
+# e.g. websockets.connect(ticket["url"], subprotocols=ticket["protocols"])
+```
+
+With a node gateway key, the socket carries no events from another node's agent
+inboxes, as `events.list()` does. `connectRealtime()` is for a self-hosted Mail
+server. There, the token travels in the `Sec-WebSocket-Protocol` header, never
+in the URL, so it must be a hex or URL-safe value. With hosted Mail,
+`connectRealtime()` throws a `RyuConfigurationError` with code
+`realtime_unavailable` and points at `connectRealtimeWithTicket()`. Self-hosted
+Mail has no tickets, so the two ticket calls fail with code
+`realtime_ticket_unavailable`. Polling `ryu.mail.events.list()` and Mail webhooks
+work with both deployments.
+
+The flat `@ryuhq/client` names, such as `listInboxes`, `getMessage`, and
+`sendDraft`, and the earlier `sendFromInbox` still work and send the same
+request. They are deprecated: your editor shows the resource method to use
+instead.
+
+To read a whole inbox, newest first, use `messages.iterate()`.
+
+```ts tab="Node"
+for await (const message of ryu.mail.messages.iterate("<inbox-id>", { limit: 100 })) {
+  console.log(message.createdAt, message.subject);
+}
+```
+
+```python tab="Python"
+for message in ryu.mail.messages.iterate("<inbox-id>", limit=100):
+    print(message.get("createdAt"), message.get("subject"))
+```
+
+Mail lists have no cursor, so the iterator asks for messages created before
+the last one it saw and drops repeats by id. When more messages share one
+timestamp than fit on a page, the ones past the page end can be skipped.
+Iterators always throw a `RyuError` on failure, also in object mode.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/mail" />
+  <DocCard href="/docs/standalone/sdk/mail-errors" />
+  <DocCard href="/docs/standalone/mail-api" />
+</Cards>

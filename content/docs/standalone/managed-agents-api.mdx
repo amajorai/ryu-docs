@@ -1,0 +1,188 @@
+---
+title: "Ryu Managed Agents API"
+description: "Find every hosted Managed Agents HTTP route, its rate limits, and its error codes"
+tags: ["managed-agents", "api", "standalone"]
+---
+
+This reference is for backend developers who call the hosted Ryu Managed
+Agents API. The API is a versioned HTTP contract on the Ryu control plane. Every path on this page is relative to `/api/v1/managed-agents`. The
+contract version is `ryu.managed-agents.v1`. For the concepts behind agents,
+environments, and sessions, see [Ryu Managed Agents](/docs/standalone/managed-agents).
+
+JSON bodies use camelCase field names. Timestamps are RFC 3339 UTC strings with
+milliseconds, such as `2026-10-10T12:00:00.000Z`. Money is an integer number of
+micro-USD in fields that end in `MicroUsd`. Ids are opaque strings with a type
+prefix, such as `magt_` for agents and `msess_` for sessions. Do not parse them.
+
+## Related references
+
+| Topic | Page |
+|---|---|
+| API keys, the `X-Ryu-Organization` header, the request and error envelope, `Idempotency-Key`, and pagination | [Managed Agents API Requests](/docs/standalone/managed-agents-api-requests) |
+| What each write route does, environment `config` defaults, and size and count limits | [Managed Agents API Resources](/docs/standalone/managed-agents-api-resources) |
+| `curl` examples and the `@ryuhq/client` TypeScript client | [Managed Agents API Examples](/docs/standalone/managed-agents-api-examples) |
+
+## Rate limits
+
+Three limits apply before a request reaches its resource. A throttled request
+always gets `429 rate_limited` with `Retry-After`, never `401`.
+
+| Limit | Applies to | Value |
+|---|---|---|
+| Per API key | Every request made with an API key | 600 requests by default. The count resets only after the key sends no request for 60 seconds, as the next paragraph explains. A key created with its own rate-limit fields uses those values. A key keeps the limit that was stored when it was created, so create a new key if an older key is throttled sooner. |
+| Per organization API key | Organization API keys with their own `rpm` or spend cap | The values set for that key. See [Spend limits](/docs/billing/usage-limits). An exceeded `stop` spend cap gets `402 api_key_spend_cap_reached`. |
+| Per organization | Agent, environment, and session write routes, for console sessions and both key types | 600 writes per organization per minute. Credential writes are not counted. |
+
+The per-key limit does not reset every minute. Each request that is not
+throttled adds one to the key's count and starts a new 60-second wait. The
+count goes back to zero only when a full wait ends with no request from the
+key. A key that sends at least one request every 60 seconds is therefore
+throttled after its 600th request, even at a low rate. A throttled request does
+not start a new wait. Its `Retry-After` value is the time left in the current
+wait, and the next request after that time starts a new count. A long-running
+integration that polls or reconnects without a pause gets this `429` from time
+to time, so handle it by waiting for `Retry-After`. To send fewer requests,
+follow a session with one stream as shown in
+[Managed Agents events and streams](/docs/standalone/managed-agents-events)
+instead of polling the event list.
+
+Volume quotas, such as queued inputs per session or sessions created per hour,
+also return `429 rate_limited`. In that case `details.limit` names the quota.
+A `429` from the per-organization write limit, sessions created per hour, or
+user event bytes per day also carries the IETF `RateLimit-Policy` and
+`RateLimit` headers, named after `details.limit`, as in this example.
+
+```text
+Retry-After: 42
+RateLimit-Policy: "writesPerOrgPerMinute";q=600;w=60
+RateLimit: "writesPerOrgPerMinute";r=0;t=42
+```
+
+`q` is the window's quota, `w` its length in seconds, `r` what is left, and `t`
+the seconds until it resets, the same as `Retry-After`. For
+`userEventBytesPerOrgPerDay`, `q` and `r` count bytes, and the policy says so
+with `qu="content-bytes"`. A refused large append can leave `r` above zero, so a
+smaller append may still fit before the reset. `RateLimit` is left out when the
+remaining amount cannot be read.
+
+## Endpoint surface
+
+The **API key scopes** column applies to API keys. The **Member permission**
+column applies to people, through a personal API key or a console session. A
+personal API key needs both. The **Retry** column is **Key** for routes that
+accept `Idempotency-Key` (see
+[idempotency](/docs/standalone/managed-agents-api-requests#idempotency)), **Safe** for routes that you can repeat, **Read** for
+read routes, and **No** for routes that are neither.
+
+| Method | Path | API key scopes | Member permission | Retry | Body limit | Success |
+|---|---|---|---|---|---|---|
+| `POST` | `/agents` | `chat:write` | `agent.run` | Key | 512 KiB | `201` `ManagedAgent` |
+| `GET` | `/agents` | `agents:read` | `agent.view` | Read | None | `200` list of `ManagedAgent` |
+| `GET` | `/agents/{agentId}` | `agents:read` | `agent.view` | Read | None | `200` `ManagedAgent` |
+| `PATCH` | `/agents/{agentId}` | `chat:write`; an organization key only on agents it created | Creator `agent.run`, others `agent.edit` | Key | 512 KiB | `200` `ManagedAgent` |
+| `POST` | `/agents/{agentId}/archive` | `chat:write`; an organization key only on agents it created | Creator `agent.run`, others `agent.delete` | Safe | 1 KiB | `200` `ManagedAgent` |
+| `GET` | `/agents/{agentId}/versions` | `agents:read` | `agent.view` | Read | None | `200` list of `ManagedAgentVersion` |
+| `GET` | `/agents/{agentId}/versions/{version}` | `agents:read` | `agent.view` | Read | None | `200` `ManagedAgentVersion` |
+| `POST` | `/environments` | People only; a personal key needs `gateway:route` and `chat:write` | `gateway.configure` | Key | 64 KiB | `201` `ManagedAgentEnvironment` |
+| `GET` | `/environments` | `agents:read` | `agent.view` | Read | None | `200` list of `ManagedAgentEnvironment` |
+| `GET` | `/environments/{environmentId}` | `agents:read` | `agent.view` | Read | None | `200` `ManagedAgentEnvironment` |
+| `PATCH` | `/environments/{environmentId}` | People only; a personal key needs `gateway:route` and `chat:write` | `gateway.configure` | Key | 64 KiB | `200` `ManagedAgentEnvironment` |
+| `POST` | `/environments/{environmentId}/archive` | People only; a personal key needs `gateway:route` and `chat:write` | `gateway.configure` | Safe | 1 KiB | `200` `ManagedAgentEnvironment` |
+| `POST` | `/credentials` | Console session only | `gateway.configure` and step-up | Key | 16 KiB | `201` `ManagedAgentCredential` |
+| `GET` | `/credentials` | `gateway:route` | `gateway.view` | Read | None | `200` list of `ManagedAgentCredential` |
+| `GET` | `/credentials/{credentialId}` | `gateway:route` | `gateway.view` | Read | None | `200` `ManagedAgentCredential` |
+| `PUT` | `/credentials/{credentialId}/key` | Console session only | `gateway.configure` and step-up | Safe | 16 KiB | `200` `ManagedAgentCredential` |
+| `DELETE` | `/credentials/{credentialId}` | Console session only | `gateway.configure` and step-up | Safe | None | `200` `ManagedAgentCredential` |
+| `POST` | `/sessions` | `chat:write` | `agent.run` | Key | 512 KiB | `201` `ManagedAgentSession` |
+| `GET` | `/sessions` | `agents:read` | `agent.view` | Read | None | `200` list of `ManagedAgentSession` |
+| `GET` | `/sessions/{sessionId}` | `agents:read` | `agent.view` | Read | None | `200` `ManagedAgentSession` |
+| `PATCH` | `/sessions/{sessionId}` | `chat:write` | `agent.run` | No | 16 KiB | `200` `ManagedAgentSession` |
+| `POST` | `/sessions/{sessionId}/events` | `chat:write` | `agent.run` | Key | 512 KiB | `202` with the appended events in `data` |
+| `GET` | `/sessions/{sessionId}/events` | `agents:read` | `agent.view` | Read | None | `200` `ManagedAgentEventList` |
+| `GET` | `/sessions/{sessionId}/stream` | `agents:read` | `agent.view` | Read | None | `200` `text/event-stream` |
+| `POST` | `/sessions/{sessionId}/cancel` | `chat:write` | `agent.run` | Safe | 4 KiB | `202` `ManagedAgentSession` |
+| `POST` | `/sessions/{sessionId}/complete` | `chat:write` | `agent.run` | Safe | 1 KiB | `202` `ManagedAgentSession` |
+| `DELETE` | `/sessions/{sessionId}` | `chat:write` | `agent.run` | Safe | None | `204` |
+
+Session routes apply a visibility rule. A person sees and changes only their
+own sessions unless they have `agent.edit`. An organization API key sees and
+changes only the sessions it started. Credential responses send
+`Cache-Control: no-store` and never return the provider key.
+
+The **step-up** in the credential rows is a fresh identity confirmation in the
+console. Without it a credential write gets `403 step_up_required`.
+
+## Error codes
+
+| HTTP | Code | When |
+|---|---|---|
+| 400 | `invalid_request` | Body or query fails the schema, an event mix is not allowed, or `X-Ryu-Organization` is not a valid organization id. |
+| 400 | `invalid_cursor` | A malformed list cursor, or an `after` or `Last-Event-ID` that is not an integer from 0 to 100,000. |
+| 400 | `invalid_idempotency_key` | The `Idempotency-Key` header is malformed. |
+| 400 | `organization_required` | A personal key or console session without a resolvable organization. |
+| 401 | `unauthenticated` | Missing or invalid credentials, including OAuth tokens. Never used for throttling. |
+| 402 | `insufficient_credits` | The admission check for Ryu-provided credentials failed. `details.reason` is `"balance"` or `"stop_budget"`. |
+| 402 | `api_key_spend_cap_reached` | The organization API key's own spend cap was reached. |
+| 403 | `forbidden` | Missing scope or permission, an API key on a people-only or console-session-only route, an organization key on an agent it did not create, a key whose metadata disagrees with its stored class, or not a member. |
+| 403 | `organization_mismatch` | The `X-Ryu-Organization` header differs from the organization API key's organization. |
+| 403 | `org_access_denied` | The organization access policy refused the request: IP allowlist, two-factor authentication for console sessions and personal keys, or session age for console sessions. `details.policyCode` carries the policy code, for example `org_mfa_required`, or `org_mfa_session_required` for a console session, or a personal key created from a session, that was not signed in with two-factor. |
+| 403 | `feature_disabled` | Managed Agents is off for the organization or the member. |
+| 403 | `step_up_required` | A credential write without a fresh step-up. `details` carries the step-up fields `error` (`"STEP_UP_REQUIRED"`), `scope` (`"org.credentials"`), `action`, `methods`, and `enrolmentRequired`. |
+| 404 | `not_found` | Unknown id, another organization's id, a session the caller cannot see, or a deleted session. |
+| 409 | `version_conflict` | `expectedVersion` is stale. |
+| 409 | `revision_conflict` | `expectedRevision` is stale. |
+| 409 | `name_taken` | A duplicate environment name or credential label. |
+| 409 | `agent_archived` | A session create referenced an archived agent. |
+| 409 | `environment_archived` | A session create referenced an archived environment. |
+| 409 | `limit_reached` | A count limit was hit. `details.limit` names it. |
+| 409 | `idempotency_key_reused` | Same key, different body. |
+| 409 | `idempotency_in_progress` | A request with the same key is still running. Sent with `Retry-After: 1`. |
+| 409 | `session_closed` | The session is terminal or closing. |
+| 409 | `session_running` | `complete` was called when the session was not idle. |
+| 409 | `session_not_terminal` | `DELETE` was called on a live session. |
+| 409 | `tool_result_required` | A `user.message` was sent while custom tool calls are pending. |
+| 409 | `unknown_tool_use` | A tool result named a `toolUseId` that is not pending. |
+| 409 | `tool_result_already_submitted` | A second result for the same `toolUseId`. |
+| 409 | `session_budget_exhausted` | The session budget is used up: less than one cent of it is left. |
+| 409 | `event_log_full` | The per-session event cap was reached. |
+| 413 | `payload_too_large` | The body exceeds the route limit. |
+| 422 | `unsupported_for_backend` | The agent, environment or input uses something the backend cannot do. `details.field` names it. |
+| 422 | `unsupported_content` | Non-text content blocks. |
+| 422 | `model_not_priced` | Ryu-provided credentials, or a session budget, with a model missing from Ryu's rate card (`openai` or `gemini`). |
+| 422 | `credential_unavailable` | A BYOK credential is revoked or missing, or the platform key is absent. |
+| 422 | `platform_credentials_disabled` | The `platform` credential source while Ryu-provided credentials are off on this deployment. |
+| 422 | `node_not_found` | No active node with the `ryu_node` id exists in the organization. |
+| 422 | `node_unreachable` | The `ryu_node` target has no reachable HTTPS address. |
+| 422 | `node_forbidden` | The `ryu_node` target is a personal or team node, or the user the session runs as is not an active member holding `agent.run`. |
+| 429 | `rate_limited` | A per-key limit (the API key's request limit, or the organization key's own request limit), the per-organization admission counter, or a volume quota. `details.limit` names it. Sent with `Retry-After`. |
+| 429 | `session_limit_reached` | The organization has its maximum number of active sessions. |
+| 429 | `stream_limit_reached` | Too many concurrent streams. `details.scope` names the cap. |
+| 500 | `internal_error` | An unhandled error. It is logged with the request id. |
+| 501 | `backend_not_implemented` | An environment or session on the `ryu_serverless` backend, which is not yet available. |
+| 502 | `vendor_error` | A synchronous vendor failure that cannot be mapped. This is not used on the async paths, which report through `session.error`. |
+| 503 | `managed_agents_disabled` | Managed Agents is not enabled on this deployment. |
+| 503 | `backend_disabled` | This backend is not available on this deployment. |
+| 503 | `billing_unavailable` | A charge for the session's Ryu-provided usage has been pending for more than 5 minutes. Ryu refuses new input to that session until the charge settles. |
+| 503 | `event_append_contended` | Ryu could not assign the next event `seq` after several retries. Sent with `Retry-After: 1`. |
+| 503 | `service_unavailable` | A shared dependency (organization access policy, key limits, spend data) is temporarily unavailable, or a session kept changing during an update, cancel, or complete. Sent with `Retry-After`. |
+
+New error codes can appear in v1. Errors that happen inside a running session
+are not HTTP errors. They appear in the event log as `session.error` events.
+
+## Examples
+
+[Managed Agents API examples](/docs/standalone/managed-agents-api-examples#examples)
+shows `curl` commands that create an agent and an environment with a personal
+API key, then start a session and send a message with an organization API key.
+
+## TypeScript client
+
+The `@ryuhq/client` package exports `createManagedAgentsClient` for the same
+routes. Its options, methods, and a streaming example are in
+[TypeScript client](/docs/standalone/managed-agents-api-examples#typescript-client).
+
+<Cards>
+  <DocCard href="/docs/standalone/managed-agents" />
+  <DocCard href="/docs/standalone/managed-agents-events" />
+  <DocCard href="/docs/standalone/managed-agents-api-requests" />
+</Cards>

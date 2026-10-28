@@ -3,15 +3,14 @@ title: Tasks
 description: The current RyuBench task categories, what each asks the agent to do, and how it is verified against persisted state.
 ---
 
-RyuBench v2 ships **50 tasks** across thirteen deterministic Tier-A categories plus
-computer-use Tier B. Forty-seven tasks form the scored API-state core; the 3
+Task set `0.2.0` has **50 tasks** across thirteen deterministic Tier-A categories plus
+computer-use Tier B. Forty-seven tasks form the scored API-state core. The 3
 computer-use tasks are reported separately.
 
 Every task is a small object with a natural-language `prompt` (the only thing the agent sees),
 an optional `setup`, and an `assert` that reads real state through the public API. The prompt is
-deliberately **under-specified** — it tests whether the model understands Ryu, not whether it
-can follow a checklist — but it always pins an exact resource name so the assertion can find
-what the agent built.
+**under-specified**: it tests whether the model understands Ryu, not whether it can follow a
+checklist. It always pins an exact resource name so the assertion can find what the agent built.
 
 <Callout type="info">
   The `assert` never inspects the transcript. It calls `GET`/`POST` against the node and grades
@@ -19,7 +18,7 @@ what the agent built.
   it *did*, not what it *said*.
 </Callout>
 
-## Tier A — the scored core
+## Tier A: the scored core
 
 | Category | The agent must… | Verified by (public API) |
 |---|---|---|
@@ -27,77 +26,31 @@ what the agent built.
 | **harness** | create durable parent/child sessions and bind an external runtime id | `GET /api/harness/sessions/:id` matches runnable and lineage fields |
 | **agent** | create/update an agent with the right configuration (name, system prompt, `chat_model`, tools allowlist, tts voice) | `GET /api/agents/:id` echoes the configuration; `GET /api/agents/:id/tools` matches |
 | **tool** | register an MCP server, find a tool via the catalog, or compute a digest in the PTC exec sandbox and persist it | recompute the reference digest in-harness and compare the persisted memory; confirm tool ids are real catalog entries |
-| **gateway** | configure a budget or firewall policy via `PUT /v1/config` so behavior changes | `GET /v1/config` shows the rule; `POST /v1/firewall/check` returns the expected verdict |
+| **gateway** | configure a budget, firewall, or organization firewall overlay via `PUT /v1/config` | `GET /v1/config` shows the rule with the expected fields |
 | **spaces** | create a Space, store a document, or ingest a fact so it becomes RAG-retrievable | `GET /api/spaces/:id/documents`; independent `POST /api/spaces/:id/search` returns the fact |
 | **plugin** | build a valid manifest and pass grant validation / signing, or toggle a plugin | `POST /v1/grants/validate` `all_approved`; `POST /v1/manifests/verify` `valid`; `GET /api/plugins` enabled flag |
 | **monitor** | create a monitor + condition and run it, or file a quest | `GET /api/monitors` shape; `GET /api/monitors/:id/snapshots`; `GET /api/quests` |
-| **chat** | drive a session to a stateful outcome (record a memory, capture a quest, fork a conversation) | the downstream artifact exists — asserted, not the reply text |
+| **chat** | drive a session to a stateful outcome (record a memory, capture a quest, fork a conversation) | the downstream artifact exists; the reply text is not graded |
 | **output-style** | author and update a reusable response profile | `GET /api/output-styles/:id` matches the persisted style, then teardown deletes it |
 | **catalog** | add, select, and restore a custom skill catalog source | `GET /api/catalog/sources?kind=skill` proves the persisted active source |
 | **notifications** | unregister a mobile push token | a single deletion probe returns `404`; `200` fails and consumes the fixture, with the result cached for repeat grading |
 | **approvals** | set the global approval mode and restore the prior mode | `GET /api/approvals/mode` returns the requested mode |
 
-## Tier B — computer-use (separate track)
+## Tier B: computer-use (separate track)
 
 | Category | The agent must… | Verified by |
 |---|---|---|
-| **computer-use** | reach the Ghost/Shadow desktop tools via `POST /api/mcp/tools/call` | tool **reachability** / graceful degradation — never deterministic screen content |
+| **computer-use** | reach the Ghost/Shadow desktop tools via `POST /api/mcp/tools/call` | tool **reachability** and graceful degradation; never deterministic screen content |
 
-Computer-use is non-deterministic and needs a sandbox VM to score for real, so its result is
-reported beside the Tier-A headline and never folded in. Letting it into the core number would
-hand the "benchmarks are fake" crowd their reproducibility headline.
+Computer-use is non-deterministic and needs a sandbox VM to score, so its result is
+reported beside the Tier-A headline and never folded into it.
 
-## Anatomy of a task
-
-```ts
-{
-  id: "workflow-passthrough-run",
-  category: "workflow",
-  tier: "A",
-  title: "Author and run an input→output passthrough workflow",
-  // prompt can be a function so it can pin a run-namespaced name
-  prompt: (ctx) =>
-    `Create a workflow named exactly "${nsName(ctx, "passthrough")}" that takes an ` +
-    `input value and returns it unchanged, then run it and make sure it completes.`,
-  async assert(ctx) {
-    const list = await getJson<{ workflows?: { name?: string; id?: string }[] }>(
-      ctx.node, "/workflows",
-    );
-    const wf = (list?.workflows ?? []).find((w) => w.name === nsName(ctx, "passthrough"));
-    if (!wf) return fail("workflow-exists", "agent never created the workflow");
-    // …assert a run reached status "completed"…
-    return grade([ /* CheckLine[] */ ]);
-  },
-  async teardown(ctx) { /* best-effort DELETE */ },
-}
-```
-
-Key rules for task authors:
-
-- **Pin the name.** The same `nsName(ctx, "base")` is recomputed in `prompt`, `assert`, and
-  `teardown` so parallel/repeated runs never collide.
-- **Assert real fields only.** Every field an assertion reads is confirmed against the Core /
-  Gateway response struct — no guessed shapes. If a field cannot be confirmed, the check is
-  weakened to something that can (an HTTP status, a top-level id).
-- **Fail safe.** A missing resource returns `fail(...)`, not a thrown error.
-- **Under-specify the prompt, pin the checkable.** Test comprehension, grade state.
-
-## Checking the verifiers
+## App prerequisites
 
 Before a run, install and enable the apps required by the selected categories. Workflow
 version tasks require Workflows; approval-mode tasks require Approvals. An unavailable
 app is an environment failure, not a model-capability result.
 
-Run `bun run --cwd apps/benchmark validate:current` against a disposable node, with
-`RYUBENCH_NODE_URL` and `RYUBENCH_NODE_TOKEN` configured, to calibrate the ten tasks added
-in task set 0.2.0. It checks that repeated no-ops fail and known API solutions pass.
-This verifies task assertions without running a model or producing a leaderboard score.
-
-## Adding a task
-
-Each category is one module in `apps/benchmark/src/tasks/<category>.ts` exporting a
-`Task[]`. Add your task to the array, keep the id kebab-unique, and register nothing else —
-`registry.ts` already aggregates every category. Bump `TASK_SET_VERSION` in `config.ts` when
-you change the suite so scores stay comparable across versions.
+To add a task or calibrate the assertions, see [Author a task](/docs/reference/benchmark/authoring-tasks).
 
 Continue with [RyuBench](/docs/reference/benchmark), [local model track](/docs/reference/benchmark/local-models), [scoring and governance](/docs/reference/benchmark/scoring), and [Core API reference](/docs/extend/develop/api-reference/core).

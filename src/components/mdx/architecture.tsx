@@ -818,14 +818,14 @@ export function Architecture() {
         <div className="rounded-2xl bg-fd-foreground p-5 text-fd-background">
           <div className="flex items-start justify-between gap-2">
             <div>
-              <p className="font-medium text-[10px] text-fd-background/60 uppercase tracking-widest">
+              <p className="font-medium text-fd-background/60 uppercase tracking-widest">
                 Control
               </p>
               <h3 className="font-medium text-lg tracking-tight">
                 Ryu Gateway
               </h3>
             </div>
-            <span className="rounded-full bg-fd-background/15 px-2 py-0.5 font-medium text-[10px] text-fd-background/70">
+            <span className="rounded-full bg-fd-background/15 px-2 py-0.5 font-medium text-fd-background/70">
               governs calls
             </span>
           </div>
@@ -835,7 +835,7 @@ export function Architecture() {
           <div className="mt-3 grid grid-cols-2 gap-1.5">
             {GATEWAY_PILLS.map((pill) => (
               <span
-                className="rounded-md bg-fd-background px-2 py-1.5 text-center font-medium text-[11px] text-fd-foreground"
+                className="rounded-md bg-fd-background px-2 py-1.5 text-center font-medium text-fd-foreground"
                 key={pill}
               >
                 {pill}
@@ -847,7 +847,7 @@ export function Architecture() {
         <FlowConnector />
 
         <div className="rounded-2xl bg-fd-secondary p-5">
-          <p className="font-medium text-[10px] text-fd-muted-foreground uppercase tracking-widest">
+          <p className="font-medium text-fd-muted-foreground uppercase tracking-widest">
             Orchestration
           </p>
           <h3 className="font-medium text-fd-foreground text-lg tracking-tight">
@@ -859,7 +859,7 @@ export function Architecture() {
           <div className="mt-3 grid grid-cols-2 gap-1.5">
             {CORE_PILLS.map((pill) => (
               <span
-                className="rounded-md bg-fd-background px-2 py-1.5 text-center font-medium text-[11px] text-fd-foreground"
+                className="rounded-md bg-fd-background px-2 py-1.5 text-center font-medium text-fd-foreground"
                 key={pill}
               >
                 {pill}
@@ -887,7 +887,7 @@ function FlowConnector() {
 function RailRow({ label, items }: { label: string; items: string[] }) {
   return (
     <div className="rounded-2xl bg-fd-secondary p-4">
-      <p className="mb-2 font-medium text-[10px] text-fd-muted-foreground uppercase tracking-widest">
+      <p className="mb-2 font-medium text-fd-muted-foreground uppercase tracking-widest">
         {label}
       </p>
       <div className="flex flex-wrap gap-1.5">

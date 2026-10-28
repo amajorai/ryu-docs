@@ -1,0 +1,122 @@
+---
+title: "Sealed User Content"
+description: "Reference for how Core and the Gateway seal user content and personal data: envelope formats, blind-index search, sealed embeddings, migration, and the per-store coverage tables"
+---
+
+Ryu is extending sealing from chat bodies and credentials to the **content** you create and the
+**personal data** it stores (names, email addresses, phone numbers, addresses). This happens store by
+store: only the stores marked **Yes** in the tables on this page and on [Sealed Files, History, and Gateway Data](/docs/core/encryption-files-and-gateway), [Sealed App and Client Data](/docs/core/encryption-app-data), and [Sealed App Records and Cloud Data](/docs/core/encryption-app-records) are sealed in this version, and a store
+marked **No** still keeps that data in plaintext. The list below describes how a store
+behaves once it is marked Yes.
+
+A sealed store seals each value on its own, with a key derived for that store from the key the
+process already holds: the master key in Core, the app's own key in an app, the Gateway's key in the
+Gateway. Each value is bound to the store, column and record it was written for, so a value copied to
+another record does not open. Ids, timestamps, sizes, and status fields stay readable so lists,
+ordering, sync, and quotas keep working.
+
+- **Formats.** A sealed store keeps text values as `encb:v1:` envelopes and binary values as
+  `RYU-CB01` (ChaCha20-Poly1305). Large files use a chunked sealed format that still supports
+  streaming and partial (Range) reads; append-only recordings use a sealed log format that survives
+  an interrupted write.
+- **Search.** Where a sealed column must be searched, the store keeps keyed tokens instead of the
+  words (a blind index). Searches still find whole words, but phrase, prefix, and stopword-only
+  searches no longer work there, and the tokens reveal which records share a word and how often.
+  Each store's row says what its index reveals.
+- **Embeddings.** A store whose row says its vectors are sealed keeps them sealed on disk and searches
+  them in memory, within one shared memory budget. When the budget is full, the least recently used
+  collections fall back to word search until they are loaded again, and the recall response reports
+  how much of the index was in memory.
+- **Migration.** When a store is first sealed, values it wrote earlier are still read, and they are
+  sealed in place in the background, resumably; the old plaintext is only replaced once the sealed
+  copy is written. Afterwards the store's freed database pages are overwritten. If Ryu quits before
+  that finishes, the store stays marked and the next start finishes it. A store recorded under a
+  different key is not migrated at all. A full compaction of
+  a large database waits for a restart with enough free disk space, and until then fragments of the
+  old plaintext can remain inside partly used pages. Compaction of a large Core database can happen
+  shortly after start, and requests to that store pause while it runs. Copies of the data folder made before the
+  upgrade (backups, snapshots) still hold the old plaintext, so rotate them.
+- **No key.** A sealed store that cannot get its key refuses to write rather than store plaintext. A
+  value that cannot be opened is an error when you open that record, and is skipped and counted when
+  a list or search would include it.
+
+## Core recall indexes (retrieval, message search, message embeddings)
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Retrieval index (`retrieval.db`) | Yes | memory and Space chunk text, chunk filter metadata, embedding vectors, OKF concept paths, tags, resources, links and verbatim concept bodies | text is sealed per value and vectors as sealed blobs, each bound to its chunk (and, for vectors, its embedding model). Concept paths are matched through a keyed token, which reveals only which chunks belong to the same concept. Ids, sources, owners, scopes and timestamps stay plaintext so access filters still run. Vectors are searched in memory within the shared budget. Existing rows are sealed in the background after the upgrade |
+| Message keyword index (`message-fts.db`) | Yes (keyed tokens, no words) | the words of your chat messages | every word is replaced by a keyed token before it is indexed, and a search is tokenized the same way, and a message's tokens are kept only in token order, never in the order of your words, so keyword search matches **whole words only**: no phrase, prefix or "near" searches, and a search made only of very common words returns nothing. The tokens still reveal which messages share a word, how many distinct words a message has, and how often each token occurs, which someone with outside knowledge can use to guess common words. An index from an older build is deleted and rebuilt from your sealed messages the next time you search. It is emptied when **Remember chats** is turned off or you clear all chats, and a conversation's rows are removed when you delete it. Removing a message removes its tokens from the file, rather than marking them deleted |
+| Message embeddings (`message-embeddings.db`) | Yes | one vector per chat message (no message text) | vectors are sealed, each bound to its message and embedding model, and searched in memory within the shared budget. Vectors from an older build are copied into the sealed form in the background and the old table is removed only after every sealed copy is checked. Rows are removed with their conversation (including when you clear chats), together with any vector from an older build that is still waiting to be sealed, and emptied when **Remember chats** is off |
+| Agent run errors, channel fallback warnings and project or bot goals (`conversations.db`) | Yes | the error text of a failed agent run, the fallback warning kept for a replayed channel reply, and the goals and standing instructions you set on projects and bots | sealed with the conversation key, like message bodies. Values written earlier still read and are sealed at the next start, which then wipes the plaintext copies older builds left in the database's free space and journal and compacts the file. A very large chat database, or one without enough free disk space to compact it, has its free space wiped but its compaction retried at a later start, so fragments of old error text can remain until then. A run whose sealed fields cannot be opened is left out of run lists and counted |
+| Conversation workspace details (`conversations.db`) | No | workspace folder and worktree paths, branch names, session working directories, collaborator user ids, collaborators' display names on messages, and reactions | folder and ownership filters and running-run checks compare them directly in the database |
+
+The memory review (Dream) response includes recall diagnostics: how many vectors of each
+recall index are loaded in memory and how many rows were skipped because a sealed value did not
+open (counts only, never content). Older builds cannot read these sealed values; the keyword index
+and message embeddings are rebuilt from your messages, but export your data before downgrading.
+
+## Core record stores (experience, approvals, safe actions, prompt evals, agents, activity, vault card metadata, accounts)
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Learning experience buffer (`experience.db`) | Yes | captured user prompts and assistant replies | sealed per value; ids, rewards and timestamps stay plaintext for the scoring and training queues. Retraining no longer writes a dataset file: samples are sent to the trainer in the request (the highest-rated samples that fit the request size limit; the cycle reports how many were sent), and dataset files older versions left behind are deleted |
+| Approvals inbox (`approvals.db`) | Yes | the whole request: tool arguments, prompts, message text, results, notes | sealed per row; status and timestamps stay plaintext for filtering and cleanup |
+| Safe Actions (`safe-actions.db`) | Yes (submissions) | planned tool calls with their arguments, verification reports, review notes | status, review time and timestamps stay plaintext; policies, tool contracts and execution receipts (hashes and statuses only) are not encrypted |
+| Prompt Studio (`prompt-evals.db`) | Yes | suite configurations and versions, run inputs and outputs, review comments | suite and run names, labels and scores stay plaintext |
+| Annotation queues (`annotation-queues.db`) | Yes | queue descriptions, rubrics and label sets, item inputs, outputs, metadata, labels and review comments | queue names, assignees, statuses, scores and timestamps stay plaintext |
+| Agents (`agents.db`) | Yes (text fields) | descriptions, system prompts, personas, older prompt versions, operation receipts | names, titles, model and tool bindings and flags stay plaintext |
+| Activity feed (`activity.db`) | Yes | titles, bodies, agent and session ids, metadata | time and id stay plaintext for paging |
+| Vault card metadata | Yes, except brand and last four digits | merchant allowlist, expiry copy, and in approval records the merchant host, requester, agent and note (an approved grant records only whether it covers the requesting session or the agent, not who they are) | sealed with the data folder's master key rather than the vault's own key, so in key-share (Shamir) mode these fields remain readable while the vault is sealed; the card number and security code are always sealed with the vault key. New audit and item-event entries for card actions no longer include brand, last four digits, merchant or grant subject; audit entries written earlier keep them because the audit log is hash-chained. Audit and item-event entries still record who acted, in plain text, next to the approval they concern: the signed-in user (or operator) for reveal and fill, or the broker session for brokered uses. That is the approval's requester, and for reveal and fill also its agent, so sealing the requester and agent in the approval record does not hide them from someone who can read the vault file; what stays protected is the merchant host and the note On the first start of this version, free space in the vault file is overwritten so card details from deleted cards do not linger, and pre-upgrade vault backup copies that still hold card rows are deleted. The credential broker's request log is not sealed: it keeps the host, session and outcome of every brokered request in plain text, including card uses, so for card uses made through the broker the merchant host and requesting session are not protected at rest |
+| Signed-in accounts (`accounts.json`) | Yes | account email, display name, avatar URL (sign-in tokens were already sealed) | user ids stay plaintext; an account that cannot be opened is kept as it is and never deleted by a rewrite |
+| Traces and plugins databases | No | mostly metadata (agents are listed separately above; Groups (Teams) data is in the app record stores table on [Sealed App Records and Cloud Data](/docs/core/encryption-app-records)) | plaintext |
+
+After you adopt a new master key, the next start re-encrypts every value in these stores under the new key, so none of them keeps depending on the retired key.
+
+Older builds cannot read these sealed values; export your data before downgrading.
+
+## Core sync and state stores (plugin storage, collaboration, workflows, scheduled jobs, voice staging)
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Plugin and app storage (`plugin-storage.db`) | Yes | every value a plugin hook or app stores: recap summaries, agent messages, goal conditions, and app records such as contacts, invoices, outreach drafts, voice scripts, slides and teleprompter scripts | each value is sealed with that plugin's own key and bound to its plugin, namespace and key, so a value copied to another key or plugin does not open. Plugin ids, namespaces, keys, timestamps and value sizes (used for the storage quota) stay plaintext. Plugins and apps see the same values as before; a value an app already encrypted itself is returned unchanged. Values written earlier are sealed when Core starts |
+| Collaborative documents (`collab.db`) | Yes | live edits, saved snapshots and the projected text of collaborative documents | each edit and snapshot is sealed and bound to its document and position; Yjs state vectors, sequence numbers and timestamps stay plaintext. Values written earlier still open and are sealed in the background after the upgrade (and whenever a document is compacted); the final compaction of the file waits for the next restart |
+| Workflow definitions, run history, sub-agent checkpoints and scheduled routines | Yes | workflow definitions, each run's inputs, trigger payloads, step outputs, state and errors, sub-agent results, and each scheduled routine's prompt, inputs and run history | each file is sealed whole and bound to its kind and id; file names (ids) and lock files stay plaintext. Channel credentials inside a definition stay sealed as before. Files written earlier still read and are sealed when Core starts, including paused routines; a leftover file of a deleted routine (an interrupted delete) is removed at start; sub-agent checkpoints of finished runs are deleted, and temporary copies left by an interrupted write are removed. Channel and webhook step delivery errors no longer include a webhook URL or bot token. The local version history of workflow definitions is described in the files and history row |
+| Voice samples for voice cloning | No | a voice sample you send for one speech request | the speech engines need a file, so the sample is written to a private temporary folder (owner-only) only while that request runs and deleted afterwards; samples a crash left behind are removed when Core starts. Reference files you place yourself are not encrypted |
+
+Older builds cannot read these sealed values; export your data before downgrading.
+
+## Spaces (documents, versions, links, graph, vectors, search, files)
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Spaces database (`spaces.db`) | Yes | document titles and bodies, chunk text and chunk metadata, Space names and descriptions, wiki-link targets, page history (titles, bodies, labels, snapshots), import names, messages and results | sealed per value, each bound to its row. Ids, kinds, sizes, owners, visibility and timestamps stay plaintext so access filters, quotas and history still work. Each page-history snapshot is addressed by a keyed hash, which only reveals which versions are identical. A value that does not open is an error when you open that document and is skipped and counted in lists, search and exports |
+| Spaces title and name lookups | Yes (keyed tokens) | document titles, wiki-link targets, Space names | stored as keyed tokens so `[[Title]]` links and "find the Space named X" still work. The tokens reveal which documents or links share a title and which Spaces share a name, and how often |
+| Spaces keyword search | Yes (keyed tokens, no words) | the words of page bodies and extracted file text | every word is replaced by a keyed token, so body search matches **whole words only**: no partial words, phrases, or searches made only of very common words. Titles, Space names and descriptions are decrypted and still match any part of a word. The tokens reveal which documents share a word and how often each token occurs |
+| Spaces graph (Graph mode) | Yes (keyed tokens) | the terms extracted from each chunk | only keyed tokens are stored; they reveal which chunks share a term and how terms co-occur |
+| Spaces embeddings | Yes | one vector per chunk | sealed, each bound to its chunk and embedding model, and searched in memory within the shared budget. While a large Space's vectors are loading, its search uses the keyword index |
+| Spaces uploaded files | Yes | the file contents | each file is sealed when it is stored and checked against its content hash when read. The file name is the hash of the original file, so someone with your data folder can confirm whether a file they already have is stored, and see file sizes. A document parser that needs a file path gets a temporary private decrypted copy that is deleted when the parse ends or times out. If Ryu stops while a parse is running, the copy stays until Ryu next starts, which deletes it |
+| File search status | Yes | the detail message and parser notes of each uploaded file's search status | sealed and bound to the document. The state shown on the badge (searchable, skipped, failed) and the parser name stay readable. Messages Ryu writes itself no longer include the file name |
+| Space backup export | No (by design) | the Space's documents and files | a backup zip is a plaintext export you asked for; restoring one encrypts it again |
+
+Spaces created before this release are encrypted in the background after the upgrade; existing
+uploaded files are encrypted one at a time when there is enough free disk space, and the work
+resumes at the next start if it is interrupted. Older builds cannot read the encrypted values;
+export your data before downgrading.
+
+After you switch Ryu to a new encryption key, Spaces recompute their title and name lookups when
+they open, then rebuild the keyword index and the Graph-mode graph in the background. Until that
+finishes, keyword and graph search can return fewer results.
+
+Core files, history, runtime residue, and Gateway personal data are on
+[Sealed Files, History, and Gateway Data](/docs/core/encryption-files-and-gateway).
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/encryption-at-rest" />
+  <DocCard href="/docs/core/encryption-what-is-sealed" />
+  <DocCard href="/docs/core/encryption-credential-files" />
+  <DocCard href="/docs/core/encryption-files-and-gateway" />
+  <DocCard href="/docs/core/encryption-app-data" />
+  <DocCard href="/docs/core/encryption-app-records" />
+</Cards>

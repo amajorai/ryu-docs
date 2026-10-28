@@ -1,6 +1,6 @@
 ---
 title: "Pick a Sidecar Port"
-description: "How Core assigns, shifts, and health-checks the port your manifest sidecar binds, which band a community app should pick from, and what happens when something else on the machine already holds the port"
+description: "How Core assigns, shifts, and health-checks a manifest sidecar port, which port band a community app should use, and what happens when the port is already taken"
 tags: ["sidecar", "port", "port_env", "manifest", "extension", "collision", "conflict"]
 ---
 
@@ -21,13 +21,12 @@ A manifest sidecar declares one TCP port:
 
 Core uses that number for three things: it tells your process which port to bind, it health-checks
 `http://127.0.0.1:<port><health_path>`, and it forwards proxied requests there. All three must
-agree, and the way they stay in agreement is that **your process binds the port Core hands it**,
-not a constant you compiled in.
+agree, so **your process binds the port Core hands it**, not a constant you compiled in.
 
-This page is only about the port. For the rest of the field, see
-[Bundle Runnables with manifest.json](/docs/extend/develop/extensions/plugin-json-manifest#declare-a-managed-sidecar);
+For the rest of the sidecar field, see
+[Declare a Managed Sidecar](/docs/extend/develop/extensions/managed-sidecar);
 for download, spawn, health and reconcile behaviour, see
-[App Manifest & Lifecycle](/docs/core/app-manifest-lifecycle#manifest-declared-managed-sidecars).
+[App Manifest & Lifecycle](/docs/core/app-managed-sidecars#manifest-declared-managed-sidecars).
 
 ## Read your port from `port_env`
 
@@ -57,18 +56,14 @@ uvicorn.run(app, host="127.0.0.1", port=port)
 ### Why the environment wins over the constant
 
 The value Core injects is **not always the number in your manifest**. A node runs under a
-*profile*, and every profile but the default shifts every port by a fixed offset - a `dev` node
-adds 1000 to everything, so a developer can run a dev build beside a release install without the
-two fighting over sockets. Core shifts your sidecar's port the same way it shifts its own.
+*profile*, and every profile but `release` shifts every port by a fixed offset. A `dev` node adds
+1000, so a dev build can run beside a release install on the same machine. Core shifts your
+sidecar's port the same way it shifts its own. See
+[Release Channels](/docs/start-here/release-channels) for the offsets.
 
 So on a `dev` node, a manifest that says `8321` is health-checked and proxied on `9321`. A process
 that hardcodes `8321` binds a port nobody is watching: Core reports the sidecar unhealthy, the
-proxy 502s, and nothing in the error names a port. Reading `port_env` makes that case correct for
-free.
-
-The same reasoning covers the future: treat the manifest `port` as *what you would like*, and the
-environment as *what you got*. A process written that way keeps working if Core ever assigns the
-port itself.
+proxy returns 502, and nothing in the error names a port. Reading `port_env` avoids this.
 
 <Callout type="warn">
   `port_env` exists on the `local` and `python` process kinds only, but a `node` sidecar is still
@@ -86,25 +81,22 @@ port itself.
 
 Core keeps a runtime registry so two managed sidecars cannot claim the same port, but it does not
 allocate a replacement when a declaration collides. The number in your manifest is the number Core
-tries, after the active profile's offset. Pick from the community band.
+tries, after the active profile's offset. Pick from the community band. The bands below are a
+convention, not a check Core enforces at install.
 
 | Range | Who uses it | Safe for your app? |
 | --- | --- | --- |
-| `3200`, `7980`, `8000`, `8080`-`8096`, `9070`, `30000` | Core's own substrate - local inference engines, speech, image generation, the workflow runtime, the SDK adapter | No, never |
-| `7990`-`8079` | Ryu's first-party apps | No - this band fills up as Ryu ships apps |
-| `8300`-`8699` | community | Yes - pick here |
+| `3200`, `7980`, `8000`, `8080`-`8086`, `8088`-`8091`, `8101`, `9070`, `30000` | Core's own substrate: local inference engines, speech, image generation, the workflow runtime, and the SDK adapter | No |
+| `7990`-`8112` (outside Core's ports) | Ryu's first-party apps and plugins | No. This band grows as Ryu ships apps |
+| `8300`-`8699` | Community apps and plugins | Yes. Pick here |
 
-Two things about that band that are easy to get wrong.
+App sidecars and plugin sidecars share one port space. There is no separate plugin range.
+First-party plugins also use ports outside the bands above: the Headroom plugin declares `8787`,
+and other plugins declare `18154` and `47821`. No first-party app or plugin declares a port inside
+`8300`-`8699`.
 
-**It ends at `8699` because plugins share the space.** App sidecars and plugin sidecars are
-allocated from one range, and installed plugins already sit above it - `8787` is taken by a
-first-party plugin, and one declares `47821`. There is no separate "plugin ports" region to hide in.
-
-**`8000` is carved out of the first-party band, not spare.** It sits inside `7990`-`8079` but Core's
-own inference server binds it, so it belongs to the row above.
-
-Within `8300`-`8699`, avoid round and famous numbers - `8500`, `8443` and the like are crowded by
-software that has nothing to do with Ryu. Check the ports of any app or plugin you expect to be
+Within `8300`-`8699`, avoid common numbers such as `8443` and `8500`, which other
+software often uses. Check the ports of any app or plugin you expect to be
 installed next to yours: a neighbour is as likely to collide as Ryu itself.
 `GET /api/sidecar/status` lists what is registered on the node you are testing against.
 
@@ -117,13 +109,13 @@ band table above tells you what *Ryu* claims; it cannot tell you what else is on
 Core checks before it spawns you. `claim_port` consults its registry of live sidecars and then
 bind-probes the port itself, and **fails the start** if either check fails:
 
-```
+```text
 port 8321 is already claimed by sidecar '@acme/other/engine'
 port 8321 is already in use on the host (bind probe failed: …)
 ```
 
-The first means another Ryu sidecar holds it. The second means anything at all does - another Ryu
-sidecar that is a compiled-in built-in, or software Ryu has never heard of.
+The first means another registered Ryu sidecar holds it. The second means any other process holds
+it: a built-in Ryu service or unrelated software.
 
 <Callout type="warn">
   This is detection, not resolution. Core does **not** move your sidecar to a free port, and there
@@ -148,40 +140,39 @@ So the remedies are all outside the app:
 - **Report it to the app author.** A port that collides on many machines is a bad pick, and the fix
   is a new manifest port in the next release.
 
-Design for the failure rather than assuming it away: surface the sidecar's health state in your UI
-instead of letting requests hang, so a user whose port is occupied sees a reason.
+Show the sidecar's health state in your UI instead of letting requests hang, so a user whose port
+is occupied sees a reason.
 
 ### The probe cannot be airtight
 
 A bind probe proves the port was free a moment ago, not that it is free when your process binds. The
 listener Core opens is dropped immediately so your child can take the port, and another process can
 win that gap. If your process can lose the race, exit non-zero on `EADDRINUSE` rather than retrying
-in a loop or silently binding something else - a sidecar listening on a port Core is not watching is
+in a loop or binding another port. A sidecar listening on a port Core is not watching is
 unavailable until its managed process is running again.
 
-Treat the manifest `port` as *what you asked for* and `port_env` as *what you got*. An app written
-that way needs no changes if the number it is handed ever stops matching the number it declared.
+Treat the manifest `port` as the port you asked for and `port_env` as the port you got.
 
 ## Your port is not your public URL
 
-App consumers and companion UIs never dial your sidecar directly. Core exposes it at
+App consumers and Companion UIs never dial your sidecar directly. Core exposes it at
 
-```
+```text
 /api/ext/<plugin_id>/<your route>
 ```
 
-and proxies through to whatever port your process ended up on. That indirection is what makes a
-port change - a profile shift, a reinstall, a future allocator - invisible to every caller. Do not
-publish `127.0.0.1:<port>` in your app's own docs or bake it into a companion UI; use the
-`/api/ext/` path, which is stable.
+and proxies through to the port your process uses. A port change, such as a profile shift or a
+reinstall, is therefore invisible to callers. Do not publish `127.0.0.1:<port>` in your app's own
+docs or put it in a Companion UI; use the `/api/ext/` path, which is stable.
 
 Core's own internal drivers use the manager's live sidecar registration when they need to call the
 service. They do not read the manifest port as a dial target, so an unregistered or stopped process
 receives no Core credentials.
 
-The shorter `/api/<name>` mounts you see on Ryu's first-party apps are reserved to built-ins and
-registered when Core builds its router, so a third-party app cannot claim one - and does not need
-to.
+The shorter `/api/<name>` mounts on some first-party apps (for example `/api/mail`) come from the
+manifest's `http.public_mount`. Core registers them once, when it builds its router from the
+manifests known at startup. An app installed while Core is running is reachable only through
+`/api/ext/<plugin_id>/*`, so a community app should use that path.
 
 ## Checklist
 
@@ -190,11 +181,6 @@ to.
 - Bind `127.0.0.1`.
 - Serve `health_path` (default `/health`) with a 2xx as soon as you are listening - Core treats
   that as "started".
-- Pick from `8300`-`8699`, avoiding round numbers and the ports of apps you ship beside.
+- Pick from `8300`-`8699`, avoiding common numbers and the ports of apps you ship beside.
 - Exit non-zero if the bind fails; never fall back to a different port on your own.
 - Point clients at `/api/ext/<plugin_id>/*`, never at the port.
-
-
-ChatGPT Web keeps its browser-capability deadline active until the response body
-has been read. A stalled body returns a timeout instead of holding the provider
-request open indefinitely; subsequent requests can proceed normally.

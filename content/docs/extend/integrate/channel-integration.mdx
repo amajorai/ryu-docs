@@ -1,81 +1,96 @@
 ---
 title: "Channel Bot Integration"
-description: "Connect Ryu to Telegram, Slack, WhatsApp Personal, WhatsApp Business, and Discord — channel adapters, credentials, and multi-tenant routing."
+description: "Explanation of how Ryu connects Telegram, Slack, WhatsApp, Discord, and BlueBubbles bots to Core agents through Gateway channel adapters."
 tags: ["channel", "telegram", "slack", "whatsapp", "discord", "bot", "integration"]
 ---
 
-Ryu can run bots on messaging platforms through channel adapters. Each channel has its own adapter
-that translates platform events into Core chat sessions and streams responses back. WhatsApp has
-two separate channel types: the unofficial self-hosted OpenWA bridge for personal accounts and
-the official Meta Cloud API for business accounts.
+A channel adapter connects a messaging platform to Ryu. The Gateway runs the platform listeners.
+Each adapter turns a platform event into a governed request, routes it to the configured Core agent
+or team, and sends the reply back to the platform.
+
+For setup, access policy, and per-platform features, see [Channel Bots](/docs/gateway/channels).
+That page is the canonical reference.
 
 ## Supported channels
 
-| Channel | Adapter | Auth |
+The transport adapters live in `crates/gateway/channels/src/`. The Gateway wiring (pipeline call,
+registration, and env fallback) is in `apps/gateway/src/channels_host.rs`.
+
+| Channel | Adapter | Headless credentials |
 |---|---|---|
-| Telegram | `apps/core/src/sidecar/adapters/telegram.rs` | `TELEGRAM_BOT_TOKEN` |
-| Slack | `apps/core/src/sidecar/adapters/slack.rs` | `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN` |
-| WhatsApp Personal | `openwa.rs` | Channel-level OpenWA URL, API key, session, and webhook secret |
-| WhatsApp Business (Cloud API) | `whatsapp.rs` | `WHATSAPP_ACCESS_TOKEN` or channel-level Meta credentials |
-| Discord | `apps/core/src/sidecar/adapters/discord.rs` | `DISCORD_BOT_TOKEN` |
+| Telegram | `telegram.rs` | `TELEGRAM_BOT_TOKEN` |
+| Slack (Socket Mode) | `slack.rs` | `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` |
+| Discord | `discord.rs` | `DISCORD_BOT_TOKEN` |
+| WhatsApp Business (Cloud API) | `whatsapp.rs` | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` |
+| WhatsApp Personal (OpenWA) | `openwa.rs` | Channel-level OpenWA URL, API key, session, and webhook secret |
+| BlueBubbles (iMessage bridge on a Mac) | `bluebubbles.rs` | `BLUEBUBBLES_SERVER_URL` and `BLUEBUBBLES_PASSWORD` |
+
+WhatsApp has two separate channel types. WhatsApp Personal uses the unofficial, self-hosted OpenWA
+bridge. WhatsApp Business uses the official Meta Cloud API.
+
+<Callout type="warn">
+  WhatsApp Personal (OpenWA) accounts are unofficial and WhatsApp can restrict them. Use a dedicated
+  number.
+</Callout>
 
 ## How it works
 
 ```mermaid
 sequenceDiagram
   participant U as User (Telegram)
-  participant CH as Channel Adapter
-  participant K as Core
-  participant G as Gateway
+  participant CH as Channel adapter (Gateway)
+  participant G as Gateway pipeline
+  participant K as Core agent or team
 
   U->>CH: "Hello bot"
-  CH->>K: POST /api/chat/stream (agent_id, session_id)
-  K->>G: Model call
-  G-->>K: Governed response
-  K-->>CH: SSE stream
+  CH->>G: Governed request (channel identity)
+  G->>K: Route to the configured agent or team
+  K-->>G: Reply
+  G-->>CH: Governed response
   CH-->>U: Reply message
 ```
 
 The channel adapter:
-1. Receives the platform event (message, command, callback).
-2. Maps it to a Core chat request with an `agent_id` and `session_id`.
-3. Streams the response back to the platform.
 
-## Gateway config for channels
+1. Receives the platform event (message, command, or callback).
+2. Applies the channel's access policy (DM and group rules, pairing approvals).
+3. Builds a governed request for the bot's configured agent, team, or model.
+4. Sends the response back to the platform.
 
-Channel bot tokens are configured in `gateway.toml`:
+Channel traffic runs with a channel identity (`channel:<name>`) and interactive priority, so it
+gets the same firewall, budget, and audit as other Gateway traffic.
+
+## Configure a channel
+
+Configure channels in **Gateway → Channels** in Desktop. Credentials there are write-only.
+
+### Managed Telegram pairing
+
+On deployments that provide it, Desktop can create a user-owned Telegram bot without asking the
+user to copy a token.
+
+- A Telegram account can have only one managed setup link waiting for its bot at a time.
+- Telegram's bot-created notice does not say which link started it, so a second link is refused
+  until the first one finishes or expires (about ten minutes).
+- If more than one link was somehow waiting, the new bot is not connected anywhere. Start the setup
+  again from the Ryu app, or send `/deletebot` to the manager bot to have it forget the bot.
+
+### Headless configuration
+
+Headless deployments can set the bot tokens in `gateway.toml` or through the environment variables
+in the table above.
 
 ```toml
 [channels.telegram]
-bot_token = "TELEGRAM_BOT_TOKEN"
+token = "<telegram bot token>"
 
 [channels.slack]
-app_token = "SLACK_APP_TOKEN"
-bot_token = "SLACK_BOT_TOKEN"
+app_token = "<slack app-level token>"
+bot_token = "<slack bot token>"
 
 [channels.discord]
-bot_token = "DISCORD_BOT_TOKEN"
+token = "<discord bot token>"
 ```
-
-WhatsApp credentials are normally configured per channel in **Gateway -> Channels**. Choose
-**WhatsApp Personal** to connect an OpenWA session (QR/pairing-code linking, webhook signing, and
-optional self-chat mode), or **WhatsApp Business (Cloud API)** to connect a Meta Business phone
-number (Phone Number ID, access token, App Secret, and Verify token). Personal OpenWA accounts are
-unofficial and can be restricted by WhatsApp; use a dedicated number. See [Gateway Channels](/docs/gateway/channels)
-for the webhook and feature details.
-
-The desktop Channels dialog also supports managed Telegram pairing on deployments that provide it.
-That path creates a user-owned Telegram bot and saves the resulting channel without asking the user
-to copy a token. Headless and TOML integrations still use an explicit `TELEGRAM_BOT_TOKEN`; the
-managed desktop flow does not change the adapter contract.
-
-See [Gateway Channels](/docs/gateway/channels) for the full configuration.
-
-## Multi-tenant routing
-
-Channel bots can route messages to different Core nodes or agents based on the platform user.
-The Gateway's `x-ryu-user-id` header carries the platform user identity, which drives per-user
-budgets and audit.
 
 ## Related
 

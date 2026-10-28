@@ -1,0 +1,217 @@
+---
+title: "Video Studio Agent Access"
+description: "Reference for the Video Studio agent permissions, project and timeline routes, look and audio tools, generation records, and the Gateway budget boundary"
+tags: ["Apps", "Video Studio"]
+---
+
+This reference lists the HTTP routes and tool names that agents use to read and
+edit a [Video Studio](/docs/apps/video-studio) project. Agents work on the same
+saved project and revision as the editor. Every route is under
+`/api/video-studio`; on this page, `…` stands for that prefix. For what each
+operation does in the editor, see [timeline editing](/docs/apps/video-studio-editing)
+and [assisted editing](/docs/apps/video-studio-assisted-editing). Media import,
+search, captions, assisted edits, and export routes are in
+[agent media and export](/docs/apps/video-studio-agents-media).
+
+<Callout type="warn">
+Video Studio is an experimental app. Cloud-provider settlement and the broader
+automated production workflow are still in development. Budget admission,
+local stock catalogs, and the saved production recipes work today.
+</Callout>
+
+## Permissions
+
+Video Studio exposes its project, media, and render operations through Ryu's
+existing tool discovery. The app requests permission to run its local media
+sidecar. Viewing and editing are separate app permissions:
+
+- **Can view** covers reads and the read-only plan routes (split-edit, filler,
+  dead-air, highlights, and soundtrack plans).
+- **Can edit** also allows importing media and starting or canceling renders.
+- **Can approve scenes** is a separate permission for scene approval.
+
+Five optional grants are requested separately and are never needed to enable
+the app:
+
+| Grant | Used for |
+| --- | --- |
+| `chat.sendFollowUp` | **Ask agent** sends a question into an existing Ryu chat. |
+| `media:record` | The voiceover recorder. |
+| `usage:audit` | Exact Gateway cost receipts in generation history. |
+| `core:list_agents` | The provider and model catalog in the **Generate** panel. |
+| `social:crud` | **Send to Outpost** for finished exports. |
+
+Without a grant, the matching control explains why it is unavailable.
+
+## Decision log and pipeline stages
+
+The Plan tab keeps an append-only **Decision log** for consequential production
+choices. Record the category, subject, chosen path, and rationale before a
+provider, model, render runtime, or creative direction is used. Read it with
+`GET …/projects/{id}/decisions` and append an entry with the
+current `revision` through `POST` on the same path.
+
+**Pipeline checkpoints** track the research, proposal, script, scene plan,
+assets, edit, and compose stages. Start and complete stages in order. Read them
+with `GET …/projects/{id}/stages` and transition them with the
+revision-checked `POST` on the same path.
+
+## Read the project and the node
+
+Before an edit, `GET …/projects/{id}/timeline` returns the saved
+frame rate, canvas, total frames, stable `trackId` values, clip source ranges,
+gaps, markers, and current revision. `GET …/projects/{id}/transcript`
+maps saved transcript words through clip trims, speed, and positions (pass
+`track`, 0 to 31, to scope it). `GET /api/video-studio/search?q=...` returns
+matching source-transcript ranges you can place with the timeline routes.
+
+`GET /api/video-studio/capabilities` reports the node's renderer: the export
+codecs (`h264`, `h265`, `prores`, `h265-10bit`, `prores-4444`, `vp9`) and
+formats, media limits, and which optional FFmpeg `filters` and `encoders` are
+present, including `x265TenBit`. `bundledAssets` reports whether the bundled
+title fonts (`fonts`) and the RNNoise voice isolation model
+(`voiceIsolationModel`) are available. Check it before asking for a feature that
+needs an optional filter, such as keys, LUTs, voice isolation, background
+cutout, or text masks.
+
+For visual review, `GET …/projects/{id}/inspect-frame?time=...`
+renders one composited PNG without adding media (`ungraded` lists up to eight
+clips to render with a neutral grade), `GET …/projects/{id}/overview`
+tiles up to 48 evenly spaced frames into one image, and
+`GET …/projects/{id}/scopes?time=...` returns histogram, parade,
+and vectorscope data for the composited frame. **Ask agent** in the editor sends
+a question about the marked range or selected clips, with the project id,
+revision, clip ids, the review markers in that range (label, time, status, and
+comment), and a timeline summary, into an existing Ryu chat. **Ask agent about
+this marker** hands one review marker over the same way.
+
+## Timeline operations
+
+Every edit below needs the editing permission and the current `revision`, and
+returns the saved project; a stale revision is rejected with a conflict so you
+can reload and retry. Clips on locked tracks are refused, and linked partners
+are always edited together. Track numbers run from 0 (bottom) to 31.
+
+| Tool | Route | Purpose |
+| --- | --- | --- |
+| `video_studio_add_clips` | `POST …/projects/{id}/add` | Place source ranges without rippling. |
+| `video_studio_insert_clips` | `POST …/projects/{id}/insert` | Insert source ranges at `at` and ripple later content. |
+| `video_studio_overwrite_clips` | `POST …/projects/{id}/overwrite` | Place clips back to back at `at` on one track, overwriting what is there. |
+| `video_studio_move_clip` | `POST …/projects/{id}/move` | Move a clip to a frame-quantized start and track. |
+| `video_studio_move_to_new_track` | `POST …/projects/{id}/move-to-new-track` | Move `clipIds`, or copy them with `duplicate`, to the first free track above. |
+| `video_studio_place_title_narration` | `POST …/projects/{id}/title-narration` | Place a narration audio `assetId` at the start of title `titleId` on the lowest free audio track (track 1 or above). Generate the audio from the title's text first. |
+| `video_studio_add_sticker` | `POST …/projects/{id}/stickers` | Place bundled sticker `stickerId` at `time` for `duration` seconds (default 4) with an animation `preset`, at 35% scale on the lowest free track above the picture. The first use draws it as a 1024-pixel PNG and adds it to the **Stickers** library folder with its license credit; later uses reuse that image. Returns `asset`, `segmentId`, `track`, and `reused`. Find ids with `video_studio_list_stickers` (`GET …/stickers?query=&category=&limit=`, view permission), which returns names, keywords, license credits, and the preset list. |
+| `video_studio_split_clip` | `POST …/projects/{id}/split` | Split at up to 64 `times`, optionally only `clipIds`. |
+| `video_studio_remove_clips` | `POST …/projects/{id}/remove` | Delete clips; `ripple` closes the gap. |
+| `video_studio_trim_to_playhead` | `POST …/projects/{id}/trim-to-playhead` | Trim the `start` or `end` edge to `time`, with `ripple`; reports `limited`. |
+| `video_studio_ripple_delete_gap` | `POST …/projects/{id}/ripple-delete-gap` | Close the gap on `track` at `time`. |
+| `video_studio_ripple_delete_range` | `POST …/projects/{id}/ripple-delete` | Remove `start` to `end` and ripple. |
+| `video_studio_trim_edit` | `POST …/projects/{id}/trim-edit` | Roll, slip, slide, or ripple-trim by `delta`; returns `applied`. |
+| `video_studio_paste_clips` | `POST …/projects/{id}/paste-clips` | Duplicate up to 200 clips at `at`, as an overwrite or an insert. |
+| `video_studio_paste_clip_settings` | `POST …/projects/{id}/paste-settings` | Copy chosen settings `groups` from one clip to up to 200 clips. |
+| `video_studio_paste_keyframes` | `POST …/projects/{id}/paste-keyframes` | Paste keyframes onto up to 200 clips; returns `pasted` and `skipped`. |
+| `video_studio_set_keyframes` | `POST …/projects/{id}/keyframes` | Replace one property's keyframes on a clip (`clipId`), title (`titleId`), or graphic (`graphicId`), with `interpolation`, `bezier`, and `target`. Title text styles, graphic shape parameters, and colors (`color: "#rrggbb"`) are keyframable. |
+| `video_studio_set_clip_properties` | `POST …/projects/{id}/clip-properties` | Patch any clip field: transform, blend, masks, key, color, effects, audio, label, color tag. |
+| `video_studio_set_transition` | `POST …/projects/{id}/transition` | Set or clear the reveal transition into `clipId`. |
+| `video_studio_overlay_edit` | `POST …/projects/{id}/overlay-edit` | Move, trim, delete, or duplicate a title, graphic, avatar, adjustment layer, or caption. |
+| `video_studio_set_graphic_masks` | `POST …/projects/{id}/graphic-masks` | Replace one shape graphic's masks (up to four, any shape but text, with optional outline strokes); `null` removes them. |
+| `video_studio_update_track` | `POST …/projects/{id}/tracks` | Set a track's name, mute, solo, lock, `hidden`, `syncLocked`, `height`, `gainDb`, and `pan`. |
+| `video_studio_add_track` | `POST …/projects/{id}/tracks/add` | Insert an empty track at `at`. |
+| `video_studio_remove_track` | `POST …/projects/{id}/tracks/remove` | Remove a track (`force` when it has clips). |
+| `video_studio_reorder_tracks` | `POST …/projects/{id}/tracks/reorder` | Reorder tracks bottom to top. |
+| `video_studio_manage_clip_links` | `POST …/projects/{id}/links` | Link or unlink audio and video. |
+| `video_studio_reattach_audio` | `POST …/projects/{id}/reattach-audio` | Recover detached audio onto the video clip. |
+| `video_studio_manage_markers` | `POST …/projects/{id}/markers` | Add, toggle, move, update, or turn a range into markers; set `rippleMarkers`. |
+
+Projects and history use `GET /api/video-studio/project-summaries`,
+`GET …/projects/{id}/poster`, and `DELETE …/projects/{id}/delete?revision=N`
+(refused while exporting or nested elsewhere). `GET …/projects/{id}/history`
+lists up to 100 saved revisions (`summary=1` for labels only), and `POST` on the
+same path restores one with `historyRevision`; `POST …/projects/{id}/undo`
+restores the newest. `POST …/projects/{id}/duplicate` makes an alternate cut,
+and `/api/video-studio/timelines` lists and creates timeline workspaces.
+
+`POST …/projects/{id}/settings` changes the canvas (`width` and `height`
+together, up to 8192), `aspectRatio`, `quality`, `fps` (23.976, 24, 25, 29.97,
+30, 48, 50, 59.94, 60, or 120), `exportCodec`, `exportPreset`, and
+`styleProfile`. `POST …/projects/{id}/match-media` matches the canvas and frame
+rate to a library video.
+
+`POST …/projects/{id}/sync` accepts `driftCorrection` (on by default) and
+`dryRun`, and returns each target's measured `drift` and any `warnings`.
+`POST …/projects/{id}/multicam` switches accept a program microphone (`audio`)
+and a split-screen `layout`. `POST …/projects/{id}/titles` accepts
+`apply-template` with a `templateId`, `start`, and optional replacement `texts`.
+`POST …/templates/{id}/instantiate` is an alias of `POST …/template-instances`
+with the template id in the path.
+
+## Look, motion, and composition
+
+| Tool | Route | Purpose |
+| --- | --- | --- |
+| `video_studio_apply_color` | `POST …/projects/{id}/color` | Apply, copy, or reset grades, or apply a `look` with an intensity. |
+| `video_studio_luts`, `video_studio_import_lut`, `video_studio_delete_lut` | `GET`, `POST`, `DELETE …/luts` | List, import (`.cube`, JSON or multipart), and delete LUTs. |
+| `video_studio_fonts`, `video_studio_import_font`, `video_studio_delete_font` | `GET`, `POST`, `DELETE …/fonts` | List, import, and delete `.ttf`/`.otf` fonts. Import a file up to 1.4 MB as base64 JSON (`{name, data}`); for a file up to 24 MB (CJK families), open an upload with `POST …/uploads` and `purpose: "font"`, send 512 KiB chunks with `PUT …/uploads/{id}`, then import it with `{name, uploadId}` instead of finishing the upload. Font files count against the node's media storage allowance, but not against the media file limit. `GET …/fonts?id=` returns a font's file as base64 for fonts up to 1.4 MB; add `&offset=` to read it in 512 KiB chunks (`{data, size, done}`), which larger fonts require. Use one with `customFont: {id, family}` on a title, a caption style, or `apply-template`. |
+| `video_studio_font_catalog`, `video_studio_import_catalog_font` | `GET`, `POST …/font-catalog` | Search the Fontsource catalog of open-licensed fonts by family (`?q=`), then add one `.ttf` (`{id, weight, style, subset}`) to the font library. Only OFL-1.1, Apache-2.0 and UFL-1.0 fonts are listed or imported, and the license is recorded for the project's credits. Fails with the reason when the catalog is unreachable. |
+| `video_studio_system_fonts` | `GET …/system-fonts` | List the font families installed on the node (`{available, fonts}`). Use one as `systemFont` on a title, a caption style, or `apply-template`; `customFont` wins when both are set. |
+| `video_studio_apply_effects` | `POST …/projects/{id}/effects` | Replace the effect stack on clips. |
+| `video_studio_edit_adjustment_layers` | `POST …/projects/{id}/adjustment-layers` | Create, update, duplicate, or delete adjustment layers. |
+| `video_studio_set_background` | `POST …/projects/{id}/background` | Set the canvas background, or a clip's own fill with `clipId`. |
+| `video_studio_apply_layout` | `POST …/projects/{id}/layout` | Apply a layout to ordered clips, with optional `fit`. |
+| `video_studio_cutout_media` | `POST …/assets/{id}/cutout` | Make a transparent cutout from a clean-plate frame. |
+| `video_studio_reframe` | `POST …/projects/{id}/reframe` | Convert the project's aspect with tracked, centered, or blur-fill framing. Optional `stabilize` (low, medium, high) swaps each target video onto its stabilized media first. |
+| `video_studio_track_motion` | `POST …/projects/{id}/track` | Track a region and make a title, graphic, clip, or new blur or mosaic region follow it. |
+
+## Audio and music
+
+| Tool | Route | Purpose |
+| --- | --- | --- |
+| `video_studio_generate_soundtrack` | `POST …/soundtrack` | Compose a local score; a long one returns a job to poll with `GET …/soundtrack-jobs?id=`. |
+| `video_studio_soundtrack_plan_context`, `video_studio_align_soundtrack_plan` | `GET`, `POST …/projects/{id}/soundtrack-plan` | Read cut and beat context, and align a section plan to it. Optional `description` (what the music should sound like) and `start`/`end` (score one range). |
+| `video_studio_generate_sfx` | `POST …/sfx` | Make a whoosh, riser, hit, impact, click, pop, swoosh, or ding, with an optional `seed`. |
+| `video_studio_detect_silence` | `GET …/assets/{id}/silence` | Find non-speech, by voice activity (`method=vad`) or loudness. |
+| `video_studio_estimate_beats` | `GET …/assets/{id}/beats` | Detect tempo, beats, and bar starts for a source span (`from`, `to`). |
+| `video_studio_avatar_lip_sync` | `POST …/projects/{id}/avatars/lip-sync` | Generate an avatar's mouth keyframes from a clip or library audio. |
+
+At most two local audio jobs run at once; a third request gets a busy response.
+
+## Generate media and draft scenes
+
+Generation, AI image edits, regeneration, and gap fill record each request
+with `POST /api/video-studio/generations` before calling Ryu's media services
+and record the outcome with `PUT` on the same path. Requests carry an optional
+`purpose`, `sourceAssetId`, up to four `inputAssetIds`, and
+`regeneratesAssetId`. Image, video, narration, soundtrack, production cap, and
+scene-drafting workflows are covered in the
+[media generation guide](/docs/apps/video-studio-generation).
+
+## Gateway budget snapshot
+
+Generation history can show a read-only snapshot from the node's Gateway when the
+Core bridge is available. It reports node-wide tracked users, agents, sessions,
+and the accounting unit; it does not attribute spend to a project or invent a
+provider receipt. If the Gateway is unavailable, the panel says so and the
+editor remains usable.
+
+The Plan budget panel separately shows the project's configured cap, exact
+receipt-backed spend, reserved estimates for requests still running, and
+unsettled estimates for completed or interrupted requests without a matching
+Gateway row. A zero cap leaves admission uncapped. Planning estimates are local
+admission values; Gateway remains authoritative for provider billing and policy.
+
+When the optional `usage:audit` grant is approved and Gateway audit records are
+available, **Gateway audit** also shows recent
+redacted provider/model rows and the actual cost field returned by Gateway.
+Cloud image and video requests carry the saved generation ID and project ID
+through the trusted Core-to-Gateway forwarder. When Gateway returns a row with
+that exact request ID, Generation history shows the resolved provider and actual
+cost beside the matching project request. A missing row stays unavailable; the
+app never joins records by timestamp, prompt, or an inferred provider. Other
+Gateway records remain node-wide and are not attached to a project.
+
+A visible budget snapshot does not create a spending cap. The app does not infer
+a cost from a generation that lacks an authoritative Gateway result.
+
+For related audio and caption workflows, see [Voice Studio](/docs/apps/voice) and
+[Subtitles](/docs/apps/subtitles). Grants and permission levels are listed on the
+[Video Studio overview](/docs/apps/video-studio#permissions).

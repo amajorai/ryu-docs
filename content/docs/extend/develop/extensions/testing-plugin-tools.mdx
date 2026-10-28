@@ -1,16 +1,15 @@
 ---
 title: "Testing Plugin Tools"
-description: "Write plugin tool bodies as deterministic functions and prove them with a golden case table, so a tool is verified before anything is allowed to call it"
+description: "How to write plugin tool, adapter, and hook bodies as deterministic fragments and verify them with golden case tables using the tools/toolsmith harness"
 ---
 
-A tool your plugin contributes is code an agent will call without asking you first.
-If it is flaky, the agent's failure looks like a bad answer rather than a bad tool,
-which is the hardest kind of bug to attribute. This page is how to make a tool body
-**testable**, what "deterministic" can actually mean for one, and how to run the
-checks.
+An agent calls your plugin's tools without asking you first. If a tool is flaky, the
+failure looks like a bad answer rather than a bad tool, so it is hard to attribute.
+Write each tool body as a deterministic function and verify it with a golden case
+table before you ship it.
 
 <Callout type="info">
-The harness described here ships in the repository as `tools/toolsmith`. It has no
+The harness described here ships in the public `amajorai/ryu` repository as `tools/toolsmith`. It has no
 dependencies beyond Node's own test runner.
 </Callout>
 
@@ -27,30 +26,29 @@ if (typeof input.text !== "string") {
 return { words: input.text.trim().split(/\s+/).filter(Boolean).length };
 ```
 
-That top-level `return` is correct, and it is also why no test runner can simply
-`import()` the file; a module parser rejects the form. So testing a tool body means
-reproducing the splice, and reproducing the splice is the job the harness does once
-instead of every plugin doing it slightly differently.
+That top-level `return` is correct, and it is also why no test runner can
+`import()` the file; a module parser rejects the form. Testing a tool body means
+reproducing the splice. The harness does that once, so each plugin does not need its
+own version.
 
 There are three fragment forms, distinguished by what gets injected:
 
 | Form | Injected bindings | Used by |
 | --- | --- | --- |
-| `inline_tool` | `input`, `caller`, `host` | a tool with `backend: "inline_deno"` |
+| `inline_tool` | `input`, `caller`, `host` | a tool with `backend: "inline_js"` |
 | `adapter` | `input`, `defaults`, `callTool`, `callNamed` | a [capability adapter](/docs/extend/develop/extensions/capability-broker) |
 | `turn_hook` | `ctx`, `host` | a [turn hook](/docs/extend/develop/extensions/plugin-runtime) |
 
 ## What "deterministic" means for a tool
 
-A tool that calls a search API is not deterministic and never will be. Demanding
-that is how you end up with no tests at all. The property that *is* achievable, and
-that the sandbox already supports:
+A tool that calls a search API is not deterministic. The property a tool can have,
+and that the sandbox already supports, is this:
 
 > The body is a **pure function of its injected input and the answers its declared
 > effects returned.** Every source of nondeterminism is confined to `host.*`,
 > `callTool` and `callNamed`, which are exactly the calls a test can stub.
 
-Concretely, that rules out reaching for anything ambient:
+That rules out every ambient source of state:
 
 - **No clock.** No `Date.now()`, no argless `new Date()`. If the tool needs a
   timestamp, take one as an input field so the caller owns it.
@@ -62,23 +60,22 @@ Concretely, that rules out reaching for anything ambient:
   Route it through `callTool` / `callNamed` or a host function.
 - **No timers.** A tool body is a straight-line function of its input.
 
-`Math.max` and `new Date(someMillis)` are perfectly pure and stay available. Only
-the impure members are off-limits.
+`Math.max` and `new Date(someMillis)` are pure and stay available. Only the impure
+members are off-limits.
 
 ## Writing the body
 
-Four rules that matter more than style:
+Follow these rules when you write the body:
 
 1. **Validate the input and throw a named error.** A tool that returns `{}` on bad
    input teaches the model that the call succeeded.
 2. **Never fabricate a plausible empty result from a broken call.** If a provider
-    answered with an error envelope, return the envelope, not `{ results: [] }`.
-    The second is an invisible lie that reads as "no matches" and sends the agent
-    confidently down the wrong path.
+   answered with an error envelope, return the envelope, not `{ results: [] }`.
+   The second reads as "no matches" and sends the agent down the wrong path.
 3. **Return a stable shape.** Same keys on every path; absent data is `null`, not a
    missing key.
 4. **Keep it narrow.** One tool with a `mode` argument routes worse than three tools
-    with three clear descriptions. The model picks by description.
+   with three clear descriptions. The model picks by description.
 
 ## Writing the cases
 
@@ -111,21 +108,21 @@ effects, and states the expectation:
 ```
 
 Each case declares exactly one of `expect` (deep-equals the return value),
-`expectError` (a regex the thrown message must match), or `expectImpure` (documents
-a body deliberately rejected as nondeterministic).
+`expectError` (a regex the thrown message must match), or `expectImpure` (a regex
+for a body the harness must reject as nondeterministic).
 
 **At least three cases are required.** The floor is happy path, boundary, and
 failure. One happy path proves nothing about a tool.
 
 ### Who called the tool
 
-An `inline_tool` body also gets `caller`: `{ agent_id, conversation_id }` for the
+An `inline_tool` body also gets `caller`, which is `{ agent_id, conversation_id }` for the
 agent whose turn dispatched the call, resolved by the host. It is separate from
 `input` because everything in `input` is a claim the model wrote: a tool that
 attributes, addresses, or scopes state by agent has to read `caller`, or naming a
 different agent in the arguments would be enough to impersonate one. Both fields
 are `null` when there is no agent (a workflow step, a monitor, a recipe), so treat
-them as optional. A case seeds it alongside `input`:
+them as optional. A case seeds `caller` next to the input:
 
 ```json
 "caller": { "agent_id": "ryu", "conversation_id": "conv_1" }
@@ -156,6 +153,14 @@ For an `adapter`, the `provider` fixture drives the provider calls:
 }
 ```
 
+Stub the shape the provider tool really returns. The example above is an MCP
+tool's result. An `http` tool answers `{ "status": 500, "body": ... }`, or, with
+`"unwrap_body": true`, the parsed body itself on a 2xx. With `"fail_open": true`,
+a 401/403 or an unreachable host answers
+`{ "available": false, "reason": ..., "hint": ... }` instead. A case stubbing an
+MCP envelope for an `http` tool passes here and returns nothing useful once
+installed.
+
 `callNamed` is checked against the `adapter.tools` allowlist your manifest declared,
 mirroring the host-side check, so a case cannot pass against a call the real
 runtime would refuse.
@@ -174,21 +179,36 @@ to do**: every effect, in order, with exact arguments:
 This is the assertion that catches a tool returning the right shape while calling
 the wrong endpoint. Use it whenever the tool has an effect.
 
+`expect` is compared against the result as it would leave the sandbox, which is
+JSON. A key whose value is `undefined` is therefore absent from `expect`.
+
+### Several bodies in one plugin
+
+A plugin that ships more than one body, such as one adapter per `browser.*` verb,
+keeps one case table per body in a `cases/` folder (`cases/browser.click.json`,
+`cases/browser.type.json`, and so on), in the same format as `cases.json`. The
+generated test file runs every table, and `verify` checks each body in turn. For an
+adapter, the table's `adapter_tools` must list exactly the tools the manifest's
+`adapter.tools` declares.
+
 ## Running the checks
 
-`--out` is your plugin's directory, the one holding its `manifest.json`, which for
-an installed plugin is `~/.ryu/plugins/<id>/`.
+`--out` is your plugin's directory, the one holding its `manifest.json`. For an installed plugin
+that is `plugins/<dir>/` in the node's
+[data folder](/docs/surfaces/desktop/user-guide/data-and-storage#whats-in-the-data-folder), where
+`<dir>` is the plugin id with `/` replaced by `+`. The examples below use a project folder.
 
 ```bash
 # create a package: body, cases.json, and its test file
 node tools/toolsmith/index.mjs scaffold \
-  --id @scope/name --tool word_count --out ~/.ryu/plugins/@scope/name
+  --id @scope/name --tool word_count --out ./scope+name
 
-# seal the authored body into the manifest (inline_deno tools only)
-node tools/toolsmith/index.mjs sync ~/.ryu/plugins/@scope/name
+# seal the authored body into the manifest (inline_js tools only);
+# add --cases cases/<tool>.json to target one table in a multi-body plugin
+node tools/toolsmith/index.mjs sync ./scope+name
 
 # the gate
-node tools/toolsmith/index.mjs verify ~/.ryu/plugins/@scope/name
+node tools/toolsmith/index.mjs verify ./scope+name
 ```
 
 Re-running `scaffold` regenerates only the test file; your body and `cases.json` are
@@ -200,35 +220,35 @@ never overwritten.
    construct listed above. It runs first, before the body executes, and a violation
    stops everything.
 2. **Manifest contract.** The tool is seated in the manifest, is routable (a real
-    description and an `input_schema`), and is callable. An `inline_deno` tool needs
-    `"tool:execute"` in `permission_grants`, and without it the tool registers,
-    appears in discovery, and then refuses every call it receives.
+   description and an `input_schema`), and is callable. An `inline_js` tool or a
+   capability adapter needs `"tool:execute"` in `permission_grants`, and without it
+   the tool registers, appears in discovery, and then refuses every call it receives.
 3. **Drift check.** The manifest carries exactly the body the cases tested.
 4. **Cases.** Every case runs **twice** against fresh, identically-seeded stubs, and
    the two results must match. Anything nondeterministic that slipped past the scan
    fails here.
 
-The generated test file runs the same four steps, so the automated suite can never
-be greener than the command.
+The generated test file runs the same four steps, so the automated suite and the
+command give the same result.
 
 <Callout type="warn">
 The purity scan is a guardrail, not a sandbox. It is a conservative source-level
 denylist, and the body runs with full privileges in the test process. Use it on tool
 bodies you or your team wrote and have read; it is not a vetting step for an
 untrusted third-party plugin. The thing that actually confines plugin code at
-runtime is the deny-by-default Deno sandbox.
+runtime is the deny-by-default JS sandbox.
 </Callout>
 
 ## Authoring in a file, shipping in the manifest
 
 A capability adapter and a turn hook both reference their body by path
 (`code_file`), and Ryu reads that file from the plugin's own directory. An
-`inline_deno` tool has no such field; its only loadable form is a string inside
+`inline_js` tool has no such field; its only loadable form is a string inside
 `manifest.json`.
 
 Write the body in a file anyway, and let `sync` copy it into the manifest. A
-`\n`-escaped one-line blob in JSON is not reviewable, not diffable, and not
-lintable, and "nobody reads it" is precisely the property malicious code relies on.
+`\n`-escaped one-line blob in JSON is hard to review, diff, or lint, and code that
+nobody reads is where malicious code hides.
 `sync --check`, which `verify` runs, is what keeps the file and the manifest from
 drifting apart.
 
@@ -236,5 +256,5 @@ drifting apart.
 
 - [Plugin and app evals](/docs/extend/develop/extensions/plugin-evals)
 - [Plugin Runtime (Turn Hooks)](/docs/extend/develop/extensions/plugin-runtime)
-- [`plugin.json` Manifest](/docs/extend/develop/extensions/plugin-json-manifest)
+- [Bundle Runnables with manifest.json](/docs/extend/develop/extensions/plugin-json-manifest)
 - [Capability Broker](/docs/extend/develop/extensions/capability-broker)

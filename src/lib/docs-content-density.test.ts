@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 
-const docsRoot = new URL("../../content/docs/", import.meta.url);
+const docsRoot = fileURLToPath(new URL("../../content/docs/", import.meta.url));
 const MAX_PROSE_PARAGRAPH_CHARS = 900;
 
 type Finding = {
@@ -85,11 +86,11 @@ test("keeps public prose paragraphs scannable", async () => {
   const findings: Finding[] = [];
   const glob = new Bun.Glob("**/*.mdx");
 
-  for await (const file of glob.scan({ cwd: docsRoot.pathname })) {
+  for await (const file of glob.scan({ cwd: docsRoot })) {
     if (file.includes("extend/develop/api-reference/")) {
       continue;
     }
-    const content = await Bun.file(new URL(file, docsRoot)).text();
+    const content = await Bun.file(`${docsRoot}/${file}`).text();
     findings.push(...findLongParagraphs(content, file));
   }
 

@@ -1,30 +1,33 @@
 ---
-title: "Anthropic & Gemini Compatible Endpoints"
-description: "Point Claude Code, the Gemini CLI, or any Anthropic- or Gemini-format client at the Ryu Gateway. Requests run through the same firewall, budgets, evals, and audit as every other path."
+title: "Anthropic and Gemini Compatible Endpoints"
+description: "Point Claude Code, the Gemini CLI, or any Anthropic- or Gemini-format client at the Ryu Gateway, with the same governance as every other path."
 tags: ["anthropic", "gemini", "messages", "generateContent", "compat", "gateway", "base-url", "claude-code"]
 ---
 
-Alongside the OpenAI-compatible surface, the Ryu Gateway speaks the **Anthropic Messages** and
-**Google Gemini** wire formats. Swap the `baseURL` of a native-format client, add a gateway API key,
-and every request runs through the same governed pipeline — budgets, firewall, routing, audit, and
-the live-traffic feed — before reaching the upstream provider. Both handlers live in
-`apps/gateway/src/compat/` and translate request and response between the native dialect and the
-pipeline's unified OpenAI shape.
+The Gateway also speaks the Anthropic Messages and Google Gemini wire formats. Change the `baseURL`
+of a native-format client and add a Gateway API key. Each request then runs through the same
+governed pipeline as the [OpenAI-compatible API](/docs/extend/integrate/openai-compat) (budgets,
+firewall, routing, audit, and the live-traffic feed) before it reaches the upstream provider. The
+handlers live in `apps/gateway/src/api/compat.rs`. They translate the request and response between
+the native dialect and the pipeline's OpenAI shape.
 
 ## Anthropic Messages (`POST /v1/messages`)
 
-```
+```text
 POST http://localhost:7981/v1/messages
 ```
 
-This is the endpoint Claude Code can point its `ANTHROPIC_BASE_URL` at. The handler translates the
-Anthropic request into the pipeline's OpenAI body, runs the full governance pipeline, and projects
-the response back into the Anthropic wire format — including `system` hoisting, tool
-`tool_use`/`tool_result` ↔ `tool_calls` conversion, and stop-reason mapping.
+Point Claude Code's `ANTHROPIC_BASE_URL` at this endpoint. The handler translates the Anthropic
+request into the pipeline's OpenAI body, runs the full governance pipeline, and projects the response
+back into the Anthropic wire format. The translation hoists `system`, converts between
+`tool_use`/`tool_result` and `tool_calls`, and maps stop reasons. Messages that mix text or thinking
+blocks with `tool_use` or `tool_result` blocks keep their tool calls and results, so multi-turn tool
+use works.
 
 Streaming (`"stream": true`) emits Anthropic-style SSE events: a `message_start`,
-`content_block_start`, one `content_block_delta` per text fragment, then `content_block_stop` /
-`message_stop`.
+`content_block_start`, one `content_block_delta` per text fragment, then `content_block_stop`,
+`message_delta`, and `message_stop`. The `message_delta` carries the token usage, including usage
+the upstream reports after its final content chunk.
 
 ```bash
 curl http://localhost:7981/v1/messages \
@@ -40,20 +43,33 @@ curl http://localhost:7981/v1/messages \
 
 ## Gemini (`POST /v1beta/models/{model}:generateContent`)
 
-```
+```text
 POST http://localhost:7981/v1beta/models/gemini-2.0-flash:generateContent
 ```
 
-Gemini carries the model on the URL path, not in the body — the whole trailing segment
-(`{model}:generateContent`) is captured, so a single route serves every model. Streaming is selected
-by the `:streamGenerateContent` suffix:
+Gemini carries the model on the URL path, not in the body. The route captures the whole trailing
+segment (`{model}:generateContent`), so one route serves every model. The `:streamGenerateContent`
+suffix selects streaming.
 
-```
+```text
 POST http://localhost:7981/v1beta/models/gemini-2.0-flash:streamGenerateContent
 ```
 
 Streaming output is a bare `data: {candidates...}` line per chunk (no named events), matching the
-Gemini protocol. This is the endpoint a Gemini SDK or the Gemini CLI can point its base URL at.
+Gemini protocol. When the upstream reports usage after the finishing chunk, it arrives as a final
+`usageMetadata` chunk. Point a Gemini SDK or the Gemini CLI base URL at this endpoint.
+
+Function calling round-trips. `functionDeclarations` become OpenAI tools, the model's calls come back
+as `functionCall` parts, and the `functionCall` and `functionResponse` parts a client sends back in
+`contents` become OpenAI `tool_calls` and `tool` messages. A `functionResponse` pairs with its call
+by `id` when that id matches a call in the preceding model turn. Otherwise (no `id`, or a
+client-generated one the call never carried), it pairs with the earliest unanswered call of the
+same name.
+
+A local or self-hosted Gateway also accepts the key as Gemini's `?key=` query parameter. The hosted
+Ryu Gateway does not: it refuses an `rgw_` token in any query parameter with `401` and ignores other
+`?key=` values, because URLs end up in proxy logs. Send the key in the `Authorization` or
+`x-goog-api-key` header there.
 
 ```bash
 curl http://localhost:7981/v1beta/models/gemini-2.0-flash:generateContent \
@@ -66,20 +82,22 @@ curl http://localhost:7981/v1beta/models/gemini-2.0-flash:generateContent \
 
 ## How the translation works
 
-Each compat handler authenticates exactly like `/v1/chat/completions` (Bearer gateway key), calls the
-same governed pipeline, then projects the result back to the caller's native format. Translation
-happens in pure functions (`apps/gateway/src/compat/{anthropic,gemini}.rs`); the streaming variants
-translate the pipeline's OpenAI SSE byte stream into the native SSE dialect on the fly.
+Each compat handler checks the same Gateway key as `/v1/chat/completions`. It reads the key from
+`Authorization: Bearer`, then from the native header (`x-api-key` for Anthropic clients,
+`x-goog-api-key` for Gemini clients). It calls the same governed pipeline, then projects the result
+back to the caller's native format. Translation happens in pure functions
+(`apps/gateway/src/compat/{anthropic,gemini}.rs`). The streaming variants translate the pipeline's
+OpenAI SSE byte stream into the native SSE dialect as it arrives.
 
 ## Response headers
 
-Responses carry the same diagnostic headers as the OpenAI surface — `x-request-id`, `x-routed-model`,
-`x-provider`, `x-cache` — so a compat call is traceable through the audit log exactly like any other.
+Compat responses carry `x-request-id` and `x-routed-model`, so you can trace a compat call through
+the audit log like any other call.
 
 ## Desktop usage
 
-The desktop Gateway dialog's **API & traffic** tab shows copyable endpoint URLs for all three dialects
-(OpenAI, Anthropic, Gemini), issues local API keys, and renders a live traffic dashboard. See
+The **API & traffic** tab of the Gateway dialog in Desktop shows copyable endpoint URLs for all three
+dialects (OpenAI, Anthropic, Gemini), issues local API keys, and shows a live traffic dashboard. See
 [Gateway configuration](/docs/gateway/configuration).
 
 ## Related

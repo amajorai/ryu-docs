@@ -1,9 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import { createFromSource } from "fumadocs-core/search/server";
 import { z } from "zod";
 
+import { pageInDocsSection } from "@/lib/docs-sections";
 import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
+import { DOCS_SEARCH_LANGUAGES } from "@/lib/search-languages";
 import { getLLMText, getPage, getPageByHref, source } from "@/lib/source";
 
 /**
@@ -18,8 +20,9 @@ import { getLLMText, getPage, getPageByHref, source } from "@/lib/source";
  * resolve the same `source` loader and `getLLMText` the `/llms*.txt` routes
  * use, so MCP output and the plain-Markdown endpoints can never drift.
  *
- * The server is deliberately **stateless** (no chat history, no auth) — the
- * transport owns sessions, but the tool bodies only read the docs tree.
+ * The server is deliberately **stateless** (no chat history, no auth). The
+ * 2026 protocol handles each request independently; legacy requests are also
+ * served without retaining a protocol session.
  */
 
 /** One search hit, with `<mark>` highlighting stripped for clean agent output. */
@@ -32,9 +35,12 @@ type SearchHit = {
   breadcrumbs: string[];
 };
 
+// The same per-locale tokenizers as /api/search. With a locale-aware source
+// Fumadocs ignores a single `language` and derives one from each locale's code,
+// which has no Orama tokenizer for `hi`, `ja`, `ko`, `pt-br` or `zh-cn`, so a
+// search in any of them failed.
 const search = createFromSource(source, {
-  // Matches /api/search (https://docs.orama.com/docs/orama-js/supported-languages)
-  language: "english",
+  localeMap: DOCS_SEARCH_LANGUAGES,
 });
 
 /** Strip `<mark>`/`</mark>` highlight markers out of a search-result string. */
@@ -67,11 +73,15 @@ function toSearchHit(result: {
   };
 }
 
-/** Render a search hit as readable text for the model. */
+/**
+ * Render a search hit as readable text for the model. The URL closes the line
+ * because the result text tells the agent to pass "a result's URL" to
+ * `docs_get_page`.
+ */
 function formatHit(hit: SearchHit): string {
   const crumbs =
     hit.breadcrumbs.length > 0 ? `${hit.breadcrumbs.join(" / ")} — ` : "";
-  return `- ${crumbs}${hit.type}: ${hit.content}`;
+  return `- ${crumbs}${hit.type}: ${hit.content} (${hit.url})`;
 }
 
 /**
@@ -102,13 +112,7 @@ function resolvePage(path: string) {
 }
 
 /**
- * Build a fresh, fully-configured docs MCP server.
- *
- * One instance per MCP session on purpose: the SDK's `Protocol` routes
- * responses through a single transport field, so sharing one server across
- * concurrent HTTP sessions would cross-wire them. A docs server has no
- * cross-session state, so per-session instances cost nothing but a few tool
- * registrations.
+ * Build a fresh, fully-configured docs MCP server for one HTTP exchange.
  */
 export function createDocsServer(): McpServer {
   const server = new McpServer({
@@ -116,27 +120,34 @@ export function createDocsServer(): McpServer {
     version: "0.1.14",
   });
 
-  server.tool(
+  server.registerTool(
     "docs_search",
     {
-      query: z
-        .string()
-        .describe("The search query, e.g. 'install cli' or 'plugin manifest'."),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(20)
-        .optional()
-        .describe("Maximum number of results to return (default 8)."),
-      tag: z
-        .string()
-        .optional()
-        .describe("Filter by a documentation tag (e.g. 'mcp', 'extensions')."),
-      locale: z
-        .string()
-        .optional()
-        .describe("Locale to search (defaults to English)."),
+      description: "Search Ryu documentation by query, tag, and locale.",
+      inputSchema: z.object({
+        query: z
+          .string()
+          .describe(
+            "The search query, e.g. 'install cli' or 'plugin manifest'.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(20)
+          .optional()
+          .describe("Maximum number of results to return (default 8)."),
+        tag: z
+          .string()
+          .optional()
+          .describe(
+            "Filter by a documentation tag (e.g. 'mcp', 'extensions').",
+          ),
+        locale: z
+          .string()
+          .optional()
+          .describe("Locale to search (defaults to English)."),
+      }),
     },
     async ({ query, limit, tag, locale }) => {
       const language = locale ?? DEFAULT_DOCS_LOCALE;
@@ -169,14 +180,17 @@ export function createDocsServer(): McpServer {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "docs_get_page",
     {
-      path: z
-        .string()
-        .describe(
-          "The docs page to read: a URL or path, e.g. '/es/docs/extend/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
-        ),
+      description: "Read a Ryu documentation page as Markdown.",
+      inputSchema: z.object({
+        path: z
+          .string()
+          .describe(
+            "The docs page to read: a URL or path, e.g. '/es/docs/extend/mcp/quickstart' or 'mcp/quickstart'. Returns the full page as Markdown.",
+          ),
+      }),
     },
     async ({ path }) => {
       const page = resolvePage(path);
@@ -198,19 +212,22 @@ export function createDocsServer(): McpServer {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "docs_index",
     {
-      section: z
-        .string()
-        .optional()
-        .describe(
-          "Optional top-level section slug to filter by (e.g. 'start-here', 'mcp', 'develop'). Omit for the whole index.",
-        ),
-      locale: z
-        .string()
-        .optional()
-        .describe("Locale to list (defaults to English)."),
+      description: "List pages in the Ryu documentation index.",
+      inputSchema: z.object({
+        section: z
+          .string()
+          .optional()
+          .describe(
+            "Optional section slug to filter by (e.g. 'start-here', 'core', 'extend', or a nested prefix such as 'extend/mcp'). Omit for the whole index.",
+          ),
+        locale: z
+          .string()
+          .optional()
+          .describe("Locale to list (defaults to English)."),
+      }),
     },
     async ({ section, locale }) => {
       const language = locale ?? DEFAULT_DOCS_LOCALE;
@@ -224,7 +241,7 @@ export function createDocsServer(): McpServer {
       }
       const pages = source
         .getPages(language)
-        .filter((page) => !section || page.slugs[0] === section)
+        .filter((page) => !section || pageInDocsSection(page.slugs, section))
         .sort((a, b) => a.url.localeCompare(b.url));
       const lines = pages.map(
         (page) =>

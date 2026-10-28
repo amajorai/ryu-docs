@@ -3,47 +3,49 @@ title: "Hooks & Lifecycle"
 description: "The plugin lifecycle from install to activation, the hook phases available, and how to build turn hooks that react to chat events."
 ---
 
-Plugins in Ryu go through a well-defined lifecycle: install, validate, enable, run, disable, and
+Plugins in Ryu go through a fixed lifecycle: install, validate, enable, run, disable, and
 uninstall. At each stage, Core enforces manifest schema validation and Gateway grant checks. Hooks
 let your plugin code react to chat events at specific boundaries: before a user message, after an
-assistant reply, before or after a tool call, and more.
-
-This page is the single reference for how plugins load, when hooks fire, and what lifecycle events
-you can use to control activation.
+assistant reply, before or after a tool call, and more. For a step-by-step guide to writing a
+hook, see [Build Turn Hooks](/docs/extend/develop/extensions/hooks-authoring).
 
 ## Plugin lifecycle overview
 
 ```mermaid
 flowchart TD
   A[Install plugin] --> B[Core validates manifest schema]
-  B --> C[Core writes to ~/.ryu/plugins/]
+  B --> C[Core writes to the data dir plugins/ folder]
   C --> D[Enable: Gateway validates grants]
   D -->|All approved| E[Activate Runnables + hooks]
-  D -->|Denied| F[Fail closed — stays disabled]
+  D -->|Denied| F[Fail closed: stays disabled]
   E --> G[Hooks fire on chat turns]
   G --> H[Disable: deactivate hooks + runnables]
   H --> I[Uninstall: remove from disk]
   E --> J[Update: re-validate + hot-reload]
-  J --> G
+  J --> K[plugin_update hooks migrate storage]
+  K --> G
+  J --> L[Rollback: restore previous version]
+  L --> K
 ```
 
 ### Lifecycle stages
 
 | Stage | What happens | Route |
 |---|---|---|
-| **Install** | Fetch manifest from URL, validate schema, write to `~/.ryu/plugins/<id>/`, hot-reload manifest set | `POST /api/plugins/install` |
+| **Install** | Fetch manifest from URL, validate schema, write it under the data directory's `plugins/` folder, hot-reload manifest set | `POST /api/plugins/install` |
 | **Install by id** | Install a known catalog plugin by its id | `POST /api/plugins/:id/install` |
 | **Enable** | Validate each declared `permission_grants` via Gateway `POST /v1/grants/validate`, then activate Runnables + hooks | `POST /api/plugins/:id/enable` |
 | **Disable** | Deactivate hooks (stop firing on next turn) + Runnables | `POST /api/plugins/:id/disable` |
-| **Update** | Re-fetch manifest, re-validate, hot-reload | `POST /api/plugins/:id/update` |
-| **Uninstall** | Remove plugin directory from disk | `DELETE /api/plugins/:id` |
+| **Update** | Re-fetch manifest, re-validate, keep the replaced version for rollback, hot-reload, then run the plugin's `plugin_update` hooks | `POST /api/plugins/:id/update` |
+| **Rollback** | Restore the version the last update replaced (manifest and bundled UI code), keeping the enabled state, then run `plugin_update` hooks | `POST /api/plugins/:id/rollback` |
+| **Uninstall** | Remove plugin directory from disk | `POST /api/plugins/:id/uninstall` |
 
 Enable **fails closed** if any declared grant is denied by the Gateway. This keeps the
 Core-vs-Gateway split intact: Core decides what runs, the Gateway decides what is allowed.
 
 ### What happens on enable
 
-When a plugin is enabled, Core runs `build_runnable_registry` (`apps/core/src/server/mod.rs`):
+When a plugin is enabled, Core validates and registers its declared runnable contributions:
 
 1. **Agent runnables** get an `app__`-namespaced id in the agent store and appear in the agent picker.
 2. **Workflow runnables** are saved as skeleton definitions and appear in the workflow list.
@@ -52,7 +54,8 @@ When a plugin is enabled, Core runs `build_runnable_registry` (`apps/core/src/se
 5. **Engine, channel, and companion runnables** register into the corresponding contribution registries.
 6. **Policy runnables** are validated by Core and applied through the Gateway/Core policy coordinator.
 7. **Turn hooks** are collected by `collect_enabled_hooks` and will fire on the next matching turn boundary.
-8. **Declarative contributions** (composer controls, settings tabs, slash commands) are stored and served at `GET /api/plugins/contributions`.
+8. **Declarative contributions** (composer controls, settings tabs, slash commands, themes, and
+   wallpaper backgrounds) are stored and served at `GET /api/plugins/contributions`.
 
 The same generic registration path feeds every client surface. A manifest may target desktop, web,
 extension, mobile, CLI, the terminal UI, Core, Gateway, Island, or a hardware-facing host. An empty
@@ -61,365 +64,18 @@ controls discoverability and rendering, not authorization: the host still checks
 declared grants and the caller's permissions before executing a sidecar, tool, or bridge method.
 
 <Callout type="warn">
-  Every Runnable kind has a handler now. The important security distinction remains: Core activates
+  Every Runnable kind has an activation handler. Core activates
   the declared contribution, but the Gateway decides whether its requested capabilities and policy
   effects are allowed. A `policy` handler coordinates state; it does not move firewall, routing, or
   budget enforcement into Core.
 </Callout>
 
-## Hook phases
+## Hook phases and recipes
 
-Turn hooks are declared under `contributes.turn_hooks` in `manifest.json`. Each hook fires at a
-specific boundary in the chat lifecycle. The `on` field selects the phase:
-
-```mermaid
-flowchart LR
-  subgraph Chat Turn Lifecycle
-    A[session_start] --> B[pre_user_turn]
-    B --> C[Model generates response]
-    C --> D[pre_tool_use]
-    D --> E[Tool executes]
-    E --> T[tool_result]
-    T --> F[post_tool_use]
-    F --> C
-    C --> G[post_assistant_turn]
-    G --> H[Turn ends]
-  end
-
-  subgraph Off-Path Events
-    I[subagent_stop] -.-> J[Observation only]
-    K[session_end] -.-> L[Observation only]
-    M[notification] -.-> N[Observation only]
-  end
-
-  subgraph Message Plane
-    O[context] --> P[rewrite / replace]
-    Q[message_end] --> R[replace]
-    S[session_before_compact] -.-> SB[Observation]
-    S2[session_compact] --> SC[replace summary]
-    T2[model_select] -.-> U2[Observation]
-    V[session_tree] -.-> W[Observation]
-    X[workflow_run_*] -.-> Y[Observation]
-  end
-```
-
-| Phase | `on` value | Fires when | Directives |
-|---|---|---|---|
-| **Session start** | `session_start` | First turn of a conversation | `inject`, `note` |
-| **Pre-user turn** | `pre_user_turn` | Before the user message reaches the model | `replace`, `inject`, `handled` |
-| **Pre-tool use** | `pre_tool_use` | Before a tool call executes | `deny` (blocks the call) |
-| **Tool result** | `tool_result` | After a tool call returns, **awaited** | `transform` (rewrites the result before the model sees it) |
-| **Post-tool use** | `post_tool_use` | After a tool call returns | Observation only — detached, fail-open |
-| **Post-assistant turn** | `post_assistant_turn` | After the assistant reply streams and persists | `note`, `continue` |
-| **Context** | `context` | Before the assembled context leaves Ryu for the model | `rewrite` (message-array plane) / `replace` (ACP plane) |
-| **Message end** | `message_end` | When an assistant message is finalized, before it persists | `replace` |
-| **Before compact** | `session_before_compact` | Before Ryu drops older turns to fit the context window | Observation only — sees what is about to be dropped |
-| **Session compact** | `session_compact` | After dropped turns have been summarized | `replace` (the summary text) |
-| **Sub-agent stop** | `subagent_stop` | When a delegated sub-agent finishes | Observation only (v1) |
-| **Delegation lifecycle** | `delegation_lifecycle` | When the global active-delegation count changes | Observation only (v1) |
-| **Session end** | `session_end` | When a conversation is deleted | Observation only (v1) |
-| **Notification** | `notification` | When a notification is fanned out | Observation only (v1) |
-| **Model select** | `model_select` | When the active model or thinking/effort level changes | Observation only |
-| **Session tree** | `session_tree` | When the conversation's message tree branches (edit/regenerate) | Observation only |
-| **Workflow started** | `workflow_run_started` | When a workflow run starts | Observation only |
-| **Workflow finished** | `workflow_run_finished` | When a workflow run completes successfully | Observation only |
-| **Workflow failed** | `workflow_run_failed` | When a workflow run fails (or a gate is rejected) | Observation only |
-
-### Directives reference
-
-| Directive | Effect | Phase |
-|---|---|---|
-| `{ kind: "none" }` | Do nothing (also the fail-safe for errors) | All |
-| `{ kind: "note", text }` | Surface `text` to the user as a `data-plugin_note` part, never in history | `post_assistant_turn`, `session_start` |
-| `{ kind: "continue", text }` | Inject `text` as a follow-up user turn, loop < 25 | `post_assistant_turn` |
-| `{ kind: "replace", text, fresh_session? }` | Swap the pending text before it reaches the model. On the ACP `context` phase, set `fresh_session: true` to send the replacement through a fresh in-process session; the persisted conversation is replayed, but warm session state is not retained. | `pre_user_turn`, `message_end`, `session_compact`, `context` (ACP plane) |
-| `{ kind: "inject", text }` | Append additional context to the outgoing message | `pre_user_turn`, `session_start` |
-| `{ kind: "deny", reason }` | Block a pending tool call; `reason` returned as tool error | `pre_tool_use` |
-| `{ kind: "transform", output }` | Rewrite a tool's result before the model sees it | `tool_result` |
-| `{ kind: "rewrite", messages }` | Replace the ENTIRE outbound message array before it reaches the model | `context` (message-array plane) |
-| `{ kind: "handled", text }` | Fully handle the turn: `text` becomes the assistant reply, no model call | `pre_user_turn` |
-
-### `deny` and `transform` are the two halves of a tool firewall
-
-`deny` stops a call from happening. `transform` reshapes what a call that already happened reports
-back. It is the redaction and narrowing primitive, so a hook can read a tool's output and return a
-rewritten value, keeping secrets, PII, or an oversized payload out of the transcript entirely.
-
-Because `reason` on a `deny` comes back to the model as the tool's **error result** rather than as a
-silent failure, the model can adapt: ask the user, try a different approach, instead of behaving
-as though the call succeeded.
-
-Two rules make `transform` trustworthy as a security boundary:
-
-- **Transforms chain in priority order.** Each `tool_result` hook receives the latest transformed
-  value, never the original raw result. A later redaction or narrowing policy therefore cannot
-  accidentally restore a secret removed by an earlier hook.
-- **Downstream observers see the final rewrite, not the original.** The detached `post_tool_use`
-  observers receive the transformed output, so a redaction is not undone by handing the raw value
-  to every other installed plugin.
-
-Pick `post_tool_use` when you only need to watch. It stays detached, so logging and telemetry cost
-the hot path nothing. Pick `tool_result` only when you need to *change* the result, and accept the
-awaited cost.
-
-### Message-plane phases
-
-Beyond the chat turn, a set of Pi-parity phases fire at Ryu's own dispatch sites, so one plugin
-governs every agent (Claude, Codex, or any other ACP agent) rather than only Pi-routed turns.
-
-- **`context`** is the context-engineering phase, and it spans two structurally different planes. On
-  the OpenAI-compat / local-engine / SDK plane, Ryu owns a real message array: `ctx.messages` is
-  populated and a hook returns `{ kind: "rewrite", messages }` to replace the whole array (multimodal
-  content survives because the array is carried as raw JSON). On the ACP plane there is no array to
-  rewrite; Ryu flattens the window into one prompt string, so `ctx.input` carries that string and a
-  hook returns `{ kind: "replace", text }` instead. A hook must check which field is set; the wrong
-  directive for the plane is ignored. When project instructions are active, `ctx.project_instructions`
-  contains the exact project-instructions block used for the current turn, so a hook can refresh or
-  remove it without parsing the surrounding system prompt. The field is absent when no project
-  instruction file is available or Safe Mode suppresses project instructions.
-- **`message_end`** fires when an assistant message is finalized, *before* it is persisted, and a
-  `replace` rewrites both the persisted content and the sealed parts. It is distinct from
-  `post_assistant_turn`, which runs after persistence and can only append a `note` or `continue`.
-- **`session_before_compact`** fires before Ryu drops older turns to fit the context window. A hook
-  sees what is about to be dropped. **`session_compact`** fires after the dropped turns are
-  summarized, and a `replace` rewrites the summary text before it merges back into the window.
-  (These fire at Ryu's own compaction sites, not Pi's. Pi auto-compacting inside its own turn loop
-  is invisible to Core.)
-- **`model_select`**, **`session_tree`**, and the three **`workflow_run_*`** phases are observation
-  only: their payload rides in `ctx.event` (`{ run_id, workflow_id, workflow_name, ... }` for the
-  workflow phases), and no directive can change what they report. `workflow_run_*` fire once per run
-  as a user understands it, not per resume or nested sub-workflow, and a run suspended at an
-  approval gate fires neither `finished` nor `failed` until it resumes and terminates.
-
-### `handled` — own a turn without a model call
-
-`replace` and `inject` still run the turn; they only reshape the prompt. `{ kind: "handled", text }`
-ends it: `text` becomes the assistant reply and **no model call is made**. That is what lets a
-plugin own a slash command, answer from cache, or refuse a prompt outright without burning a model
-call. The reply is persisted like any assistant message, and first writer wins. Once one hook
-handles a turn, later hooks do not run.
-
-## The tool glob gate
-
-A `pre_tool_use` or `post_tool_use` hook usually cares about only some tools. The manifest's
-`match.tools` field is a spawn-avoidance gate evaluated in Rust before any sandbox spawn: the hook
-runs only when the tool being called matches one of its patterns.
-
-The matcher (`glob_match`) is deliberately tiny:
-
-| Pattern | Matches |
-|---|---|
-| `*` | Everything |
-| `bash*` | Prefix: `bash`, `bash_read`, etc. |
-| `*write` | Suffix: `file_write`, `web_write` |
-| `*edit*` | Substring: `file_edit`, `inline_edit` |
-| `exact_name` | Exact match only |
-
-A hook whose gate does not match the current tool never spawns the Deno sandbox.
-
-## Cross-platform hook bodies
-
-Ryu hook bodies are sandboxed JavaScript fragments, not shell commands. Core loads a flat
-`hooks/<name>.js` or `hooks/<name>.mjs` file from the plugin's `code_file` and runs it with only
-`ctx` and `host` injected. The same body is therefore usable across Ryu's supported hosts; Core
-owns the host-specific runtime details.
-
-Keep the platform boundary in the host:
-
-- Do not add `bash`, `sh`, PowerShell, `cmd`, `.sh`, `.cmd`, or `.ps1` wrappers. A hook has no
-  command field; Core invokes the fragment through its sandbox.
-- Do not import or reach for Node, Bun, Deno, `process`, `fetch`, child processes, or filesystem
-  APIs. Use `host.storage`, `host.sideModel`, and other declared capabilities instead.
-- Do not hard-code home, temporary, or drive paths (`/tmp`, `/Users`, `/home`, `C:\\...`, `$HOME`,
-  `%TEMP%`). Treat paths in `ctx` or tool payloads as opaque strings. Filesystem or process work
-  belongs in an app sidecar with a typed host boundary.
-- Keep `code_file` package-relative with forward slashes, for example `hooks/review.js`. Core's
-  manifest validator rejects traversal and backslash-separated forms before loading a plugin.
-
-The repository's plugin test gate scans every packaged hook body under `apps-store` and
-`plugins-store` for these portability hazards. A missing sandbox runtime degrades a hook to
-`{ kind: "none" }`; it does not turn a platform-specific fallback into a supported path.
-
-### Tokenmaxxing: notify when delegation becomes idle
-
-The `delegation_lifecycle` event is the smallest useful primitive for an “always keep work moving”
-plugin. It carries a run id, the agent id, a monotonic transition id, and the process-global
-`active_count`. A plugin can watch the `1 → 0` transition and send one notification without polling:
-
-```json
-{
-  "id": "@ryu/tokenmaxxing",
-  "name": "Tokenmaxxing",
-  "version": "0.1.0",
-  "permission_grants": ["notifications:send", "storage:kv"],
-  "contributes": {
-    "turn_hooks": [
-      {
-        "id": "tokenmaxxing.delegation-idle",
-        "on": "delegation_lifecycle",
-        "code_file": "hooks/delegation-complete.js"
-      }
-    ]
-  }
-}
-```
-
-The shipped hook stores the last transition id, ignores duplicate or out-of-order events, and
-notifies only when the global count reaches zero. It is failure-closed: a notification failure does
-not start a timer, create a new agent, or claim that work is still active. Disable the plugin if you
-do not want an idle notification; it does not change delegation scheduling or model budgets.
-
-## Building a turn hook
-
-### Function-hook middleware
-
-Ryu also supports an opt-in middleware form inspired by Koa-style function hooks. Set
-`mode: "middleware"` on a `turn_hooks` entry, or use `defineFunctionHook` in the TypeScript SDK:
-
-```ts
-import { defineFunctionHook, definePlugin } from "@ryuhq/sdk";
-
-export default definePlugin({
-  id: "com.example.redact-tools",
-  name: "Redact Tools",
-  version: "1.0.0",
-  turnHooks: [
-    defineFunctionHook({
-      id: "redact.result",
-      on: "tool_result",
-      match: { tools: ["http*"] },
-      run: async (ctx, _host, next) => {
-        const result = await next(ctx);
-        if (result.kind !== "transform" || typeof result.output !== "object") {
-          return result;
-        }
-        return {
-          kind: "transform",
-          output: { ...(result.output as Record<string, unknown>), secret: "[redacted]" },
-        };
-      },
-    }),
-  ],
-});
-```
-
-Middleware hooks run in descending `priority` order, with ties resolved by plugin id and hook id.
-`next(ctx)` reaches the remaining middleware hooks. A hook can return without calling `next` to
-short-circuit its chain, pass a rewritten event context downstream, or await the downstream
-directive and wrap it on the way back out. A failed middleware hook is skipped and the chain below
-it continues. Legacy hooks (mode omitted) retain their independent directive behavior.
-
-The continuation is Core-owned and one-shot. Request identity (`conversation_id`, `caller_user_id`,
-the resolved agent, and plugin flags) is preserved across rewrites, so a plugin cannot retarget a
-downstream hook's tenant or enable another plugin's flag. Middleware code still runs in the same
-deny-by-default sandbox and uses the same grant-gated `host` capabilities; this is function-shaped
-composition, not ambient in-process plugin code.
-
-### 1. Declare the hook in manifest.json
-
-```json
-{
-  "id": "com.example.double-check",
-  "name": "Double Check",
-  "version": "1.0.0",
-  "permission_grants": ["hook:side-model"],
-  "contributes": {
-    "turn_hooks": [
-      {
-        "id": "dc.review",
-        "on": "post_assistant_turn",
-        "code": "// JS body: return { kind: 'note', text: '...' }"
-      }
-    ],
-    "composer_controls": [
-      { "id": "dc.toggle", "type": "toggle", "flag": "com.example.double-check" }
-    ]
-  }
-}
-```
-
-### 2. Use the TypeScript SDK
-
-```ts
-import { definePlugin, defineTurnHook } from "@ryuhq/sdk";
-
-export default definePlugin({
-  id: "com.example.double-check",
-  name: "Double Check",
-  version: "1.0.0",
-  grants: ["hook:side-model"],
-  composerControls: [{ id: "dc.toggle", "type": "toggle", "flag": "com.example.double-check" }],
-  turnHooks: [
-    defineTurnHook({
-      id: "dc.review",
-      run: async (ctx, host) => {
-        if (!ctx.flags["com.example.double-check"]) {
-          return { kind: "none" };
-        }
-        const last = ctx.transcript.at(-1);
-        const review = await host.sideModel({
-          prompt: last?.content ?? "",
-          model_pref_key: "double-check-model",
-        });
-        return { kind: "note", text: review };
-      },
-    }),
-  ],
-});
-```
-
-### 3. The `ctx` and `host` globals
-
-Each hook body runs in a fresh Deno sandbox with exactly two globals:
-
-**`ctx` — the turn context:**
-
-| Field | Type | Description |
-|---|---|---|
-| `conversation_id` | `string` | Conversation id; natural key for per-conversation storage |
-| `agent_id` | `string` | The agent that produced the turn |
-| `transcript` | `{ role, content }[]` | Recent messages, oldest to newest |
-| `flags` | `{ [pluginId]: boolean }` | Per-request plugin flags (e.g. composer toggles) |
-| `project_instructions` | `string` (when available) | The project-instructions block used for the current `context` turn |
-
-**`host` — the capability bridge:**
-
-| Call | Grant required | Returns |
-|---|---|---|
-| `host.sideModel({ prompt, system?, model?, model_pref_key?, effort? })` | `hook:side-model` | One non-streaming Gateway completion as text |
-| `host.storage.get(key, namespace?)` | `storage:kv` | Stored string or `null` |
-| `host.storage.set(key, value, namespace?)` | `storage:kv` | `true` |
-| `host.storage.delete(key, namespace?)` | `storage:kv` | `true` |
-| `host.storage.keys(namespace?)` | `storage:kv` | Namespace's keys |
-| `host.notify({ title, body })` | `notifications:send` | A bounded notification for the active user |
-| `host.log(...args)` | none | Captured logs |
-
-Storage is namespaced per plugin. An ungranted capability call rejects with `is_error: true`; an
-uncaught throw degrades the hook to `{ kind: "none" }`. A misbehaving plugin can never block a turn.
-
-## Where hooks run
-
-Hooks live in `apps/core/src/plugin_host/` because they decide *what runs next*: a Core concern.
-Any model call a hook makes (`host.sideModel`) still routes through the Gateway.
-
-```mermaid
-flowchart TD
-  A[Assistant turn streams + persists] --> B[run_chat_with_hooks]
-  B --> C{Any enabled turn hooks?}
-  C -->|No| Z[Return stream unwrapped — zero overhead]
-  C -->|Yes| D[Build HookContext from persisted transcript]
-  D --> E[Run each hook in Deno sandbox]
-  E --> F{Directive}
-  F -->|note| G[Emit data-plugin_note frame]
-  F -->|continue| H[Inject follow-up user turn, loop < 25]
-  F -->|none| Z2[Stop]
-  F -->|deny| Z3[Block tool call]
-  H --> A
-```
-
-The chat path wires hooks at `run_chat_with_hooks` (`apps/core/src/server/mod.rs`). When no plugin
-contributes a hook (the common case) or the sandbox backend is absent, the inner stream is returned
-unwrapped, at zero overhead on the hot path.
+Turn hooks are declared under `contributes.turn_hooks` in `manifest.json`, and the `on` field
+selects the phase. Each phase, its directives, and the tool glob and reply cadence gates are in
+[Hook Phases and Directives](/docs/extend/develop/extensions/hook-phases). Worked patterns are in
+[Hook Recipes](/docs/extend/develop/extensions/hook-recipes).
 
 ## The process-global dispatcher
 
@@ -436,22 +92,27 @@ plugin is actually loaded.
 
 | Phase | Live-tested | Directives applied |
 |---|---|---|
-| `post_assistant_turn` | Yes (double-check, goal, advisor fixtures) | `note`, `continue` |
+| `post_assistant_turn` / `stop` | Yes (double-check, goal, advisor fixtures) | `note`, `continue`, `interactive_message` |
 | `pre_user_turn` | Wired | `replace`, `inject`, `handled` |
+| `pre_model_select` | Wired | `select_model` |
 | `session_start` | Wired | `inject`, `note` |
 | `pre_tool_use` | Wired | `deny` (blocks the call) |
 | `tool_result` | Wired | `transform` |
 | `post_tool_use` | Wired | Observation only |
+| `action` | Wired | Observation only |
 | `context` | Wired | `rewrite` / `replace` |
 | `message_end` | Wired | `replace` |
 | `session_before_compact` | Wired | Observation only |
 | `session_compact` | Wired | `replace` |
 | `subagent_stop` | Wired | Observation only |
+| `delegation_lifecycle` | Wired | Observation only |
 | `session_end` | Wired | Observation only |
 | `notification` | Wired | Observation only |
 | `model_select` | Wired | Observation only |
 | `session_tree` | Wired | Observation only |
 | `workflow_run_started` / `_finished` / `_failed` | Wired | Observation only |
+| `view_action` | Wired | `note`, `none` |
+| `plugin_update` | Wired | Observation only (`note` is shown) |
 
 <Callout type="info">
   The observation-only phases fire (detached, fail-open) but their directives are not applied to
@@ -460,7 +121,7 @@ plugin is actually loaded.
 
 ## Opt-in token-maxxing and duplicate work
 
-Extensions that deliberately spend extra context or model budget may expose a user-controlled
+Extensions that spend extra context or model budget may expose a user-controlled
 “token-maxxing” mode through a contribution or setting. It must be opt-in, scoped to the current
 turn or conversation, and explicit about cost. The runtime does not enable it merely because a
 plugin is installed.
@@ -474,7 +135,10 @@ observation-only phase into a control point.
 ## Related
 
 <Cards>
+  <DocCard href="/docs/extend/develop/extensions/hooks-authoring" />
   <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
+  <DocCard href="/docs/extend/develop/extensions/hook-phases" />
+  <DocCard href="/docs/extend/develop/extensions/hook-recipes" />
   <DocCard href="/docs/extend/develop/extensions/plugin-runtime" />
   <DocCard href="/docs/core/double-check" />
   <DocCard href="/docs/core/goals" />

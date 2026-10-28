@@ -1,38 +1,39 @@
 ---
 title: "The Ryu Agent"
-description: "What the Ryu agent is, how it wraps Pi, how the Gateway integrates, and how context management works."
+description: "How the default Ryu agent wraps a managed Pi, routes its model calls through Gateway, reaches Core tools, and manages context, with the preferences and API calls that configure it."
 tags: ["ryu-agent", "pi", "gateway", "compaction", "truncation", "context-window", "default-agent"]
 ---
 
-The **Ryu** agent is the default agent installed on every Ryu node. It is Pi (the coding agent from
-Earendilworks) wrapped with the Gateway on top, the flagship "car around the engine" demo. When you
-send a message in Ryu, the Ryu agent is what handles it unless you explicitly pick a different agent.
+The **Ryu** agent is the default agent installed on every Ryu node (`DEFAULT_AGENT_ID` is `"ryu"`).
+It is Pi (the coding agent from Earendilworks) with Gateway on top. When you send a message in Ryu,
+the Ryu agent handles it unless you pick a different agent.
 
 ## What it is
 
 Ryu is **not** a separate engine. It is a managed configuration of Pi that:
 
-1. **Runs Pi as an ACP subprocess** — the same tool-loop agent that reads files, runs commands, and
+1. **Runs Pi as an ACP subprocess.** Pi is a tool-loop agent that reads files, runs commands, and
    edits code.
-2. **Routes every model call through the Gateway** — firewall, budget, evals, and audit apply.
-3. **Uses an isolated config directory** — `~/.ryu/pi-agent`, completely separate from any Pi you
+2. **Routes model calls through Gateway by default.** Firewall, budget, evals, and audit apply.
+   You can opt out (see [When Gateway is off](#when-gateway-is-off)).
+3. **Uses an isolated config directory.** `~/.ryu/runtimes/pi-agent` is separate from any Pi you
    have installed yourself.
-4. **Exposes Core's tools to Pi** — the managed extension lists and calls tools through Core. Core
+4. **Exposes Core's tools to Pi.** The managed extension lists and calls tools through Core. Core
    enforces the Ryu agent's allowlist, permissions, approvals, and identity bindings. The built-in
-   flagship is seeded with the explicit `*` grant; newly-created agents start with no executable
+   Ryu agent is seeded with the explicit `*` grant. Newly created agents start with no executable
    tools until you grant a specific tool or `*` in their card.
-5. **Manages its own Pi binary** — installed at `~/.ryu/pi/`, downloaded and version-checked by
-   Core's onboarding.
+5. **Manages its own Pi binary.** Core's onboarding installs and version-checks it under
+   `~/.ryu/runtimes/pi/`.
 
 ```mermaid
 flowchart TD
   U[User] --> C[Core]
   C -->|"agent_id = ryu"| R[Ryu Agent Route]
-  R --> SP["Spawn Pi subprocess<br/>~/.ryu/pi/bin/pi"]
+  R --> SP["Spawn Pi subprocess<br/>~/.ryu/runtimes/pi/…/node_modules/.bin/pi"]
   SP --> PI[Pi Agent]
   PI -->|"model requests"| GW[Gateway]
   GW --> ENG[Engine<br/>Gemma 4 / OpenAI / etc]
-  PI -->|"ryu_call_tool"| MCP[MCP Bridge]
+  PI -->|"mcp__ryu__* / ryu_call_tool"| MCP[MCP Bridge]
   MCP --> CT[Core Tool Registry]
 ```
 
@@ -40,10 +41,10 @@ flowchart TD
 
 | Feature | Bare Pi (`acp:pi`) | Ryu agent (`ryu`) |
 |---|---|---|
-| **Binary** | User's own `pi` on PATH | Managed `~/.ryu/pi/node_modules/.bin/pi` |
-| **Config directory** | `~/.pi/agent` | `~/.ryu/pi-agent` (isolated) |
-| **Gateway routing** | **On by default** for the routable ACP entry; direct-egress opt-out | **On by default** (`gateway_bypass: false`) |
-| **Model calls** | Gateway-governed by default (unless opted out) | Always through Gateway |
+| **Binary** | User's own `pi` on PATH | Managed `~/.ryu/runtimes/pi/…/node_modules/.bin/pi` |
+| **Config directory** | `~/.pi/agent` | `~/.ryu/runtimes/pi-agent` (isolated) |
+| **Gateway routing** | **On by default** for the routable ACP entry; direct-egress opt-out | **On by default** (`gateway_bypass: false`); direct-egress opt-out |
+| **Model calls** | Gateway-governed by default (unless opted out) | Gateway-governed by default (unless opted out) |
 | **MCP tools** | Pi's built-in only | Core's allowlisted tool registry via `ryu-mcp.ts` |
 | **Skills** | Pi's own skill system | Core's skill catalog (progressive disclosure) |
 | **Context management** | Pi's own (llama.cpp context-shift) | Ryu's trim/compact layer (opt-in) |
@@ -53,15 +54,16 @@ flowchart TD
 
 When a chat message arrives with `agent_id = "ryu"`, Core follows this path:
 
-1. **`agent_route()`** (`apps/core/src/sidecar/adapters/mod.rs:1202`) matches the `"ryu"` id and
+1. **`agent_route()`** (`apps/core/src/sidecar/adapters/mod.rs`) matches the `"ryu"` id and
    calls `ryu_agent_route()`.
-2. **`ryu_agent_route()`** (line 1115) calls `acp::ryu_pi_acp_cmd()` to build the spawn command.
+2. **`ryu_agent_route()`** calls `acp::ryu_pi_acp_cmd()` (`apps/core/src/sidecar/adapters/acp.rs`)
+   to build the spawn command.
 3. Core prepares the managed Pi runtime and isolated configuration, then starts it through ACP.
    No node-wide bearer or user JWT is passed into the agent process.
 4. The managed extension receives a short-lived capability for that exact ACP session. Core accepts
    it only on the dedicated tool broker, resolves caller, conversation, agent, and narrowing scopes
    from its server-side record, and forwards calls through the normal governed dispatcher.
-5. Pi runs its full tool loop (model → tool calls → tool results → continue) via ACP protocol.
+5. Pi runs its full tool loop (model, tool calls, tool results, continue) over ACP.
 6. Core forwards ACP events (text, tool calls, results, usage) to the client.
 
 The extension is a proxy, not an authorization bypass. It does not submit caller, agent,
@@ -72,128 +74,81 @@ authenticate to other Core routes.
 
 ## The Gateway integration
 
-The Ryu agent is the first-run flagship, and its Gateway routing is always on. Other routable ACP
-agents use the same governed-by-default foundation through their applicable mechanism. Two
-mechanisms ensure Ryu's model calls traverse the Gateway:
+Gateway routing is on by default for the Ryu agent. Other routable ACP agents use the same
+governed-by-default posture through their own mechanism. Two mechanisms send the Ryu agent's model
+calls through Gateway:
 
 ### 1. Environment injection
 
 Core injects `OPENAI_BASE_URL=http://127.0.0.1:7981/v1` and `OPENAI_API_KEY=<gateway-token>` into
-the Pi subprocess. Any HTTP client in Pi that reads these env vars will route through the Gateway.
+the Pi subprocess when Gateway routing is on. Any HTTP client in Pi that reads these env vars
+routes through Gateway.
 
 ### 2. models.json pinning
 
 Pi does **not** honor `OPENAI_BASE_URL` for its built-in `openai` provider. It uses its own
-provider config with `api: "openai-completions"`. So Ryu's config layer writes `models.json` to
-pin the `openai` provider at the local Gateway:
-
-```json
-{
-  "providers": [
-    {
-      "id": "openai",
-      "baseUrl": "http://127.0.0.1:7981/v1",
-      "api": "openai-completions",
-      "apiKey": "<gateway_token>",
-      "models": [
-        {
-          "id": "gemma-4-E2B-it-Q4_K_M",
-          "contextWindow": 128000,
-          "maxTokens": 8192
-        }
-      ]
-    }
-  ]
-}
-```
-
-This ensures Pi's LLM calls hit the Gateway regardless of how Pi resolves its provider internally.
+provider config with its native `api: "openai-responses"`. Ryu's config layer writes
+`models.json` to pin the `openai` provider at the local Gateway (`http://127.0.0.1:7981/v1`), with
+the Gateway token as its `apiKey`. Pi's model calls then reach Gateway however Pi resolves its
+provider internally. See [Pi Engine Internals](/docs/start-here/architecture/pi-engine#modelsjson)
+for the file format.
 
 ### What the Gateway applies
 
 When a model call from the Ryu agent reaches the Gateway, it goes through the full pipeline:
 
-- **Authentication** — validates the gateway token
-- **Budget check** — per-key, per-org, per-agent budget enforcement
-- **Firewall scan** — PII/DLP, prompt injection detection, custom patterns
-- **Model routing** — picks which upstream provider handles the call
-- **Cache check** — exact and semantic cache lookup
-- **Provider call** — forwards to the upstream (OpenAI, local engine, etc.)
-- **Audit** — logs the request for compliance
-- **Evals** — inline evaluation (prompt injection detection, PII)
+- **Authentication** validates the Gateway token.
+- **Budget check** enforces per-key, per-org, and per-agent budgets.
+- **Firewall scan** runs PII/DLP, prompt-injection detection, and custom patterns.
+- **Model routing** picks the upstream provider for the call.
+- **Cache check** looks up the exact and semantic caches.
+- **Provider call** forwards the request to the upstream (OpenAI, a local engine, and others).
+- **Audit** logs the request.
+- **Evals** run inline evaluation, such as prompt-injection and PII detectors.
 
 See [Gateway routing](/docs/gateway/routing) for the full pipeline.
 
 ## The MCP bridge for Pi
 
-Pi has no in-process MCP bridge; it advertises no MCP-server support. The `ryu-mcp.ts` extension
-(loaded from `apps/core/assets/pi-extensions/ryu-mcp.ts`) bridges this gap by registering two tools:
+Pi's ACP bridge does not pass MCP servers through from the ACP session. The `ryu-mcp.ts`
+extension connects Pi to Core's tools through these paths:
 
-| Tool | What it does |
+| Path | What it does |
 |---|---|
-| `ryu_list_tools` | Discovers available tools via Core's HTTP API (`GET /api/tools/search`) |
-| `ryu_call_tool` | Calls any Core tool by name, forwarding to `POST /api/tools/exec/<tool_id>` |
+| `mcp__ryu__*` tools | Core's MCP bridge, registered with Pi's built-in MCP client. The agent's granted tools are deferred: Pi's `tool_search` loads them when needed. |
+| `ryu_call_tool` | Calls any Core tool by id, including searchable-but-unlisted tools such as Composio actions |
+| `ryu_list_tools` | Lists the Ryu tools this agent can call |
 
-This is what lets the Ryu agent call widget-bearing tools (Apps-SDK / MCP apps), use the self-API,
-and access any tool in Core's registry. The bridge also handles widget emission: when a tool returns
-structured content in `details.ryuWidget`, Core's ACP handler rebuilds it into widget events for
-the desktop.
+With these paths the Ryu agent can call widget-bearing tools (Apps-SDK / MCP apps), use the
+self-API, and reach any tool in Core's registry. Interactive apps render inline in the chat on
+both calling paths (`mcp__ryu__*` and `ryu_call_tool`).
+See [Pi engine internals](/docs/start-here/architecture/pi-engine#the-ryu-mcpts-extension).
 
 ## Context management
 
-Without Ryu's context-window management, Pi relies on llama.cpp's built-in context-shift. Ryu
-never configures `n_keep` for Pi, so `n_keep` defaults to 0. On overflow, the engine can evict
-the **system prompt** along with the oldest turns.
+Without Ryu's context-window management, Pi relies on llama.cpp's built-in context-shift, which
+can evict the **system prompt** along with the oldest turns. Ryu's context-management layer keeps
+the system block and either trims older turns (**Trim**) or summarizes them through Gateway
+(**Compact**). It moves the cut in fixed steps so a provider prompt cache keeps hitting, and it can
+compact harder once that cache has expired.
 
-Ryu's context-management layer exists to prevent this. It is **opt-in / off by default**.
+<Callout type="warn">
+  Context management is opt-in and off by default.
+</Callout>
 
-### Two modes
+Separately, when you switch a conversation to a model with a smaller context window, Ryu hands the
+earlier history off as a one-time summary. That handoff is **on by default**.
 
-| Mode | Setting | What it does |
-|---|---|---|
-| **Trim** | `context.max-tokens` set, `context.auto-compact` off | A token-budgeted sliding window: keeps the newest turns that fit, always preserving every `system` message and at least the last user turn. Older turns are dropped. |
-| **Compact** | `context.max-tokens` set, `context.auto-compact` on | Instead of dropping older turns, sends them to a side model for a concise summary via the Gateway. The summary is injected as a leading `[Earlier conversation summary]` block. |
-
-### Token accounting
-
-Ryu uses a conservative `len / 3.5` character heuristic (no tokenizer, matching Jan AI). Base64
-image payloads are not counted. A flat per-image cost of 768 tokens is used instead. A 512-token
-reserve is held for downstream skill injection.
-
-### How to enable
-
-Set via the desktop preferences or the Core API:
-
-```bash
-# Auto-size to the loaded model's context window
-curl -X PUT http://localhost:7980/api/preferences \
-  -H 'Content-Type: application/json' \
-  -d '{ "key": "context.max-tokens", "value": "auto" }'
-
-# Enable compaction (summarize instead of drop)
-curl -X PUT http://localhost:7980/api/preferences \
-  -H 'Content-Type: application/json' \
-  -d '{ "key": "context.auto-compact", "value": "true" }'
-```
-
-See [Pi Engine Internals](/docs/start-here/architecture/pi-engine) for the full details on how
-Pi's config, models, and context management work.
+The modes, token accounting, cache behavior, handoff options, and the preferences that turn each
+one on are in
+[Pi Context Management](/docs/start-here/architecture/pi-context-management).
 
 ## Managed Pi config
 
-Ryu owns three files in `~/.ryu/pi-agent/`:
-
-| File | Contents |
-|---|---|
-| `settings.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel` + Ryu-namespaced keys (`x-ryu-routing`, `x-ryu-provider-routing`, `x-ryu-active-provider`) |
-| `models.json` | Custom providers + per-model overrides. The critical piece pins Pi's `openai` provider at the local Gateway. |
-| `auth.json` | The *active* account's API key / OAuth subscription tokens per provider. OAuth tokens are proactively refreshed before each turn. |
-
-Credentials are sealed with the at-rest master key (OS keychain → `~/.ryu/master.key`) and stored in
-the multi-account vault at `~/.ryu/pi-accounts.db`; `auth.json` only ever materializes the active
-account, so Pi keeps reading the file format it always did.
-
-The Ryu namespaced keys (`x-ryu-*`) survive round-trips because Pi ignores unknown settings keys.
+Ryu owns `settings.json`, `models.json`, and `auth.json` in the `~/.ryu/runtimes/pi-agent/`
+directory. `models.json` pins Pi's `openai` provider at the local Gateway, and `auth.json` holds
+only the active account's credentials. The fields and the credential vault are in
+[Pi Engine Internals](/docs/start-here/architecture/pi-engine#the-config-directory).
 
 ## The managed subscription
 
@@ -208,11 +163,11 @@ The Ryu agent exposes independent settings for its model, voice, tools, memory, 
 
 | Setting | Default | Configurable? |
 |---|---|---|
-| Chat model | `openrouter/auto` (managed) or `gemma-4-E2B-it-Q4_K_M` (local) | Yes — any Gateway-routable model |
+| Chat model | `openrouter/auto` (managed) or `gemma-4-E2B-it-Q4_K_M` (local) | Yes, any Gateway-routable model |
 | Voice Recognition engine | Whisper / Parakeet | Yes |
-| Audio engine | OuteTTS / Kokoro | Yes |
+| Audio engine | Kokoro 82M (OuteTTS fallback) | Yes |
 | Image model | stable-diffusion.cpp | Yes |
-| Tools / MCP | Core's allowlisted registry | Yes — via MCP registry and plugin system |
+| Tools / MCP | Core's allowlisted registry | Yes, through the MCP registry and plugin system |
 | Memory / Spaces | Long-term memory + RAG | Yes |
 | Persona | System prompt | Yes |
 | Gateway Policy | Default firewall + budget | Yes |
@@ -221,15 +176,22 @@ See [Agent setup](/docs/learn/academy/operator/agents-as-cards) for the complete
 
 ## When Gateway is off
 
-If you disable Gateway routing for the Ryu agent, it becomes plain Pi: an ACP subprocess calling
-its configured provider directly. The MCP bridge still works (tools are still callable), but the
-Gateway pipeline (firewall, budget, evals, audit) does not apply to model calls.
+The Ryu agent has no separate Gateway on/off switch. The provider you pick in the Ryu agent's
+model settings decides the route: the Ryu-managed `gateway` provider is routed through Gateway,
+and your own provider key is not. The per-agent `agent-gateway-routing` preference is not read for
+the Ryu agent (`apps/desktop/src/lib/api/agent-egress.ts`).
+
+With a direct provider, the Ryu agent becomes plain Pi: an ACP subprocess that calls that provider
+directly. The MCP bridge still works (tools are still callable), but the Gateway pipeline
+(firewall, budget, evals, audit) does not apply to model calls. To set the provider from the Core
+API, send `PUT /api/pi-config` (`apps/core/src/pi_config/mod.rs`, `PiConfigInput`):
 
 ```bash
-# Disable gateway routing for the Ryu agent
-curl -X PUT http://localhost:7980/api/preferences \
+# Send the Ryu agent's model calls straight to your own provider key
+curl -X PUT http://localhost:7980/api/pi-config \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{ "key": "agent-gateway-routing", "value": { "ryu": false } }'
+  -d '{ "provider": "openai", "model": "<model-id>", "apiKey": "<your-key>" }'
 ```
 
 ## Related

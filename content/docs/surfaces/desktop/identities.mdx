@@ -1,15 +1,19 @@
 ---
 title: "Identities"
-description: "Per-domain agent logins: encrypted at rest, governed by the Gateway, never exposed to the model."
+description: "How the desktop Identities page stores per-domain website logins for agents, how Core uses them at tool-call time, and the Core routes behind it."
 ---
 
-**Passport** lets an agent use a website connection on your behalf without placing credential state
-in the model. You store a connection for a domain once, attach the profile to an agent, and when a
-tool call targets that domain Core consults the Gateway before Passport consumes any credential.
+**Identities** lets an agent use a website login on your behalf without placing credential state
+in the model. You store a connection for a domain once and attach its profile to an agent. When a
+tool call targets that domain, Core checks the Gateway before any credential is used.
+
+By default, Core keeps connections in its in-process identity store. When
+Core is configured to use a remote [Passport](/docs/standalone/passport) service, the same routes
+and tool-call checks go to Passport instead.
 
 Credentials are:
 
-- **Encrypted at rest** in Passport's tenant store (`enc:v1:` envelope).
+- **Sealed at rest** before they are stored.
 - **Never returned in any API response** - the sealed state is structurally excluded from every
   `ConnectionRecord` JSON response via `#[serde(skip)]`.
 - **Never sent to the model** - decryption happens only at the tool-dispatch chokepoint, never
@@ -21,11 +25,10 @@ Open **Identities** from the command palette or the left sidebar to manage them.
 
 - A **profile** is a named grouping you can attach to one or more agents.
 - A **connection** binds a profile to a single domain (the site the agent may sign in to).
-- An agent bound to a profile is effectively "logged in to every authenticated domain" under
-  that profile.
-- Domain matching is exact host in v1 - no subdomain fuzzing.
+- An agent bound to a profile can use every authenticated connection in that profile.
+- Domain matching uses the exact host. Subdomains do not match.
 
-```
+```text
 Agent → profile_ids[] → Profile → Connection (per domain) → sealed credential
 ```
 
@@ -35,17 +38,19 @@ Every tool dispatch goes through a vault consult:
 
 1. The agent's bound profile IDs are checked against the call's target domain (extracted from a
    `url` or `domain` argument).
-2. If a bound connection is **`NEEDS_AUTH`** - the tool is not dispatched. A
+2. If a bound connection is **`NEEDS_AUTH`**, the tool is not dispatched. A
    `__ryu_elicitation__` envelope is returned instead, pausing the agent until you complete login.
-3. If a bound connection is **`AUTHENTICATED`** - the credential is read through the Gateway's
-   `identity.read` grant gate (fail-closed: a denied or unreachable gateway means the tool
-   proceeds without the credential, returning its own auth error). A `credential_read` audit row
-   is emitted carrying only the domain and source - never the decrypted credential.
+3. If a bound connection is **`AUTHENTICATED`**, the credential is read through the Gateway's
+   `identity.read` grant gate. This gate fails closed. If the Gateway denies the read or cannot be
+   reached, the tool proceeds without the credential and returns its own auth error. A
+   `credential_read` audit row records only the domain and source, never the decrypted credential.
+4. Only tools that can inject a credential into their own request (today `web_fetch`) receive it.
+   For other tools, the credential is read and audited, then dropped.
 
 <Callout type="info">
-  Passport consumes credentials only through an explicit governed runtime path. Core's built-in
-  `web_fetch` and authenticated MCP paths use the Passport adapter when remote mode is configured;
-  other tools still need their own declared credential consumer. Connect owns Composio account and
+  When Core uses a remote Passport service, `web_fetch` and authenticated MCP connections go through
+  Passport, which consumes the credential and returns only the result. Composio tools are skipped by
+  this check because Composio has its own connection flow. Connect owns Composio account linking and
   action execution separately.
 </Callout>
 
@@ -56,9 +61,11 @@ Every tool dispatch goes through a vault consult:
    for example `app.example.com`.
 3. The connection starts in **`NEEDS_AUTH`** with no credential state.
 
+Canceling a new-connection form opened from a selected connection returns to that connection.
+
 ## Authenticating: manual import
 
-Manual import is the fully-wired path today:
+Manual import is the supported login path:
 
 1. Select the connection, then click **Start login**. A manual-kind flow has no hosted page.
 2. Log in to the site yourself in a browser and copy the session cookie or token.
@@ -66,34 +73,50 @@ Manual import is the fully-wired path today:
 4. The plaintext is sealed immediately on receipt and never logged or returned. The connection
    flips to **`AUTHENTICATED`**.
 
-Use **Poll status** to refresh the displayed status after an import.
+If an import is rejected, the pasted value stays in the form so you can edit it or retry. A
+successful import clears the field and refreshes the displayed status.
+
+Use **Check status** to refresh the displayed status after an import.
 
 <Callout type="warn">
-  Manual import is the working capture path for provider-neutral Passport connections. Composio
-  account linking and actions belong to the separate [Connect](/docs/standalone/connect) service;
-  Passport does not silently capture or export their provider credentials.
+  Manual import is the only credential capture path. Ryu does not capture browser sessions for
+  you. Composio account linking and actions belong to the separate
+  [Connect](/docs/standalone/connect) service, and Identities does not capture or export their
+  provider credentials.
 </Callout>
 
 ## Binding a profile to an agent
 
 Open the agent's settings and add one or more profile IDs to its identity profiles list. Only
 profiles explicitly bound to an agent are consulted at tool-call time. An agent with no bound
-profiles sees no vault activity at all.
+profiles has no vault activity.
+
+Bound profiles apply only to agents set to **Acts as you** or **Both**. An agent set to **Its own
+identity** never uses your profiles, even if some are still bound to it. It uses its own
+[agent accounts](/docs/security/secret-vault-agent-accounts) instead. See
+[Choose which accounts an agent can use](/docs/surfaces/desktop/user-guide/agent-account-access#choose-which-accounts-an-agent-can-use).
 
 ## Core compatibility API reference
 
-Existing Desktop clients call these Core adapter routes (port 7980). New standalone integrations
-should use the [Passport API](/docs/standalone/passport-api) directly.
+The desktop calls these Core routes (port `7980` in the `release` profile). New standalone
+integrations should use the [Passport API](/docs/standalone/passport-api) directly.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/identities` | List all profiles and their connections (status only, no credential state) |
 | `POST` | `/api/identities/connections` | Create a connection (`profile_id`, `domain` required; starts `NEEDS_AUTH`) |
-| `POST` | `/api/identities/connections/:id/login` | Begin a login flow - returns `{flow_id, kind}` |
+| `POST` | `/api/identities/connections/:id/login` | Begin a login flow; returns `{flow_id, kind}` |
 | `GET` | `/api/identities/connections/:id` | Poll a connection's `status` and `flow_status` |
-| `POST` | `/api/identities/connections/:id/import` | Seal and import manual credential state - flips to `AUTHENTICATED` |
+| `POST` | `/api/identities/connections/:id/import` | Seal and import manual credential state; the status becomes `AUTHENTICATED` |
 | `DELETE` | `/api/identities/connections/:id` | Delete a connection and its sealed state |
 
 No response body ever contains `encrypted_state` or a decrypted credential.
 
-Continue with [Desktop user guide](/docs/surfaces/desktop/user-guide), [Passport](/docs/standalone/passport), [Gateway governance](/docs/gateway/governance), [authentication and pairing](/docs/security/authentication-and-pairing), and [Desktop account security](/docs/surfaces/desktop/user-guide/account-security).
+## Related
+
+<Cards>
+  <DocCard href="/docs/standalone/passport" />
+  <DocCard href="/docs/gateway/governance" />
+  <DocCard href="/docs/security/authentication-and-pairing" />
+  <DocCard href="/docs/surfaces/desktop/user-guide/account-security" />
+</Cards>

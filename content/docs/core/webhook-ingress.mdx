@@ -1,0 +1,74 @@
+---
+title: "Webhook Ingress"
+description: "Reference for the public URL Core gives Composio triggers: ingress backends, the status and backend routes, RyuRelay replay and rotation, and HMAC verification"
+---
+
+The webhook ingress seam (`crates/core/webhook-ingress/`, wired in `apps/core/src/webhook_ingress.rs`) gives Composio
+triggers a public URL to call. It is a swappable `WebhookIngress` source, so a node can expose Core through its
+own relay, the mesh Funnel, a tunnel, or a Ryu-hosted relay without changing the rest of the stack.
+
+```http
+GET /api/webhook-ingress/status
+```
+
+Returns the active backend `kind`, its resolved `public_url` (or `null`), and `up` (true once a public URL has
+been resolved). The backend selector is read and set at `GET`/`POST /api/webhook-ingress/backend`, resolving
+from the env override, then the `webhook.ingress.backend` pref, then the default.
+
+| Backend (`IngressKind`) | What it is |
+|---|---|
+| `OwnRelay` | BYO: the user already exposes Core at a public URL, configured via `RYU_WEBHOOK_INGRESS_URL`. |
+| `TailscaleFunnel` | Publishes only Core's webhook paths over the mesh's Tailscale Funnel (needs the mesh enabled). See [Tailscale Funnel scope](/docs/core/private-networking#tailscale-funnel-scope). |
+| `Cloudflared` | A Cloudflare tunnel in front of Core. It exposes every Core route, so [local-only features](/docs/core/private-networking#local-only-features-while-a-tunnel-runs) pause while it runs. |
+| `RyuRelay` | Ryu-hosted managed push (outbound SSE client into `composio_triggers`). |
+
+RyuRelay connects to the Ryu server you signed in to and authenticates with your sign-in token. To
+use a different server, set `RYU_BACKEND_URL`, which takes precedence. It has no default address. Until
+you sign in or set `RYU_BACKEND_URL`, Core does not start RyuRelay or send your token. Selecting
+RyuRelay in that state is refused with `400`, and `GET /api/webhook-ingress/status` reports no public
+URL for it and a `reason` of `no_ryu_server`.
+
+RyuRelay keeps a short replay buffer for reconnecting nodes, up to five minutes and subject to a
+shared memory budget. Each account can register up to 64 relay nodes; older buffered deliveries
+may be evicted sooner under load. Core still verifies each delivery before running a workflow.
+
+RyuRelay refuses a delivery that has no webhook signature header with `401` before buffering it,
+because Core would reject it. When an account's replay space is full, the account's node holding
+the most replay gives up its oldest deliveries instead of new deliveries being refused. When the
+shared buffer is full, an account above its fair share is refused, and its oldest deliveries make
+room for accounts within theirs.
+
+To replace a node's relay URL, for example after it leaked, send `POST /api/composio-relay/rotate`
+to the Ryu server, authenticated as the account that registered the node (the same bearer token
+Core uses). The optional JSON body `{ "node_name": "<node>" }` selects the node. The default is
+`default`. The response returns the new `relay_token` and `public_url`. The old URL stops working
+at once. Deliveries to it get `404`, replay buffered for it is discarded, and Core's open relay
+connection is closed. Each account can rotate up to 10 times a minute.
+
+Core recovers from a rotation by itself, without a restart. When the relay closes or drops its
+connection, or refuses it because the token was rotated or the node is no longer registered, Core
+registers again before it reconnects. It then saves the new token, reports the new URL from
+`GET /api/webhook-ingress/status` and `GET /api/webhooks`, and resumes from the last delivery it
+received, so deliveries sent to the new URL in the meantime still arrive. If Core was disconnected
+or stopped during the rotation, it picks up the new URL when it reconnects or starts. Other
+failures, such as an expired sign-in or a relay outage, only retry with a growing delay.
+
+When Core manages your Composio webhook subscription (a Composio key under **Settings →
+Integrations** and at least one trigger subscription), Core also points that subscription at the
+new URL. Any other webhook still sending to the old URL, such as a workflow webhook URL you gave a
+third-party service, keeps getting `404` until you replace it with the new URL that Core shows.
+
+<Callout type="warn">
+The public ingress is **HMAC fail-closed**. Composio deliveries require the signed
+webhook ID, timestamp, and exact raw body, with a five-minute replay window. The
+`RyuRelay` backend transports those values to Core unchanged; Core performs the
+project-secret verification before dispatching a run.
+</Callout>
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/private-networking" />
+  <DocCard href="/docs/core/workflow-triggers-and-history" />
+  <DocCard href="/docs/core/node-and-presence" />
+</Cards>

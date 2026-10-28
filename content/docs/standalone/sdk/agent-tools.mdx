@@ -1,0 +1,381 @@
+---
+title: "Services as Agent Tools"
+description: "Give an @ryuhq/sdk Agent, a Vercel AI SDK call, or an MCP client the standalone services as typed tools, all from one registry"
+tags: ["sdk", "agents", "tools", "mcp", "ai-sdk", "standalone"]
+---
+
+`@ryuhq/services/tools` holds one registry of tools for Managed Agents,
+Messaging, Mail, Notify, Box, Gateway, Passport, and Sites. Each tool has a
+snake_case name such as `notify_list_events`, a title, a description written
+for a model, a zod input schema, and the four MCP effect hints: read-only,
+destructive, idempotent, and open world. Three surfaces read the same
+definitions, so a tool behaves the same wherever an agent meets it:
+
+- `toRyuAgentTools(ryu)` returns tools for an `@ryuhq/sdk` `Agent`.
+- `toAiSdkTools(ryu)` returns tools in the Vercel AI SDK shape.
+- [`ryu-services mcp`](/docs/standalone/sdk/mcp) serves them to an MCP client.
+
+The Python client has the same registry in `ryu_sdk.services.tools`; see
+[From Python](/docs/standalone/sdk/agent-tools#from-python).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+The adapters copy the tool shape of each framework, so `@ryuhq/services` does
+not depend on `@ryuhq/sdk`, `ai`, or an MCP SDK. The code on this page is taken
+from a test that runs the Agent against a stub model and a stub Notify.
+
+## What you need
+
+- The packages each sample imports, beside `@ryuhq/services` - `@ryuhq/sdk`
+  for the Agent sample, and `ai` with `@ai-sdk/openai` for the Vercel AI SDK
+  sample (`bun add @ryuhq/sdk ai @ai-sdk/openai`). `@ryuhq/services` itself is
+  not on npm yet, and the npm release of `@ryuhq/sdk` can lag its source; see
+  [What you can install today](/docs/standalone/sdk/choose-an-sdk#what-you-can-install-today)
+  before relying on its `@ryuhq/sdk/agent` entry point. The Python OpenAI
+  sample also needs `pip install openai`.
+- The variables of each service the tools should reach, such as
+  `RYU_NOTIFY_API_KEY`; the [SDK overview](/docs/standalone/sdk#configure)
+  lists them.
+- For the `@ryuhq/sdk` and `ryu_sdk` Agent samples, a running
+  [Ryu Gateway](/docs/standalone/sdk/gateway): `agent.generate()` sends its
+  model calls to the Gateway at `RYU_GATEWAY_URL` (default
+  `http://127.0.0.1:7981`), with `RYU_GATEWAY_TOKEN` as its bearer when the
+  Gateway requires one. Without a Gateway at that address, building the Agent
+  works, but `agent.generate()` fails with
+  `could not reach the Ryu Gateway at <origin>`, naming the origin it tried
+  and the `RYU_GATEWAY_URL` and `RYU_GATEWAY_TOKEN` settings (never the token
+  itself). A call whose timeout fires while it waits on the Gateway, before
+  the answer starts or while it streams, fails with
+  `the Ryu Gateway at <origin> did not respond in time`. A Gateway that
+  answers with an error status fails with
+  `[ryu-sdk] gateway <status> at <origin>`, and a `401` or `403` also names
+  `RYU_GATEWAY_TOKEN`. The Vercel AI SDK and MCP samples use your own model
+  provider and need no Gateway.
+
+## With an @ryuhq/sdk Agent
+
+```ts title="agent.ts"
+import { Agent } from "@ryuhq/sdk/agent";
+import { Ryu } from "@ryuhq/services";
+import { toRyuAgentTools } from "@ryuhq/services/tools";
+
+// Reads each service's variables, such as RYU_NOTIFY_API_KEY, from the environment.
+const ryu = new Ryu();
+
+const agent = new Agent({
+  name: "ops",
+  model: "openai/gpt-4o-mini",
+  instructions: "Answer questions about recent Notify events.",
+  // The read-only tools of every service `ryu` is configured for.
+  tools: toRyuAgentTools(ryu),
+});
+
+const { text } = await agent.generate("What was the last event about?");
+```
+
+The Agent sees only the services `ryu` is configured for, so set the
+variables of the ones you want; the [SDK overview](/docs/standalone/sdk#configure)
+lists them. Pass a client built with the default result mode: the adapters
+throw a `RyuConfigurationError` for `new Ryu({ result: "object" })`.
+
+A tool returns `{ data, error, meta }` as compact JSON, sized for a model's
+context. `error` keeps `code`, `message`, `service`, `status`, and
+`retryable`, plus `hint`, `details`, `requestId`, and `retryAfterSeconds`
+when they are set. `meta` carries only `requestId`, `idempotencyKey`, and
+`replayed`, each when set. Your own SDK calls still return the full result.
+When the call fails, including when the model sends arguments the schema
+rejects, the model gets the error instead of the run ending, and can correct
+itself. Rejected arguments come back as `invalid_arguments`, with each
+problem in `error.details.issues`.
+
+Aborting the Agent run (the `signal` you pass to `generate()` or `stream()`)
+also aborts the request a tool is waiting on, such as a running `box_exec`
+or a `managed_agents_list_events` call with `wait: true`.
+
+These tools run in your own process with your `Ryu` client and its keys.
+They cannot be packed into a plugin with `ryu pack`; a packed copy only throws
+an error that says so.
+
+## Choose the tools
+
+By default the adapters expose only read-only tools. Tools that send email or
+SMS, charge credit, run a model or an agent, or stop, delete, or overwrite
+something appear only with `readOnly: false`. Every service you name in
+`services` must be configured: the next sample names Mail and Notify, so it
+throws `RyuConfigurationError` when only Notify is set up, and the error names
+the variables that set up each missing service. Omit `services` to get tools
+for the configured services only.
+
+```ts
+const tools = toRyuAgentTools(ryu, {
+  services: ["mail", "notify"],
+  readOnly: false, // also expose tools that send, charge, run or delete
+  exclude: ["mail_send"],
+  // Ask the Agent's approvalHandler before anything that leaves Ryu.
+  needsApproval: (tool) => tool.annotations.openWorldHint,
+});
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `services` | Every service `ryu` is configured for | Only these services, by SDK name. A listed service that is not configured throws a `RyuConfigurationError`. |
+| `readOnly` | `true` | `false` also exposes the tools that change something. |
+| `include` | All | Only these tool names. Naming a write tool while `readOnly` is on throws, so a tool is never hidden silently. |
+| `exclude` | None | Leave out these tool names. An unknown name throws. |
+| `needsApproval` | Every tool that is not read-only, and every open-world tool | `true`, `false`, or a function of the tool deciding whether a person approves the call first. |
+
+With `needsApproval`, the Agent asks its `approvalHandler` before it runs the
+tool. An Agent without an `approvalHandler` stops at that call and reports it
+in `approvalRequired`; nothing is sent. The default also covers open-world
+tools that are read-only: `passport_fetch` is in the read-only set, but it
+sends a stored login to an external site with a URL the model chose, so it
+asks first.
+
+Tools that create something billed or reach people take an `idempotencyKey`
+argument. Reusing the key when a tool call is retried returns the first
+result instead of a second Box, session, message, or event (with one
+exception, below). `mail_send` and `messaging_send_sms` require it; `box_create`,
+`managed_agents_create_session`, `managed_agents_send_message`, and
+`notify_publish` accept it, and their descriptions ask the model to pass one.
+
+`notify_request_approval` also accepts a key, but a keyed retry does not
+replay the first call: each call sets a new deadline, so Notify refuses the
+retry with `409 idempotency_conflict` and never publishes a second request.
+After a lost reply, the model reads the first request with `notify_get_event`
+(using the first call's `event.id`) or finds it with `notify_list_events`.
+
+`mail_create_inbox` (exposed by the sample above) takes a required `clientId`
+instead of an `idempotencyKey`. Creating again with the same `clientId` returns the inbox already made.
+
+## With the Vercel AI SDK
+
+`toAiSdkTools` returns `{ description, inputSchema, execute }` for each tool,
+keyed by its name, with the zod schema as `inputSchema`.
+
+```ts title="summary.ts"
+import { openai } from "@ai-sdk/openai";
+import { generateText, stepCountIs } from "ai";
+import { Ryu } from "@ryuhq/services";
+import { toAiSdkTools } from "@ryuhq/services/tools";
+
+const ryu = new Ryu();
+const tools = toAiSdkTools(ryu, { services: ["notify"] });
+
+const { text } = await generateText({
+  model: openai("gpt-4o-mini"),
+  tools,
+  stopWhen: stepCountIs(5),
+  prompt: "Summarize the unacknowledged Notify events.",
+});
+```
+
+`execute` resolves to the same `{ data, error, meta }` JSON and does not throw
+for a service error, and the AI SDK's `abortSignal` cancels the call. The AI
+SDK validates the model's arguments against `inputSchema` before it calls
+`execute`, so a rejected argument reaches the model as the AI SDK's own tool
+error rather than as `invalid_arguments`. Each tool also carries
+`needsApproval`, computed as above: AI SDK releases that support tool
+approval read it, and others ignore it.
+
+## With an MCP client
+
+`ryu-services mcp` serves the same registry over stdio, with the same tool
+names. Like the adapters, it registers only the read-only tools by default,
+so the entry below serves Notify's read-only tools. To register the tools that
+write, send, or delete as well, add `--allow-writes` to the args; the server
+then relies on your MCP host to ask before it runs a tool whose hints say it
+is not read-only. `--read-only` is still accepted, as a no-op, for older
+configurations.
+
+```json
+{
+  "mcpServers": {
+    "ryu-services": {
+      "command": "ryu-cli",
+      "args": ["services", "mcp", "--services", "notify"],
+      "env": { "RYU_NOTIFY_API_KEY": "<your tenant key>" }
+    }
+  }
+}
+```
+
+`ryu-cli services` runs the same server as `ryu-services` from
+`@ryuhq/services-cli`, which is not on npm yet. `ryu-cli services` arrives in a
+Ryu release after 0.4.0; until then neither the CLI nor the MCP server can be
+installed outside the Ryu repository (see
+[Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli)). Once `@ryuhq/services-cli` is on npm, use
+`"command": "ryu-services"` and `"args": ["mcp", "--services", "notify"]`. The
+[MCP server page](/docs/standalone/sdk/mcp) lists every tool and flag.
+
+MCP clients get results as `{ data, meta }` structured content, declared as
+each tool's `outputSchema`, and failures, including arguments the schema rejects (`invalid_arguments`), as tool errors
+carrying `{ error }` with the full `RyuError` JSON. Cancelling the MCP
+request aborts the call the tool is waiting on.
+
+## From Python
+
+`ryu_sdk.services.tools` carries the same tools as `@ryuhq/services/tools`.
+The names, descriptions, argument JSON Schemas, and effect hints are exported
+from the TypeScript registry, and a test fails when the two differ. It has
+three adapters:
+
+- `to_ryu_agent_tools(ryu)` returns a dict of `Tool` objects keyed by tool
+  name, for a `ryu_sdk` `Agent`.
+- `to_openai_tools(ryu)` returns OpenAI function-tool definitions, for Chat
+  Completions or, with `api="responses"`, the Responses API.
+- `to_anthropic_tools(ryu)` returns Anthropic Messages API tool definitions.
+
+```python title="agent.py"
+from ryu_sdk import Agent
+from ryu_sdk.services import Ryu
+from ryu_sdk.services.tools import to_ryu_agent_tools
+
+# Reads each service's variables, such as RYU_NOTIFY_API_KEY, from the environment.
+ryu = Ryu()
+
+agent = Agent(
+    "ops",
+    model="openai/gpt-4o-mini",
+    instructions="Answer questions about recent Notify events.",
+    # The read-only tools of every service `ryu` is configured for.
+    tools=to_ryu_agent_tools(ryu),
+)
+
+result = agent.generate("What was the last event about?")
+```
+
+The options are the Node ones in snake_case: `services` (SDK names such as
+`"managed_agents"` or service ids), `read_only` (default `True`), `include`,
+`exclude`, and `needs_approval`. A wrong option raises the same
+`RyuConfigurationError`, and so does a client built with `result="object"`.
+`include`, `exclude`, and `services` each take a list or a single name. A type
+checker also rejects a `result="object"` client, because the adapters accept
+only `Ryu` or `AsyncRyu` in the default result mode.
+
+Each tool's output JSON Schema, the `{ data, meta }` shape the MCP server
+declares, is `tool.output_schema` on an Agent tool and
+`tools.output_schema(name)` on the OpenAI and Anthropic lists. The OpenAI and
+Anthropic tool definitions have no field for it, so it is not sent to the
+model. In TypeScript the same schema is `tool.outputSchema` (zod) and
+`ryuToolOutputJsonSchema(tool)` (JSON Schema). Both ports answer the same
+`data` for a tool, so the schema describes either. The schema allows only
+`data` and `meta` at the top level, while an adapter result also carries
+`error`, which is `null` on success. To validate an adapter result, check
+`{ data, meta }` from it. A failed call has no `data` to check.
+
+Because the result is a dict, combine it with your own tools through its
+values or keys: `tools=[my_tool, *to_ryu_agent_tools(ryu).values()]`, or
+`tools={**to_ryu_agent_tools(ryu), "mine": my_tool}`. Unpacking the dict
+itself (`[my_tool, *to_ryu_agent_tools(ryu)]`) passes the names, not the
+tools, and the Agent raises `TypeError`.
+
+Every service you name in `services` must be configured. The next sample
+names Mail and Notify, so it raises `RyuConfigurationError` when only Notify
+is set up; the error names the variables that set up each missing service.
+Omit `services` to get tools for the configured services only.
+
+```python
+tools = to_ryu_agent_tools(
+    ryu,
+    services=["mail", "notify"],
+    read_only=False,  # also expose tools that send, charge, run or delete
+    exclude=["mail_send"],
+    # Ask the Agent's approval_handler before anything that leaves Ryu.
+    needs_approval=lambda tool: tool.annotations.open_world_hint,
+)
+```
+
+The function-calling adapters return a list you pass as `tools`. The list
+also has `execute(name, arguments)`, which runs the call the model asked
+for. It takes the arguments as a dict or as the model's JSON string, and
+returns the same `{ data, error, meta }` JSON as the Node adapters. It runs
+only the tools in the list, so a name the model makes up, or a write tool
+that `read_only` left out, comes back as an `unknown_tool` error.
+
+`execute` will not run a tool that needs approval: by default every tool
+that is not read-only, and `passport_fetch`, which sends a stored login to an
+outside site and is offered even with `read_only=True`. Such a call returns an
+`approval_required` error and sends nothing. To run it, ask a person first
+(`tools.needs_approval(name)` says when; it is `False` for a name the list
+does not offer, because `execute` refuses that as `unknown_tool` without
+asking) and call `execute(name, arguments, approved=True)`. You can instead
+give the adapter an `approve=` callback; it receives the tool and the parsed arguments and must
+return `True`. `needs_approval=False` turns the check off.
+
+```python title="openai_loop.py"
+import json
+
+from openai import OpenAI
+from openai.types.chat import ChatCompletionAssistantMessageParam, ChatCompletionMessageParam
+from ryu_sdk.services import Ryu
+from ryu_sdk.services.tools import to_openai_tools
+
+client = OpenAI()
+ryu = Ryu()
+tools = to_openai_tools(ryu, services=["notify"])
+
+def ask_user(name: str, arguments: str) -> bool:
+    return input(f"Run {name} with {arguments}? [y/N] ").strip().lower() == "y"
+
+messages: list[ChatCompletionMessageParam] = [
+    {"role": "user", "content": "Summarize the unacknowledged Notify events."}
+]
+response = client.chat.completions.create(model="gpt-4o-mini", messages=messages, tools=tools)
+message = response.choices[0].message
+# The tools are function tools, so the model's calls are function calls.
+calls = [call for call in message.tool_calls or [] if call.type == "function"]
+assistant: ChatCompletionAssistantMessageParam = {"role": "assistant", "content": message.content}
+# The API rejects an empty tool_calls list, so add it only when the model called a tool.
+if calls:
+    assistant["tool_calls"] = [
+        {
+            "id": call.id,
+            "type": "function",
+            "function": {"name": call.function.name, "arguments": call.function.arguments},
+        }
+        for call in calls
+    ]
+messages.append(assistant)
+for call in calls:
+    name, arguments = call.function.name, call.function.arguments
+    # A tool that needs approval runs only with approved=True; otherwise the model gets approval_required.
+    approved = tools.needs_approval(name) and ask_user(name, arguments)
+    result = tools.execute(name, arguments, approved=approved)
+    messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
+```
+
+```python title="anthropic_tools.py"
+import json
+from typing import Any
+
+from ryu_sdk.services import Ryu
+from ryu_sdk.services.tools import to_anthropic_tools
+
+ryu = Ryu()
+tools = to_anthropic_tools(ryu, services=["notify"])
+
+# Pass `tools` to client.messages.create(); then run each tool_use block in the reply.
+def tool_result(block: Any) -> dict[str, str]:
+    result = tools.execute(block.name, block.input)
+    return {"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)}
+```
+
+The tools validate arguments with the same rules as the Node zod schemas.
+For example, a `url` argument accepts any URL that `new URL()` parses, such as
+`mailto:` and `file:` URLs. Arguments they reject come back as `invalid_arguments`, with each problem in
+`error.details.issues`. With an `AsyncRyu` client, call
+`await tools.aexecute(...)`, or run the Agent tools with `agent.agenerate()`.
+The Python `Agent` has no abort signal. A waiting `managed_agents_list_events` call still stops at its `timeoutMs`.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/mcp" />
+  <DocCard href="/docs/standalone/sdk/errors" />
+</Cards>

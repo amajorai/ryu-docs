@@ -1,7 +1,6 @@
-import type { TranslationsAPI } from "fumadocs-core/i18n";
 import { openapiTranslations } from "fumadocs-openapi/i18n";
 import type { I18nProviderProps } from "fumadocs-ui/contexts/i18n";
-import { i18nProvider, uiTranslations } from "fumadocs-ui/i18n";
+import { uiTranslations } from "fumadocs-ui/i18n";
 
 import { DOCS_LOCALE_NAMES, type DocsLocale, i18n } from "./i18n";
 
@@ -261,15 +260,27 @@ export const translations = i18n
   .extend(openapiTranslations())
   .add(FUMADOCS_TRANSLATIONS);
 
-// `fumadocs-ui@16.12` fixes the translation key set to `string` in the
-// i18nProvider parameter even though the runtime accepts a narrower API. Keep
-// the compatibility cast at this adapter boundary instead of weakening the
-// route/layout code.
-const providerTranslations = translations as unknown as TranslationsAPI<
-  DocsLocale,
-  string
->;
+// Project the actual 16.12 provider fields without widening its finite translation-key API.
+// i18nProvider extends UI keys and returns these same locale/translation projections.
+const providerTranslations = translations.extend(uiTranslations());
 
 export function fumadocsProvider(locale: DocsLocale): I18nProviderProps {
-  return i18nProvider(providerTranslations, locale);
+  const { defaultLanguage, languages } = providerTranslations.config;
+  return {
+    locale,
+    translations:
+      providerTranslations.get(locale) ??
+      providerTranslations.get(defaultLanguage),
+    locales: languages.map((code) => ({
+      locale: code,
+      name: providerTranslations.get(code).displayName ?? "English",
+    })),
+  };
+}
+
+/** The "On this page" heading for the docs TOC column, rendered server-side. */
+export function tocTitle(locale: DocsLocale): string {
+  const localized: Partial<Record<string, string>> =
+    FUMADOCS_TRANSLATIONS[locale as keyof typeof FUMADOCS_TRANSLATIONS] ?? {};
+  return localized["On this page(table of contents)"] ?? "On this page";
 }

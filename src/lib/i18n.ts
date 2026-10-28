@@ -31,7 +31,7 @@ export const i18n = defineI18n({
   languages: [...DOCS_LANGUAGES],
 });
 
-export const DOCS_LOCALE_NAMES: Record<DocsLocale, string> = {
+export const DOCS_LOCALE_NAMES = {
   ar: "العربية",
   de: "Deutsch",
   en: "English",
@@ -44,10 +44,10 @@ export const DOCS_LOCALE_NAMES: Record<DocsLocale, string> = {
   "pt-br": "Português (Brasil)",
   ru: "Русский",
   "zh-cn": "简体中文",
-};
+} satisfies Record<DocsLocale, string>;
 
 export function isDocsLocale(value: string | undefined): value is DocsLocale {
-  return value !== undefined && DOCS_LANGUAGES.includes(value as DocsLocale);
+  return DOCS_LANGUAGES.some((locale) => locale === value);
 }
 
 export function localeForDocument(locale: string): string {

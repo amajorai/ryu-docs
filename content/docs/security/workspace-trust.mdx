@@ -1,0 +1,127 @@
+---
+title: "Workspace Trust"
+description: "How Ryu limits coding agents working in folders you have not trusted: no prompt-skipping modes, no unattended shell commands, and an OS sandbox that hides credentials and cuts the network."
+---
+
+A coding agent pointed at a folder reads that folder's README, docs, and scripts as part of its
+job. Models cannot reliably tell the text they read from the instructions they follow, so a
+repository can talk an agent into running its own code. A README that says "run `security.sh`
+before testing" is enough. The script looks harmless, quietly starts a binary, and the agent runs
+it as you.
+
+A command scanner cannot catch every disguise. Ryu therefore sets how much an agent may do on
+its own from one question: **have you marked this folder as trusted?**
+
+## What changes in a folder you have not trusted
+
+Every ACP agent (Claude Code, Codex, Pi, and other agents you add) is limited in three ways.
+
+**It keeps asking before it runs commands.** Ryu refuses session modes that skip permission
+prompts, such as Claude Code's `bypassPermissions` and `auto` modes, Codex's `full-access` mode,
+and similar "don't ask" modes. If you pick one, the agent stays in its asking mode and Ryu tells
+you why. Codex's default `auto` mode, which already runs in Codex's own sandbox and asks before
+escalating, stays available.
+
+**Unattended runs never approve shell commands.** Scheduled jobs, bots, and other headless runs
+have nobody to ask, so every shell request the agent makes in an untrusted folder is rejected.
+In a trusted folder, a headless run still approves only commands the
+[command scanner](/docs/security/command-approval) allows, and only once.
+
+**It runs in an OS sandbox.** Ryu launches the agent inside a sandbox that:
+
+- hides your SSH keys, GPG keys, cloud CLI credentials (AWS, Azure, Google Cloud, Kubernetes,
+  Docker), GitHub CLI tokens, package-registry tokens (`.npmrc`, `.pypirc`, Cargo, RubyGems),
+  `.netrc` and git credential files, password stores, and browser profiles. Hidden folders look
+  empty and hidden files read as empty, and the agent cannot write into either;
+- hides Ryu's own data: the files at the top of its data folder and its keys, database and state
+  folders (preferences, conversations, secrets, node tokens);
+- cuts the agent's network so it can only reach the Ryu Gateway. The agent's model traffic
+  already goes through the Gateway, so the agent keeps working, but anything it runs cannot send
+  your data anywhere else.
+
+The agent's own sign-in (for example `~/.claude` or Ryu's managed Codex home) stays readable,
+because hiding it would sign the agent out.
+
+An agent with limited account access runs in a sandbox in trusted folders too, without the network
+limit. See
+[Choose which accounts an agent can use](/docs/surfaces/desktop/user-guide/agent-account-access#choose-which-accounts-an-agent-can-use).
+
+The first time an agent starts in an untrusted folder, the chat shows a notice explaining what is
+limited, with a **Trust folder** button.
+
+### Network limits
+
+Ryu cuts the network only when the agent sends its model traffic through the Ryu Gateway, which
+is the default. If you have switched an agent to connect to its provider directly, its network
+stays open and the notice says so.
+
+An agent that would be downloaded by `npx`, `bunx`, `uvx`, `pnpm dlx`, `yarn dlx`, `pipx run`, or a
+similar package runner when it starts needs the open network to download itself, so Ryu does not
+start it in an untrusted folder. The chat explains why and offers **Trust folder**. Ryu installs
+npm-distributed agents in the background the first time they are used. Once that install finishes,
+send your message again and the agent starts inside the sandbox. Agents
+that are only available through a package runner need a trusted folder.
+
+While the network is cut, anything the agent itself fetches from the internet fails: web fetch
+tools, package installs, and sign-in refreshes the agent makes on its own. If the agent asks you
+to sign in again in an untrusted folder, trust the folder or sign in from a chat in a trusted one.
+
+### Platform support
+
+| Platform | Sandbox |
+|---|---|
+| Linux | Private user, mount, and network namespaces. Credential paths are covered by empty read-only mounts, which are locked so the agent cannot unmount them. Only the Gateway is reachable, through a local relay. Requires unprivileged user namespaces. |
+| macOS | A Seatbelt profile that denies reads and writes of the same paths and all outbound network except `localhost`. |
+| Windows | Not available yet. |
+
+<Callout type="warn">
+When the sandbox is not available (Windows, or a Linux system that blocks unprivileged user
+namespaces, as some Ubuntu releases do by default), the agent runs without it, the notice says so,
+and the first two limits still apply. An agent with limited account access is the exception: it
+doesn't start, unless it runs on Ryu's own engine, which then runs it with its shell and file tools
+turned off.
+</Callout>
+
+## Trusting a folder
+
+- In a chat, select **Trust folder** on the notice. The agent restarts without limits on your
+  next message.
+- To review or remove trusted folders, open **Gateway → Guardrails → Trusted folders**.
+
+Trusting a folder also trusts every folder inside it, and a git worktree created from a trusted
+repository (including the ones Ryu creates for chats) inherits that trust. Ryu checks the record git
+keeps inside the trusted repository, so a downloaded folder cannot claim to be one of its worktrees.
+A chat without a project runs in the default projectless folder (`Documents/Ryu/Projects`), which
+is treated as trusted. Folders inside it, such as a repository you clone there, are not. If a
+chat without a project runs in the folder Ryu was started from instead, that folder is not trusted
+automatically, because it is often your home folder or the root of the disk. Trust it explicitly
+if you want agents to work there without limits.
+
+Trust a folder only when you trust the code in it, not just the task. Cloning someone else's
+repository to review, test, or "security check" it is exactly the case to leave it untrusted.
+
+## For operators
+
+The trusted list is stored in the node preference `trusted-workspaces` as a JSON array of absolute
+paths. To change it from a script, add folders with `POST /api/workspace-trust/trust`
+(`{"folders": ["/path"]}`) and remove one with `POST /api/workspace-trust/untrust`
+(`{"folder": "/path"}`). Both change the list in one step and return the stored list, so edits
+made at the same time from two windows or scripts do not overwrite each other.
+
+On a node that only ever runs known code, set `RYU_TRUST_ALL_WORKSPACES=1` to turn the
+workspace-trust limits off.
+
+<Callout type="warn">
+  The sandbox narrows what a hijacked agent can reach. It is not a virtual machine: the agent
+  still runs as you, can read and change the folder it works in and anything not listed above,
+  and on macOS DNS lookups are still possible. To run code you do not trust at all, use a
+  disposable container or VM from [Sandboxing and isolation](/docs/security/sandboxing-isolation).
+</Callout>
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/security/command-approval" />
+  <DocCard href="/docs/security/sandboxing-isolation" />
+  <DocCard href="/docs/gateway/acp-agent-governance" />
+</Cards>

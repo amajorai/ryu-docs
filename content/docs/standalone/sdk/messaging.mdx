@@ -1,0 +1,303 @@
+---
+title: "Messaging SDK Quickstart"
+description: "Quote and send SMS with Ryu Messaging from curl, @ryuhq/services, the ryu_sdk.services Python client, the ryu-services CLI, and its MCP tools"
+tags: ["messaging", "sms", "whatsapp", "sdk", "cli", "mcp", "standalone"]
+---
+
+<Callout type="warn">
+Early access: hosted on the Ryu control plane; Ryu enables it per organization, and the organization must also turn on its Ryu Messaging feature (off by default); there is no self-hosted service.
+</Callout>
+
+This page makes a first call to [Ryu Messaging](/docs/standalone/messaging)
+with curl, with the `@ryuhq/services` TypeScript SDK, with the `ryu_sdk.services` Python client, with the `ryu-services`
+command line, and with its MCP tools. The full HTTP contract is on
+[Ryu Messaging API](/docs/standalone/messaging-api), and leases, registration,
+WhatsApp senders, and opt-outs are on
+[Numbers and senders](/docs/standalone/messaging-numbers).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## What you need
+
+- An organization where Ryu has enabled Messaging, with the organization's
+  **Ryu Messaging** feature turned on. Until both are on, organization routes
+  answer `404 not_found` or `403 feature_disabled`.
+- A `ryu_` API key with the `messaging:read` scope to read, and
+  `messaging:manage` to send, lease numbers, or change settings. A personal key
+  also needs its owner's `messaging.read` or `messaging.manage` permission.
+- A leased number with the `SMS` capability to send from, and credits to cover
+  the hold. Each send costs what AWS End User Messaging charges, with no Ryu
+  markup; [Pricing](/docs/standalone/messaging#pricing) explains the quote,
+  hold, and settle steps.
+
+## Configure
+
+Messaging uses the same `ryu_` key, organization, and control-plane origin as
+Managed Agents. The SDK and the CLI read these environment variables. Options
+passed to `new Ryu()` win over them:
+`messaging: { apiKey, baseUrl, organizationId }` first, then the shared
+`apiKey`, `baseUrl`, and `organizationId`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RYU_API_URL` | `https://api.ryuhq.com` | Control-plane origin; the client appends /api/messaging. |
+| `RYU_API_KEY` | none | The same ryu_ key, sent as x-api-key; it needs the messaging:read scope to read and messaging:manage to send, buy numbers or change settings. |
+| `RYU_ORGANIZATION_ID` | none | Required: the organization every Messaging route names in its path, also sent as X-Ryu-Organization. |
+
+```sh
+export RYU_API_KEY="ryu_..."
+export RYU_ORGANIZATION_ID="<organization-id>"
+```
+
+Both variables are required for every Messaging call except `status()` (and
+`ryu-services messaging status`): the server answers
+`GET /api/messaging/status` without a key, so `status()` runs without them
+and, unless both are set, sends neither. Every other call checks its
+configuration before the first request: a missing variable gives a
+`RyuConfigurationError` whose `details.missing` names it, and nothing is
+sent. The key is sent only to the control-plane origin.
+
+The SDK's default origin is the documented control-plane host in the table
+above; Messaging answers there only for organizations where Ryu has enabled
+it. If Ryu gave you another control-plane origin, set `RYU_API_URL` to it. The
+curl examples below use the variable, so set it either way:
+
+```sh
+export RYU_API_URL="https://api.ryuhq.com"
+```
+
+## First call with curl
+
+Quote an SMS. A quote sends nothing; it returns the most the send can hold
+and the organization's available credit:
+
+```sh
+curl -sS "$RYU_API_URL/api/messaging/orgs/$RYU_ORGANIZATION_ID/quote?channel=sms&to=%2B6591234567&body=Your%20order%20has%20shipped." \
+  -H "x-api-key: $RYU_API_KEY" \
+  -H "X-Ryu-Organization: $RYU_ORGANIZATION_ID"
+```
+
+Send it. Every send requires an `Idempotency-Key`, which makes a retry of the
+same request safe:
+
+```sh
+curl -sS -X POST "$RYU_API_URL/api/messaging/orgs/$RYU_ORGANIZATION_ID/sms" \
+  -H "x-api-key: $RYU_API_KEY" \
+  -H "X-Ryu-Organization: $RYU_ORGANIZATION_ID" \
+  -H "Idempotency-Key: order-1842-shipped" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"<number-id>","to":"+6591234567","body":"Your order has shipped."}'
+```
+
+## First call with the SDK
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_API_KEY, RYU_ORGANIZATION_ID and RYU_API_URL.
+const ryu = new Ryu({ result: "object" });
+
+const quote = await ryu.messaging.quote({
+  channel: "sms",
+  to: "+6591234567",
+  body: "Your order has shipped.",
+});
+if (quote.data) {
+  console.log(quote.data.quote.ceilingMicroUsd, quote.data.credit.availableMicroUsd);
+}
+
+const { data, error, meta } = await ryu.messaging.sms.send(
+  { from: "<number-id>", to: "+6591234567", body: "Your order has shipped." },
+  { idempotencyKey: "order-1842-shipped" },
+);
+
+if (error) {
+  console.error(error.code, error.message, error.details);
+} else {
+  console.log(data.id, data.status, data.heldMicroUsd, meta.idempotencyKey);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_API_KEY, RYU_ORGANIZATION_ID and RYU_API_URL.
+ryu = Ryu(result="object")
+
+quote = ryu.messaging.quote({"channel": "sms", "to": "+6591234567", "body": "Your order has shipped."})
+if quote.data:
+    print(quote.data["quote"]["ceilingMicroUsd"], quote.data["credit"]["availableMicroUsd"])
+
+data, error, meta = ryu.messaging.sms.send(
+    {"from": "<number-id>", "to": "+6591234567", "body": "Your order has shipped."},
+    idempotency_key="order-1842-shipped",
+)
+
+if error:
+    print(error.code, error.message, error.details)
+elif data and meta:
+    print(data["id"], data["status"], data["heldMicroUsd"], meta.idempotency_key)
+```
+
+The namespace wraps every method of the `@ryuhq/client` Messaging client,
+grouped by resource:
+
+| Namespace | Methods |
+|---|---|
+| `ryu.messaging` | `status()`, `quote(input)` |
+| `ryu.messaging.sms`, `.mms`, `.voice`, `.whatsapp` | `send(input, options?)` |
+| `ryu.messaging.whatsapp` | `senders()`, `templates.list(senderId)`, `templates.create(senderId, definition)` |
+| `ryu.messaging.numbers` | `list({ status }?)`, `quote({ country, type })`, `buy(input, options?)`, `update(id, { label })`, `release(id)` |
+| `ryu.messaging.messages` | `list(query?)`, `get(id)`, `iterate(query?)` |
+| `ryu.messaging.optOuts` | `list(query?)`, `add(phoneNumber)`, `remove(phoneNumber)`, `iterate(query?)` |
+| `ryu.messaging.settings` | `get()`, `update(input)`, `rotateWebhookSecret()` |
+
+Money is an integer number of micro-USD (1 USD = 1,000,000) in fields that
+end in `MicroUsd`. A send returns the stored message once AWS accepted it,
+with its hold in `heldMicroUsd`; the final price arrives later as
+`priceMicroUsd` and `chargedMicroUsd`.
+
+To walk the whole message log, newest first, use `iterate()`. It sends
+`cursor` and follows `nextCursor`, and keeps your filters:
+
+```ts tab="Node"
+for await (const message of ryu.messaging.messages.iterate({ direction: "inbound" })) {
+  console.log(message.createdAt, message.from, message.body);
+}
+```
+
+```python tab="Python"
+for message in ryu.messaging.messages.iterate(direction="inbound"):
+    print(message["createdAt"], message["from"], message["body"])
+```
+
+`ryu.messaging.optOuts.iterate()` pages the opt-out list by `nextToken` the
+same way. Iterators always throw a `RyuError` on failure, also in object mode.
+
+## Expected response
+
+A send answers `202` with the stored message. Example from the
+[OpenAPI document](https://ryuhq.com/openapi/messaging.json):
+
+```json
+{
+  "message": {
+    "id": "4f3c2b1a-0d9e-4f8a-9b7c-6d5e4f3a2b1c",
+    "channel": "sms",
+    "direction": "outbound",
+    "status": "accepted",
+    "from": "+15555550100",
+    "to": "+6591234567",
+    "body": "Your order has shipped.",
+    "segments": 1,
+    "heldMicroUsd": 9000,
+    "priceMicroUsd": null,
+    "chargedMicroUsd": 0,
+    "chargeState": "held",
+    "metadata": { "order": "1842" }
+  }
+}
+```
+
+The example is shortened; the document lists every field of the message.
+
+## Webhooks
+
+Messaging signs deliveries to the organization's webhook URL with Standard
+Webhooks and a `whsec_` secret, the same scheme as Mail. Verify the raw body,
+and answer a `RyuWebhookVerificationError` with `401`, or `422` when its code is
+`webhook_payload_invalid` (a signed delivery whose body is not the expected
+JSON). The Python sample is a FastAPI handler; `ryu-sdk` does not depend on
+FastAPI, so install it first, for example `pip install fastapi uvicorn`.
+
+```ts tab="Node"
+import {
+  isKnownMessagingWebhookEvent,
+  RyuWebhookVerificationError,
+  verifyMessagingWebhook,
+} from "@ryuhq/services/webhooks";
+
+export async function POST(request: Request): Promise<Response> {
+  try {
+    const event = await verifyMessagingWebhook({
+      headers: request.headers,
+      payload: await request.text(),
+      // The whsec_ secret settings.update returned.
+      secret: process.env.MESSAGING_WEBHOOK_SECRET ?? "",
+    });
+    if (isKnownMessagingWebhookEvent(event) && event.event_type === "message.delivered") {
+      console.log(event.data.message.id, event.data.message.chargedMicroUsd);
+    }
+    return Response.json({ ok: true });
+  } catch (error) {
+    // A signed delivery whose body is not Messaging's JSON gets 422. A forged, altered, or stale one gets 401 so it is not acknowledged; each retry fails verification again.
+    if (error instanceof RyuWebhookVerificationError) {
+      const status = error.code === "webhook_payload_invalid" ? 422 : 401;
+      return Response.json({ code: error.code }, { status });
+    }
+    throw error;
+  }
+}
+```
+
+```python tab="Python"
+import os
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from ryu_sdk.services import (
+    RyuWebhookVerificationError,
+    is_known_messaging_webhook_event,
+    verify_messaging_webhook,
+)
+
+app = FastAPI()
+
+
+@app.post("/webhooks/messaging")
+async def messaging_webhook(request: Request) -> JSONResponse:
+    try:
+        event = verify_messaging_webhook(
+            headers=request.headers,
+            payload=await request.body(),
+            # The whsec_ secret settings.update returned.
+            secret=os.environ.get("MESSAGING_WEBHOOK_SECRET", ""),
+        )
+    except RyuWebhookVerificationError as error:
+        status = 422 if error.code == "webhook_payload_invalid" else 401
+        return JSONResponse({"ok": False, "error": {"code": error.code, "message": error.message}}, status_code=status)
+    if is_known_messaging_webhook_event(event) and event["event_type"] == "message.delivered":
+        print(event["data"]["message"]["id"], event["data"]["message"]["chargedMicroUsd"])
+    return JSONResponse({"ok": True})
+```
+
+`ryu.webhooks.verify({ service: "messaging", ... })` does the same. Each event
+is delivered at most once per organization, with up to three attempts;
+deduplicate on `event_id`. [SDK webhooks](/docs/standalone/sdk/webhooks)
+covers the error codes and framework handlers.
+
+## Errors, retries, CLI, and MCP
+
+- [Messaging SDK errors and retries](/docs/standalone/sdk/messaging-errors) lists the
+  error codes, the SDK error classes, and which requests the SDK retries.
+- [Messaging CLI and MCP](/docs/standalone/sdk/messaging-cli-mcp) runs these calls with
+  the `ryu-services` command line and its MCP tools.
+  Until `@ryuhq/services-cli` is on npm, run them through `ryu-cli`, as
+  [Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli) shows.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/messaging" />
+  <DocCard href="/docs/standalone/messaging-api" />
+  <DocCard href="/docs/standalone/messaging-numbers" />
+</Cards>

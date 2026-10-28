@@ -1,0 +1,222 @@
+---
+title: "Chat Provider Pools"
+description: "Reference for Gateway chat provider pools: pool routes, selection strategies, member and cooldown settings, Auto scoring weights, and fusion and pipeline limits."
+tags: ["Providers", "Routing"]
+---
+
+A chat provider pool spreads chat sessions across several provider and model pairs. A chat model
+map can point to a named `pool:<name>` route. Each pool member names a configured direct provider
+and the exact model that provider accepts. The Gateway selects the member before budgeting and
+response-cache lookup. New sessions use one of the selection strategies below. An active session
+stays with its eligible member for upstream prompt-cache reuse.
+
+The editor offers the strategies advertised by the connected Gateway. Older
+nodes retain their original five choices. A saved strategy the node does not
+advertise is displayed read-only; it is never silently changed to round robin.
+Provider/model pool selection is separate from an individual provider's
+[account routing](/docs/providers/account-routing). See
+[provider routing](/docs/providers/routing) for how a pool fits into model routing precedence.
+
+## Selection strategies
+
+| Strategy | Purpose |
+|---|---|
+| `priority` | Prefer eligible members in priority order |
+| `round_robin` | Rotate new sessions within the eligible priority tier |
+| `weighted_round_robin` | Retain the legacy weighted rotation policy |
+| `weighted` | Apply configured member weights |
+| `random` | Shuffle eligible choices without immediate repeats across decks |
+| `strict_random` | Independently draw uniformly from eligible choices |
+| `least_used` | Prefer members with fewer active requests |
+| `fill_first` | Fill the selected member before moving on |
+| `p2c` | Compare two eligible choices |
+| `cost_optimized` | Use available cost evidence |
+| `headroom` | Use available capacity headroom |
+| `reset_window` | Use reported reset windows |
+| `reset_aware` | Account for reported reset timing |
+| `context_relay` | Use the chat context-relay policy |
+| `context_optimized` | Use known model context capacity |
+| `cache_optimized` | Prefer the cache-aware selection policy |
+| `lkgp` | Use the last-known-good policy |
+| `auto` | Let the Gateway combine available selection evidence |
+| `quota_weighted` | Combine quota evidence with weights |
+| `fusion` | Collect bounded text responses and synthesize with a judge |
+| `pipeline` | Execute bounded text targets in member order |
+
+Cost, quota, and context observations can be missing or stale. Unknown evidence
+does not mean zero cost, unused quota, or unlimited context. The Gateway uses its
+supported fallback instead of inventing a measurement. For a known model limit,
+set a member's **Context capacity (tokens)** or `context_tokens` to a positive
+integer up to 2,000,000. Leave it blank when unknown. This setting describes
+model capacity, not account quota usage.
+
+**Cooldown wait** sets a bounded delay when every executable pool member is on an
+observed cooldown. The default `0` fails immediately; an explicit value up to
+30,000 milliseconds can wait for a member to recover. A healthy alternative is
+selected without waiting. Missing credentials and policy-denied members are not
+reasons to wait. Cancelling or timing out the request cancels the wait before
+provider dispatch. Existing session affinity and response-cache protections remain.
+Managed credit admission prices the output ceiling against the selected member's model rather
+than the public pool alias. If a budget rule downgrades the route, Gateway checks the downgraded
+provider's credit pool and reserves against that final route.
+
+Create and edit pools in **Gateway → Model routing → Direct chat pools**, then select the pool in a
+chat model mapping. The Gateway validates pool membership before saving and applies the change
+after a restart. A pool mapping does not use the mapping's optional provider-model rewrite;
+each member's own model ID is authoritative. Active pool aliases from model mappings appear in
+`GET /v1/models`, so compatible CLI clients can discover the name to request.
+
+```toml
+[routing.model_map."balanced-chat"]
+provider = "pool:balanced-chat"
+
+[routing.provider_pools.balanced-chat]
+wait_for_cooldown_ms = 1000 # optional; 0 fails immediately, maximum 30000
+strategy = "round_robin" # choose a strategy supported by this Gateway
+sticky_limit = 3 # 1-100 new session assignments per member; round_robin only
+
+[[routing.provider_pools.balanced-chat.members]]
+provider = "openai"
+model = "gpt-4o-mini"
+priority = 0
+weight = 1
+enabled = true
+context_tokens = 128000 # optional; omit when unknown
+last_resort = false
+
+[[routing.provider_pools.balanced-chat.members]]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+priority = 0
+weight = 1
+enabled = true
+last_resort = true # use only after regular members are unavailable
+```
+
+Only configured, healthy chat providers participate. Search, fetch, speech-only, image-only,
+video-only, and classification providers cannot be added to a chat pool. A provider that supports
+chat alongside another operation, such as Qwen, can participate.
+
+A pool may use two different models from the same provider. Each exact
+provider/model pair may appear only once. Those models still share the
+provider/account quota evidence; they do not gain independent quota allowances.
+
+Lower priority numbers are preferred.
+Rotation and weights apply within the highest available priority. A rate-limited member cools down
+and Gateway tries the next eligible member in the same plain-chat request, using that member's
+model and credit pool. The successful member becomes the session's new binding.
+
+Mark a member **Last resort** to reserve it for when no regular member is available.
+Priority and weights rank regular members before emergency members, even if the
+emergency member has a lower priority number. An existing session keeps its
+last-resort binding while that member stays healthy, preserving its upstream prompt cache.
+The last-resort member is included at the end of a same-request fallback plan;
+Gateway does not wait for a cooling regular member before using it.
+After every configured member fails, the pool returns the final failure. To provide an emergency
+destination, add a last-resort member with its exact upstream model. The ordinary provider fallback
+chain does not extend a pool's request plan, so the public pool alias never becomes an upstream model.
+
+Choose **Priority** (`strategy = "priority"`) to keep sending new sessions to the first
+eligible member in the lowest priority tier until it cools down or becomes unavailable.
+Upstream prompt caches stay warmer than when each new session rotates.
+
+For **Round robin**, set **New sessions per member** to 1–100 to keep a batch of new
+sessions on one member before advancing. The default is 1. This counts new
+session assignments, including requests without a session ID; calls from an
+already bound session do not advance the batch. A cooled or unavailable member
+is skipped immediately. In authored Gateway configuration, use
+`sticky_limit = 3` under `[routing.provider_pools.<name>]` with
+`strategy = "round_robin"`. Other strategies require the default value of 1.
+
+**Weighted** draws among eligible members in the preferred priority tier with odds
+proportional to each weight. **Random** uses a shuffled deck; **Strict random** makes
+an independent uniform draw. **Least used** chooses the eligible member with the fewest
+active requests; ties follow configuration order. These selection strategies
+retain an active session's binding to protect its upstream prompt cache.
+
+## Auto scoring weights
+
+Auto uses a pinned default set when `auto_weights` is absent. Expand **Advanced
+Auto scoring weights** to inspect those values. Enable custom weights to edit
+them. Custom values must be finite, from 0 to 1,000, with a positive total. The
+Gateway normalizes the configured weights. In a partial custom object, omitted
+fields are zero; they do not inherit the full default set.
+
+| Weight | Pinned default |
+|---|---|
+| `quota` | 0.1429 |
+| `health` | 0.1605 |
+| `cost_inv` | 0.1429 |
+| `latency_inv` | 0.1143 |
+| `task_fit` | 0.0762 |
+| `stability` | 0.0476 |
+| `tier_priority` | 0.0476 |
+| `tier_affinity` | 0.0476 |
+| `specificity_match` | 0.0476 |
+| `context_affinity` | 0.0476 |
+| `cache_affinity` | 0 |
+| `session_availability` | 0.0476 |
+| `reset_window_affinity` | 0 |
+| `connection_density` | 0.0476 |
+| `quality` | 0.03 |
+| `reliability` | 0 |
+
+Weights change ranking, not observations. Changing a quota coefficient does not
+change reported quota windows or create independent quota for each model.
+
+```toml
+[routing.provider_pools.balanced-chat.auto_weights]
+quality = 1 # all other custom coefficients are zero
+```
+
+## Fusion and pipeline limits
+
+Fusion and pipeline are chat-only multi-target execution policies. They support
+at most eight enabled targets. Every accepted target call uses the normal
+Gateway admission and accounting path and can incur its own provider charge.
+Fusion also calls its configured judge. Multi-target work is not a free fallback.
+
+The editor shows these controls only for fusion and pipeline:
+
+| Setting | Default | Supported range |
+|---|---|---|
+| Per-target timeout, `leg_timeout_ms` | 30,000 ms | 1–30,000 ms |
+| Total timeout, `total_timeout_ms` | 120,000 ms | 1–120,000 ms; at least the per-target timeout |
+| Output limit, `max_output_bytes` | 262,144 bytes | 1–262,144 bytes |
+| Response quorum, `quorum` | 2 | 1–8 |
+| Quorum grace, `grace_ms` | 250 ms | 0–5,000 ms |
+
+Fusion requires a connected, concrete judge provider and exact upstream model.
+The judge cannot name another pool. Tool-bearing fusion requests go directly to
+the judge instead of running independent tool legs. Pipeline targets run in
+member order within the total deadline.
+
+```toml
+[routing.provider_pools.review]
+strategy = "fusion"
+
+[routing.provider_pools.review.execution]
+leg_timeout_ms = 30000
+total_timeout_ms = 120000
+max_output_bytes = 262144
+quorum = 2
+grace_ms = 250
+
+[routing.provider_pools.review.judge]
+provider = "openai"
+model = "gpt-4o-mini"
+```
+
+Add concrete members as in the earlier example. Search and fetch pools cannot
+use fusion, pipeline, context relay, context optimization, or cache optimization; their
+[web operation routing](/docs/providers/routing#modality-slots) is
+separate from conversations.
+
+Removing one member's provider key makes that member ineligible without stopping unrelated
+Gateway routes. Gateway response caches are bypassed for pool routes. One Gateway can define
+up to 128 pools with up to 32 members each.
+Streaming chat also retries before returning a response body. Requests with managed tool loops
+do not replay on another pool member after an error because tools may already have run; uncertain
+provider delivery also stops retries. Pools are chat routes; the default provider, modality maps,
+and generic fallback chains cannot name a pool alias. Routing changes take effect after the Gateway
+restarts.

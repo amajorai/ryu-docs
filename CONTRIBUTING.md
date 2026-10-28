@@ -55,6 +55,18 @@ edits the files under `content/docs`; review the resulting Git diff and run the 
 publishing. Feedback actions are server-owned and fall back to an email draft when the hosted
 GitHub destination is not configured.
 
+### Apps and Plugins catalog pages
+
+Pages under `content/docs/apps` and `content/docs/plugins` whose frontmatter contains
+`generated: "generate:catalog"` are generated from the store manifests by
+`scripts/generate-catalog.ts`. Do not edit them directly: put authored prose in
+`content-guides/<apps|plugins>/<slug>.mdx` (`index.mdx` for the catalog landing page). The
+generator script documents the guide format, which supports a lead section, a replacement
+description, and blocks anchored to generated headings or lines. Pages without the marker are
+hand-written; the generator never overwrites or deletes them. In the monorepo, run
+`bun run generate:catalog` after changing a manifest or guide, and `bun run generate:catalog:check`
+to confirm the committed pages match their sources.
+
 ## Pull requests
 
 - Keep changes focused — one logical change per PR.

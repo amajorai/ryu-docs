@@ -1,17 +1,16 @@
 ---
-title: "Auto-update"
-description: "One Core-computed update verdict with native download and install behavior for each surface."
+title: "Auto-Update"
+description: "How Core computes one update verdict for every Ryu surface, the update check and apply routes, and how each surface downloads, verifies, and installs updates"
 ---
 
-Ryu keeps the update decision understandable across every surface (desktop, web app, CLI, gateway, island,
-extension, and mobile). The release verdict is shared where a surface talks to Core; the install *mechanism*
-remains platform-specific. Per the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule,
-deciding *what runs* (including which build of the binaries runs) is Core's job. The Gateway governs what is
-allowed, measured, and paid, never the install lifecycle.
+Core computes one update verdict for every surface that talks to it (Desktop, web app, CLI, Gateway, Island,
+browser extension, and mobile). The install mechanism stays platform-specific. This page is for operators and
+client developers. Per the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule, deciding what
+runs (including which build of the binaries runs) is Core's job. The Gateway governs what is allowed, measured,
+and paid, never the install lifecycle.
 
-For the complete Stable, Beta, Nightly, Canary, and local Dev comparison, including local data roots and
-sharing boundaries, see [Ryu Release Channels](/docs/start-here/release-channels). This page focuses on
-the update verdict and install mechanisms.
+For the Stable, Beta, Nightly, Canary, and local Dev comparison, including local data roots and
+sharing boundaries, see [Ryu Release Channels](/docs/start-here/release-channels).
 
 ## One verdict, native install
 
@@ -22,21 +21,28 @@ feed, and Dev is a local build rather than a published train. Core's own crate v
 is therefore the canonical version for the build that is answering an update check, and `current_version()`
 returns it.
 
-Every client reads Core's one verdict instead of each re-implementing GitHub-release polling. What differs is
-only how the bytes land:
+Every client reads Core's verdict instead of polling GitHub releases itself. Only the install path differs:
 
 | Surface | Mechanism | On launch |
 |---|---|---|
 | Desktop (Tauri) | Signed Tauri updater feed with a durable, one-artifact cache | After sign-in, the first onboarding screen checks the desktop bundle and lets the user continue at any time. By default, eligible updates download and verify in the background. Ryu then asks before installing and restarting. |
 | Web app (browser) | Deployment refresh | Does not show a native-app update step or claim that a desktop bundle is current. A new web deployment is picked up through the browser's normal refresh/reload path. |
-| CLI (Rust) | Manual download (prints the release URL) | Prints a one-line notice when an update is available; `ryu version` / `ryu update` show details. |
-| Extension (Chrome) | Chrome Web Store (auto) | Mounted notify-only toast, deduped per release; the extension does not try to install its own package. |
+| CLI (`ryu-cli` terminal client) | Official `ryu-cli` release asset with SHA-256 verification | When the shared `auto-updates` preference is on, checks its release channel in the background, stages the matching binary, and installs it for the next launch. A running terminal session is not interrupted; source and development runs skip self-update. |
+| Browser extension | Browser add-on store | Chrome and other browsers manage package updates for store installs. Ryu's extension release toast is for the connected Core node; the extension does not install its own package. Unpacked development installs must be updated by reloading the development build. |
 | Island (Electron) | Core `DownloadCenter` for the managed bundle, plus `electron-updater` when the companion is running | Desktop and one-line setup stage the bundle through the global resumable download path while Island is disabled. Once enabled, the running companion reads the shared `auto-updates` pref; enabled updates install silently and relaunch, while disabled updates remain available without an unattended install. |
-| Mobile (Expo) | `expo-updates` (EAS OTA) | Checks on launch when enabled; Settings can check manually and offers an available OTA for explicit installation. |
+| Mobile (Expo) | `expo-updates` (EAS OTA) | Settings controls automatic launch checks. Enabled updates download and reload automatically; manual checks remain available when automatic updates are off. Native-code changes still require an App Store or Play Store build. |
 | Gateway (Rust) | Updated with Core (managed sidecar) | Ships in the same release, replaced when Core is. |
 
-The headless binaries (core, gateway, cli) have no native updater of their own, so Core also owns the binary
-self-update for them (see [Applying an update](#applying-an-update)).
+Core owns the shared release verdict and verified update API. The terminal client applies its own `ryu-cli` release
+asset, while Core applies updates to the binaries it runs. Each graphical and browser host uses its native
+update mechanism.
+
+Desktop keeps a downloaded update ready if installation is canceled or the installer fails, so
+you can retry when convenient. An obsolete release or changed signed feed requires downloading
+the update again. A preparation response for a different release is rejected; check for updates
+again before installing. Desktop saves automatic-download choices on this device. Quick repeated
+changes are saved in the order you make them. If your latest change cannot be saved, the switch
+returns to the value that was last saved successfully and explains the failure.
 
 ## Desktop first-run check
 
@@ -53,18 +59,17 @@ step because a web deployment cannot install a Tauri bundle.
 
 ## Checking for an update
 
-Three Core routes back the whole system. They are registered in `apps/core/src/server/mod.rs` and each has an
-API reference page.
+Three Core routes provide update status and installation. Each has an API reference page.
 
 | Endpoint | Purpose |
 |---|---|
-| [`GET /api/version`](/docs/extend/develop/api-reference/core/health/get_version) | Installed version plus the per-component build list and the running `os-arch` platform. |
+| [`GET /api/version`](/docs/extend/develop/api-reference/core/health/get_version) | Installed version plus the per-component build list, the running `os-arch` platform, and `features` - behaviors a client checks before relying on them (`web_delegated_ext` means the node accepts app requests from the Ryu web app). |
 | [`GET /api/update/check`](/docs/extend/develop/api-reference/core/health/update_check) | Compares the installed version against the latest GitHub release and returns the verdict. |
 | [`POST /api/update/apply`](/docs/extend/develop/api-reference/core/health/update_apply) | Downloads and installs an update for the headless binaries. |
 
 `GET /api/update/check` queries the latest release on the requested channel, compares semver (a malformed tag
-parses to `(0,0,0)`, so it never claims to be newer than a real version), picks the best release asset for the
-running platform, and returns an `UpdateCheck`:
+parses to `(0,0,0)`, so it never claims to be newer than a real version), picks this platform's standalone
+Core binary from the release, and returns an `UpdateCheck` object with these fields.
 
 | Field | Meaning |
 |---|---|
@@ -73,11 +78,13 @@ running platform, and returns an `UpdateCheck`:
 | `update_available` | `true` only when `latest` is strictly newer than `current`. |
 | `notes` | The GitHub release body, if any. |
 | `html_url` | Link to the human-readable release page. |
-| `asset` | The release asset matching this platform (`name`, `url`, `kind`, `size`), when one resolved. |
+| `asset` | This platform's Core binary (`name`, `url`, `kind`, `size`), when the release publishes one. |
 
-The asset matcher gates by OS first (filename and extension heuristics), then scores an arch bonus for
-`x86_64`/`aarch64` and common aliases (`amd64`, `x64`, `arm64`), keeping the highest-scoring asset. The `kind`
-is inferred from the extension (`msi`, `exe`, `dmg`, `appimage`, `deb`, `archive`, or `unknown`).
+`asset` is matched by exact name: `ryu-core-<os>-<arch>` (with `.exe` on Windows), for example
+`ryu-core-linux-x86_64` or `ryu-core-windows-x86_64.exe`. A release also carries the Gateway, the CLI, app
+binaries, checksums, and desktop installers, so Core never guesses among them. When the release has no Core
+binary for this platform, `asset` is `null`. The `kind` is `exe` for the Core binary and is otherwise inferred
+from the extension (`msi`, `exe`, `dmg`, `appimage`, `deb`, `archive`, or `unknown`).
 
 <Callout type="info">
   The check **fails open** for launch safety: a network or API error never blocks the app. Surface clients
@@ -85,27 +92,33 @@ is inferred from the extension (`msi`, `exe`, `dmg`, `appimage`, `deb`, `archive
   current when the service could not answer.
 </Callout>
 
-## Keep working through GitHub outages
-
-GitHub-backed skill taps and Marketplace listings keep the last successful browse result in a short-lived
-memory cache and, for the default catalog view, a disk cache. If GitHub or the Marketplace endpoint is
-temporarily unavailable, Ryu labels the result as cached and keeps browsing possible. An already-installed
-skill can also be retried from its local copy when its recorded catalog identity matches the requested skill.
-A first install still fails closed when the bytes cannot be verified or downloaded, so stale data never
-turns into an unverified install or silently substitutes a same-named skill from another repository.
-
 ## Applying an update
 
 For the headless binaries `POST /api/update/apply` stages the asset and either self-replaces or hands the path
-back (`apps/core/src/update/apply.rs`):
+back:
 
-- A bare executable on Windows is swapped in place. A running `.exe` cannot be overwritten, so Core renames the
-  live binary aside to `<exe>.old`, copies the new binary into the original slot, and reports
-  `restart_required`. The `.old` crumb is removed on the next launch by `cleanup_stale_backup()`.
+- This platform's Core binary is swapped in place on Windows, macOS, and Linux. Core copies the new binary
+  next to the running one, renames the live binary aside to `<exe>.old`, moves the new binary into the
+  original slot, and reports `restart_required`. If the final move fails, the old binary is restored. The
+  previous executable is removed on the next launch. A Core running inside the macOS desktop app bundle is
+  not swapped, because the desktop updater owns that bundle.
+- When the Gateway binary Core launches (`RYU_GATEWAY_BIN`, or `ryu-gateway` on `PATH`) is installed outside an
+  app bundle, the matching `ryu-gateway-<os>-<arch>` from the same release is verified and swapped in alongside
+  Core, because Core and the Gateway ship as one version. If only Core could be updated, the response says so.
+- Any other executable or archive is staged and its path returned without replacing Core.
 - An OS installer (`msi`, `dmg`, `deb`, `appimage`) is staged to disk and its path returned. The client runs
   the platform installer; Core does not launch GUI installers itself.
 
-The download stages atomically: write to a `.part` file in `~/.ryu/updates/`, then rename into place.
+The download stages atomically: write to a `.part` file in `cache/updates/` under the data dir (`~/.ryu` on the release profile), verify its checksum,
+flush it to disk, then rename it into place. On macOS and Linux the staging folder is flushed after the
+rename, so a staged update that was reported complete survives a power loss.
+
+An update deferred to the node's quiet hour installs then, but the new binary only runs after Core restarts.
+On a node run under a process supervisor (systemd, a container restart policy), set
+`RYU_RESTART_AFTER_UPDATE=1` to have Core shut down gracefully after a deferred update. Shutdown stops the
+Gateway and sidecars, and Core exits with code `75` so the supervisor starts the new build. Core skips the
+restart when the Gateway was not updated with it, so the restart never pairs the new Core with the old
+Gateway. Leave the variable unset on an unsupervised node, where exiting would leave Core stopped.
 
 The Electron companion completes its enabled-update path automatically after the signed download: on
 Windows it invokes the NSIS updater in silent mode and relaunches the companion, so users do not have to
@@ -120,10 +133,11 @@ older Core that lacks this verified installer must be updated before Island can 
 
 ## Update settings by surface
 
-The Tauri app has a device-local **Download updates automatically** preference. It defaults to on and controls
-only whether that desktop downloads an eligible app bundle in advance. It does not authorize installation.
-After download and signature verification, App Settings and the persistent update notice both offer
-**Install and restart**. Turning the preference off changes the first action to **Download update**.
+The Tauri app's **Download updates automatically** preference (see
+[Desktop first-run check](#desktop-first-run-check)) controls only whether that desktop downloads an eligible
+app bundle in advance. After download and signature verification, App Settings and the persistent update
+notice both offer **Install and restart**. Turning the preference off changes the first action to
+**Download update**.
 
 Core and remote-node automatic updates remain a separate policy. Changing the Tauri download preference does
 not change whether a server updates its Core or Gateway binaries. The Chrome extension is notify-only because
@@ -136,6 +150,101 @@ no bundled binary toggle because deployments are refreshed by the browser.
   installation. If a signed feed is unavailable, Ryu keeps working and offers the manual download page.
 </Callout>
 
+## Updates while work is running
+
+Downloading an update keeps the current app and its running work available. When
+Desktop manages the local runtime, it also prepares Core, Gateway, and CLI as a
+complete release set. Every binary must pass checksum and version checks before
+the app installer starts. The next launch selects the complete matching set
+together. A failed preparation leaves the active runtime unchanged; Ryu refuses
+to start a mismatched managed set after a failed install.
+
+Prepared runtime files are checked against their saved SHA-256 digests before
+reuse. Changed or incomplete files are prepared again rather than selected.
+
+Prepared runtimes follow the target build's profile. Canary and Nightly updates
+keep their runtime files in their own profile folders; explicit profile or data-folder
+overrides remain authoritative.
+
+Installing a packaged desktop update restarts the app and can stop local chats,
+tools, workflows, and work waiting for approval. Ryu warns before installation and
+offers **Keep working**. Cancelling keeps the verified update ready for later.
+If cancelling a scheduled update fails, its schedule stays visible and you can retry; Ryu does not
+report it as cancelled until the saved schedule is cleared. A delayed check or download does not
+restore an older ready notice after you clear it or prepare a newer update.
+Remote nodes continue running. Local Dev reloads retain their separate execution
+runtime as described in [Chat basics](/docs/surfaces/desktop/user-guide/chat-basics).
+
+Windows installers keep the current application installation folder,
+including paths with spaces. Reinstalling the previous package during recovery
+uses that same folder.
+
+Once you approve a packaged app update, Ryu pauses its owned local runtime before
+handing off to the native installer. Ryu prevents local runtime starts and
+data-folder changes during the update. If the installer reports an error, Ryu attempts to
+restart the previous runtime and keeps the verified update available for retry.
+
+The managed Ryu agent's Pi runtime updates separately. Ryu installs the entire
+dependency tree into a new directory and checks that its SDKs load before selecting
+it. Existing agent processes retain their original runtime files; newly spawned
+processes use the selected generation. Failed installation or validation leaves
+the previous runtime available. Previous generations are retained so running work
+can still use them; this requires additional disk space.
+
+<Callout type="warn">
+  Runtime preparation and selection are transactional. The native desktop
+  application installer remains platform-specific: Ryu does not yet guarantee
+  automatic restoration of the desktop executable or database migrations if an
+  installed release fails to start. A reported installer failure keeps the prepared
+  update for retry.
+</Callout>
+
+### Recovery checkpoints
+
+Ryu checks the prepared update before replacing the running app. If preparation
+fails, the update remains available for retry and Ryu reports the failure. A
+failed preparation does not mean the new version was installed.
+
+Recovery preparation needs free disk space for a data checkpoint and rollback
+files. Preparation time depends on the total size and the number of files.
+Large model files and folders with many small runtime files take longer to copy
+and verify. If the checkpoint cannot be prepared, the app installer does not start.
+
+After a normal app start, background maintenance keeps the two most recent
+verified checkpoints for the current profile. Pending updates and checkpoints still
+owned by a recovery process are preserved. Cleanup protects configured profile
+data locations, including profiles that are not running. Redundant rollback
+copies are removed only when their ownership can be proved; replaced or older
+unidentified folders are preserved. Failed integrity checks defer cleanup.
+
+Temporary restore copies left by a crash are removed only after their update
+finishes and their recorded filesystem identity still matches. Copies owned by
+another profile or overlapping a configured data location remain protected.
+
+Abandoned checkpoint captures are removed only when an ownership record proves
+that publication and installation never began. Verified installer history is
+kept while referenced by current releases, retained checkpoints, prepared updates,
+or unfinished handoffs. Unknown older files are preserved.
+
+Preparation refuses oversized metadata or directory trees that are too deep or
+too wide before it starts the installer (`crates/core/runtime-install/src/recovery.rs`).
+
+| Limit | Value |
+|---|---|
+| Captured roots per transaction | 128 |
+| Directory depth per root | 64 |
+| Entries per root | 100,000 |
+| Cumulative encoded path names per root | 64 MiB |
+
+File contents are streamed, not loaded into memory, and have no size limit.
+
+To keep development profiles and custom feeds separate from everyday data, see
+[Updates and Profile Data](/docs/extend/develop/update-recovery).
+
+## Verified update downloads
+
+Applying, scheduling, or canceling a node update requires node-management permission on managed or organization-bound nodes. The headless apply API accepts only assets from Ryu’s official published releases. Before staging a download, Core checks the filename, release tag, asset URL, size, and SHA-256 digest against fresh release metadata. The downloaded bytes must match that digest before an installer handoff or binary replacement. Missing digests, unpublished assets, and mismatches stop the update; they do not fall back to an unchecked download.
+
 ## Desktop signing
 
 The desktop updater verifies a minisign signature on every downloaded artifact using the public verification
@@ -143,15 +252,18 @@ key embedded in the installed app. The private release key stays outside the sou
 artifact is verified again immediately before installation, so changing cached bytes makes the update invalid.
 
 <Callout type="warn">
-  The installed app trusts a specific release key. If a future release must use a different key, existing
-  installations may need a one-time manual reinstall before automatic downloads can continue.
+  Automatic desktop installation requires a newer published artifact signed by the release key that the
+  installed app trusts. If a future release must use a different key, existing installations may need a
+  one-time manual reinstall before automatic downloads can continue.
 </Callout>
 
-<Callout type="warn">
-  A development checkout can verify the prepared-update state, cache validation, and user-facing flow, but it
-  cannot install a production desktop bundle. A real installation still requires a newer published artifact
-  signed by the release key trusted by the installed app.
-</Callout>
+The desktop minisign key covers only desktop updates. Managed cloud computers use a separate
+release-signing scheme. Each stable release can include a list of checksums for its Linux
+binaries, signed with a key that is separate from the desktop key. When that signing is
+enabled, a managed cloud computer installs a release only if this list verifies. Release
+signing for cloud computers is not enabled yet, so they currently report new releases without
+installing them automatically. [Cloud Computer SSH and Updates](/docs/core/cloud-computer-ssh-and-updates) describes the cloud
+computer update schedule.
 
 <Cards>
   <DocCard href="/docs/extend/develop/api-reference/core/health/update_check" />
@@ -159,7 +271,3 @@ artifact is verified again immediately before installation, so changing cached b
   <DocCard href="/docs/core/node-and-presence" />
   <DocCard href="/docs/surfaces/desktop/user-guide/data-and-storage" />
 </Cards>
-
-## Verified update downloads
-
-Applying, scheduling, or canceling a node update requires node-management permission on managed or organization-bound nodes. The headless apply API accepts only assets from Ryu’s official published releases. Before staging a download, Core checks the filename, release tag, asset URL, size, and SHA-256 digest against fresh release metadata. The downloaded bytes must match that digest before an installer handoff or binary replacement. Missing digests, unpublished assets, and mismatches stop the update; they do not fall back to an unchecked download.

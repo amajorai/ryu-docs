@@ -1,24 +1,30 @@
 ---
 title: "Author a Ryu App"
-description: "Ship an interactive in-chat widget as a plugin using defineApp, a single-file build, and a ui:// MCP resource"
+description: "How to build, pack, and install a Ryu App - tools whose results render an interactive in-chat widget - with defineApp, a single-file build, and a ui:// MCP resource"
 ---
 
 A **Ryu App** bundles one or more tools whose results render an interactive widget inline in a chat
-reply - a checklist you tick, a data grid you sort, a budget dial you turn. This page is the
-authoring path: how you build one and install it. For how a widget renders, the sandboxed iframe,
-and the governance gate, see [Ryu Apps](/docs/surfaces/desktop/user-guide/apps) - this page does not re-state
-those.
+reply, such as a checklist, a sortable data grid, or a budget dial. This page covers how to build
+and install one. For how a widget renders, the sandboxed iframe, and the governance gate, see
+[Ryu Apps](/docs/surfaces/desktop/user-guide/apps).
+
+<Callout type="info">
+  **No code needed for a simple app.** [App Studio](/docs/apps/app-studio) builds a full-page
+  Companion app with drag and drop or chat edits, then installs it disabled so you review its
+  permissions when you enable it. Use this page when you need tools, widgets, or behavior beyond a
+  single sandboxed HTML page.
+</Callout>
 
 <Callout type="info">
   `defineApp` supports two shapes. A tool without `runnable` is declarative pass-through: its
   widget renders from `window.openai.toolInput` / `toolOutput`. Attach a `ToolRunnable` when the app
-  owns executable behavior; `ryu pack` carries its body as Core's grant-gated `inline_deno` backend.
+  owns executable behavior; `bunx ryu pack` carries its body as Core's grant-gated `inline_js` backend.
   The [ResolveDesk support-widget example](/docs/extend/develop/extensions/support-widget) shows the
   executable path.
 </Callout>
 
 <Callout type="info">
-  **What remains separate.** The `inline_deno` tool tier is the supported path for small,
+  **What remains separate.** The `inline_js` tool tier is the supported path for small,
   self-contained executable bodies. The **WASM tool tier** and the **out-of-process plugin host**
   remain separate surfaces. Keep provider calls behind `host.sideModel` or another governed host
   capability; a widget still cannot access the network directly.
@@ -27,9 +33,9 @@ those.
 ## 1. Declare the app with `defineApp`
 
 `defineApp` (`packages/sdk/src/runnable/app.ts`, from `@ryuhq/sdk`) assembles a complete
-`manifest.json` manifest for a Ryu App from a declarative description. Each tool is one of two kinds,
-and the split is derived exactly the way Core's in-process provider derives it
-(`apps/core/src/sidecar/mcp/apps/mod.rs`).
+`manifest.json` for a Ryu App from a declarative description. Each tool is one of two kinds.
+The split matches the one Core's in-process apps provider makes
+(`tools_for_server` in `apps/core/src/sidecar/mcp/mod.rs`).
 
 | Tool kind | `accessible` | What it does |
 |---|---|---|
@@ -37,8 +43,10 @@ and the split is derived exactly the way Core's in-process provider derives it
 | **companion** | `true` | A call target a mounted widget may invoke back (`callTool`). Carries `widget_accessible: true`, gets no widget template. |
 
 An app tool may also set `runnable` to a `ToolRunnable` from `defineTool`. The SDK keeps the
-render/companion metadata and adds that runnable's `inline_deno` body to the same tool config. The
-body is executed by Core only when the app has the `tool:execute` grant.
+render/companion metadata and adds that runnable's `inline_js` body to the same tool config. The
+body is executed by Core only when the app has the `tool:execute` grant. `defineApp` adds
+`tool:execute` when any tool has a `runnable`, and adds `widget:render` when the app contributes a
+widget.
 
 ```ts
 import { defineApp } from "@ryuhq/sdk";
@@ -69,7 +77,7 @@ HTML file). The widget renders inside a null-origin sandboxed iframe and talks t
 `window.openai` (the OpenAI Apps SDK surface, aliased from Ryu's native `window.ryu` bridge). It
 reads its tool's validated arguments and result from `window.openai.toolInput` / `toolOutput` - Core
 echoes the validated arguments back as `structuredContent`, so the widget has data to render without
-any server round-trip. A companion `callTool` goes back through the host, never direct from the
+any server round trip. A companion `callTool` goes back through the host, never direct from the
 frame.
 
 ## 3. Build and pack
@@ -80,21 +88,16 @@ under a `default-src 'none'` CSP iframe that cannot fetch an external chunk.
 <Callout type="warn">
   Build **one app per Vite invocation** (single input). A multi-entry build hoists a shared React
   chunk that `vite-plugin-singlefile` leaves external (a `./chunk.js` reference), which cannot load
-  under the null-origin iframe and renders a blank widget. The built-in apps loop each app through
-  its own single-input build for exactly this reason
-  (`packages/ryu-apps/scripts/build-all.ts`, run via `bun run build`); a Rust regression test asserts
-  every bundle is self-contained.
+  under the null-origin iframe and renders a blank widget. Each app under `apps-store/<app>/ui`
+  builds its own single-file bundle for this reason.
 </Callout>
 
-Then pack: `ryu pack` bundles your `uiEntry` output into the manifest's `ui_code` field (with a
+Then pack: `bunx ryu pack` bundles your `uiEntry` output into the manifest's `ui_code` field (with a
 `ui_code_sha256`). At install, Core splits the bundle - `ui_code` is the widget carriage, the rest
 is the manifest - and refuses a bundle whose code does not match the declared hash
 (`apps/core/src/server/mod.rs`).
 
 ## The widget wire contract
-
-The widget communicates with Core through a well-defined wire contract. Understanding this contract
-is essential for building widgets that render correctly and call tools safely.
 
 ### Data flow
 
@@ -138,8 +141,9 @@ When the widget calls `callTool`, the call follows this path:
    scan, and audit.
 5. The result flows back through the same path to the widget.
 
-Widget-initiated calls are **never** trusted from the frame. The full governance path is documented
-in [Ryu Apps](/docs/surfaces/desktop/user-guide/apps#provenance-and-gateway-gating).
+Core does not trust widget-initiated calls from the frame. The host holds the node token. The full
+governance path is documented in
+[Ryu Apps](/docs/surfaces/desktop/user-guide/apps#provenance-and-gateway-gating).
 
 ### Rendering constraints
 
@@ -153,14 +157,24 @@ in [Ryu Apps](/docs/surfaces/desktop/user-guide/apps#provenance-and-gateway-gati
 ## 4. Install and enable
 
 Install the packed bundle and enable it, the same lifecycle as any plugin
-([App Manifest & Lifecycle](/docs/core/app-manifest-lifecycle)):
+([App Manifest & Lifecycle](/docs/core/app-manifest-lifecycle)). The SDK CLI does both against your
+local node and finds its token for you:
 
 ```bash
-curl -X POST http://localhost:7980/api/plugins/install \
-  -H 'content-type: application/json' \
-  -d @my-app.bundle.json
+bunx ryu install . --enable
+```
 
-curl -X POST http://localhost:7980/api/plugins/com.example.checklist/enable
+Or call the authenticated endpoints directly. A packed bundle (manifest plus `ui_code`) goes to
+`install-bundle`; `POST /api/plugins/install` only fetches a manifest from an `https://` URL.
+
+```bash
+curl -X POST http://localhost:7980/api/plugins/install-bundle \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'content-type: application/json' \
+  --data @dist/plugin.bundle.json
+
+curl -X POST http://localhost:7980/api/plugins/com.example.checklist/enable \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN"
 ```
 
 Once enabled, Core's in-process app provider advertises the render tool with its widget `_meta`
@@ -171,20 +185,15 @@ the render tool, the widget mounts in the message list.
 
 A widget only appears if the agent actually calls the render tool through a governed tool loop.
 
-- The batteries-included **local engine** (Gemma) and **OpenAI-compat** registry agents funnel
-  through `route_openai_stream` and emit widgets with no per-agent config.
-- Bridged ACP agents (Claude Code, Codex, Gemini, or a BYO agent with gateway routing on) emit via
-  the MCP bridge.
-- The flagship **`ryu` / Pi** agent (`AgentRoute::Acp`) cannot emit a widget from its own tool
-  calls: Pi (an R1 fork) exposes no base-URL or MCP hook to inject the app tools into its
-  in-subprocess loop. This is inherent to that engine, not a gap in the app.
-
-## Governance
-
-Widget-initiated calls are never trusted from the frame. A companion `callTool` goes to the host
-(which holds the node token), through Core's provenance gate (`apps/core/src/server/widgets.rs`),
-then to the Gateway's `POST /v1/exec/tool` for scan, budget, forward, and audit. The full path is
-documented in [Ryu Apps](/docs/surfaces/desktop/user-guide/apps#provenance-and-gateway-gating).
+- The local engine and OpenAI-compatible registry agents run through `route_openai_stream`
+  (`apps/core/src/sidecar/adapters/mod.rs`) and emit widgets with no per-agent config.
+- Bridged ACP agents (for example Claude Code, Codex, or Gemini) emit widgets through Core's MCP
+  bridge (`apps/core/src/sidecar/adapters/mcp_bridge.rs`) when their tool calls reach the app tools
+  through that bridge.
+- The managed Pi agent calls Ryu tools through its `ryu-mcp` extension. When it calls a
+  widget-bearing tool, Core rebuilds the widget from the tool result
+  (`apps/core/src/sidecar/adapters/acp.rs`), so it renders the same way. See
+  [Pi engine](/docs/start-here/architecture/pi-engine#the-ryu-mcpts-extension).
 
 ## Related
 

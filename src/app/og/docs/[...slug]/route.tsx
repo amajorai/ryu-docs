@@ -21,5 +21,6 @@ export async function GET(
 
   return renderDocsOgCard({
     title: page.data.title,
+    description: page.data.description,
   });
 }

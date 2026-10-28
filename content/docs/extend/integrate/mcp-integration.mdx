@@ -1,22 +1,26 @@
 ---
 title: "MCP Integration"
-description: "Expose Ryu as an MCP server, or consume external MCP servers as tools. The Model Context Protocol bridge on both planes — internals, widgets, and hooks."
+description: "How Ryu acts as an MCP server and an MCP client, and how the MCP bridge handles tool naming, widgets, and tool hooks."
 tags: ["mcp", "tools", "integration", "claude-desktop", "ide", "stdio", "server", "client", "widget", "hooks"]
 ---
 
 Ryu has two MCP (Model Context Protocol) integration points:
 
-1. **Ryu as MCP server** — expose your Ryu node's tools to any MCP host (Claude Desktop, IDEs,
-   other agents).
-2. **Ryu as MCP client** — consume external MCP servers as tools inside your agents.
+1. **Ryu as MCP server** - an MCP host (Claude Desktop, an IDE, another agent) calls your Ryu node.
+2. **Ryu as MCP client** - your agents call tools from external MCP servers.
 
-Both routes route tool execution through the Gateway for allowlist gating, budget enforcement,
+On both paths, tool execution goes through the Gateway for allowlist gating, budget enforcement,
 and audit.
 
 ## Ryu as MCP server
 
-The MCP server (`apps/mcp`) bridges MCP hosts to a Ryu Core node over HTTP. It holds no model and
-runs no inference; it translates MCP tool calls into Core HTTP requests.
+Core serves MCP over HTTP at `POST /mcp` and `POST /mcp/:agent_id`. These are the canonical node
+MCP endpoints. Both routes need a node or paired bearer token.
+
+For hosts that only accept a stdio command, the `apps/mcp` package (`ryu-mcp`) is a compatibility
+bridge. It holds no model and runs no inference. It exposes a fixed set of `ryu_*` tools (for
+example `ryu_list_agents`, `ryu_run_workflow`, `ryu_call_mcp_tool`, `ryu_ask`) and translates each
+call into a Core HTTP request through `@ryuhq/core-client`.
 
 ```mermaid
 flowchart LR
@@ -34,10 +38,11 @@ RYU_CORE_URL=http://127.0.0.1:7980 RYU_CORE_TOKEN=... \
   bun run apps/mcp/src/index.ts serve
 ```
 
-Point your MCP host at this server's stdio command. The MCP server's tools are exactly Core's
-tool catalog. Every tool search, describe, and execute call goes through the governed path.
+Point your MCP host at this stdio command. A bare invocation also runs `serve`. The `login`,
+`logout`, and `whoami` subcommands manage the optional Ryu account sign-in. The account session
+never replaces the node bearer token.
 
-See [MCP Server](/docs/extend/mcp) for the full setup and configuration.
+See [Ryu MCP](/docs/extend/mcp) for the full setup and configuration.
 
 ## Ryu as MCP client
 
@@ -52,23 +57,30 @@ Ryu then owns browser authorization, encrypted local tokens, refresh, and discon
 
 ```bash
 curl -X POST http://localhost:7980/api/mcp/servers \
+  -H "Authorization: Bearer $RYU_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "my-tools",
-    "command": ["npx", "-y", "my-mcp-server"],
+    "command": "npx",
+    "args": ["-y", "my-mcp-server"],
     "env": { "API_KEY": "..." }
   }'
 ```
 
+The body also accepts `url`, `headers`, and `type` (`stdio`, `http`, `streamable-http`, or `sse`)
+for a remote server, so an entry copied from a Cursor or Claude Desktop `mcp.json` posts unchanged.
+The `name` must be unique and must not contain `__`.
+
 ### How tools are exposed
 
 Once registered, the MCP server's tools appear in the unified tool catalog. On the ACP plane, the
-MCP bridge offers `tool_search` → `execute` to agents. On the OpenAI-compat plane, the Gateway
-injects `tool_search` into the request body.
+MCP bridge offers `tool_search` and then `execute` to agents. On the OpenAI-compatible plane, the
+Gateway injects a `tool_search` meta-tool into the request body.
 
-Tool execution always goes through:
-1. **Core** — tool search ranking and catalog management
-2. **Gateway** — allowlist gate, exec budget, exec audit
+Tool execution always goes through two layers.
+
+1. **Core** - tool search ranking and catalog management
+2. **Gateway** - allowlist gate, exec budget, exec audit
 
 See [Unified Tool Catalog](/docs/core/unified-tool-catalog) and
 [Gateway Tools](/docs/gateway/tools) for the governance details.
@@ -80,7 +92,7 @@ tool discovery, dispatch, and the widget system.
 
 ### The McpRegistry
 
-The `McpRegistry` is the single source of truth for all tools in Ryu:
+`McpRegistry` holds every tool Ryu can call.
 
 ```mermaid
 flowchart TD
@@ -92,7 +104,7 @@ flowchart TD
   end
 
   REG["McpRegistry<br/>tool cache + resource cache"]
-  SEARCH["tool_search<br/>Needle 2 + BM25 fallback"]
+  SEARCH["tool_search<br/>Needle 3 default, Needle 2, BM25, semantic"]
   EXEC["tool_execute<br/>allowlist + budget + audit"]
 
   MCP --> REG
@@ -103,57 +115,56 @@ flowchart TD
   REG --> EXEC
 ```
 
-### Built-in MCP providers
+### Built-in tool servers
 
-Core synthesizes built-in tools without spawning external processes:
+Core synthesizes built-in tools in-process, without spawning external processes. The reserved
+built-in servers are listed in `BUILTIN_SERVERS` (`apps/core/src/sidecar/mcp/catalog.rs`), and
+`ryu_self_build` is also classified as built-in. Core-provided capability facades such as `web`,
+`browser`, `computer`, `memory`, `decision`, and `verify` (`capability_tools.rs`) are wired into
+the same registry. `composio.*` tools are classified as Composio, and the synthetic `app` server
+holds app tools.
 
-| Provider | Tools | Purpose |
-|---|---|---|
-| `shadow` | screen capture, OCR | Screen perception |
-| `spider` | web crawl, scrape | Web scraping |
-| `exa` | web search | Web search |
-| `rtk` | retrieval toolkit | RAG operations |
-| `web_fetch` | fetch URL | HTTP fetching |
-| `usage` | current or requested provider/model | Usage windows, remaining quota, and reset times |
-| `sandbox` | code exec | Wasmtime sandbox |
-| `notify` | send notification | Notification fan-out |
-| `channel` | channel operations | Bot channel access |
-| `search_conversations` | search chats | Conversation search |
-| `threads` | thread operations | Thread management |
-| `delegate` | delegate to agent | Agent delegation |
-| `orchestrator` | orchestrate | Multi-agent coordination |
-| `skills` | skill operations | Skill management |
-| `advisor` | advisory | Context companion |
-| `ui` | UI operations | Widget rendering |
-| `research` | research ops | Research experiments |
-| `artifact` | artifact ops | File artifacts |
-| `apps` | app operations | App management |
-| `catalog` | catalog browse | Model/skill/MCP catalogs |
+[Built-in Tools Reference](/docs/core/built-in-tools) lists every server, its tool ids, and which
+ones are off by default.
 
 ### Tool naming convention
 
-Every tool has a fully-qualified id:
+Every tool has a fully qualified id. The id is also the allowlist key.
 
-```
+```text
 <server>.<tool_name>
 ```
 
-Examples:
-- `spider.crawl` — crawl a URL
-- `exa.search` — web search
-- `shadow.screenshot` — screen capture
-- `ryu_api.get_agents` — Self-API tool
+For example:
+
+- `notify.desktop` - show a desktop notification
+- `artifact.create` - write a generated file
+- `ui.render` - render generative UI inline
+- `composio.<action>` - a Composio action
 
 ### Tool principal and tenancy
 
 Every tool call carries a `ToolPrincipal`, the authorization principal resolved from the host
-conversation's owner:
+conversation's owner.
 
 | Principal | Meaning | Behavior |
 |---|---|---|
 | `Unrestricted` | Personal/unbound node | Full access |
 | `Owned` | Org-bound principal | Org-scoped access |
-| `Unresolved` | Cannot determine | **Fail-closed** — call refused |
+| `Unresolved` | Org-bound node, no principal resolves | Fail-closed: the call is refused |
+
+A local (stdio) MCP server shipped by an app or plugin also receives the call's principal in
+the request's `_meta["ryu/caller"]`, so it can keep per-user records and authorize them itself.
+
+| Value | Meaning |
+|---|---|
+| `{ "kind": "node" }` | Personal node, or the node operator: one principal |
+| `{ "kind": "user", "userId": "…", "orgId": "…" \| null }` | A verified user on a shared node |
+| `{ "kind": "unresolved" }` | A shared node could not resolve the caller; the server should refuse |
+
+Ryu builds this value from the conversation's server-side owner, never from tool arguments, so
+a model cannot choose another principal. MCP servers you register yourself and remote servers
+never receive it.
 
 ## Widget system
 
@@ -168,48 +179,50 @@ flowchart LR
   RENDER -->|"ToolWidgetEvent"| CHAT[Chat surface]
 ```
 
-1. A tool declares `ryu/outputTemplate` in its `_meta`, a path like `ui://widget/chart.html`
-2. The `WidgetBinding` resolves the template from the plugin's UI code
-3. When the tool executes, Core wraps the output in a `ToolWidgetEvent`
-4. The chat surface renders the widget inline
+1. A tool declares `ryu/outputTemplate` (or the `openai/outputTemplate` alias) in its `_meta`,
+   with a URI such as `ui://widget/chart.html`.
+2. `WidgetBinding` resolves the template from the plugin's UI code.
+3. When the tool executes, Core wraps the output in a `ToolWidgetEvent`.
+4. The chat surface renders the widget inline.
 
 ### Widget promotion
 
-Plugins can promote tools to widget-accessible status:
+A plugin binds a tool to a widget in `contributes.widgets`. `tool_id` is
+`<mcp_servers key>.<toolName>`, and `uri` must match the resource the server serves and the tool's
+`_meta` output template.
 
 ```json
 {
   "contributes": {
     "widgets": [{
-      "tool_id": "my-tool",
-      "template": "ui://widget/my-widget.html"
+      "tool_id": "my_server.render",
+      "uri": "ui://widget/my-widget.html"
     }]
   }
 }
 ```
 
-The widget promotion gate requires:
-- `contributes.widgets[]` in the manifest
-- `widget:render` grant approved by the Gateway
+Optional fields are `mime` (default `text/html+skybridge`), `default_display_mode` (`inline`,
+`fullscreen`, or `pip`), and `ui_entry` (the source entry `ryu pack` builds).
 
-### Widget-capable tools
+The widget promotion gate requires both of these.
 
-Tools that return widget content include:
+- `contributes.widgets[]` in the manifest of an enabled plugin
+- the `widget:render` permission grant
 
-| Tool | Widget |
-|---|---|
-| Charts/graphs | `@xyflow` rendered visualizations |
-| Code diffs | Inline diff viewer |
-| Dashboards | Custom dashboard widgets |
-| App tools | Ryu Apps rendered in chat |
+A plugin that declares widgets without the grant still runs, but its widgets fall back to plain
+text.
+
+The built-in `ui.render` tool and app tools ([Ryu Apps](/docs/extend/develop/extensions/ryu-apps))
+also return widget content.
 
 ## Pre/post tool hooks
 
-Plugins can intercept tool calls at two boundaries:
+Plugins can intercept tool calls at two boundaries.
 
 ### Pre-tool hooks (`pre_tool_use`)
 
-Fire **before** a tool executes. Can block the call.
+Fires before a tool executes. It can block the call.
 
 ```json
 {
@@ -218,66 +231,69 @@ Fire **before** a tool executes. Can block the call.
       "id": "guard.shell",
       "on": "pre_tool_use",
       "match": { "tools": ["bash*"] },
-      "code": "// Return { kind: 'deny', reason: '...' } to block"
+      "code_file": "hooks/guard-shell.js"
     }]
   }
 }
 ```
 
+The hook body is a flat `.js` file under the plugin's `hooks/` folder. Packing inlines it as
+`code`. Return `{ kind: "deny", reason }` from the body to block the call.
+
 | Directive | Effect |
 |---|---|
-| `{ kind: "deny", reason }` | Block the tool call; reason returned as tool error |
+| `{ kind: "deny", reason }` | Block the tool call; the reason is returned as the tool error |
 | `{ kind: "none" }` | Allow the call to proceed |
 
 ### Post-tool hooks (`post_tool_use`)
 
-Fire **after** a tool returns. Observation only in v1.
-
-| Directive | Effect |
-|---|---|
-| `{ kind: "none" }` | Observation only (v1) |
+Fires after a tool returns, detached from the tool call. It is observation only and adds no
+latency. To rewrite a result before the model sees it, declare a `tool_result` hook instead. That
+phase is awaited and accepts a `transform` directive with the new `output`. See
+[Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle).
 
 ### Tool glob gate
 
-The `match.tools` field is a spawn-avoidance gate evaluated in Rust before any sandbox spawn:
+`match.tools` is evaluated in Rust before Core spawns the sandbox. A pattern is a tool id with
+optional leading or trailing `*`.
 
 | Pattern | Matches |
 |---|---|
 | `*` | Everything |
-| `bash*` | Prefix: `bash`, `bash_read`, etc. |
+| `bash*` | Prefix: `bash`, `bash_read`, and so on |
 | `*write` | Suffix: `file_write`, `web_write` |
 | `*edit*` | Substring: `file_edit`, `inline_edit` |
 | `exact_name` | Exact match only |
 
-A hook whose gate does not match the current tool never spawns the Deno sandbox.
+A hook whose gate does not match the current tool never spawns the JS sandbox.
 
 ## Prompt injection defense
 
-Untrusted tool results are wrapped in boundary markers:
+Core wraps untrusted tool results in boundary markers (`apps/core/src/sidecar/untrusted.rs`).
 
-```
-<<<EXTERNAL_UNTRUSTED_CONTENT>>
+```text
+<<<EXTERNAL_UNTRUSTED_CONTENT>>>
 ... tool output ...
-<<<END_EXTERNAL_UNTRUSTED_CONTENT>>
+<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>
 ```
 
-This prevents prompt injection from tool outputs influencing the agent's behavior.
+The markers tell the model that the wrapped text is data, not instructions. This reduces the
+risk that a tool output can redirect the agent.
 
 ## MCP tool format
 
-MCP tools follow the standard JSON-RPC protocol:
+MCP tools use the standard JSON-RPC methods.
 
-- `tools/list` — returns available tools with names, descriptions, and input schemas
-- `tools/call` — executes a tool by name with arguments
+- `tools/list` - returns available tools with names, descriptions, and input schemas
+- `tools/call` - executes a tool by name with arguments
 
-The Ryu MCP bridge translates these into Core's HTTP API format transparently.
+The stdio bridge translates these into Core HTTP requests.
 
 ## Security
 
 - Tool execution requires the Gateway's allowlist to include the tool ID.
 - The exec budget caps execution count and wall-clock time per rolling window.
 - Every execution emits an audit event.
-- Untrusted tool results are wrapped in `<<<EXTERNAL_UNTRUSTED_CONTENT>>>` boundary markers.
 - Pre-tool hooks can block dangerous calls before execution.
 - Tool principal enforcement prevents tenancy bypasses.
 

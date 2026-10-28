@@ -11,11 +11,54 @@ Ryu-operated account or backend.
 This page covers the OSS server. Account, organization, billing, Marketplace,
 managed inference, and Web/Mobile account surfaces are separate products.
 
+## Try it in GitHub Codespaces
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/amajorai/ryu?quickstart=1)
+
+The button creates a codespace from the repo's [`.devcontainer/`](https://github.com/amajorai/ryu/tree/main/.devcontainer)
+configuration. It installs the published, checksum-verified release binaries and the same
+release's web app bundle rather than building the `Dockerfile`, starts Core in the
+background, and opens the Ryu web app in a new browser tab once Core is ready. You do not
+type any commands or sign in to a Ryu account. The web app talks only to the Core running
+in your codespace, as that Core's owner. The codespace requests 2 CPUs, 8 GB of memory, and
+32 GB of storage.
+
+If the tab does not open (for example, because your browser blocked the pop-up), open the
+**Ryu** port from the **Ports** panel, or use the link printed in the terminal. To use the
+Ryu terminal UI instead, run `ryu-playground` in any terminal. A release that does not
+publish the web app bundle opens the terminal UI instead.
+
+The codespace runs on your own GitHub Codespaces quota. Stop or delete it when you are
+done to save quota and storage.
+
+The playground sets `RYU_SKIP_LOCAL_STACK_INSTALL=1`, so Core does not download local
+engines or models on its own. That keeps startup fast and leaves the codespace's disk for
+your work. This applies to Core releases after v0.4.0; v0.4.0 and earlier ignore the setting
+and download the local model stack (several GB) on first start.
+
+<Callout type="info">
+  Chat needs a provider key. Enter it on
+  the codespace create page, or add it as a personal
+  [Codespaces secret](https://docs.github.com/en/codespaces/managing-your-codespaces/managing-your-account-specific-secrets-for-github-codespaces)
+  with access to `amajorai/ryu` (rebuild the codespace after adding it). `OPENAI_API_KEY`
+  works on its own. For another OpenAI-compatible provider, set `RYU_DEFAULT_LLM_API_KEY`
+  (your provider key), `RYU_DEFAULT_LLM_BASE_URL` (its OpenAI-compatible base URL), and
+  `RYU_DEFAULT_LLM_MODEL` together.
+</Callout>
+
+<Callout type="warn">
+  Keep the forwarded **Ryu** (7990) and **Ryu Core API** (7980) ports private. GitHub
+  signs you in before a private port reaches the codespace. Requests through either
+  port act as the owner of your codespace's Core, so a public port would expose your node.
+</Callout>
+
 ## One-click deploy
 
 Each button builds the repo's [`Dockerfile`](https://github.com/amajorai/ryu/blob/main/Dockerfile).
-Core runs the stack and spawns the Gateway on loopback itself, so a hosted server
-publishes only Core's port and is governed the moment it serves traffic.
+Core runs the stack and spawns Gateway on loopback, so a hosted server
+publishes only Core's port. The image entrypoint binds Core to the platform's `$PORT`
+(default 7980). Gateway controls cover requests routed through that sidecar;
+provider-native runtimes and external tools need separate checks.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/amajorai/ryu)
 &nbsp;
@@ -24,39 +67,58 @@ publishes only Core's port and is governed the moment it serves traffic.
 [![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/amajorai/ryu/tree/main)
 
 <Callout type="warn">
-  Core downloads a fully-local model stack (llama.cpp + Gemma 4, nomic
-  embeddings, whisper) on first boot. Pick a plan with **at least 2 GB of RAM**
-  (4 GB is comfortable), or set a provider key such as `OPENAI_API_KEY` so Core
-  routes to a hosted model and skips the local download. A 512 MB instance will
-  not boot the local stack.
+  Local onboarding attempts model and runtime downloads. Size RAM, disk, and GPU capacity for
+  the selected model; a fixed instance size does not guarantee readiness. For provider-backed
+  inference, configure and test the model route and credentials. Setting a provider key alone
+  does not prove that local downloads are skipped. See [Local model setup](/docs/learn/cookbook/chat-with-a-local-model).
 </Callout>
 
-The templates live at the repo root — `render.yaml`, `railway.json`, `fly.toml`,
-and `.do/deploy.template.yaml` — so each platform auto-detects its config.
+The templates live at the repo root (`render.yaml`, `railway.json`, `fly.toml`, and
+`.do/deploy.template.yaml`), so each platform detects its config.
 
 ## Docker
 
-The whole stack is one image. To run Core and the Gateway as the two-service
-split (the production shape):
+The whole stack is one image. To run Core and Gateway as two separate services, set the four
+Gateway keys (Compose refuses to start without them) and start the stack:
 
 ```bash
 git clone https://github.com/amajorai/ryu
 cd ryu
+export GATEWAY_MASTER_KEY="$(openssl rand -hex 24)"
+export GATEWAY_RELAY_KEY="$(openssl rand -hex 24)"
+export GATEWAY_CORE_RELAY_KEY="$(openssl rand -hex 24)"
+export GATEWAY_CORE_PROOF_KEY="$(openssl rand -hex 24)"
 docker compose up --build
 ```
 
-That serves Core on `http://localhost:7980` and the Gateway on `:7981`, with
-model state persisted in a named volume. Point any OpenAI-compatible client at
-the Gateway's `/v1/chat/completions`.
+That publishes Core on `http://localhost:7980` and keeps model state in a named volume.
+Gateway listens on port 7981 inside the Compose network only; it is not published to the
+host. Point any OpenAI-compatible client at Core's `POST /v1/chat/completions`.
 
-The two-service file is an advanced topology: because Gateway binds on the
-container network, configure Gateway authentication before exposing port 7981,
-and give Gateway a provider or an engine URL reachable from the Gateway
-container. Core's private loopback engine is not reachable through another
-container's `127.0.0.1`. The single-image path below is the canonical simplest
-self-hosted server shape.
+The two-service file is an advanced topology. Core reaches Gateway at `http://gateway:7981`
+(`RYU_GATEWAY_MANAGED=0` with `RYU_GATEWAY_URL`). Put provider keys on the Gateway service,
+or give Gateway an engine URL it can reach from its own container. Core's private loopback
+engine is not reachable through another container's `127.0.0.1`. The single-image path below
+is the simplest self-hosted server shape.
 
-To run just Core (it manages the Gateway in-process):
+The four keys must be different random values:
+`GATEWAY_MASTER_KEY` for administration, `GATEWAY_RELAY_KEY` for agent inference,
+`GATEWAY_CORE_RELAY_KEY` for Core's trusted forwarding, and
+`GATEWAY_CORE_PROOF_KEY` for Core-signed agent identity. Do not reuse one value
+across these roles. `RYU_IDENTITY_ROOT` is optional: set it to the base64 of
+32 or more random bytes (for example `openssl rand -base64 32`) to keep end-user
+hashes stable across restarts. A self-hosted Gateway never sends a Ryu-derived
+identifier to your providers.
+
+The split Gateway sets `RYU_GATEWAY_FLEET=1` because Core reaches it from
+another container. That setting only hardens exposure: Gateway refuses to start
+with authentication off, never trusts a `127.0.0.1` caller as the local
+operator, and refuses `/passthrough/*` with `403`. It does not turn your stack
+into a hosted Ryu Gateway, so apart from that hardening the
+[hosted Gateway restrictions](/docs/gateway/managed-data-plane#hosted-gateway-restrictions)
+and the Ryu platform policy do not apply to it.
+
+To run only Core (it manages Gateway as a loopback sidecar):
 
 ```bash
 docker build -t ryu .
@@ -72,8 +134,8 @@ Keep the Docker socket, host PID/network namespaces, host devices, and host
 filesystem out of the container. The image already runs as UID `10001`; the
 explicit flags above preserve that boundary when the command is copied into a
 deployment script. For agent code that needs stronger isolation, use the
-default `wasmtime` or a rootless container/microVM backend rather than mounting
-host paths into an execution container.
+default `wasmtime` [sandbox](/docs/core/sandbox) or a rootless container/microVM backend
+rather than mounting host paths into an execution container.
 
 ## Fly.io
 
@@ -88,8 +150,8 @@ sets the Dockerfile build, a `/data` volume, and a `/api/health` check.
 
 ## One VPS, one command
 
-For a dedicated box, the Hetzner Cloud provisioner stands up a server end-to-end
-(SSH key, firewall, server, Core + Gateway as systemd units). See
+For a dedicated server, the Hetzner Cloud provisioner sets up the SSH key, firewall, server, and
+Core and Gateway as systemd units. See
 [Deploying Ryu](/docs/learn/academy/cloud/deployment) for the tiers, ports, firewall
 model, and the managed-vs-self-hosted line.
 
@@ -101,16 +163,16 @@ override.
 
 ## What about Vercel and AWS?
 
-Core and the Gateway are long-running servers, so they need a container host
-(any of the above), not a serverless platform. **Vercel** is serverless: it is
-perfect for the documentation site (`apps/fumadocs`, a Next.js app) but cannot
-host Core or the Gateway. On **AWS**, run the same Docker image on Lightsail
+Core and Gateway are long-running servers, so they need a container host
+(any of the above), not a serverless platform. **Vercel** is serverless. It can host
+the documentation site (`apps/fumadocs`, a Next.js app) but cannot host Core or Gateway.
+On **AWS**, run the same Docker image on Lightsail
 Containers, App Runner, or ECS/Fargate with a persistent volume for `/data`.
 
-For the common Core, Gateway, and client variables, see [Public environment variables](/docs/start-here/environment-variables).
+For the common Core, Gateway, and client variables, see [Environment Variables](/docs/start-here/environment-variables).
 
 <Callout type="info">
-  The Gateway is **AGPL-3.0**. If you host a *modified* Gateway, section 13 of
+  Gateway is licensed **AGPL-3.0-or-later**. If you host a *modified* Gateway, section 13 of
   the AGPL requires you to offer your modified source to its users. Core is
   Apache-2.0 with no such obligation.
 </Callout>

@@ -1,77 +1,124 @@
 ---
-title: "Security"
-description: "The hardware threat model and hardening: per-device revocable tokens, the pairing trust gap, never exposing Core unauthenticated, the OTA gap, and ambient data privacy."
+title: "Hardware Security"
+description: "The hardware threat model and how to harden it: per-device tokens, press-to-confirm pairing, the encrypted relay, device tools, Core authentication, the missing OTA channel, and ambient privacy."
 ---
 
-The hardware security posture is honest about its boundary: the design is **safe on a LAN or tailnet today**, and there is a clear, short list of things to add before exposing any of it to the open internet. This page is that list, plus the mechanisms already in place.
+The hardware design is safe on a LAN or tailnet. It needs the additions in the [checklist](#before-internet-exposure-the-checklist) below before any part of it faces the open internet.
 
 ## Device tokens
 
-Every device authenticates with a per-device `device_token`, issued at [pairing](/docs/hardware/pairing) and used as the Bearer on the WebSocket upgrade.
+Every device authenticates with a per-device `device_token`. [Pairing](/docs/hardware/pairing) issues the token, and the device sends it as the Bearer on the `GET /api/hardware/ws` upgrade.
 
 - **Per-device and revocable.** Each device is its own registry row with its own token. Revoke a lost device with `DELETE /api/hardware/devices/:id`, which kills only that device.
-- **Hashed at rest on the node.** The node stores the token SHA-256 hashed, not in the clear.
-- **Secure-store on the phone.** The mobile app keeps the token in `expo-secure-store`.
-- **Enforced on every connect.** The WebSocket upgrade rejects unregistered or mismatched device tokens on every bind (loopback is the only exception, matching Core's existing behavior).
+- **Hashed at rest on the node.** The node stores tokens SHA-256 hashed, not in the clear, and compares them in constant time.
+- **The phone holds only a relay token.** For a v1.1 device, the device token is encrypted to the device during pairing and never reaches the phone. The phone keeps a separate relay token in `expo-secure-store` that can only open the device's encrypted relay connection, for that one device.
+- **Enforced on every connect.** The WebSocket upgrade rejects unregistered or mismatched tokens on every bind, loopback included.
+- **A token is not enough to open a session.** A v1.1 device also proves its pinned key in the encrypted handshake, so a stolen token without the device's key cannot open a live session.
+- **A stolen token still has some value.** The device token alone can still fetch that device's dashboard image until you remove the device. If a device or its token may be lost, remove it in the app to revoke it.
 
-## The pairing exposure
+## Pairing: press to confirm
 
-The pair endpoint is the one soft spot. `POST /api/hardware/pair` trusts `device_id` entropy plus the `pairing_nonce`; it has no proof that the caller actually controls the device.
+Pairing a v1.1 device proves that you are holding that device, and that nobody is sitting between the phone and the device. These protections apply only when your node, the app and the device firmware all support RHP v1.1; anything older pairs through the legacy method described below.
 
-- On a LAN or tailnet, the endpoint is not publicly reachable, so this is safe.
-- Before internet-exposing the pair endpoint, add **out-of-band proof of possession**: a code the user reads off the device (or the app generates) and confirms in-app, so a remote attacker cannot win a race-to-pair against a legitimately booting device.
+- **Your node token is required.** Only an app already signed in to your node can start a pairing.
+- **Compare a code.** The watch and desk show a 6-digit code on screen, and the necklace beeps it. The app shows the code your node computed. The code covers both the device's key and the node's key, so a device in the middle produces a different code. Tap **Codes don't match** if they differ. The attempt is cancelled and logged.
+- **Press the button.** The device only confirms after a physical press, and only after it has shown the code. Nothing is issued to anyone until the device's confirmation checks out on your node.
+- **Single use and short-lived.** A pending pairing expires after 3 minutes and each step can only be used once, so a recorded pairing cannot be replayed.
+- **Scanning the QR adds a second check.** On the watch and desk the QR carries the device's key, so a swapped key is caught even if you skip the comparison.
+
+### The necklace and "I can't verify"
+
+The necklace has no screen, so it plays its code as a sequence of beeps. If you cannot hear or compare them, the app offers **I can't verify**. Pairing still completes, but the device is marked **Unverified** in the app permanently, because the code comparison is what protects a BLE-only pairing against a nearby attacker. To clear the badge, remove the device and pair it again somewhere quiet.
+
+### Legacy devices and re-pairing
+
+Devices paired with older firmware or an older app keep working in **legacy** mode, which uses the v1 plaintext protocol and is badged **Legacy** in the app. To upgrade one: update the firmware and the app, remove the device in the app, hold the device button for 10 seconds to factory-reset it, then pair again. There is no in-place upgrade, so a relay phone can never enroll a key on a device's behalf. Firmware that supports v1.1 refuses legacy provisioning entirely.
 
 <Callout type="warn">
-  Do not expose the pair endpoint to the internet without out-of-band verification. The nonce alone does not prove device control.
+  Legacy pairing, which older firmware still uses and which stays enabled by default, has no code compare and no button press. It trusts the device ID and a one-time nonce, which do not prove that the caller controls the device. Keep the pair endpoint on your LAN or tailnet and do not expose it to the internet while you still pair legacy devices. Once every device is on v1.1, turn legacy pairing off by setting the node preference `hardware-legacy-v1-pairing` to `"false"` (`PUT /api/preferences/hardware-legacy-v1-pairing` with `{"value":"false"}`). `POST /api/hardware/pair` then answers `426` with `pairing_v2_required`.
 </Callout>
 
-## Never expose Core unauthenticated
+## What the relay phone can and cannot see
 
-The device security model rests on Core's own posture.
+In Mode A the phone forwards the device's encrypted session to your node.
 
-- Any non-loopback bind **requires** `RYU_TOKEN`. Core fails closed without it, so there is no accidental open node.
-- Prefer **Tailscale** over opening a public port. The node is reachable on the tailnet; devices and the relay phone join the same tailnet.
-- Loopback limits exposure but does not disable Core's node bearer. Local
-  clients can resolve the minted `node-auth.token`; a direct client must send it
-  just like a remote deployment.
+- **It cannot see or change:** your speech, the assistant's replies, TTS audio, camera images, device tool calls, the device token, or your Wi-Fi password. It cannot inject commands the device will act on.
+- **It can see:** how much data flows and when, and whether the link is up. It can also delay or drop traffic, which shows up as a disconnect.
+- **The optional face mirror.** So the app can show the assistant's face while relaying, your node also sends the phone a coarse state such as "listening" or "thinking". The phone never forwards it to the device. You can turn this mirror off per device in the app.
 
-See [Deployment](/docs/hardware/deployment) for the exact `RYU_BIND` and `RYU_TOKEN` invocation.
+## Your Wi-Fi password
+
+If you enter Wi-Fi credentials while pairing, they pass through your node once, in memory, so the node can encrypt them to the device together with the device's credentials. The node never stores, logs, or returns the password, and the phone only ever carries the encrypted form.
+
+## Device tools
+
+A device on an encrypted session can offer tools to your agents, such as showing text on the watch. Tools are offered only on a personal node, only while the Hardware Devices app is enabled, and only while the device is connected. The node checks these conditions again on every call.
+
+- **Sensitive tools are off by default.** A tool the device marks as sensitive stays hidden until you turn it on.
+- **Personal nodes only.** Device tools are not offered on a managed or shared node.
+- **Turn them off any time.** In the mobile app, open the device and use **Device tools** to turn off all of its tools, or switch individual tools off. New calls stop immediately; a call already running finishes.
+- **Per-agent allowlists still apply**, and some tools require a press on the device before they run.
+- **Removing the device** stops every tool and fails any call in flight.
+- **Results are data.** A tool result comes back marked as data provided by the device, not as instructions to the agent (`apps/core/src/sidecar/mcp/device_tool.rs`).
+
+The wire messages that carry tools are in [Protocol](/docs/hardware/protocol#device-tools).
+
+## If your node's device key is lost
+
+Your node keeps a long-term key that every v1.1 device pins. It is stored encrypted with your node's other secrets and is never silently replaced. If it cannot be read (for example after restoring a node without its encryption key), the node reports its identity as unavailable in the device list and refuses new pairings until you reset it with `POST /api/hardware/identity/reset`. Resetting creates a new key and marks every v1.1 device **Re-pair required**; those devices show "Node identity changed" and must be removed and paired again.
+
+## Protect the device's storage
+
+The device keeps its private key and tokens in flash. For devices that leave your desk, build production firmware with ESP32-S3 flash encryption (and NVS encryption) enabled so a stolen device cannot simply be read out. Removing a lost device from the app revokes it immediately either way.
+
+## Core authentication
+
+The device security model depends on Core's own authentication.
+
+- Any non-loopback bind requires `RYU_TOKEN`. Core fails closed without it.
+- Prefer Tailscale over a public port. Devices and the relay phone join the same tailnet as the node. Scope the access rules and keep node keys short-lived. See [Harden your tailnet](/docs/core/private-networking#harden-your-tailnet).
+- A loopback bind limits exposure but does not turn off Core's node bearer. Local clients resolve the minted `node-auth.token`, and a direct client must send it like a remote deployment.
+
+See [Hardware Deployment](/docs/hardware/deployment) for the `RYU_BIND` and `RYU_TOKEN` invocation.
 
 ## The OTA gap
 
-There is **no over-the-air firmware update in v1**. Reflash over USB for now. Before fielding devices you cannot physically reach, plan an `esp_https_ota` channel, signed and pinned to your node, so a field device can be patched without a cable.
+<Callout type="warn">
+  There is no over-the-air (OTA) firmware update. Reflash devices over USB. Before you field devices you cannot reach physically, plan a signed `esp_https_ota` channel pinned to your node.
+</Callout>
 
 ## Ambient data and privacy
 
-Always-on capture records bystanders, which is a privacy and legal surface, not just an engineering one.
+Always-on capture records bystanders. That is a privacy and legal question as well as an engineering one.
 
-- **Consent and opt-in.** Make ambient capture opt-in and extend the existing meeting-consent UX rather than adding a separate, weaker path.
-- **Minimize at the edge.** On-device VAD means silence is never transmitted or stored, so the recording surface is only actual speech.
-- **Retention limits.** Set retention on ambient sessions; do not keep raw audio indefinitely.
-- **Hard mute.** Give the device a hard mute the user can trust to stop capture immediately.
+- **Consent and opt-in.** Make ambient capture opt-in, and extend the existing meeting-consent flow rather than adding a separate, weaker path.
+- **Minimize at the edge.** On-device VAD (voice activity detection) means silence is not sent or stored.
+- **Retention limits.** Set retention on ambient sessions. Do not keep raw audio indefinitely.
+- **Hard mute.** Give the device a hard mute that stops capture immediately.
 
-See [Ambient capture](/docs/hardware/ambient-capture) for how the VAD and meetings pipeline already minimize what leaves the device.
+See [Ambient Capture](/docs/hardware/ambient-capture) for how VAD and the meetings pipeline limit what leaves the device.
 
 ## Monitoring
 
-`GET /api/hardware/devices` reports last-seen, online status, and battery from device `telemetry`, so you can spot a device that went dark or one you do not recognize.
+`GET /api/hardware/devices` reports `last_seen`, `online`, and `battery_pct` for each paired device. Use it to find a device that went dark or one you do not recognize.
 
 ## Before internet exposure: the checklist
 
-The LAN/tailnet design becomes internet-ready when you add:
-
 <Steps>
   <Step>
-    Out-of-band proof of possession on the pair endpoint (a user-confirmed code).
+    Out-of-band proof of possession at pairing. **Added in RHP v1.1:** the code compare and button press described above, for v1.1 devices only. Legacy pairing still has no such check.
   </Step>
   <Step>
-    A signed OTA channel (`esp_https_ota`) so field devices can be patched.
+    Add a signed OTA channel (`esp_https_ota`) so field devices can be patched.
   </Step>
   <Step>
-    Application-layer encryption of the BLE relay tunnel, beyond BLE's own pairing (a v2 item).
+    Application-layer encryption of the relay. **Added in RHP v1.1:** the end-to-end encrypted session, for v1.1 devices only. Legacy devices stay on the plaintext relay until you re-pair them.
   </Step>
   <Step>
-    Confirmed `RYU_TOKEN` on every bind and Tailscale (or equivalent private networking) in front of the node, never a raw public port.
+    Confirm `RYU_TOKEN` on every bind, and put Tailscale (or equivalent private networking) in front of the node instead of a public port.
+  </Step>
+  <Step>
+    Turn legacy pairing off (`hardware-legacy-v1-pairing` set to `"false"`) once no device needs it.
   </Step>
 </Steps>
 

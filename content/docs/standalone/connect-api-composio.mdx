@@ -1,0 +1,386 @@
+---
+title: "Connect Composio Account Linking"
+description: "Reference for Ryu Connect's Composio routes - execution receipts and limits, action discovery, account linking for tenants and their agents, revocation, and natively served toolkits"
+tags: ["Standalone", "Connect", "Composio"]
+---
+
+Ryu Connect owns the Composio account and action routes below. A tenant's
+grants determine which account and actions are visible. See also the
+[Connect API overview](/docs/standalone/connect-api),
+the [Ryu Connect service guide](/docs/standalone/connect), and
+[Gateway tool governance](/docs/gateway/tools).
+
+## Execution billing and limits
+
+### Execution billing receipts
+
+Native execution through `POST /v1/composio` or `POST /v1/composio/execute` can
+return a `billingReceipt` beside `successful` and `data`. It contains a
+provider transaction ID and billing metadata only: usage kind, auth source,
+direct-execution status, and any exact premium charge in micro-USD. The same
+action called as `composio.<SLUG>` returns the same receipt on the other two
+paths. `/v1/exec/tool` adds it as a top-level `billingReceipt` beside `result`.
+MCP `tools/call` puts it in the result's `_meta` under the key
+`com.ryuhq/billingReceipt`. Connect removes that key from results returned by
+registered MCP servers, so only Connect's own Composio calls can carry it.
+
+Connect issues a receipt only when the execution log names the binding's
+connected account, Composio's record of that account shows it belongs to the
+binding's `userId`, and the log names the auth config that record lists (which
+must also equal the binding's `authConfigId` when one is set). A binding to
+`instant_account` is billed as Instant only when the log records the binding's
+`userId` as its caller, because the shared Instant account does not identify a
+tenant. Any other log gets no receipt.
+
+Core forwards this evidence to Gateway and removes it from agent-visible output.
+A missing or `null` receipt means execution completed but accounting evidence
+could not be verified. Do not retry the tool automatically; reconcile the
+provider transaction before permitting further managed spend. See
+[credits and ZDR](/docs/billing/credits).
+
+### Call limits
+
+Each binding in `RYU_CONNECT_COMPOSIO_BINDINGS` can set optional `limits`. A
+binding without `limits` has no quota, budget, or rate limit in Connect.
+
+```json
+{
+  "tenantId": "acme",
+  "userId": "acme-user",
+  "connectedAccountId": "ca_123",
+  "apiKeyEnv": "COMPOSIO_API_KEY",
+  "version": "20251027_00",
+  "allowedTools": ["GMAIL_GET_PROFILE"],
+  "limits": {
+    "maxCallsPerMinute": 30,
+    "maxPremiumMicroUsd": 5000000,
+    "periodSeconds": 86400
+  }
+}
+```
+
+| Field | Effect |
+|---|---|
+| `maxCallsPerMinute` | Allows 1 to 10,000 executions in any rolling 60 seconds. Further calls get `429` with `code: "rate_limited"`. |
+| `maxPremiumMicroUsd` | Caps the premium charges recorded from billing receipts in each period, in micro-USD. Once the total reaches the cap, calls get `402` with `code: "spend_limit_reached"`. |
+| `periodSeconds` | Sets the spend period, from 60 seconds to 31 days. The default is one day. Valid only with `maxPremiumMicroUsd`. |
+
+`limits` must set `maxCallsPerMinute`, `maxPremiumMicroUsd`, or both. Invalid
+values refuse startup.
+
+Limits apply per tenant on every execution path listed above. A refused call
+never reaches Composio. REST refusals include a `Retry-After` header and a
+`retryAfterSeconds` field. Over MCP, a refusal is an `isError` result that says
+how many seconds to wait. Every admitted call counts toward
+`maxCallsPerMinute`, including calls that the provider fails.
+
+The spend cap counts only Composio premium charges: the exact
+`premiumChargeMicroUsd` in each receipt. Calls through your own or a
+Composio-managed auth configuration add nothing. Periods are fixed windows
+counted from the Unix epoch, so a one-day period resets at 00:00 UTC. Calls already
+in progress when the cap is reached still finish and can take spend past it. If Connect cannot verify a
+call's receipt, it counts that call as using the rest of the period's budget.
+So does a call whose request fails after it was sent to Composio, because the
+action may have run. To admit calls again before the period ends, raise `maxPremiumMicroUsd` and
+restart. Spend totals are stored in `usage.db` under `RYU_CONNECT_DATA_DIR` and
+survive restarts; per-minute call counts are in memory and reset on restart.
+
+## Discovery and account linking
+
+### Discover permitted actions
+
+`GET /v1/composio/actions/{slug}` describes one permitted tool, using the
+tenant's configured version. The caller cannot override that version. The
+response includes the tool's input schema, toolkit, description, and tags;
+ungranted tools are rejected before a provider request. The shared REST
+`/v1/tools/describe?id=composio.{slug}` and native MCP listings expose the same
+versioned input schema, normalized as JSON Schema. A metadata lookup failure
+stays an error instead of advertising a weaker schema.
+
+`GET /v1/composio/actions` browses granted action metadata with optional
+`toolkit`, substring query `q`, repeated `tags` (all must match), and `limit`
+(1 to 100, default 50). Provider results are intersected with the tenant's tool
+grants before filtering and projection. Pagination is bounded to six pages with
+one 25-second deadline; an incomplete traversal fails instead of returning a
+partial catalog. Core's action picker forwards through this native
+endpoint in remote mode and does not fall back to its provider key.
+
+In remote mode, Core's tool-description endpoint uses these schemas through the
+verified caller's Connect mapping. A denied or unavailable lookup does not fall
+back to a shallow local description.
+
+### Inspect linked accounts and toolkits
+
+`GET /v1/composio/accounts` lists only the authenticated tenant's assigned
+account as `{ id, toolkit, status, active }`, with an optional exact `toolkit`
+filter. The toolkit slug comes from the verified provider record, so a pending,
+canceled, or revoked record may not match a toolkit filter. Unlinked tenants
+get an empty list. This is not a project-wide Composio account listing. Core's
+connections list uses this endpoint in remote mode, with no provider key in Core.
+
+`GET /v1/composio/toolkits` returns the tenant's assigned integration metadata,
+never auth-config credentials or another tenant's integrations. An unassigned
+tenant gets an empty catalog. Core's toolkit picker uses it in remote mode.
+
+In remote mode, Core's Composio status endpoint returns
+`execution_owner: "connect"` for a caller with a valid Connect mapping.
+`configured` describes that caller's configuration, not provider login status
+or reachability.
+
+### Start a managed account link
+
+Service-managed linking uses a configured auth config and separate management
+credentials, which runtime tool credentials cannot replace. The Composio project
+must enable callback identity verification, and the host application completes
+setup for the returning user's tenant.
+
+### Complete sign-in through Core
+
+When using Core as the authenticated host, submit the returned session URI to
+`POST /api/composio/connections/complete` with `{ "sessionUri": "..." }` and
+the normal Core authentication. Core derives the user from that authenticated
+request and uses its separate Connect management-token mapping. User IDs,
+account IDs, and other extra body fields are rejected. The endpoint returns
+verified account metadata, not provider credentials. It does not accept an
+unauthenticated provider redirect as proof of user identity; your callback screen
+must establish the user's Core session before submitting completion.
+
+The shared Core client exposes the same operation:
+
+```ts
+import { completeComposioConnection } from "@ryuhq/core-client/composio";
+
+const account = await completeComposioConnection(target, sessionUri);
+```
+
+Use the authenticated active-node target, including its user JWT where required.
+Then refresh the connection list for its access policy; completion metadata is
+not an authorization grant.
+
+Desktop recognizes session-only Connect callback handoffs and asks you to choose
+an already configured node before completing the account. It never connects to
+a node named by the link or activates the account on its own. Use the same node and signed-in identity that started
+the login, and after an uncertain result check Connections instead of
+resubmitting the callback.
+
+For a Desktop handoff, a deployed Web host exposes `/connect/callback` as a
+script-free relay. Set the Composio project's callback verifier to that public
+HTTPS URL. It accepts only `session_uri` and shows an **Open Ryu** link; it
+does not authenticate the user or complete the connection. Desktop confirms and
+calls the Core endpoint above. The relay loads no scripts or remote assets and
+sends `no-store` and `no-referrer` headers. Redact callback query strings in
+access logs.
+
+### Management endpoints
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `POST` | `/v1/composio/link` | `{}` or `{ "expectedToolkit": "gmail" }`, optionally with `agentId` | Login URL and pending account ID |
+| `POST` | `/v1/composio/complete` | `{ "sessionUri": "..." }`, optionally with `agentId` | Verified active account metadata |
+| `POST` | `/v1/composio/cancel` | `{}` or `{ "agentId": "..." }` | Canceled pending local setup |
+| `POST` | `/v1/composio/revoke` | `{}` or `{ "agentId": "..." }` | Revoke a Connect-linked account; management token required |
+
+When `expectedToolkit` is supplied, Connect verifies that its configured auth
+config has that exact toolkit slug and is enabled before creating a login link.
+The constraint cannot select another auth config, provider user, or tenant.
+
+### Agent accounts inside a tenant
+
+A linked binding can let a tenant's agents link accounts of their own. Set
+`agentSubjects` on the binding in `RYU_CONNECT_COMPOSIO_BINDINGS`, as in this
+example.
+
+```json
+{
+  "tenantId": "acme",
+  "userId": "acme-user",
+  "authConfigId": "ac_123",
+  "callbackVerification": true,
+  "apiKeyEnv": "COMPOSIO_API_KEY",
+  "version": "latest",
+  "allowedTools": ["GMAIL_GET_PROFILE"],
+  "agentSubjects": { "max": 5 }
+}
+```
+
+`max` is 1 to 256. Only a binding with `authConfigId` can set it, so agent
+accounts are always linked through callback identity verification and never
+statically configured. Startup is refused if another tenant's `userId` begins
+with this tenant's agent prefix (`<userId>:agent:`).
+
+The caller stays the tenant, with the same bearer as for its own account. A
+request names one agent with `agentId` - an ASCII letter or digit followed by up
+to 127 letters, digits, `_` or `-`. Connect links that agent's account to the
+Composio user `<userId>:agent:<agentId>`, which it derives itself. An `agentId`
+therefore always names an agent inside the caller's tenant, never another tenant
+or the tenant's own account.
+
+| Route | Where `agentId` goes |
+|---|---|
+| `POST /v1/composio/link`, `/complete`, `/cancel`, `/revoke` | Body, beside the existing fields; management bearer only |
+| `GET /v1/composio/accounts`, `GET /v1/composio/connection` | Query string |
+| `POST /v1/composio`, `POST /v1/composio/execute` | Body |
+
+Without `agentId` these routes act on the tenant's own account, as before, and
+neither listing includes the other's account. An agent account uses the
+tenant's auth config, `allowedTools`, version and `limits`; its calls count
+toward the tenant's limits and appear in the tenant's usage. `/v1/exec/tool`,
+MCP `tools/call` and the trigger routes take no `agentId` and act only on the
+tenant's own account.
+
+| Response | Meaning |
+|---|---|
+| `400` with `code: "subject_unsupported"` | The tenant's binding has no `agentSubjects`, or the request names a [natively served toolkit](#natively-served-toolkits), whose connections belong to the tenant only |
+| `400` with `code: "invalid_request"` | The `agentId` is malformed |
+| `409` with `code: "subject_limit"` | `max` agents already hold an account or a link in progress; cancel or revoke one first |
+
+Core sends `agentId` for an agent with its own identity, using its owner's
+Connect credentials, and reports a tenant without agent accounts as
+`501` with `code: "agent_entity_unsupported"`. Because the sign-in callback
+carries only a session, Core's completion endpoint finishes the most
+recent link the signed-in user started, for themselves or for one of their
+agents (see [Complete sign-in through Core](#complete-sign-in-through-core)).
+
+### Recover pending setup
+
+Connect persists setup metadata and account IDs in its own SQLite store. Pending
+setup survives a restart and cannot execute tools. Completion verifies the
+provider user, exact pending account, and configured auth-configuration ID before
+activation. Disabled accounts, disabled auth configurations, and non-active
+provider statuses cannot activate a pending setup. Management keys must
+be distinct from runtime keys. OAuth tokens, link tokens, login URLs, and
+verification session URIs are not persisted.
+
+Store upgrades preserve existing account ownership, pending setup, and operation
+generations; accounts from before agent accounts existed stay the tenant's own.
+Unsupported future store versions are refused without rewriting the store. Back up before upgrading and prefer rolling forward. Manual rollback
+requires disabling runtime credentials and reconciling later link/revocation
+decisions first; restoring an older backup alone can lose a revocation decision.
+
+Creation is not retried automatically: an existing setup returns `409`. If a
+login response was lost, cancel pending setup before retrying. Canceling setup
+does not revoke an active account at Composio.
+
+### Revoke a linked account
+
+For accounts linked through Connect, revocation first persists a `revoking`
+state that blocks new runtime calls. It then verifies the bound account's owner
+and auth configuration and requests provider revocation. Only a matching
+`REVOKED` result marks local revocation complete. Provider failure leaves the
+account disabled locally, including after a restart; an explicit retry can
+confirm an already-revoked account. A confirmed revocation permits a new link.
+Canceling cannot undo an in-progress revocation, and calls already sent upstream
+cannot be recalled. Provider revocation is best-effort, so some providers need
+access removed by hand. This endpoint does not delete account records or manage
+statically configured accounts.
+
+Execution follows the [Composio v3.1 execution contract](https://docs.composio.dev/reference/api-reference/tools/postToolsExecuteByToolSlug).
+
+## Natively served toolkits
+
+An operator can move a toolkit from Composio to Connect's own implementation
+with `RYU_CONNECT_TOOLKIT_PROVIDERS` (for example `{"github":"native"}`) and
+grant it per tenant with `RYU_CONNECT_NATIVE_GRANTS`. Only tenants with a grant
+move; every other tenant and toolkit keeps using Composio. The action IDs,
+routes, refusals, and billing receipts on this page keep their shape, so
+callers need no change. A natively routed call that fails never falls back to
+Composio.
+
+```json
+[{"tenantId":"acme","userId":"acme-user","toolkit":"github","allowedTools":["GITHUB_CREATE_AN_ISSUE","GITHUB_LIST_REPOSITORY_ISSUES"],"limits":{"maxCallsPerMinute":60}}]
+```
+
+`allowedTools` lists up to 64 actions the toolkit implements. `limits` accepts
+only `maxCallsPerMinute`; natively served actions have no premium charge.
+
+Connect serves GitHub, Linear, Notion and Slack natively. Their actions, how
+each provider's OAuth differs, and how a tenant links through its own app are
+in [native toolkits](/docs/standalone/connect-api-native-toolkits).
+
+Each natively served toolkit uses your own OAuth app, configured in
+`RYU_CONNECT_OAUTH_APPS`. The client secret is read from the environment
+variable that `clientSecretEnv` names and is never returned by any route.
+
+```json
+[{"toolkit":"github","clientId":"Iv1.abc","clientSecretEnv":"GITHUB_OAUTH_CLIENT_SECRET","scopes":["repo","read:user"],"redirectUri":"https://connect.example.com/v1/oauth/callback/github","returnUrl":"https://app.example.com/connect/callback"}]
+```
+
+`redirectUri` must be HTTPS (plain HTTP only to `localhost`, `127.0.0.1`, or
+`[::1]`), without credentials, query, or fragment, and end in
+`/v1/oauth/callback/<toolkit>`. Register exactly that URL as the app's callback
+URL. `returnUrl` follows the same rules; Connect appends only `?session_uri=…`.
+
+### Link a natively served toolkit
+
+1. `POST /v1/composio/link` with the management bearer and
+   `{"expectedToolkit": "github"}` returns `{connectedAccountId, redirectUrl,
+   status: "pending"}`. `redirectUrl` is the provider's authorization page,
+   with a single-use `state` and, where the provider supports it, a PKCE
+   challenge. The link expires after 10
+   minutes; a second link while one is pending returns `409`.
+2. After the user approves, the provider redirects the browser to
+   `GET /v1/oauth/callback/github`. Connect exchanges the code, stores the
+   tokens encrypted but not yet usable, and redirects to
+   `returnUrl?session_uri=<handle>`. If the user declines or the exchange
+   fails, the browser sees a static error page and the link is canceled.
+3. `POST /v1/composio/complete` with the same tenant's management bearer and
+   `{"sessionUri": "<handle>"}` activates the connection and returns
+   `{connectedAccountId, toolkit, status: "ACTIVE", active: true}`. Complete it
+   within 15 minutes. Another tenant's bearer gets `403`.
+
+The callback alone never activates a connection: only the host that started
+the link can complete it, the same rule as
+[completing sign-in through Core](#complete-sign-in-through-core). Core's
+existing completion flow works unchanged.
+
+`POST /v1/composio/cancel` with `{"toolkit": "github"}` cancels a link in
+progress. `POST /v1/composio/revoke` with `{"toolkit": "github"}` blocks the
+connection first, then revokes its token at the provider and deletes it from
+Connect. If the provider cannot confirm, the connection stays blocked and an
+explicit retry finishes it. Send `{}` to these routes for the Composio account.
+A user can link again after cancel, revoke, or expiry.
+
+`GET /v1/composio/accounts` lists natively served connections after the
+Composio account, and `GET /v1/composio/connection?expectedAccountId=<id>`
+polls one of them.
+
+Until a connection is active, calls answer exactly as an unlinked Composio
+account does: `403` with `code: "precondition_required"` on `POST /v1/composio`,
+`/v1/composio/execute` and `/v1/exec/tool`, and an `isError` result over MCP
+with the same fields in `_meta["com.ryuhq/refusal"]`. The body names what to
+link:
+
+```json
+{
+  "code": "precondition_required",
+  "error": "Link a github account before calling this tool",
+  "ok": false,
+  "precondition": {
+    "kind": "connection",
+    "toolkit": "github",
+    "linkPath": "/v1/composio/link"
+  }
+}
+```
+
+When the provider rejects the stored authorization, or it can no longer be
+refreshed, the connection becomes `expired`, and calls answer with
+`kind: "authorization"` until the user links again. Nothing reaches the
+provider and nothing is charged; after linking, the same call runs.
+
+### Billing
+
+A call that the provider answers successfully, or rejects because of its arguments
+(`400`, `404`, `409`, `410`, or `422`), returns a `billingReceipt` on every
+execution path, with a transaction ID starting with `rnx_`. Redirects, expired
+authorizations, rate limits, provider errors, timeouts, and invalid arguments
+return no receipt and are not charged. Ryu-hosted Connect charges each receipt
+of a direct call **$0.40** per 1,000 calls, with no Composio add-ons, and the
+response reports `priceSource: "connect_native"`. A call Ryu Core makes through
+Connect is charged by the Ryu Gateway as a Composio tool call instead; see
+[Ryu Connect pricing](/docs/standalone/connect#pricing).
+
+<Cards>
+  <DocCard href="/docs/standalone/connect-api" />
+  <DocCard href="/docs/standalone/connect-api-native-toolkits" />
+</Cards>

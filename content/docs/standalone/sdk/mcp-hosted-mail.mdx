@@ -1,0 +1,153 @@
+---
+title: "Hosted Mail MCP Tools"
+description: "Use the six Mail tools that Ryu's hosted /mcp endpoint serves over OAuth, with no node and no install"
+tags: ["mail", "mcp", "oauth", "standalone"]
+---
+
+Ryu's hosted MCP endpoint also serves six Mail tools itself, without a
+node and without installing anything. Point a remote MCP client at the
+control plane's `/mcp` (`https://api.ryuhq.com/mcp` on Ryu's hosted
+service), with no node id in the URL and no `X-Ryu-Node-Id` header. The
+client signs you in with OAuth (PKCE) and asks for `mail:read`, `mail:send`,
+or both. Ask for both if the client sends mail and also reads it: a grant
+holds only the scopes the client requested. You can lower or remove Mail on
+the consent screen.
+
+The hosted endpoint does not serve Messaging or Managed Agents tools. Use
+[`ryu-services`](/docs/standalone/sdk/mcp) with a Ryu API key for those. Mail must be enabled for the organization.
+
+## Scopes and consent
+
+Creating inboxes needs `mail:manage` as well, and Ryu never grants it by
+default. Ryu's OAuth metadata does not list it, so a client that requests
+every listed scope does not ask for it, and an authorization request with no
+`scope` leaves it out. A grant without it does not list `mail_create_inbox`,
+though the server's instructions name the tool. A call to it then returns
+HTTP 403 with
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="mail:manage"`,
+and a client that supports step-up authorization signs you in again with
+`mail:manage` in its request. A client can also name `mail:manage` in its
+first authorization request.
+
+The consent screen offers it under **Mail**, described as "Create Mail inboxes
+in your organization (each counts toward its inbox allowance)", and leaves it
+off until you choose it. The level's label depends on which Mail scopes the
+client asked for: **Read, send & manage inboxes** when it asked for all three,
+**Manage** when it asked for `mail:manage` alone. With `mail:manage` a grant
+can create inboxes and nothing else: it cannot change or delete inboxes,
+domains, lists, pods, or webhooks.
+
+The screen describes each Mail level in plain words
+("Read", "Send", "Read & send" or "Read, send & manage inboxes") and marks an app that Ryu has not verified
+as **Unverified app**. For an unverified app that returns you to a web
+address, the screen also names that address, so you can check it before you
+allow the app. For an unverified app that returns you to a program on your
+device, such as a desktop editor, the screen names the link type that opens it
+(for example `cursor:`), so you can check that it is the program you expect.
+
+## Tools
+
+| Tool | Scope | What it does | Read-only |
+|---|---|---|---|
+| `mail_list_organizations` | Any Mail scope | Lists the organizations where you are a member and that have allowed this app to use Mail, with each one's `id`, `name`, and `slug`. Takes no arguments. | Yes |
+| `mail_list_inboxes` | `mail:read` | Lists the organization's inboxes you can see, with ids and addresses. | Yes |
+| `mail_list_messages` | `mail:read` | Lists one inbox's messages, newest first; page with `before`. | Yes |
+| `mail_get_message` | `mail:read` | Reads one message in full. | Yes |
+| `mail_create_inbox` | `mail:manage` | Creates an inbox in the organization from `name` and optional `localPart`, `domainId`, and `description`, and returns it. `clientId` is required: a retry with the same one returns the inbox already made. Never destructive. | No |
+| `mail_send` | `mail:send` | Sends an email from an inbox (`inboxId`) to real recipients; `idempotencyKey` is required. Open world. | No |
+
+## Before the first call
+
+Your consent alone does not open an organization's mail to an app. Each
+organization keeps a list of the OAuth apps (by client id) allowed to use its
+Mail through these tools, and the list starts empty. A call from an app that
+is not on it is refused with `oauth_client_not_allowed`, and the error names
+the app's `clientId`. An organization owner or admin adds the app's client id
+under **Apps allowed to use Mail through MCP** on the organization's Security
+page, one client id per line (up to 50 ids of up to 512 characters each,
+with no spaces or hidden characters). Saving may ask the admin to confirm
+their identity, unless they confirmed it in the last few minutes. Removing an
+id stops that app at its next call, and **Remove all apps** turns the hosted
+Mail tools off for the whole organization.
+
+Members' consents are not
+revoked, so an app allowed again later can use the grant it still holds
+without a new sign-in. A change to the list is recorded in the
+organization's audit log as **Security settings updated**
+(`org-security.update`), with the client ids added
+and removed. If the audit log cannot record a save that adds an app, the save
+fails and every setting it changed is put back. A save that only removes apps
+is kept even then, so a removed app is stopped either way.
+
+Every tool except `mail_list_organizations` takes a required
+`organizationId`. A token belongs to you, not to an organization, so each call
+names the organization it acts in. An agent finds the id with
+`mail_list_organizations`, which returns
+`{"organizations": [{"id": "...", "name": "...", "slug": "..."}]}` sorted by
+name. It lists only organizations you are a member of that have put this
+app's client id on their list, so an empty list means no organization has
+allowed the app yet.
+
+Being listed does not bypass anything else: the other
+tools still check your Mail permissions and the organization's access rules
+on every call. Those access rules (an IP allowlist, required two-factor
+authentication, a maximum sign-in age) apply to the Mail calls, not to the
+list, so an organization can appear in the list while its Mail calls from
+your current address or session are refused. The list covers at most your
+first 500 memberships. You can also read the id yourself: it is the part after
+`/organizations/` in the address of the organization's admin console. Each
+tool's description of `organizationId` says both.
+
+## How these tools differ from `ryu-services`
+
+- You must be a member of the organization you name, and its Mail
+  permissions apply: reading needs `mail.read`, and sending and creating
+  inboxes need `mail.manage`.
+- The organization's access rules apply: required two-step verification, and
+  its session length, measured from the sign-in you authorized the app from.
+  When that sign-in is older than the organization allows, authorize the app
+  again. An organization's IP allowlist applies to the address your MCP
+  client connects from.
+- `mail_send` takes the sending inbox's id as `inboxId`, not an address.
+- `tools/list` shows only the tools your grant allows. A call to a tool
+  whose scope you did not grant is refused with HTTP 403 and
+  `WWW-Authenticate: Bearer error="insufficient_scope", scope="mail:send"`,
+  so the client can ask you again.
+- A result is Mail's own JSON reply, unchanged; there is no
+  `{data, meta}` wrapper. Each tool declares that reply's shape as its MCP
+  `outputSchema` (an inbox list, a message list, or one message; the
+  organization list above), and the reply's `structuredContent` matches it.
+  The schemas require only identity fields (an inbox's `id` and `address`;
+  a message's `id`, `inboxId`, `direction` and `to`) and allow fields Mail
+  adds later, so a retried `mail_send` that returns the first attempt's
+  stored receipt still matches. A success reply that does not match comes
+  back as text content only, with no `structuredContent`. A failure is a tool error (`isError`) whose text is
+  `{"error": {"body": {"error": "...", "code": "..."}, "status": 404,
+  "tool": "mail_get_message"}}`, plus `retryAfter` when Mail or the endpoint
+  asks you to wait. It is not the `RyuError` shape described in
+  [Results and errors](/docs/standalone/sdk/mcp#results-and-errors).
+- Each app may make up to 600 tool calls a minute for you, and all apps
+  together up to 1,200 a minute in one organization (`mail_list_organizations`
+  names no organization, so it counts only toward the first limit). Over the limit, the call
+  fails with `code: "rate_limited"` and `retryAfter` in seconds.
+- A call that takes longer than 30 seconds fails with
+  `code: "timeout"` and `retryable: true`. For `mail_send` the email may or may not have gone out:
+  retry with the same `idempotencyKey`, and Mail answers from the first
+  attempt instead of sending twice. For `mail_create_inbox` the inbox may or
+  may not exist: retry with the same `clientId`, and Mail returns the inbox
+  instead of creating a second one, even while the first call is still
+  running.
+- Sends count against the organization's Mail quota, and a new inbox against
+  its inbox allowance. Both are attributed to you, as with a personal Ryu API
+  key.
+- Inbox delivery settings (`webhookUrl`) are never shown, even to a grant
+  with `mail:manage`, and `mail_create_inbox` cannot set them. No tool
+  changes or deletes inboxes, domains, lists, pods, or webhooks.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/mcp" />
+  <DocCard href="/docs/standalone/sdk/mail-cli-mcp" />
+  <DocCard href="/docs/standalone/mail-api" />
+</Cards>

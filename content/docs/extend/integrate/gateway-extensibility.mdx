@@ -1,146 +1,156 @@
 ---
 title: "Gateway Extensibility"
-description: "Extend the Gateway's governance pipeline — custom firewall patterns, router backends, WASM policy plugins, and the passthrough proxy."
+description: "Reference for the Gateway's extension points: swappable stage backends, custom firewall patterns, upstream routers, WASM policy plugins, and the passthrough proxy."
 tags: ["gateway", "firewall", "routing", "wasm", "policy", "extensibility", "custom"]
 ---
 
-The Gateway follows a **registry pattern** for its core subsystems: each is an interface-backed
-backend that can be registered, swapped at runtime, or extended. This page covers the extensibility
-points for each subsystem.
+Each governance stage in the Gateway is a registry of interchangeable backends. A built-in backend
+is active by default, and configuration selects another registered backend. Most extensions need
+only configuration. Code-level backends are Rust types compiled into the Gateway.
 
-## The registry pattern
+## Stage backends
 
-Four Gateway subsystems share the same pattern:
+The `[backends]` table in `gateway.toml` names the active backend for each stage
+(`StageBackendsConfig` in `apps/gateway/src/config.rs`). Every field defaults to `"builtin"`, so an
+absent table keeps the built-in behavior. An id that is not registered is refused when the Gateway
+builds its state, so a typo fails closed.
 
-| Subsystem | Registry type | Builtin | Live-swap? |
-|---|---|---|---|
-| Router | `RouterRegistry` | `ModelRouter` | No (restart required) |
-| Firewall | `FirewallRegistry` | `FirewallScanner` | Yes |
-| Budget | `BudgetRegistry` | budget enforcer | Yes |
-| Passthrough | `PassthroughRegistry` | passthrough backends | Yes |
+| Stage | Field |
+|---|---|
+| Budget | `budget` |
+| Response cache | `cache` |
+| Semantic cache | `semantic_cache` |
+| Audit | `audit` |
+| Evals | `evals` |
+| Circuit breaker | `circuit_breaker` |
+| Rate limit | `rate_limit` |
+| Firewall | `firewall` |
+| Router | `router` |
+| Smart router | `smart_router` |
+| Passthrough proxy | `passthrough` |
+| Connections | `connections` |
 
-Each registry:
-- Has a `BUILTIN` constant (the default active backend)
-- Exposes `register(id, backend)` for extension
-- Exposes `set_active(id)` for live swap
-- Returns `active()` — a clone of the active `Arc` out of the read lock
+`PUT /v1/config` with a partial `backends` object changes one stage and keeps the others. The
+`budget`, `router`, and `connections` selections apply live. Other stages take effect on the next
+Gateway restart (see
+[Configuration API](/docs/gateway/configuration-api)).
+
+Each registry (for example `RouterRegistry` in `apps/gateway/src/router/mod.rs` and
+`FirewallRegistry` in `apps/gateway/src/firewall/mod.rs`) follows the same shape:
+
+- A `BUILTIN` id (`"builtin"`) for the default backend
+- `register(id, backend)` to add a backend
+- `set_active(id)` to switch backends
+- `active()`, which returns a clone of the active `Arc` without holding the lock
 
 ## Custom firewall patterns
 
 The firewall (`apps/gateway/src/firewall/mod.rs`) scans inbound and outbound text for PII,
-secrets, prompt injection, code injection, toxicity, and bias. You can add custom patterns.
-
-### Adding patterns via config
-
-Custom patterns are regex-based and declared in `gateway.toml`:
+secrets, prompt injection, code injection, toxicity, and bias. Add your own regex patterns in
+`gateway.toml`. They merge into the built-in sets.
 
 ```toml
 [firewall]
 enabled = true
 policy = "warn_and_continue"
 
-[firewall.custom_patterns]
-# Pattern name → regex
-internal_api_key = "AKIA[0-9A-Z]{16}"
-custom_token = "tok_[a-zA-Z0-9]{32}"
+[[firewall.custom_patterns]]
+name = "internal_api_key"
+regex = "AKIA[0-9A-Z]{16}"
+kind = "secret"
+
+[[firewall.custom_patterns]]
+name = "custom_token"
+regex = "tok_[a-zA-Z0-9]{32}"
+kind = "secret"
 ```
 
-Custom patterns run alongside the built-in detectors. A match triggers the same policy action
-as any other detection (`block`, `warn_and_continue`, or `redact` depending on `policy`).
+Patterns use the `regex` crate syntax, which does not backtrack, so a pattern cannot cause ReDoS.
+An invalid regex is skipped with a warning. Under `sanitize`, a match redacts to
+`[REDACTED:<NAME>]`.
 
-### Pattern detection kinds
+| `kind` | Merged into |
+|---|---|
+| `pii` (default) | PII patterns |
+| `secret` | Secret patterns |
+| `prompt_injection` | Inbound prompt-injection scanning |
+| `code_injection` | Code-injection evaluator (input) |
+| `toxicity` | Toxicity evaluator (output) |
+| `bias` | Bias and fairness evaluator (output) |
 
-| Kind | What it catches | Default action |
-|---|---|---|
-| `pii` | Email, phone, SSN, credit card, IP address | `redact` |
-| `secrets` | API keys, tokens, passwords | `block` |
-| `injection` | Prompt injection attempts | `block` |
-| `code_injection` | Code injection patterns | `block` |
-| `toxicity` | Toxic or harmful content | `warn` |
-| `bias` | Biased content | `warn` |
+`policy` sets the action for any detection:
 
-See [Security](/docs/gateway/security) for the full firewall configuration.
+| `policy` | Action |
+|---|---|
+| `block` (default) | Reject the request with a 403 |
+| `warn_and_continue` | Log the detection and let the request through |
+| `sanitize` | Redact detected PII and secrets, then continue |
 
-## Custom router backends
+See [Security: Firewall & DLP](/docs/gateway/security) for the full firewall configuration.
 
-The `ModelRouter` (`apps/gateway/src/router/mod.rs`) resolves a model name to a provider. You
-can add custom routing logic.
+## Routing
 
-### The RouterBackend trait
+Most routing needs are configuration, not code. See [Routing](/docs/gateway/routing) for
+`model_map`, `fallback_chain`, `modality_map`, and `smart_routing`.
+
+The router stage also accepts an upstream router as its backend: `openrouter`, `litellm`, or
+`local` (`UPSTREAM_ROUTER_IDS` in `crates/gateway/router/src/lib.rs`). Set `backends.router` to
+hand `router/<model>` ids, and models that would go to the default provider, to that router. A
+selected router whose provider is not configured fails like any unavailable provider. See
+[upstream routers](/docs/providers/upstream-routers).
+
+A custom router backend implements `RouterBackend`.
 
 ```rust
 pub trait RouterBackend: Send + Sync {
-    fn route(&self, model: &str, ctx: &RequestContext) -> RouteDecision;
-    fn route_modality_with_slot(&self, model: &str, modality: &str, slot: Option<&str>) -> RouteDecision;
-    fn fallback_chain(&self, primary: &RouteDecision) -> Vec<RouteDecision>;
-    fn eval_route(&self, model: &str, eval_name: &str) -> RouteDecision;
+    fn route(&self, requested_model: &str) -> RouteDecision;
+    fn route_modality_with_slot(
+        &self,
+        modality: &Modality,
+        requested_model: &str,
+        slot_provider: Option<&ProviderId>,
+        slot_model: Option<&str>,
+    ) -> RouteDecision;
+    fn fallback_chain(&self, primary: &ProviderId) -> Vec<ProviderId>;
+    fn eval_route(
+        &self,
+        requested_model: &str,
+        score_of: &dyn Fn(&ProviderId) -> Option<f32>,
+    ) -> Option<RouteDecision>;
 }
 ```
 
-Register a custom backend at startup:
-
-```rust
-router_registry.register("custom-router", my_router_backend);
-router_registry.set_active("custom-router");
-```
-
-### Configuration-driven routing
-
-Most routing needs are met by configuration rather than code. See [Routing](/docs/gateway/routing)
-for:
-
-- `routing.model_map` — exact and prefix model remapping
-- `routing.fallback_chain` — failover between providers
-- `routing.smart` — classifier-driven model selection
-- `routing.modality` — per-modality provider routing
+The model map, fallback chain, and tiers are a startup snapshot. Changing them needs a restart.
 
 ## WASM policy plugins
 
-The Gateway supports WASM-based policy plugins for custom governance logic
-(`apps/gateway/src/wasm_policy/mod.rs`). A WASM policy can inspect, modify, or reject requests
-and responses.
+A WASM policy plugin (`apps/gateway/src/wasm_policy/mod.rs`) runs untrusted policy code inside the
+Gateway. The guest receives a request excerpt and returns a verdict: allow, or deny with a reason.
+The operator maps a deny to block, sanitize, or warn. It cannot rewrite the request.
+
+The sandbox has no WASI and no host imports, so the guest has no filesystem, network, clock, or
+randomness. Fuel, an epoch deadline, and a memory limit bound each call, and every request gets a
+fresh `Store`. A trap, timeout, or invalid output becomes a failure verdict, which fails closed by
+default.
 
 <Callout type="warn">
-  WASM policy plugins are an advanced extension point. The API surface is subject to change. For
-  most governance needs, use the firewall config, budget rules, or custom patterns instead.
+  WASM policy plugins are an advanced extension point, and the API can change. For most governance
+  needs, use firewall config, custom patterns, budget rules, or routing config instead.
 </Callout>
 
-### When to use WASM policies
-
-| Need | Use instead |
+| Need | Use |
 |---|---|
 | Block specific content patterns | Custom firewall patterns |
-| Rate limit by user/agent | Budget rules |
+| Rate limit by user or agent | Budget and rate-limit rules |
 | Route to different providers | Routing config |
-| Custom request/response transformation | WASM policy |
-| Custom audit logging | WASM policy |
-| Compliance-specific checks | WASM policy |
+| An allow or deny check that patterns cannot express | WASM policy |
 
-## Extending the passthrough proxy
+## Passthrough proxy
 
-The passthrough proxy (`apps/gateway/src/passthrough/mod.rs`) handles non-OpenAI-compat wire
-formats (Anthropic Messages, OpenAI Responses). You can add new upstream formats.
-
-### The PassthroughBackend trait
-
-```rust
-pub trait PassthroughBackend: Send + Sync {
-    async fn forward(
-        &self,
-        format: WireFormat,
-        upstream_base: &str,
-        request: &Request,
-    ) -> Result<Response>;
-}
-```
-
-Register a custom passthrough:
-
-```rust
-passthrough_registry.register("custom", my_passthrough_backend);
-```
-
-This is used for adding support for new agent wire formats that don't speak OpenAI-compatible JSON.
+The passthrough proxy (`apps/gateway/src/passthrough/mod.rs`) forwards native wire formats
+(Anthropic Messages, OpenAI Responses) for agents such as Claude Code and Codex. Its backend trait,
+`PassthroughBackend`, is crate-private (`pub(crate)`). A replacement proxy, such as a mesh-relayed
+or policy-augmented one, is a change inside the Gateway crate, not an external plugin.
 
 ## Related
 

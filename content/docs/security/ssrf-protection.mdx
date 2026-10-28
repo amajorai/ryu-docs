@@ -1,46 +1,55 @@
 ---
-title: "SSRF protection"
-description: "How Ryu guards outbound fetches against server-side request forgery, including cloud-metadata and homograph host attacks."
+title: "SSRF Protection"
+description: "How Core's guarded egress path protects outbound fetches from server-side request forgery (SSRF): blocked address ranges, internal and metadata host names, homograph hosts, and pinned connections."
 ---
 
-When a Core-owned feature fetches a user-or-model-supplied URL through the guarded egress path, it gets destination screening, connection pinning, redirect denial, and bounded responses. These guarantees belong to that transport boundary; a URL validation result or a separate provider/child-process client is not equivalent.
+When a Core-owned feature fetches a URL that a user or model supplied, it goes through the guarded egress path. That path screens the destination, pins the connection, denies redirects, and bounds the response. These guarantees belong to the transport. A URL that passed validation earlier, or a separate provider or child-process client, does not get them.
 
-The same sink-time rule applies to model/runtime downloads, skill archives, workflow webhooks, Core notifications, hosted-node delegation, and mail delivery. Artifact downloads require an integrity digest before executable bytes are installed; child-process crawlers and unpinned remote Git clones fail closed.
+The same check at the point of use applies to model and runtime downloads, skill archives, workflow webhooks, Core notifications, hosted-node delegation, and mail delivery. Artifact downloads need an integrity digest before executable bytes are installed. Child-process crawlers and unpinned remote Git clones fail closed.
 
-## Existing protections
+## Address and transport checks
 
+- Accepts only `https` and `http` URLs, and features whose policy turns off plain `http` (such as notification delivery) accept only `https`
 - Blocks loopback, private, link-local, CGNAT, and ULA address ranges on guarded requests
-- Pins guarded client connections to the validated IP, so DNS cannot be re-resolved to a different address after the check
-- Forbids redirects on guarded requests, so a redirect cannot bounce them to an internal target
+- Checks IPv6 forms that embed an IPv4 address (IPv4-mapped, NAT64, and IPv4-compatible) against the IPv4 rules
+- Pins guarded client connections to the validated IP, so DNS cannot re-resolve to a different address after the check
+- Forbids redirects on guarded requests, so a redirect cannot send them to an internal target
 - Caps guarded response bodies
 - Requires SHA-256 metadata before downloaded runtimes, tools, plugins, or MCP servers can be
   installed and executed
 
-## Added protections
+Features that use the shared guarded transport get these checks. Other outbound surfaces must use
+an equivalent broker or stay constrained. A URL screened earlier does not make them SSRF-safe.
 
-Features that use the shared guarded transport inherit these protections automatically. Other
-outbound surfaces must use an equivalent broker or remain explicitly constrained; they must not
-claim SSRF protection merely because a URL was screened earlier.
+## Host name checks
 
-### Cloud-metadata hostname denylist
+### Internal and cloud-metadata host names
 
-The `169.254.169.254` metadata IP was already blocked. The guard now also rejects the metadata *hostnames*, case-insensitive - a host equal to or ending in `metadata.google.internal` or `metadata.goog`, plus the bare host `metadata`. This closes the gap where a name resolves to the metadata endpoint through DNS rather than a literal IP.
+The address check blocks the `169.254.169.254` metadata IP. Before DNS runs, the host name check also rejects internal and metadata *host names* (case-insensitive, trailing dot ignored):
+
+| Rejected host | Examples |
+|---|---|
+| `localhost` and any `*.localhost` | `localhost`, `app.localhost` |
+| Any `*.local` or `*.internal` name | `printer.local`, `db.internal`, `metadata.google.internal` |
+| `metadata.goog` and its subdomains | `metadata.goog` |
+| The bare host `metadata` | `metadata` |
+
+This catches a name that resolves to an internal or metadata endpoint through DNS instead of a literal IP. The rules live in `crates/core/egress/src/lib.rs`.
 
 ### Homograph and hostile-host guard
 
 The guard rejects a host that:
 
-- contains non-ASCII characters
-- contains zero-width or bidi control characters
+- contains non-ASCII characters (this covers Unicode lookalikes, zero-width, and bidi control characters)
+- contains control characters or whitespace
 - fails to round-trip through IDNA / punycode encoding (a decode mismatch)
-- contains embedded control characters or whitespace
 
-This blocks lookalike-domain (homograph) attacks and hosts crafted with invisible or directional Unicode to disguise their real target.
+This blocks lookalike-domain (homograph) attacks and hosts that use invisible or directional Unicode to hide their real target.
 
 <Callout type="info">
 Use the guarded transport for server-side fetches. Provider-owned HTTP clients, browser/crawler
 navigation, command-line network tools, downloads, and sidecar callbacks need their own pinned
-egress boundary; a preflight check alone does not close DNS rebinding or redirect risks.
+egress boundary. A preflight check alone does not close DNS rebinding or redirect risks. Outbound content checks are covered in [Outbound DLP](/docs/security/outbound-dlp).
 </Callout>
 
 ## Related
@@ -49,6 +58,7 @@ egress boundary; a preflight check alone does not close DNS rebinding or redirec
   <DocCard href="/docs/security/outbound-dlp" />
   <DocCard href="/docs/security/network-binding-auth" />
   <DocCard href="/docs/security/trust-model" />
+  <DocCard href="/docs/gateway/security" />
+  <DocCard href="/docs/extend/mcp/security" />
+  <DocCard href="/docs/security/safe-actions" />
 </Cards>
-
-Continue with [Security](/docs/security), [Gateway security](/docs/gateway/security), [MCP security](/docs/extend/mcp/security), and [safe actions](/docs/security/safe-actions).

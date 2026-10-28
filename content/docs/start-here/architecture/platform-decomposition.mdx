@@ -1,16 +1,14 @@
 ---
 title: "Platform Decomposition"
-description: "How Ryu decomposes into self-contained capability packages — the apps-store model, the capability broker, the six proven patterns, and the full extraction map."
+description: "How Ryu splits into a minimal Core kernel and self-contained apps-store packages, how the capability broker picks a provider, and how each client mounts app UIs."
 ---
 
-Ryu's long-term architecture is a **minimal kernel plus self-contained sandboxed app/capability
-packages** — the "iPhone of AI" model. The Core kernel handles orchestration, sessions, and chat
-routing; everything else is a swappable package that the kernel discovers, resolves, and runs.
+Ryu is a **minimal kernel plus self-contained, sandboxed app packages**. The Core kernel handles
+orchestration, sessions, and chat routing. Other capabilities are swappable packages that the
+kernel discovers, resolves, and runs. For the conceptual layer map, see
+[Capability Layers](/docs/start-here/architecture/capability-layers).
 
-This page explains the decomposition model, the proven patterns, and the capability broker.
-For the full capability layer hierarchy, see [Capability Layers](/docs/start-here/architecture/capability-layers).
-
-## The vision
+## The model
 
 ```mermaid
 flowchart TB
@@ -25,7 +23,7 @@ flowchart TB
     A1["monitors app"]
     A2["workflows app"]
     A3["mail app"]
-    A4["skills app"]
+    A4["research app"]
     A5["...more"]
   end
 
@@ -40,52 +38,25 @@ flowchart TB
   Apps -->|"provides"| Kernel
 ```
 
-Each app is a directory under `apps-store/<app>/` containing:
+Each app is a directory under `apps-store/<app>/`. It contains a `manifest.json` and any of the
+other entries it needs:
 
 | File | Purpose |
 |---|---|
 | `manifest.json` | Manifest declaring runnables, permissions, sidecars, and activation events |
-| `backend/` | Sidecar binary crate (or library crate) |
+| `plugin.json` | Generated Agent Plugins projection of the manifest. Do not hand-edit it (see [Extension schemas and layouts](/docs/extend/develop/extensions/schemas-and-layouts)) |
+| `backend/` | Optional Rust backend crate that runs as a sidecar |
 | `sidecar/` | Optional external sidecar process |
-| `ui/` | Companion package (plain HTML/CSS, no `@ryu/ui` dependency) |
-| `tests/` | Integration and unit tests |
+| `ui/` | Optional Companion UI package, built as a single-file HTML bundle |
 
-## The six proven patterns
+## Shared contracts and sidecars
 
-The decomposition uses a small set of mechanical patterns, applied consistently:
+Shared wire types live in a pure-data contracts crate, `crates/core/kernel-contracts`. Core and each
+app depend on it, so neither side can drift from the manifest or wire format.
 
-### 1. Gate-not-move
-
-Instead of physically extracting code, gate access behind a trait or config key. The old code
-stays in Core but is only callable through the new abstraction. This lets you verify the new
-path without a risky big-bang move.
-
-### 2. Cfg-gate
-
-Feature-flag the old and new code paths. Ship both, default to the old, flip the flag in CI
-to test the new path. Roll back by flipping the flag, not by reverting code.
-
-### 3. Out-of-process sidecar
-
-Spawn the capability as a separate process. Core communicates over HTTP or a local socket. The
-sidecar owns its own state, its own binary, and its own release cycle. Core downloads,
-checksum-verifies, starts, and health-checks it.
-
-### 4. Contracts crate
-
-Extract the shared types into a pure-data crate (`crates/core/kernel-contracts`). Both Core and
-the app depend on the contracts crate, so neither can drift from the wire format.
-
-### 5. Verify-every-wave
-
-Each extraction wave ships with an integration test suite (`crates/testing/integration`) that
-proves the old path still works and the new path produces identical results. A wave is not done
-until the tests pass.
-
-### 6. Adversarial verification
-
-After each wave, a separate agent reviews the diff for logic changes, accidental coupling, and
-missed callers. The reviewer is a different model than the one that wrote the code.
+An app that ships a `backend/` or `sidecar/` runs as a separate process. Core starts it,
+health-checks it, and proxies its routes through `/api/ext/:plugin_id/*rest`. The sidecar owns its
+state and its binary.
 
 ## Performance boundary
 
@@ -108,24 +79,31 @@ A plugin declares:
 
 ```json
 {
-  "requires": { "capabilities": ["rag"] },
+  "requires": { "capabilities": [{ "capability": "rag", "min_version": "1.0" }] },
   "provides": [
     {
       "capability": "rag",
       "version": "1.0",
       "sidecar": "rag-sidecar",
-      "route": "/api/rag/*",
+      "route": "/query",
       "grant": "sidecar:process"
     }
   ]
 }
 ```
 
-The registry resolves this to a concrete provider app using the priority:
+The registry resolves this to a concrete provider app in this order:
 
-1. **Override** — an explicit user override wins.
-2. **Single provider** — if only one app provides the capability, use it.
-3. **Ambiguous** — if multiple providers exist and no override is set, refuse with an error message listing the candidates.
+1. **No provider** - resolution fails with `capability_unprovided`.
+2. **Override** - an explicit user override wins. The override must name one of the providers.
+3. **Single provider** - if only one app provides the capability, the broker uses it.
+4. **Two or more providers, no override** - a strict capability (the default, used by `rag` and
+   `engines`) fails with `capability_ambiguous` and lists the candidates. A capability is
+   selectable only when every provider declares `selectable` (for example `web.search`,
+   `browser.control`, or `memory`). The broker then picks the provider that declares `default`,
+   else the lexicographically lowest app id.
+5. **Version floor** - the chosen provider's capability `version` must satisfy the consumer's
+   `min_version`.
 
 The broker then lowers the abstract edge to a bare app-id edge so the existing dependency
 graph handles enable/disable/cycle detection unchanged.
@@ -142,30 +120,21 @@ flowchart LR
   Broker -.->|"alternative"| ProviderB
 ```
 
-## What has been extracted
+## What runs out of process
 
-The decomposition is substantially complete: every feature app (mail, teams, research, clips,
-finetune, quests, healing, monitors, dashboards, meetings, recipes) now serves its `/api/*` surface
-out-of-process as a sidecar, and the remaining work sits in the Gateway, frontend, and platform
-layers.
-
-### Not decomposed (by design)
-
-| Component | Why it stays in Core |
-|---|---|
-| Scheduler | Kernel subsystem, needed by everything |
-| L0/L1/L2 primitives | Consumers still in-crate; extraction deferred to later waves |
+Feature apps such as mail, teams, research, clips, finetune, quests, healing, monitors,
+dashboards, meetings, and recipes ship a `backend/` under `apps-store/<app>/` and serve their API
+as a sidecar. The scheduler stays in Core because every subsystem depends on it.
 
 ## How apps are surfaced
 
-Each surface (desktop, web, native, TUI) mounts app UIs differently:
+Each client surface mounts app UIs differently:
 
 | Surface | Mechanism | Implementation |
 |---|---|---|
-| **Desktop** | Plugin companion host (iframe) | `PluginCompanionPage` renders plugin-declared companion surfaces |
-| **Web** | Next Route Handler proxy | `@ryu/app-host` proxies app routes through Next.js |
-| **Native** | WebView extension host | `WebViewExtensionHost` renders app UIs in a WebView |
-| **TUI** | Manifest-declared commands | Plugins register TUI commands via `activation_events` |
+| **Desktop** | Plugin companion host (iframe) | `PluginCompanionPage` renders plugin-declared Companion UI surfaces |
+| **Web** | Plugin host panel | `@ryu/app-host` `ExtensionHost` mounts app UIs and calls the app's `/api/ext/*` route |
+| **Mobile** | WebView extension host | `WebViewExtensionHost` renders app UIs in a WebView |
 
 ```mermaid
 flowchart TB
@@ -187,11 +156,7 @@ flowchart TB
     N1["WebViewExtensionHost"]
   end
 
-  subgraph TUI2["TUI"]
-    T1["manifest commands"]
-  end
-
-  Apps --> Desktop & Web & Native & TUI2
+  Apps --> Desktop & Web & Native
 ```
 
 ## Related

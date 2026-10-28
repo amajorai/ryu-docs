@@ -1,56 +1,83 @@
 ---
-title: "Pairing and provisioning"
-description: "How a device pairs with your account over QR and BLE, the GATT provisioning and relay services, the canonical UUID table, and the pairing trust model."
+title: "Pairing and Provisioning"
+description: "How to pair a device with your node from the mobile app (compare a 6-digit code, press the device button), with timeouts, troubleshooting messages, and the BLE GATT UUID table."
 ---
 
-Pairing binds an unprovisioned device to your account and hands it everything it needs to connect: a `device_token`, the node URL, and (optionally) WiFi credentials. The flow uses a QR code and a BLE provisioning channel, driven by the Ryu mobile app.
+Pairing binds an unprovisioned device to your node and hands it everything it needs to connect: its device token, the node URL, the node's key, and (optionally) WiFi credentials. The Ryu mobile app drives it over BLE. With RHP v1.1, pairing is **press to confirm**. You compare a short code between the app and the device, then press the device button. Only then does your node issue credentials, encrypted so that only that device can read them.
 
 ## The pairing flow
 
 <Steps>
   <Step>
-    **Unprovisioned boot.** The device generates a `device_id` and a `pairing_nonce`, starts BLE GATT advertising the RHP Provisioning Service, and (watch and desk) renders a QR code encoding `ryu-pair://<device_id>?n=<nonce>&t=<device_type>`. The necklace has no display, so it advertises the same payload in a GATT characteristic.
+    **Find the device.** An unprovisioned device advertises over BLE as `Ryu-<type>-<last 4 characters of its id>`. The watch and desk also show a QR code. In the Ryu mobile app, signed in to your node, open Devices then Pair and scan the QR. For the necklace, or any device without a QR, choose **Pair without a QR code** and pick the device from the list. Allow camera access to scan. If you deny access, use **Cancel** to leave pairing, enable camera access in your device settings, then reopen Pair.
   </Step>
   <Step>
-    **App scans.** In the Ryu mobile app, signed in with better-auth, you open Devices then Pair and scan the QR (or pick the device over BLE).
+    **WiFi (optional).** Enter the WiFi network the device should use for direct (Mode B) connections, or skip it to use the phone relay only. Filling it in first lets the device finish as soon as you press its button. The device stores a network name of up to 32 bytes and a password of 8 to 63 bytes. Accented and non-Latin characters take 2 to 4 bytes each, so the app tells you before pairing starts if a password is too long.
   </Step>
   <Step>
-    **App pairs with the node.** The app calls `POST /api/hardware/pair` with `{ device_id, pairing_nonce, device_type }`. The node verifies the nonce, registers the device to your account, and returns `{ device_token, node_url }`.
+    **Compare the code.** The app connects to the device and starts the pairing with your node. The watch and desk show a 6-digit code such as `394 867`. The necklace beeps it. The app shows the code your node computed. Tap **Codes match** only if they are the same, otherwise tap **Codes don't match**.
   </Step>
   <Step>
-    **Provision over BLE.** The app writes to the device's provisioning characteristic: `{ device_token, node_url, wifi_ssid?, wifi_psk?, prefs }`. The device persists this to NVS.
+    **Press the device button.** After the code appears, press the device's button once to confirm. The device only accepts the press after it has shown or beeped the code.
   </Step>
   <Step>
-    **Connect.** The device tries Mode B (direct WiFi) if creds are present and the node is reachable, otherwise Mode A (relay through the app). The pairing characteristic closes and the device reboots into normal operation, using `device_token` as the Bearer on the WebSocket upgrade.
+    **Done.** Your node checks the device's confirmation, then sends back the device's credentials encrypted to that device, plus a relay token for the phone. The app writes the encrypted credentials to the device, which saves them and restarts. The app shows **Paired** once the device connects, or **Paired - waiting for the device** if it has not checked in within a minute.
   </Step>
 </Steps>
 
+After pairing, the device and your node pin each other's keys and talk over an [end-to-end encrypted session](/docs/hardware/protocol#the-encrypted-device-session), whether the device connects directly over WiFi or through the phone.
+
+### The necklace beeps
+
+The necklace has no screen, so it plays its code. It starts with two rising tones, then plays each of the six digits in turn: a digit is that many short beeps, and zero is one long beep. There is a longer pause after the third digit. Tap **Replay** in the app to hear it again. If you cannot hear or compare the beeps, you can choose **I can't verify**. The device still pairs but is permanently marked **Unverified**. See [Hardware Security](/docs/hardware/security#the-necklace-and-i-cant-verify).
+
+### Timeouts
+
+- The pairing on your node expires after **3 minutes** if it is not completed.
+- After the code appears, the device accepts the button press for **60 seconds**.
+- After the press, the app has **2 minutes** to deliver the encrypted credentials.
+
+If any step times out or is cancelled, the device starts a fresh attempt with a new code. The QR code stays the same, so you can just try again.
+
+## Troubleshooting
+
+| Message | What it means |
+|---|---|
+| **Update the Ryu app** | The device runs v1.1 firmware, which refuses the old pairing method. Update the mobile app and pair again. |
+| **Update your Ryu node to pair this device** | Your node predates v1.1 pairing. Update Ryu on the node, then pair again. |
+| **Possible interference** | The key the device reported over BLE does not match its QR code. Pairing stops. Move away from other BLE devices and try again. |
+| **Codes don't match** | You saw different codes. Nothing was issued; pair again. If it keeps happening, something nearby may be interfering. |
+| **Node identity changed** (on the device) | Your node's key is no longer the one the device paired with. Remove the device in the app, hold its button for 10 seconds to reset it, and pair again. |
+| **Legacy** badge | The device was paired with older firmware or an older app and uses the v1 protocol. Update the firmware, remove the device, hold its button for 10 seconds, and pair again. |
+
+Devices with older firmware (a QR code without a key in it) still pair through the legacy v1 method and are badged **Legacy** in the app.
+
 ## GATT services
 
-Pairing and the Mode A relay each have their own BLE GATT service. The phone is the BLE central; the device is the peripheral.
+Pairing and the Mode A relay each have their own BLE GATT service. The phone is the BLE central, and the device is the peripheral. v1.1 adds no new services or characteristics.
 
 ### Provisioning service (`RHP_PROV`)
 
 Used only while pairing.
 
-- `pairing_info` (read / notify) - device_id, nonce, and type.
-- `provision` (write, chunked) - the token, URL, and WiFi JSON.
-- `status` (notify) - the provisioning result.
+- `pairing_info` (read / notify) - the device id, nonce, type, and the device's public key.
+- `provision` (write, chunked) - pairing steps from the app, including the encrypted credentials.
+- `status` (notify) - pairing progress from the device, including its confirmation after the button press.
 
 ### Relay service (`RHP_RELAY`)
 
-Used at runtime in Mode A. The phone bridges these characteristics to and from the node WebSocket frames one to one.
+Used at runtime in Mode A. For a v1.1 device the phone forwards encrypted packets over the control characteristics and cannot read them. For a legacy device it bridges the JSON and Opus characteristics to the node WebSocket one to one.
 
-- `ctrl_up` (notify) - JSON control, device to node.
-- `ctrl_down` (write) - JSON control, node to device.
-- `audio_up` (notify) - Opus, device to node.
-- `audio_down` (write) - Opus, node to device.
+- `ctrl_up` (notify) - device to node.
+- `ctrl_down` (write) - node to device.
+- `audio_up` (notify) - Opus, device to node (legacy only).
+- `audio_down` (write) - Opus, node to device (legacy only).
 
-The direction rule is simple: every `*_up` characteristic is a notify (the phone subscribes), and every `*_down` is a write (the phone writes).
+Every `*_up` characteristic is a notify (the phone subscribes), and every `*_down` is a write (the phone writes).
 
 ## Canonical UUID table
 
-These 128-bit UUIDs are the single source of truth. Both sides use them verbatim - the firmware (`apps/hardware/firmware/shared/ble_prov/ble_prov.c`) and the app (`apps/native/lib/hardware/ble.ts`). A divergence here breaks discovery, so never edit one side only.
+These 128-bit UUIDs are the single source of truth. The firmware and the mobile app both use them verbatim. A divergence here breaks discovery, so never edit one side only.
 
 | Service / characteristic | Direction (firmware) | UUID |
 |---|---|---|
@@ -64,8 +91,8 @@ These 128-bit UUIDs are the single source of truth. Both sides use them verbatim
 | `RHP_RELAY` audio_up | notify | `7e1a0002-9b34-4d21-8f5a-2c6b1d3e0004` |
 | `RHP_RELAY` audio_down | write | `7e1a0002-9b34-4d21-8f5a-2c6b1d3e0005` |
 
-<Callout type="warn">
-  The pair endpoint trusts `device_id` entropy plus the nonce. It has no proof-of-control: anyone who can reach the endpoint and present a valid `device_id` and nonce could attempt to pair. That is safe on a LAN or tailnet, where the endpoint is not publicly reachable. **Before internet-exposing the pair endpoint**, add out-of-band verification (a code the user confirms in-app) to stop a race-to-pair. See [Security](/docs/hardware/security).
+<Callout type="info">
+  Pairing needs an app that is already signed in to your node, a matching code, and a press on the device itself. For a v1.1 device, someone who can reach your node but is not holding the device cannot complete a pairing, and the phone never learns the device's own token. Legacy pairing for older firmware has no code or press check, so keep your node off the open internet while you still use it. See [Hardware Security](/docs/hardware/security#pairing-press-to-confirm) for the full model.
 </Callout>
 
 ## Related
@@ -75,4 +102,3 @@ These 128-bit UUIDs are the single source of truth. Both sides use them verbatim
   <DocCard href="/docs/hardware/deployment" />
   <DocCard href="/docs/hardware/security" />
 </Cards>
-

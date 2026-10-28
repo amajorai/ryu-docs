@@ -1,5 +1,7 @@
 "use server";
 
+import { z } from "zod";
+
 import {
   type ActionResponse,
   actionResponse,
@@ -10,9 +12,12 @@ import {
 } from "@/components/feedback/schema";
 import { isDocsLocale } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
+import { reserveFeedbackSubmission } from "./docs-feedback-budget";
 
-const DEFAULT_GITHUB_OWNER = "amajorai";
-const DEFAULT_GITHUB_REPOSITORY = "ryu";
+// The public repository that receives docs feedback issues. Fixed, not
+// per-deployment: only DOCS_FEEDBACK_GITHUB_TOKEN comes from the environment.
+const FEEDBACK_GITHUB_OWNER = "amajorai";
+const FEEDBACK_GITHUB_REPOSITORY = "ryu";
 const FEEDBACK_EMAIL = "hello@ryuhq.com";
 
 type DocsFeedback = PageFeedback | BlockFeedback;
@@ -52,22 +57,15 @@ function fallbackUrl(feedback: DocsFeedback, pageUrl: URL): string {
   return `mailto:${FEEDBACK_EMAIL}?${params.toString()}`;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+const githubIssueSchema = z.object({ html_url: z.string() });
 
 async function sendToGitHub(
   feedback: DocsFeedback,
   pageUrl: URL,
   token: string,
 ): Promise<string> {
-  const owner =
-    process.env.DOCS_FEEDBACK_GITHUB_OWNER?.trim() || DEFAULT_GITHUB_OWNER;
-  const repository =
-    process.env.DOCS_FEEDBACK_GITHUB_REPOSITORY?.trim() ||
-    DEFAULT_GITHUB_REPOSITORY;
   const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/issues`,
+    `https://api.github.com/repos/${encodeURIComponent(FEEDBACK_GITHUB_OWNER)}/${encodeURIComponent(FEEDBACK_GITHUB_REPOSITORY)}/issues`,
     {
       method: "POST",
       headers: {
@@ -89,12 +87,12 @@ async function sendToGitHub(
     throw new Error(`GitHub feedback request failed with ${response.status}`);
   }
 
-  const payload: unknown = await response.json();
-  if (!isRecord(payload) || typeof payload.html_url !== "string") {
+  const payload = githubIssueSchema.safeParse(await response.json());
+  if (!payload.success) {
     throw new Error("GitHub feedback response did not include a URL");
   }
 
-  return payload.html_url;
+  return payload.data.html_url;
 }
 
 function isAllowedPageUrl(pageUrl: URL): boolean {
@@ -133,7 +131,7 @@ async function submitFeedback(feedback: DocsFeedback): Promise<ActionResponse> {
 
   const fallback = fallbackUrl(feedback, pageUrl);
   const token = process.env.DOCS_FEEDBACK_GITHUB_TOKEN?.trim();
-  if (!token) {
+  if (!token || !reserveFeedbackSubmission(feedbackBody(feedback, pageUrl))) {
     return actionResponse.parse({
       destinationUrl: fallback,
       submitted: false,

@@ -1,15 +1,16 @@
 ---
-title: Durable agent harness
+title: Durable Agent Harness
 description: Start, resume, cancel, and observe a Ryu agent run through one session and event contract.
 ---
 
-The durable harness is the common control surface for Ryu agents. A **session** binds a runnable to
-conversation history and an execution profile. Each call inside that session creates an idempotent
-**run** with a replayable, ordered event stream.
+The durable harness is the shared control surface for Ryu agent runs, exposed as
+`client.harness` in [`@ryuhq/client`](/docs/extend/develop/sdk/client) (`packages/client/src/harness.ts`).
+A **session** binds a runnable to conversation history and an execution profile. Each call inside
+that session creates an idempotent **run** with a replayable, ordered event stream.
 
-The same run can be observed by a desktop, web app, CLI, messaging adapter, or another TypeScript
-process. Core remains the execution owner; Gateway policy still governs models, tools, budgets, and
-network access.
+Desktop, a web app, `ryu-cli`, a messaging adapter, or another TypeScript process can observe the
+same run. Core executes the run. Gateway policy governs models, tools, budgets, and network
+access.
 
 ## Install
 
@@ -38,7 +39,7 @@ const session = await client.harness.createSession({
     worktreeIsolation: true,
     network: "inherit",
     sandbox: "inherit",
-    approval: "on_risk",
+    approval: "inherit",
   },
 });
 ```
@@ -83,9 +84,12 @@ for await (const event of agent.stream("Continue the review.")) {
 }
 ```
 
-This mode delegates execution to the Core-registered runnable, so local SDK-only tools are not
-silently copied into the server run. Use the ordinary SDK loop when the tool implementation should
-stay in the calling process.
+With `sessionId`, Core executes the registered runnable. Local SDK-only tools are not copied into
+the server run, and an agent configured with [middleware](/docs/extend/develop/sdk/agent-middleware)
+yields an error in that mode. Use the
+ordinary SDK loop when the tool implementation must stay in the calling process.
+
+`client.harness.run(sessionId, input, options)` combines `startRun` and `events` in one call.
 
 `idempotencyKey` is scoped to the session. Retrying the same request returns the original run and
 does not dispatch a duplicate turn. A run's terminal event is one of `run_completed`, `run_failed`,
@@ -105,11 +109,11 @@ for await (const event of client.harness.events(started.run.id, cursor)) {
 }
 ```
 
-The event journal is durable and encrypted at rest by Core. The stream records the accepted input
-boundary as a digest and bounded message count, then emits text deltas, tool lifecycle metadata,
-tool-result digests, approval requests, checkpoints, and terminal outcomes through the same event
-vocabulary across transports. User content and tool payloads are not copied into this projection;
-tool arguments and results are represented by hashes.
+Core stores the event journal durably and encrypts it at rest. The stream records the accepted
+input as a digest and a bounded message count. It then emits text deltas, tool lifecycle metadata,
+tool-result digests, approval requests, checkpoints, and terminal outcomes, with the same event
+vocabulary on every transport. User content and tool payloads are not copied into this projection.
+Hashes stand in for tool arguments and results.
 
 ## Resume with a new attempt
 
@@ -123,10 +127,63 @@ const retry = await client.harness.startRun(
 );
 ```
 
-The new run has an incremented `attempt` and `parentRunId`. Core rejects a resume id from another
-session. If Core restarts while a run is still `running` or `awaiting_approval`, it appends a
-terminal `run_interrupted` event before serving the session again, so a client never waits forever
-on a stale live cursor.
+The new run has an incremented `attempt` and a `parentRunId`. Core rejects a resume id from another
+session. If Core restarts while a run is `running` or `awaiting_approval`, it appends a terminal
+`run_interrupted` event before it serves the session again. A client never waits on a stale live
+cursor.
+
+## Send a message while a run is active
+
+A session runs one turn at a time. When a new run is started while another run in the same
+session is still `running` or `awaiting_approval` (a "double-text"), `multitaskStrategy` decides
+what happens:
+
+| Strategy | Behavior |
+|---|---|
+| `reject` (default) | The node answers `409 Conflict`. It also refuses while other runs are queued, so a rejected run never jumps the queue. |
+| `enqueue` | The run is stored as `pending` in the session's ordered queue and starts after every run ahead of it has finished. |
+| `interrupt` | The active run is stopped at its next cancellation point and ends as `run_canceled`; its partial reply stays in the transcript. The new run starts ahead of any `enqueue` runs. |
+| `rollback` | Like `interrupt`, but the turns the stopped run wrote are removed from the conversation before the new run starts. |
+
+```typescript
+const followUp = await client.harness.startRun(
+  session.id,
+  { prompt: "Actually, only look at the auth tests." },
+  { multitaskStrategy: "interrupt" },
+);
+
+if (followUp.queued) {
+  // `followUp.displacedRunId` is the run being stopped (interrupt/rollback).
+}
+
+for await (const event of client.harness.events(followUp.run.id)) {
+  if (event.type === "run_queued") {
+    console.log(`Waiting behind ${event.activeRunId} (position ${event.position})`);
+  }
+  // `run_started` follows once the run leaves the queue.
+}
+```
+
+A queued run's first event is `run_queued`; `run_started` and `input_accepted` follow when it is
+dispatched. With no active run, every strategy starts the run immediately. Cancel a queued run
+with `client.harness.cancel(runId)`; it ends as `run_canceled` without affecting the active run.
+
+The queue is durable: queued runs survive a node restart. After a restart, runs queued in a
+session that belongs to a signed-in person or organization end as `run_failed` because they can
+only run with their author's credentials; submit them again. Runs in sessions without an owner
+continue automatically.
+
+The SDK `Agent` accepts the same option for `sessionId` runs:
+
+```typescript
+const agent = new Agent({
+  name: "reviewer",
+  model: "the-model-is-resolved-by-core",
+  core: { baseUrl: "https://your-ryu-node.example", token: nodeToken },
+  sessionId: session.id,
+  multitaskStrategy: "enqueue",
+});
+```
 
 ## Cancel a run
 
@@ -134,18 +191,21 @@ on a stale live cursor.
 await client.harness.cancel(started.run.id);
 ```
 
-Cancellation is authorization-checked against the session's conversation and forwarded to the
-active agent transport when that transport supports cancellation.
+Core checks cancellation against the session's conversation ACL and forwards it to the active
+agent transport when that transport supports cancellation.
 
-When an ACP runtime emits `approval_requested`, use the request id from the event with the existing
-permission boundary. The event carries the runtime's option ids; send the exact id the user chose:
+## Resolve an approval
+
+When an ACP runtime emits `approval_requested`, pass the event's `approvalId` to the permission
+boundary (`POST /api/chat/permission`). The event carries the runtime's option ids. Send the exact
+id the user chose:
 
 ```typescript
 await client.harness.resolvePermission(event.approvalId, selectedOptionId);
 ```
 
 Omitting the option id rejects the request. An SDK `Agent` can resolve the same boundary through
-`approvalHandler`; return `true` to select the first allow option, `false` to reject, or a specific
+`approvalHandler`. Return `true` to select the first allow option, `false` to reject, or a specific
 runtime option id. If no handler is configured, the agent yields the approval event and leaves the
 run in `awaiting_approval` so another UI can resolve it. The SDK also exposes
 `agent.resolvePermission(requestId, optionId)` and `agent.streamRun(runId, after)` when the
@@ -156,16 +216,20 @@ approval UI lives outside the agent loop.
 | Profile | Meaning |
 |---|---|
 | `local` | Use the selected local workspace without allocating a worktree. |
-| `worktree` | Allocate or reuse an isolated Git worktree for the session; `cwd` must be an existing Git repository. |
-| `remote` | Reserved for a configured remote execution adapter. |
-| `cloud` | Reserved for a configured cloud execution adapter. |
+| `worktree` | Allocate or reuse an isolated Git worktree for the session. `cwd` is required and must be an existing Git repository. |
+| `remote` | Reserved for a remote execution adapter. |
+| `cloud` | Reserved for a cloud execution adapter. |
 
-Remote and cloud profiles are rejected by a node that does not advertise those adapters; they do
-not silently fall back to local execution. On the current local/worktree adapter, `network`,
-`sandbox`, and `approval` must be `inherit`; this prevents a caller from believing a setting was
-enforced when the selected runtime does not expose that control. Future execution adapters may
-advertise stricter values. A supplied `cwd` must be an existing directory. Profile fields never
-bypass Core or Gateway policy.
+A supplied `cwd` must be an existing directory. Profile fields never bypass Core or Gateway policy
+(`apps/core/src/server/harness.rs`).
+
+<Callout type="warn">
+  Core rejects `remote` and `cloud` profiles with an error. They never fall back to local
+  execution. On `local` and `worktree`, `network`, `sandbox`, and `approval` must be `inherit`.
+  The client types accept other values (`denied`, `gateway_only`, `allow`, `workspace`, `strict`,
+  `on_risk`, `always`, and `never`), but Core rejects them, so a caller never assumes a control was enforced
+  when the runtime does not expose it.
+</Callout>
 
 ## REST and SSE endpoints
 
@@ -178,12 +242,14 @@ The client wraps these protected Core endpoints:
 | `GET` | `/api/harness/sessions/:id/children` | List child-agent sessions |
 | `PUT` | `/api/harness/sessions/:id/native` | Bind a native runtime session id |
 | `GET` | `/api/harness/sessions/:id/runs` | List attempts |
-| `POST` | `/api/harness/sessions/:id/runs` | Start an idempotent run |
+| `POST` | `/api/harness/sessions/:id/runs` | Start an idempotent run (optionally queued with `multitaskStrategy`) |
 | `GET` | `/api/harness/runs/:id` | Read run state |
 | `GET` | `/api/harness/runs/:id/events?after=N` | Replay and follow events |
 | `POST` | `/api/harness/runs/:id/cancel` | Request cancellation |
+| `POST` | `/api/chat/permission` | Resolve an approval request (`resolvePermission`) |
 
-Every endpoint is scoped to the session's conversation ACL. A node token is not a provider key;
-keep provider credentials in the Gateway's existing secret boundary.
+Every harness endpoint is scoped to the session's conversation ACL. A node token is not a provider
+key. Keep provider credentials in the Gateway.
 
-Continue with [SDK reference](/docs/extend/develop/sdk), [client library](/docs/extend/develop/sdk/client), [Core client](/docs/extend/develop/sdk/core-client), [conversations and sessions](/docs/core/conversations-sessions), and [API reference](/docs/extend/develop/api-reference).
+For how sessions map to conversations, see [Conversations and sessions](/docs/core/conversations-sessions).
+For every endpoint schema, see the [API reference](/docs/extend/develop/api-reference).

@@ -1,0 +1,381 @@
+---
+title: "Sites SDK Quickstart"
+description: "Create, save, and deploy a Site on a standalone Sites process with curl, @ryuhq/services, the ryu_sdk.services Python client, the ryu-services CLI, and its MCP tools"
+tags: ["sites", "websites", "sdk", "cli", "mcp", "standalone"]
+---
+
+<Callout type="warn">
+Early access: self-hosted process only, and standalone mode needs a ryu-sites release after 0.4.0, which is not published yet; there is no Ryu-hosted offer.
+</Callout>
+
+This page makes a first call to a standalone [Ryu Sites](/docs/standalone/sites)
+process with curl, with the `@ryuhq/services` TypeScript SDK, with the `ryu_sdk.services` Python client, with the
+`ryu-services` command line, and with its MCP tools. The full management
+contract is on [Ryu Sites API](/docs/standalone/sites-api).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+<Callout type="warn">
+Standalone mode needs a ryu-sites release after 0.4.0, which is not published
+yet: the published `amajorai/ryu-sites` 0.4.0 runs only as the Core-managed
+sidecar. Until a later release is out, there is no standalone Sites process to
+run these samples against; see
+[Start the standalone service](/docs/standalone/sites#start-the-standalone-service).
+</Callout>
+
+## What you need
+
+- **A standalone Sites process that you run.** Follow
+  [Start the standalone service](/docs/standalone/sites#start-the-standalone-service)
+  once a ryu-sites release after 0.4.0 is published.
+  That page starts the management listener on `http://127.0.0.1:8021` and the
+  visitor listener on port 8022.
+- **Its management bearer**: the `RYU_SITES_API_TOKEN` you started it with.
+  A Core-issued token is never accepted by a standalone process.
+- **Public Sites allowed on the process, to open what you deploy.** The
+  operator allows them with `RYU_SITES_PUBLIC=1` (or the runtime config's
+  `publicEnabled` when that variable is unset). A new
+  Site is private, and without an OpenID Connect client (`RYU_SITES_ISSUER`
+  and its client settings) nobody can sign in on the visitor origin, so a
+  private Site serves nobody: its pages answer `403` with a "This site is
+  private" page. With public Sites allowed, you can set a Site's audience to
+  `public`, as in [Open the Site to visitors](#open-the-site-to-visitors).
+  `ryu-services sites status` shows `publicEnabled` and `identityAvailable`.
+
+The SDK talks to the management listener only. Deployed pages and their
+browser routes are served on the visitor listener, which the SDK never calls.
+
+## Configure
+
+The SDK and the CLI read these environment variables. Options passed to
+`new Ryu()` win over them, and `new Ryu({ env: false })` turns env reads off.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RYU_SITES_URL` | none | Sites management listener origin (no default). |
+| `RYU_SITES_API_KEY` | none | Sites management bearer token. |
+
+```sh
+export RYU_SITES_URL="http://127.0.0.1:8021"
+export RYU_SITES_API_KEY="$RYU_SITES_API_TOKEN"   # the token the process started with
+```
+
+Sites has no default URL, so a missing `RYU_SITES_URL` gives a
+`RyuConfigurationError` that names the variable. The bearer is sent only to
+`RYU_SITES_URL`.
+
+`RYU_SITES_URL` must be the management listener (`RYU_SITES_PORT`, 8021 on the
+setup page), not the visitor listener (`RYU_SITES_VISITOR_PORT`, 8022). The
+visitor listener answers management calls with `404` "Site is not deployed".
+In both SDKs, that error's `hint` says that `RYU_SITES_URL` looks like the
+visitor listener.
+
+## First call with curl
+
+Create a Site, save a version with the revision you read, then deploy it.
+Use the `id` from the create response as `<site-id>`. The save response is the
+Site; its new version is the last entry in `versions`, so use that entry's
+`id` as `<version-id>`.
+
+```sh
+curl -sS -X POST "$RYU_SITES_URL/api/sites/projects" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Launch notes","slug":"launch-notes"}'
+
+curl -sS -X POST "$RYU_SITES_URL/api/sites/projects/<site-id>/versions" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"html":"<!doctype html><title>Launch</title><h1>Launch notes</h1>","message":"First draft","expectedRevision":0}'
+
+curl -sS -X POST "$RYU_SITES_URL/api/sites/projects/<site-id>/deploy" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"versionId":"<version-id>","expectedRevision":1}'
+```
+
+## First call with the SDK
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors. `sites.deploy()` reads the
+Site's revision, saves the HTML as a version with that `expectedRevision`,
+then deploys it:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_SITES_URL and RYU_SITES_API_KEY.
+const ryu = new Ryu({ result: "object" });
+
+const { data: site, error: createError } = await ryu.sites.projects.create({
+  name: "Launch notes (SDK)",
+  slug: "launch-notes-sdk",
+});
+
+if (site) {
+  const { data, error } = await ryu.sites.deploy({
+    projectId: site.id,
+    html: "<!doctype html><title>Launch</title><h1>Launch notes</h1>",
+    message: "First draft",
+  });
+  if (error) {
+    console.error(error.code, error.message, error.details);
+  } else {
+    console.log(data.url, data.version?.id, data.project.settings.audience);
+  }
+} else {
+  // A slug that is already taken, such as one the curl step used, is 409 conflict.
+  console.error(createError.code, createError.message);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_SITES_URL and RYU_SITES_API_KEY.
+ryu = Ryu(result="object")
+
+site, create_error, _ = ryu.sites.projects.create({"name": "Launch notes (SDK)", "slug": "launch-notes-sdk"})
+
+if site:
+    data, error, meta = ryu.sites.deploy(
+        {
+            "projectId": site["id"],
+            "html": "<!doctype html><title>Launch</title><h1>Launch notes</h1>",
+            "message": "First draft",
+        }
+    )
+    if error:
+        print(error.code, error.message, error.details)
+    elif data:
+        print(data["url"], data["version"] and data["version"]["id"], data["project"]["settings"]["audience"])
+elif create_error:
+    # A slug that is already taken, such as one the curl step used, is 409 conflict.
+    print(create_error.code, create_error.message)
+```
+
+These samples use the slug `launch-notes-sdk`, because the curl step above
+already took `launch-notes`; a slug is unique on a Sites process, and reusing
+one answers `409 conflict`. Delete a Site before you run its sample again,
+as in [Clean up](#clean-up).
+
+## Open the Site to visitors
+
+The first deploy keeps the Site private. In standalone mode a private Site is
+open only to visitors who sign in through an OpenID Connect client that the
+operator configured; without one, nobody can open the printed URL. To serve the
+Site to everyone, the operator must allow public Sites (`RYU_SITES_PUBLIC=1`,
+or the runtime config's `publicEnabled`; `status()` reports `publicEnabled`), then set the
+Site's audience to `public`. `projects.makePublic()` does that, and
+`projects.updateSettings()` changes any other settings:
+
+```ts tab="Node"
+const { data: opened, error: openError } =
+  await ryu.sites.projects.makePublic("<site-id>");
+if (openError) {
+  // While public Sites are off this is 403 policy_denied, with a hint.
+  console.error(openError.code, openError.message);
+} else {
+  console.log(opened.settings.audience, opened.revision);
+}
+
+// Or change other settings; the ones you leave out are kept.
+const { error: settingsError } = await ryu.sites.projects.updateSettings(
+  "<site-id>",
+  { allowRemix: true },
+);
+if (settingsError) {
+  console.error(settingsError.code, settingsError.message);
+}
+```
+
+```python tab="Python"
+opened, open_error, _meta = ryu.sites.projects.make_public("<site-id>")
+if open_error:
+    # While public Sites are off this is 403 policy_denied, with a hint.
+    print(open_error.code, open_error.message)
+elif opened:
+    print(opened["settings"]["audience"], opened["revision"])
+
+# Or change other settings; the ones you leave out are kept.
+_site, settings_error, _settings_meta = ryu.sites.projects.update_settings("<site-id>", {"allowRemix": True})
+if settings_error:
+    print(settings_error.code, settings_error.message)
+```
+
+```sh tab="CLI"
+# <site-id-or-slug>: the create command on the Sites CLI and MCP page makes launch-notes-cli.
+ryu-services sites settings <site-id-or-slug> --audience public
+ryu-services sites settings <site-id-or-slug> --allow-remix on
+```
+
+The settings route, `PUT /api/sites/projects/{id}/settings`, replaces every
+setting at once. So the SDK and the CLI read the Site first, send its current
+settings with your changes laid over them, and send the `revision` they read
+as `expectedRevision`. Pass `{ expectedRevision }` (`expected_revision=` in
+Python, `--expected-revision` in the CLI) to refuse the change with
+`409 conflict` unless the Site is still at the revision you reviewed. A failed
+call names its step, `read` or `settings`, in `error.details.step`. The
+`database` and `extensions` settings have their own routes, so
+`updateSettings()` refuses them before sending anything. `null` clears
+`workspaceId` or `spaceId` and is refused on every other setting.
+
+Some settings depend on how the operator runs the process:
+
+- `invited`, `workspace`, `editors`, and `optionalSignIn` need the process's
+  OpenID Connect sign-in (`RYU_SITES_ISSUER` and its client settings). Without
+  it the route answers `503 unavailable`, which the SDK does not retry,
+  because only an operator change fixes it. With sign-in configured,
+  `updateSettings("<site-id>", { audience: "invited", viewers: ["ada@example.com"] })`
+  (or `ryu-services sites settings <id> --audience invited --viewer ada@example.com`)
+  opens the Site to the people you name; check its `error` as above. Shared data, AI, Space retrieval,
+  and owner reset checks answer the same way when their service is not
+  connected.
+- A non-null `workspaceId` must be a workspace you belong to, or the route
+  answers `403 forbidden`. A standalone process without Ryu Core gives its
+  management caller no workspaces, so it refuses every `workspaceId`.
+- `editors` can save and deploy versions, which replaces what the Site
+  serves. Only the SDK changes them; the CLI and the MCP tool do not.
+
+If a Site was saved as `public` and the operator has since turned public Sites
+off, the route refuses every change to it with `403 policy_denied` until the
+change also sets another audience. The SDK's hint says so.
+
+Without the SDK, read the Site and send its settings back with `audience`
+changed. This pipeline uses `jq`.
+
+```sh
+curl -sS "$RYU_SITES_URL/api/sites/projects/<site-id>" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+  | jq '{settings: (.settings + {audience: "public"}), expectedRevision: .revision}' \
+  | curl -sS -X PUT "$RYU_SITES_URL/api/sites/projects/<site-id>/settings" \
+      -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+      -H "Content-Type: application/json" \
+      --data-binary @-
+```
+
+While public Sites are off, the settings call answers `403 policy_denied`.
+See [Visitor access](/docs/standalone/sites#visitor-access) and the settings
+route on [Ryu Sites API](/docs/standalone/sites-api#management-routes).
+
+`deploy()` also takes `{ projectId, versionId }` to publish a version that is
+already saved. The namespace has `status()`, `projects.list({ scope })`,
+`projects.get(id)`, `projects.create(input)`,
+`projects.delete(id, { expectedRevision, slug })`,
+`projects.updateSettings(id, settings)`, `projects.makePublic(id)`,
+`versions.create(id, { html, expectedRevision })`, and
+`unpublish(id)`. Site lists are not paginated.
+
+## Clean up
+
+`projects.get()` takes a Site's `id`, not its slug, and `projects.delete()`
+takes the `id` plus the Site's current `revision` as `expectedRevision` and
+its `slug`, which confirms the delete. This lists your Sites and deletes the
+ones the samples on this page create (`launch-notes`, `launch-notes-sdk`, and
+`launch-notes-cli`):
+
+```ts tab="Node"
+const sampleSlugs = new Set(["launch-notes", "launch-notes-sdk", "launch-notes-cli"]);
+const listed = await ryu.sites.projects.list();
+for (const listedSite of listed.data ?? []) {
+  if (sampleSlugs.has(listedSite.slug)) {
+    const deleted = await ryu.sites.projects.delete(listedSite.id, {
+      expectedRevision: listedSite.revision,
+      slug: listedSite.slug,
+    });
+    if (deleted.error) {
+      console.error(listedSite.slug, deleted.error.code, deleted.error.message);
+    }
+  }
+}
+```
+
+```python tab="Python"
+sample_slugs = {"launch-notes", "launch-notes-sdk", "launch-notes-cli"}
+listed = ryu.sites.projects.list()
+for listed_site in listed.data or []:
+    if listed_site.get("slug") in sample_slugs:
+        deleted = ryu.sites.projects.delete(
+            listed_site["id"], {"expectedRevision": listed_site["revision"], "slug": listed_site["slug"]}
+        )
+        if deleted.error:
+            print(listed_site["slug"], deleted.error.code, deleted.error.message)
+```
+
+```sh tab="curl"
+curl -sS "$RYU_SITES_URL/api/sites/projects" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY"
+
+curl -sS -X DELETE "$RYU_SITES_URL/api/sites/projects/<site-id>" \
+  -H "Authorization: Bearer $RYU_SITES_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"expectedRevision":<revision>,"slug":"launch-notes"}'
+```
+
+Each delete answers `{ "deleted": true }`. A stale `expectedRevision` answers
+`409 conflict`. List the Sites again and use the new `revision`. The
+`ryu-services` CLI has no delete command; use the SDK or curl.
+
+## Expected response
+
+`deploy()` resolves to `{ project, version, url }`. `project` is the Site
+after the deploy, as in this abridged example from the
+[OpenAPI document](https://ryuhq.com/openapi/sites.json):
+
+```json
+{
+  "id": "6f1c2d3e-4a5b-46c7-a8b9-c0d1e2f3a4b5",
+  "name": "Launch notes",
+  "slug": "launch-notes",
+  "revision": 2,
+  "settings": { "audience": "private" },
+  "versions": [
+    {
+      "id": "0c9d8e7f-2a1b-4f53-9d7e-5f0c6c1e3c2b",
+      "bytes": 57,
+      "message": "First draft",
+      "commit": null,
+      "createdAt": "2026-10-21T12:05:00.000Z"
+    }
+  ],
+  "deploymentId": "0c9d8e7f-2a1b-4f53-9d7e-5f0c6c1e3c2b",
+  "hasPublished": true
+}
+```
+
+A full `SitesProject` also carries `domains` (each custom domain's `host`,
+`status`, `verification` value and `checkedAt`), `aliases`, `access`,
+`schemaVersion`, `connections` (owner-managed connector bindings), and, on a
+Site that was remixed or duplicated, `remixedFrom` (the Site and version it
+was copied from). Each version saved since Site tools exist carries
+`extensions`, the Site tools saved with it. The SDK exports their types (`SitesDomainBinding`,
+`SitesConnection`, `SitesRemixSource`, `SitesExtensions`, `SitesTool`); the
+Python `ryu_sdk.services.shapes` module has `TypedDict`s with the same names.
+
+`url` is built the way Sites builds it: `http://<slug>.localhost:<visitor
+port>/` for the default `localhost` domain, otherwise
+`https://<slug>.<domain>/`. The SDK reads the domain and port from
+`GET /api/sites/status`. `version` is the deployed version. It is `null` only
+if Sites left that version out of its reply; the deploy still happened.
+
+## Errors, retries, CLI, and MCP
+
+- [Sites SDK errors and retries](/docs/standalone/sdk/sites-errors) lists the
+  error codes, the SDK error classes, and which requests the SDK retries.
+- [Sites CLI and MCP](/docs/standalone/sdk/sites-cli-mcp) runs these calls with
+  the `ryu-services` command line and its MCP tools.
+  Until `@ryuhq/services-cli` is on npm, run them through `ryu-cli`, as
+  [Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli) shows.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sites" />
+  <DocCard href="/docs/standalone/sites-api" />
+</Cards>

@@ -1,0 +1,393 @@
+---
+title: "Box SDK Quickstart"
+description: "Create a Ryu Box and run a command in it with curl, @ryuhq/services, the ryu_sdk.services Python client, the ryu-services CLI, and its MCP tools"
+tags: ["box", "workspace", "sdk", "cli", "mcp", "standalone"]
+---
+
+<Callout type="warn">
+Early access: hosted at https://box.ryuhq.com and enabled per organization by Ryu; the self-hosted service is not yet published.
+</Callout>
+
+This page makes a first call to [Ryu Box](/docs/standalone/box) with curl,
+the `@ryuhq/services` TypeScript SDK, the `ryu_sdk.services` Python client, the
+`ryu-services` command line, and its MCP tools. The full route and credential
+contract is on [Box API](/docs/standalone/box-api), and states and workers are
+on [Box lifecycle](/docs/standalone/box-lifecycle).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## What you need
+
+Pick one deployment.
+
+- **Ryu-hosted Box** (`https://box.ryuhq.com`): early access, enabled for
+  each organization by Ryu. It is not self-serve. To call the `/v1` API, you
+  need a tenant key for your organization; ask Ryu for it once your access is
+  enabled. Usage is charged at the published rates in
+  [Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing).
+- **Self-hosted Box**: the self-hosted Box service is not yet published, so
+  there is no source or container image to download and run today (see
+  [Ryu Box](/docs/standalone/box#self-hosting)). A Box service that Ryu runs
+  for you at another URL, or one you already operate, takes the same calls:
+  its tenant key is the value set in `RYU_BOX_API_TOKEN` (or one entry of
+  `RYU_BOX_API_TOKENS`) on the service, and by default it listens on
+  `http://127.0.0.1:8090`. Ryu never bills a self-hosted Box.
+
+HTTP calls work in any runtime with `fetch`. Terminals, tunnels, and SSH use
+WebSockets, so they need a server runtime with a `WebSocket` implementation:
+Node.js 22 or later, Bun, and Deno have `globalThis.WebSocket`. On another
+runtime, pass a constructor as `new Ryu({ box: { webSocket } })`.
+
+## Configure
+
+The SDK and the CLI read these environment variables. Options passed to
+`new Ryu()` win over them, and `new Ryu({ env: false })` turns env reads off.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RYU_BOX_URL` | `https://box.ryuhq.com` | Box origin; set it only when Ryu issued you another URL. |
+| `RYU_BOX_API_KEY` | none | Box tenant bearer token (hosted keys are provisioned by Ryu). |
+
+Ryu-hosted Box:
+
+```sh
+export RYU_BOX_API_KEY="<tenant-key>"
+```
+
+Self-hosted Box:
+
+```sh
+export RYU_BOX_URL="http://127.0.0.1:8090"
+export RYU_BOX_API_KEY="<the service's RYU_BOX_API_TOKEN>"
+```
+
+Without `RYU_BOX_URL`, the SDK and the CLI call `https://box.ryuhq.com`. A
+missing key gives a `RyuConfigurationError` that names `RYU_BOX_API_KEY`, and
+nothing is sent. The key is sent only to the Box origin, as
+`Authorization: Bearer`.
+
+## First call with curl
+
+Create a Box. Creating requires an `Idempotency-Key`, which makes a retry of
+the same request safe. The URL falls back to `https://box.ryuhq.com` when
+`RYU_BOX_URL` is not set.
+
+```sh
+curl -sS -X POST "${RYU_BOX_URL:-https://box.ryuhq.com}/v1/boxes" \
+  -H "Authorization: Bearer $RYU_BOX_API_KEY" \
+  -H "Idempotency-Key: build-runner-1" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"build-runner","size":"small"}'
+```
+
+Run a command in it and wait for the output. Replace `<box-id>` with the
+`box.id` from the create response, such as `bx_0123...` (it already starts
+with `bx_`).
+
+```sh
+curl -sS -X POST "${RYU_BOX_URL:-https://box.ryuhq.com}/v1/boxes/<box-id>/commands" \
+  -H "Authorization: Bearer $RYU_BOX_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"cat","args":["/etc/os-release"]}'
+```
+
+A new Box runs the default `ubuntu:24.04` image, which has the base Ubuntu
+tools but no Node.js, Python, or build tools, so the samples on this page run
+commands that image already has.
+
+The samples below create Boxes with their own names, because Box names are
+unique per tenant: creating `build-runner` again answers `409 conflict`. Delete
+a sample's Box before you run that sample again; [Clean up](#clean-up) deletes
+every Box this page creates. Each Box counts toward your tenant's active-Box
+quota until it is deleted.
+
+## First call with the SDK
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors. `box.run()` creates the Box,
+waits until it leaves `provisioning`, runs the command, and waits for it:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_BOX_API_KEY, and RYU_BOX_URL when it is set.
+const ryu = new Ryu({ result: "object" });
+
+const { data, error } = await ryu.box.run({
+  size: "small",
+  command: ["uname", "-a"],
+});
+
+if (error) {
+  console.error(error.code, error.message, error.requestId);
+} else {
+  console.log(data.box.id, data.result.exitCode, data.result.stdout);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_BOX_API_KEY, and RYU_BOX_URL when it is set.
+ryu = Ryu(result="object")
+
+data, error, meta = ryu.box.run({"size": "small", "command": ["uname", "-a"]})
+
+if error:
+    print(error.code, error.message, error.request_id)
+elif data:
+    print(data["box"]["id"], data["result"]["exitCode"], data["result"]["stdout"])
+```
+
+`box.run()` never deletes the Box. If the Box ends in `error`, the call fails
+with `box_failed`; if it is still provisioning after `readyTimeoutMs` (default
+30 minutes; `ready_timeout=`, in seconds, in Python), it fails with
+`box_ready_timeout` (a `RyuTimeoutError`, not the service's
+`409 box_not_ready`). Both carry the Box id in
+`error.details.boxId`, so you can inspect or delete it.
+
+`box.run()` reads the command's output as a stream and collects it, so a
+command may run longer than the SDK's `timeoutMs`; the command's own
+`timeoutSecs` (service default 120, at most 3600) bounds it. Aborting the
+call's `signal` closes the stream, and the service then stops the command.
+The Python client has no `signal`. Its `box.run()` runs to the end, and you stop
+an `exec_stream()` by breaking out of a `for` loop written directly over the
+call (`for event in box.exec_stream(...)`), which releases the stream and
+closes it. A stream you keep in a variable is a generator: call `close()` on
+it, or wrap it in `contextlib.closing()`. Python spells the polling interval
+`poll_interval=`, in seconds.
+
+An array `command` is sent word for word. A string is a command line that
+the service splits like a shell would (quotes group words), without running
+a shell.
+
+To resume a run after a crash, pass the same `idempotencyKey` again with the
+same input (in Python, the same `idempotency_key=` to `ryu.box.run()`).
+Without a `name`, the Box name is derived from the key, so the
+repeated create replays the first Box instead of failing with
+`idempotency_conflict`.
+
+The same namespace wraps every method of the `@ryuhq/client` Box client,
+arranged by resource. Boxes are the primary resource, so calls on a Box
+itself stay at the top level; things a Box holds, and snapshots and secrets,
+have their own namespace:
+
+| Namespace | Methods |
+|---|---|
+| `ryu.box` | `list`, `get`, `create`, `delete`, `stop`, `resume`, `fork`, `waitUntilReady`, `run`, `exec`, `execStream`, `accessToken`, `openTerminal`, `openTunnel`, `enableSsh`, `usage` |
+| `ryu.box.processes` | `list`, `get`, `spawn`, `logs`, `followLogs`, `kill`, `writeStdin`, `interrupt` |
+| `ryu.box.files` | `list`, `read`, `readText`, `write`, `mkdir`, `delete`, `downloadArchive`, `uploadArchive` |
+| `ryu.box.previews` | `list`, `create`, `delete` |
+| `ryu.box.snapshots` | `list`, `get`, `create`, `delete` |
+| `ryu.box.secrets` | `list`, `set`, `delete` |
+| `ryu.box.prompts` | `list`, `get`, `create`, `cancel` |
+| `ryu.box.events` | `list`, `follow` |
+
+The client's flat names (`readTextFile`, `writeFile`, `listSnapshots`,
+`putSecret`, `spawn`, and the rest) still work and send the same request,
+but they are deprecated in favor of the names above.
+
+Snapshot names are unique per tenant too, so this sample names its snapshot
+after the Box:
+
+```ts tab="Node"
+const box = await ryu.box.create({ name: "files-demo", size: "small" });
+if (box.data) {
+  await ryu.box.files.write(box.data.id, "hello.txt", "hi\n");
+  const text = await ryu.box.files.readText(box.data.id, "hello.txt");
+  const snapshot = await ryu.box.snapshots.create(box.data.id, `${box.data.id}-after-setup`);
+  if (snapshot.error) {
+    console.error(snapshot.error.code, snapshot.error.message);
+  }
+  console.log(text.data, snapshot.data?.id);
+} else {
+  console.error(box.error.code, box.error.message);
+}
+```
+
+```python tab="Python"
+box = ryu.box.create({"name": "files-demo", "size": "small"})
+if box.data:
+    ryu.box.files.write(box.data["id"], "hello.txt", "hi\n")
+    text = ryu.box.files.read_text(box.data["id"], "hello.txt")
+    snapshot = ryu.box.snapshots.create(box.data["id"], f"{box.data['id']}-after-setup")
+    if snapshot.error:
+        print(snapshot.error.code, snapshot.error.message)
+    print(text.data, snapshot.data and snapshot.data["id"])
+elif box.error:
+    print(box.error.code, box.error.message)
+```
+
+To stream a command's output:
+
+```ts tab="Node"
+const streamBox = await ryu.box.create({ name: "stream-demo", size: "small" });
+if (streamBox.data) {
+  for await (const event of ryu.box.execStream(streamBox.data.id, { command: "ls", args: ["-la", "/"] })) {
+    if (event.type === "stdout" || event.type === "stderr") {
+      process.stdout.write(event.data);
+    }
+  }
+} else {
+  console.error(streamBox.error.code, streamBox.error.message);
+}
+```
+
+```python tab="Python"
+import sys
+
+stream_box = ryu.box.create({"name": "stream-demo", "size": "small"})
+if stream_box.data:
+    for event in ryu.box.exec_stream(stream_box.data["id"], {"command": "ls", "args": ["-la", "/"]}):
+        if event["type"] in ("stdout", "stderr"):
+            sys.stdout.write(event["data"])
+elif stream_box.error:
+    print(stream_box.error.code, stream_box.error.message)
+```
+
+Streams are async iterables. They always throw a `RyuError` on failure, also
+in object mode.
+
+`exec` is the plain command route: the service answers only once the
+command has ended, so the call's `timeoutMs` (default 60 seconds) must cover
+the command. For longer commands use `execStream`, `box.run()`, or raise the
+timeout for that call, for example
+`ryu.box.with({ timeoutMs: 15 * 60_000 }).exec(id, { command: "make", timeoutSecs: 840 })`.
+Python spells the option `timeout`, in seconds:
+
+```python
+ryu.box.with_options(timeout=15 * 60).exec(box_id, {"command": "make", "timeoutSecs": 840})
+```
+
+If the SDK gives up first, the command keeps running in the Box.
+
+## Clean up
+
+Every sample on this page leaves its Box running, and `box.run()` without a
+`name` creates a new Box, named `run-` and a short suffix, each time it runs.
+This deletes the Boxes the samples create. It also deletes every other Box
+whose name starts with `run-`, so narrow the filter if you keep such Boxes:
+
+```ts tab="Node"
+const sampleNames = new Set(["build-runner", "files-demo", "stream-demo", "nightly-runner"]);
+const listed = await ryu.box.list();
+for (const listedBox of listed.data ?? []) {
+  if (sampleNames.has(listedBox.name) || listedBox.name.startsWith("run-")) {
+    const deleted = await ryu.box.delete(listedBox.id);
+    if (deleted.error) {
+      console.error(listedBox.name, deleted.error.code, deleted.error.message);
+    }
+  }
+}
+```
+
+```python tab="Python"
+sample_names = {"build-runner", "files-demo", "stream-demo", "nightly-runner"}
+listed = ryu.box.list()
+for listed_box in listed.data or []:
+    name = listed_box.get("name", "")
+    if name in sample_names or name.startswith("run-"):
+        deleted = ryu.box.delete(listed_box["id"])
+        if deleted.error:
+            print(name, deleted.error.code, deleted.error.message)
+```
+
+Deleting a Box does not delete the snapshot the files sample took. List
+snapshots with `ryu.box.snapshots.list()` and delete them with
+`ryu.box.snapshots.delete()` when you no longer need them.
+
+## Expected response
+
+Creating a Box returns it in a `box.created` envelope. Example from the
+[OpenAPI document](https://ryuhq.com/openapi/box.json):
+
+```json
+{
+  "ok": true,
+  "type": "box.created",
+  "box": {
+    "allowedHosts": [],
+    "createdAt": "2026-10-21T12:00:00.000Z",
+    "driver": "docker",
+    "envNames": [],
+    "id": "bx_0123456789abcdef0123456789abcdef",
+    "image": "ubuntu:24.04",
+    "lastError": null,
+    "name": "build-runner",
+    "network": "none",
+    "repo": null,
+    "secrets": [],
+    "size": "small",
+    "snapshotId": null,
+    "status": "ready",
+    "stoppedAt": null,
+    "ttlSeconds": 86400,
+    "updatedAt": "2026-10-21T12:00:00.000Z"
+  }
+}
+```
+
+With `setup` commands or a `repo`, the answer is `202` with the Box
+`provisioning`. A repeat with the same key and body answers `200` with type
+`box.existing` and the same Box; newer Box servers also send an
+`Idempotent-Replayed: true` header. The SDK reports either signal as
+`meta.replayed: true`. This sample repeats the curl create above, with the
+same key and the same body, so it replays that Box instead of creating one:
+
+```ts tab="Node"
+const {
+  data: replayed,
+  error: replayError,
+  meta: replayMeta,
+} = await ryu.safe.box
+  .with({ idempotencyKey: "build-runner-1" })
+  .create({ name: "build-runner", size: "small" });
+if (replayError) {
+  console.error(replayError.code, replayError.message);
+} else {
+  console.log(replayed.id, replayMeta.replayed);
+}
+```
+
+```python tab="Python"
+replayed, replay_error, replay_meta = ryu.safe.box.with_options(idempotency_key="build-runner-1").create(
+    {"name": "build-runner", "size": "small"}
+)
+if replay_error:
+    print(replay_error.code, replay_error.message)
+elif replayed and replay_meta:
+    print(replayed["id"], replay_meta.replayed)
+```
+
+After that Box is deleted, a replay of its key answers
+`409 idempotency_key_resource_deleted` (a `RyuConflictError`; like every
+`409` except `idempotency_in_progress`, it is not retried): the key stays
+spent, so choose a new key for a new Box. A fork replay gets the same answer
+even after its source Box was deleted. Box servers built before this code
+existed answer `404 not_found` instead, so code that detects a deleted Box
+should handle both. Use one key per create or fork: a fork's key reused on
+`create`, or on a fork of another Box, is a `409 idempotency_conflict`.
+
+## Errors, retries, CLI, and MCP
+
+- [Box SDK errors and retries](/docs/standalone/sdk/box-errors) lists the
+  error codes, the SDK error classes, and which requests the SDK retries and
+  keys with `Idempotency-Key`.
+- [Box CLI and MCP](/docs/standalone/sdk/box-cli-mcp) runs these calls with
+  the `ryu-services` command line and its MCP tools.
+  Until `@ryuhq/services-cli` is on npm, run them through `ryu-cli`, as
+  [Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli) shows.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/box" />
+  <DocCard href="/docs/standalone/box-api" />
+  <DocCard href="/docs/standalone/box-lifecycle" />
+</Cards>

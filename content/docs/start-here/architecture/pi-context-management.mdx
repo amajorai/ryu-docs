@@ -1,0 +1,213 @@
+---
+title: "Pi Context Management"
+description: "Reference for how Ryu keeps long Pi conversations inside the context window: Trim and Compact modes, token accounting, cache-stable cuts, model-switch handoff, and the preferences that enable them."
+tags: ["pi", "context-window", "compaction", "truncation", "handoff", "prompt-cache"]
+---
+
+Ryu keeps long conversations with the [Ryu agent](/docs/start-here/architecture/ryu-agent) and
+other ACP agents inside the model's context window. This page is the reference for that layer. For
+the managed Pi binary and its config files, see
+[Pi Engine Internals](/docs/start-here/architecture/pi-engine).
+
+## The problem
+
+Local models run with small context windows (often 4k to 8k). Without app-side bounding, Ryu sends
+the full thread and relies on llama.cpp's engine context-shift. That shift is a blunt instrument:
+
+- Ryu never emits `--keep` / `n_keep`, so llama.cpp defaults `n_keep` to 0
+- On overflow, the engine can evict the **system prompt** (the leading instructions, long-term
+  memory, skills) along with the oldest turns
+- There is no guarantee the system block is preserved
+
+Ryu's context-management layer exists to fix this: it guarantees the system block is always kept,
+and provides an option to summarize dropped turns instead of silently losing them.
+
+## Token accounting
+
+Ryu uses a conservative character heuristic, not a tokenizer:
+
+```text
+tokens = ceil(characters / 3.5)
+```
+
+A per-message overhead of 4 tokens is added for the role and formatting
+wrapper. Base64 image payloads are **not** counted. A flat per-image cost of 768 tokens is used
+instead, so a vision chat does not look like 100k tokens. A 512-token reserve is held for
+downstream skill injection.
+
+## Two modes
+
+### Trim mode (default when enabled)
+
+A token-budgeted sliding window that keeps the newest turns that fit the input budget. Always
+preserves:
+
+- Every `system` message (moved to the front)
+- At least the last user turn
+- System tokens + downstream skill injection are accounted for in the budget
+
+```text
+Input budget = max_tokens - reserve_output - system_tokens - skills_reserve(512)
+```
+
+Older turns that exceed the budget are dropped.
+
+### Compact mode
+
+Instead of dropping older turns, sends them to a side model for a concise summary via the
+Gateway (`gateway_summarize()`). The summary is injected as a leading system block:
+
+```text
+[Earlier conversation summary]
+- User asked about X
+- Decided to use Y approach
+- Created file Z with W changes
+- ...
+```
+
+Results are cached by a hash of the dropped-message set, so an unchanged tail is not
+re-summarized. Adds one blocking summarization round-trip per over-budget turn.
+
+The summarizer receives a fixed instruction to preserve key facts, decisions, code snippets, and
+action items in a concise bullet-list summary under 500 words. The instruction text is an
+implementation detail and may change without changing the context-management contract.
+
+## Two code paths
+
+| Path | Used by | What it does |
+|---|---|---|
+| **ACP path** (`budgeted_short_term()`) | The Ryu agent (Pi via ACP) | Replaces the fixed last-10 cap. Fetches up to 400 recent turns, windows them to the input budget, optionally summarizes. |
+| **OpenAI-compat path** (`apply_openai()`) | Direct OpenAI-compatible agents | Trims the full outbound message list. |
+
+## How to enable
+
+Context management is **opt-in / off by default**. These preferences control it:
+
+| Preference | Values | Default |
+|---|---|---|
+| `context.max-tokens` | `""` / `0` / `off` = disabled; `auto` = model's `ctx_size`; positive integer = explicit budget | `""` (disabled) |
+| `context.auto-compact` | `true` / `false` | `false` |
+| `context.max-tokens.local` | Same values as `context.max-tokens`; applies only to agents bound to a local engine (llama.cpp, Ollama, vLLM, SGLang, MLX, ...) | unset (uses `context.max-tokens`) |
+| `context.max-tokens.engine.<engine>` | Same values; applies only to agents bound to that engine (for example `context.max-tokens.engine.llamacpp`) | unset |
+| `context.compact-on-cache-expire` | `true` / `false`; compacts harder once the provider prompt cache has expired ([details](#compacting-when-the-prompt-cache-expires)) | `false` |
+
+The most specific setting wins: the per-engine key, then `.local` (for local engines), then the
+global `context.max-tokens`. An unset or blank scoped key falls through to the next one; an explicit
+`off` disables trimming for that scope. `auto` uses the model's `ctx_size`, including an engine-wide
+`ctx_size` default when the model has no override of its own.
+
+```bash
+# Auto-size to the loaded model's context window
+curl -X PUT http://localhost:7980/api/preferences/context.max-tokens \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "value": "auto" }'
+
+# Trim only local models; leave cloud providers on full history
+curl -X PUT http://localhost:7980/api/preferences/context.max-tokens.local \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "value": "auto" }'
+
+# Enable compaction (summarize instead of drop)
+curl -X PUT http://localhost:7980/api/preferences/context.auto-compact \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "value": "true" }'
+```
+
+To also compact once the provider prompt cache has expired:
+
+```bash
+curl -X PUT http://localhost:7980/api/preferences/context.compact-on-cache-expire \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "value": "true" }'
+```
+
+## Cache-stable cuts
+
+Both modes move the cut in steps, not one turn at a time. Once history goes over budget, Ryu drops
+turns up to a fixed checkpoint. Checkpoints fall every quarter of the configured window, counted
+from the start of the conversation. The cut never moves back to an earlier checkpoint within a
+conversation, even when the room left for history shrinks or grows from turn to turn, until the
+history changes or the context settings do. New turns then fill the freed space while the replayed
+history stays byte-identical from turn to turn. In Compact mode the same summary is reused until
+the cut moves again. The kept history always still fits the budget.
+
+A provider prompt cache can only reuse this stable history when everything sent ahead of it is
+stable too. Per-turn context such as auto-recall results and memory therefore goes after the
+history, on the newest user message, rather than into the system block.
+
+## Compacting when the prompt cache expires
+
+Hosted providers keep a conversation's prompt prefix cached for a while after each turn, and every
+cache hit refreshes that lifetime. Core tracks this per conversation and per provider: after each
+turn that reports cache reads or writes, it starts a countdown using the provider's published
+default lifetime (Anthropic about 5 minutes, OpenAI about 30). Providers that publish no expiry
+(Google, DeepSeek, xAI) and local models are never treated as expired. The countdown lives in Core's
+memory, so a restart forgets it and nothing is compacted early until a new turn reports cache use.
+
+With `context.compact-on-cache-expire` on (it needs `context.auto-compact`), the first agent turn
+after the countdown runs out keeps only half the history budget verbatim and summarizes the rest.
+The whole prompt is re-sent at full price on that turn anyway, so moving the cut then costs no cache
+hits, and the smaller history is what the next stretch of turns caches. The agent starts that turn
+from the summarized history instead of reopening its previous session, and later turns resume the
+new session. If the summary cannot be produced, the turn falls back to the normal budget and the
+agent keeps its session.
+
+This applies to agent conversations (the Ryu agent and other ACP agents). The OpenAI-compatible
+path sends the message list the client supplied, so it is not compacted early.
+
+## Handoff when you switch models
+
+Switching a conversation to another model mid-chat can leave the new model with more history than
+it can hold, for example going from a 1M-token model to a 256K one, or from a cloud model to a
+local 8K model. Ryu can hand the conversation off instead: it summarizes everything said before
+the switch once, then gives the new model that summary plus the messages after the switch. The
+transcript shows a **Context handed off** marker after the model change as soon as the turn
+starts, with the number of messages summarized and both context windows.
+
+This is separate from the budget above and is **on by default** for the case that would otherwise
+break the chat. Choose when it happens in **Settings → Memory → Model switch handoff**, or with the
+`context.handoff-on-model-change` preference:
+
+| Value | When the earlier history is handed off |
+|---|---|
+| `smaller-context` (default) | The new model's context window is smaller than the previous model's and the conversation no longer fits it. Needs both windows to be known: a local model's context size, or the public model catalog for cloud models. |
+| `different-provider` | The provider changes, whatever the window sizes. |
+| `always` | Every model change. |
+| `off` | Never. The whole conversation is sent, as before. |
+
+The summary is produced once per model change and reused unchanged on every later turn, so the
+prompt cache keeps hitting. If you edit or branch from a message sent before the switch, that
+branch gets its own summary of its own history. Switching back to the original branch reuses the
+original summary, and the marker follows whichever branch is shown. The summary is written by
+`context.compact-model` (or the node-wide default model) when set. Otherwise the model you switched
+from writes it, since that model already held the full history. The new model is the last
+fallback. If no summary can be produced, the turn is sent with the
+full history and Ryu tries again on the next turn. The same `session_before_compact` and
+`session_compact` plugin hooks that govern compaction also see and can rewrite the handoff
+summary.
+
+```bash
+curl -X PUT http://localhost:7980/api/preferences/context.handoff-on-model-change \
+  -H "Authorization: Bearer $RYU_CORE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "value": "different-provider" }'
+```
+
+## Short-term context for ACP
+
+The Ryu agent's short-term context is assembled by `assemble_short_term_context()` as a plain-text
+"Conversation so far:" block from the last N messages (default 10), formatted as `role: content`
+lines. When context management is enabled, `budgeted_short_term()` replaces this with the
+token-budgeted version that can fetch up to 400 recent turns.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/start-here/architecture/pi-engine" />
+  <DocCard href="/docs/start-here/architecture/ryu-agent" />
+  <DocCard href="/docs/core/conversations-sessions" />
+</Cards>

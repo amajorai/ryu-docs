@@ -1,23 +1,27 @@
 ---
-title: "Dashboard"
-description: "The TRMNL-style dashboard surface: the node renders Ryu's existing Home dashboard to an image, the device polls and blits it, and edits nudge a re-poll."
+title: "Device Dashboard"
+description: "How the desk hub and watch show a TRMNL-style dashboard: the node renders it to an image, the device polls and displays it, and edits nudge a re-poll. Includes the display routes."
 ---
 
-The desk hub (e-ink) and the watch (LCD) both show a customizable widget dashboard, following the [TRMNL](https://docs.trmnl.com/go/how-it-works) model: the **node renders the dashboard to an image** and the device just polls and displays it. Ryu does not build a new widget system for hardware; it reuses the existing Home dashboard, its widget engine, and the `dashboard_builder` tools.
+The desk hub (e-ink) and the watch (LCD) both show a customizable widget dashboard. It follows the [TRMNL](https://docs.trmnl.com/go/how-it-works) model: the **node renders the dashboard to an image**, and the device polls and displays it. Hardware reuses the [Dashboards](/docs/apps/dashboards) widget engine and the `dashboard_builder` tools instead of a separate widget system.
+
+<Callout type="warn">
+  Device dashboards need an enabled app that provides the `dashboards.*` capabilities, normally the [Dashboards](/docs/apps/dashboards) app. Dashboards is experimental and not pre-installed, so install and enable it first.
+</Callout>
 
 ## Server renders, device displays
 
-The device is dumb on purpose. It never composes widgets; it fetches a finished image at its own resolution and depth and blits it.
+The device never composes widgets. It fetches a finished image at its own resolution and depth and blits it.
 
 <Steps>
   <Step>
-    The device polls the node on an interval: `GET /api/hardware/display/:device_id`.
+    The device polls the node on an interval with `GET /api/hardware/display/:device_id`, sending its own device token as the Bearer.
   </Step>
   <Step>
-    The node renders that device's dashboard to an image and returns a small JSON envelope with the `image_url`, a content `rev` hash (so the device skips re-download when nothing changed), a `refresh_rate` in seconds, and a `screen` descriptor (width, height, bit depth, rotation).
+    The node renders that device's dashboard to an image and returns a small JSON envelope with the `image_url`, a content `rev` hash (so the device skips re-download when nothing changed), a `refresh_rate` in seconds, and a `screen` descriptor (width, height, bit depth, palette of `mono`, `rgba`, or `rgb565`, and rotation).
   </Step>
   <Step>
-    The device downloads the image (1-bit packed for e-ink, color raster for LCD) and displays it. E-ink uses partial refresh with a periodic full clear; the device may deep-sleep until the next poll.
+    The device downloads the image (1-bit packed for e-ink, a color raster for LCD) and displays it. The image route returns `304 Not Modified` when the device's `rev` still matches. E-ink uses partial refresh with a periodic full clear.
   </Step>
 </Steps>
 
@@ -27,36 +31,38 @@ The envelope looks like this:
 { "image_url": "/api/hardware/display/:device_id/image?rev=<hash>",
   "rev": "<content-hash>",
   "refresh_rate": 300,
-  "screen": { "w": 800, "h": 480, "bit_depth": 1, "rotation": 0 } }
+  "screen": { "w": 800, "h": 480, "bit_depth": 1, "palette": "mono", "rotation": 0 } }
 ```
 
-## Reuse, not reinvention
+## Device-scoped dashboards
 
-The dashboard a device shows is a **device-scoped dashboard**: its own layout, widget selection, and refresh rate, stored alongside the existing dashboards. The same `dashboard_builder` chat and tools that build your desktop dashboard target a device by `device_id` - for example "add a clock and calendar widget to my desk." The watch can share a dashboard or use a compact variant.
+The dashboard a device shows is a **device-scoped dashboard** with its own layout, widget selection, and refresh rate, stored alongside your other dashboards. The same `dashboard_builder` chat and tools that build your desktop dashboard target a device by `device_id`, for example "add a clock and calendar widget to my desk." The watch can share a dashboard or use a compact variant.
 
-On the node, `dashboard/render.rs` takes a dashboard (layout plus current widget data) and a device profile (resolution, bit depth, palette) and produces an image. It builds an SVG layout and rasterizes it with `resvg` and `tiny-skia`, so there is no headless Chromium dependency on the node. For e-ink it dithers to 1-bit and packs to the panel format; for the watch LCD it outputs a 240x240 color raster.
+On the node, the Dashboards app renderer (`apps-store/dashboards/backend/src/render.rs`) takes a dashboard (layout plus current widget data) and a device profile (resolution, bit depth, palette) and produces an image. It builds an SVG layout and rasterizes it with `resvg` and `tiny-skia`, so the node needs no headless browser. For e-ink it dithers to 1-bit and packs to the panel format. For the watch LCD it outputs a 240x240 color raster (PNG by default, or big-endian RGB565). The renderer pre-rotates the image, so the device does not rotate it.
 
 ## Poll, nudge, and refresh rate
 
-The device refreshes on its `refresh_rate` (default 300 s, with a server floor of 30 s). For faster reaction to edits, the node can also send the RHP `display` control message over the live WebSocket to tell a device its dashboard changed and to re-poll now. So editing a widget on the desktop reflects on the device within the debounce rather than waiting for the next scheduled poll.
+The device refreshes on its `refresh_rate`. The default is 300 s, and the server clamps anything lower than 30 s up to 30 s (`apps-store/dashboards/backend/src/device.rs`). The node can also send the RHP `display` control message over the live WebSocket to tell a device its dashboard changed and to re-poll now, so a widget edit on the desktop shows on the device without waiting for the next scheduled poll.
 
-The REST surface adds to the protocol's endpoints:
+The dashboard adds these routes to the [protocol's REST surface](/docs/hardware/protocol#rest-surface). The two `display` routes authenticate the device token. The two `devices` routes need the node token.
 
-```
+```text
 GET  /api/hardware/display/:device_id            -> { image_url, rev, refresh_rate, screen }
-GET  /api/hardware/display/:device_id/image?rev= -> image bytes (1-bit packed | png)
+GET  /api/hardware/display/:device_id/image?rev= -> image bytes (1-bit packed, RGB565, or PNG), or 304
 GET  /api/hardware/devices/:id/dashboard         -> device dashboard config
-PUT  /api/hardware/devices/:id/dashboard         -> set layout / widget selection / refresh_rate
+PUT  /api/hardware/devices/:id/dashboard         -> set layout, widget selection, refresh_rate
 ```
+
+For the generated route reference, see [Core hardware API](/docs/extend/develop/api-reference/core/hardware).
 
 ## Per-device behavior
 
 - **Desk** - primary surface is the e-ink dashboard via the TRMNL poll-bitmap path. An optional secondary LCD can run the live island face and chat over the WebSocket.
-- **Watch** - gains a dashboard view mode alongside face and chat: a compact color raster on the round LCD, switched with the button. Smaller widget set.
+- **Watch** - gains a dashboard view mode alongside face and chat: a compact color raster on the round LCD, switched with the button. Smaller widget set. The watch's default screen profile renders PNG, but the firmware's `dash_client` blits only raw 1-bit or 16-bit RGB565 frames. Set the watch's `prefs.screen` to `{ "bit_depth": 16, "palette": "rgb565" }` with `PATCH /api/hardware/devices/:id` (which replaces all prefs, so send back the ones you read).
 - **Necklace** - no display, so no dashboard surface. Its captured data still flows into the dashboards that other devices view.
 
 <Callout type="warn">
-  Two hard constraints. First, the dashboard **image path is Mode B (WiFi) only**. `dash_client` fetches the bitmap over plain HTTP to the node origin; the BLE relay tunnels only WebSocket control and Opus audio, not the image. A relay-only (Mode A) device still receives the re-poll nudge but cannot fetch the bitmap. The always-plugged desk is always Mode B, so this is fine for it; the watch dashboard view requires known WiFi. Second, **RGB565 is big-endian end to end** - the node emits big-endian and the firmware swaps to little-endian before the LCD decode. Do not "correct" either side to little-endian.
+  Two hard constraints. First, the dashboard **image path is Mode B (WiFi) only**. `dash_client` fetches the image over HTTP (or HTTPS for a `wss://` node URL) from the node origin. The BLE relay carries the WebSocket session, not the image. A relay-only (Mode A) device still receives the re-poll nudge but cannot fetch the image. The always-plugged desk is always Mode B, so this is fine for it. The watch dashboard view requires known WiFi. Second, **RGB565 is big-endian on the wire**. The node emits big-endian, and the watch firmware swaps to little-endian before the LCD decode. Do not "correct" either side to little-endian.
 </Callout>
 
 <Callout type="info">
@@ -70,5 +76,3 @@ PUT  /api/hardware/devices/:id/dashboard         -> set layout / widget selectio
   <DocCard href="/docs/hardware/protocol" />
   <DocCard href="/docs/hardware/firmware" />
 </Cards>
-
-Continue with [Hardware](/docs/hardware), [devices and pairing](/docs/hardware/devices), [hardware architecture](/docs/hardware/architecture), and [Core hardware API](/docs/extend/develop/api-reference/core/hardware).

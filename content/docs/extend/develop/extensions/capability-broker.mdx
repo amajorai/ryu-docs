@@ -1,12 +1,11 @@
 ---
-title: "Capability Broker"
-description: "Declare abstract capabilities in your plugin and let Core resolve them to concrete providers: the platform decomposition layer for swappable components."
+title: "Declare Capabilities in a Plugin"
+description: "Declare provides and requires capabilities in a plugin manifest so Core binds consumers to swappable provider apps, with overrides and binding error codes."
 tags: ["capability", "broker", "binding", "plugin", "provides", "requires", "platform"]
 ---
 
-The capability broker is how plugins declare abstract capabilities and how Core resolves them to
-concrete provider apps. It is the platform decomposition layer: apps become swappable capability
-packages.
+The capability broker lets a plugin declare abstract capabilities, and Core resolves them to
+concrete provider apps. A provider app can then be swapped without changing its consumers.
 
 ## The concept
 
@@ -17,7 +16,7 @@ resolves the abstract requirements to concrete providers at enable time.
 flowchart LR
   A["Plugin A requires: rag"] --> B["Binding Registry"]
   C["Plugin B provides: rag"] --> B
-  B -->|"resolves"| D["Binding: Plugin A → Plugin B"]
+  B -->|"resolves"| D["Binding: Plugin A to Plugin B"]
 ```
 
 ## Declaring capabilities in manifest.json
@@ -41,14 +40,16 @@ flowchart LR
 
 | Field | Purpose |
 |---|---|
-| `capability` | The abstract capability name (e.g., `rag`, `tts`, `stt`, `image`) |
+| `capability` | The abstract capability name (for example `rag`, `web.search`, `memory`) |
 | `version` | Semver version of the capability |
 | `sidecar` | The sidecar process name to spawn |
 | `route` | The HTTP route prefix for the capability |
 | `grant` | The Gateway grant required to use this capability |
-| `selectable` | Opt in to the user-picks-one flavour instead of an ambiguity error |
+| `title` | Optional display name for the capability's picker header |
+| `selectable` | Opt in to the user-picks-one mode instead of an ambiguity error |
 | `default` | Preferred pick among the providers of a selectable capability |
 | `target` | For a capability that controls a machine, whether that machine is this one (`local-machine`) or a separate one (`remote-desktop`) |
+| `layerKind` | Optional product layer for the capability (`decision-model` or `tunnel`). `decision-model` places typed-decision providers in the Decision Models picker rather than Toolkits. |
 | `tools` | Canonical verb to this provider's tool, the seam that keeps tool ids stable across a swap |
 
 ### Requiring a capability
@@ -64,93 +65,89 @@ flowchart LR
 
 When this plugin is enabled, the binding registry resolves `rag` to a concrete provider.
 
-## Two flavours: strict and selectable
+## Two modes: strict and selectable
 
-The binding registry (`apps/core/src/plugins/binding.rs`) has two resolution modes, and a
-capability picks one with the `selectable` flag.
-
-**Strict** (the original, used by `rag` and `engines`) refuses to guess:
-
-1. **Override** - a user-configured override for this capability wins
-2. **Single provider** - if exactly one installed plugin provides the capability, use it
-3. **Ambiguous** - multiple providers exist, so error and make the operator pick
-4. **Missing** - no providers, so `MissingDependency`
-
-**Selectable** (`"selectable": true`) is for capabilities the user is *meant* to pick between, and
-never errors on a second provider:
-
-1. Override
-2. Sole provider
-3. The provider declaring `"default": true`
-4. Lexicographically lowest provider id
-
-Selectability is a property of the capability, not the provider, so every provider of one must
-agree on the flag. The loader rejects a mixed declaration.
+A capability resolves in one of two modes. **Strict** (used by `rag` and `engines`) fails with
+`capability_ambiguous` when two or more providers exist and no override is set. **Selectable**
+(every provider declares `"selectable": true`) picks the provider declaring `"default": true`, else
+the lowest provider id. For the full resolution ladder, version floors, and enable-time gates, see
+[how the capability broker resolves bindings](/docs/extend/integrate/capability-broker).
 
 <Callout type="warn">
-If any provider of a capability omits `"selectable": true`, the capability resolves to nothing and
-the whole layer stops serving, with no error and no refused enable.
+If any provider of a capability omits `"selectable": true`, the capability falls back to strict
+resolution. With two or more providers and no override, binding then fails with
+`capability_ambiguous`.
 </Callout>
 
 ## Built-in capabilities
 
 Strict capabilities, resolved to one provider:
 
-| Capability | Default provider | Description |
+| Capability | Built-in provider | Description |
 |---|---|---|
-| `rag` | `@ryu/rag` | Embedding, vector storage, retrieval |
-| `tts` | `com.ryu.tts` | Audio synthesis |
-| `stt` | `com.ryu.stt` | Voice Recognition transcription |
-| `image` | `com.ryu.image` | Image generation |
-| `storage` | `com.ryu.storage` | File and blob storage |
-| `sandbox` | `com.ryu.sandbox` | Code execution sandbox |
+| `rag` | `@ryu/rag` | Embedding and vector retrieval |
+| `engines` | `@ryu/engines` | Local inference engines |
 
-Selectable capabilities, which the user swaps at runtime: `web.search`, `web.extract`,
-`web.crawl`, `memory`, `browser.control`, `computer.control`. These also bind **canonical verbs**,
-so swapping the provider does not change the tool ids an agent calls. See
+Selectable capabilities, which the user swaps at runtime, include `web.search`, `web.extract`,
+`web.crawl`, `memory`, `browser.control`, `computer.control`, and `document.parse`. These also
+bind **canonical verbs**, so swapping the provider does not change the tool ids an agent calls. See
 [Swappable Layers](/docs/core/swappable-layers) for that mechanism, the declarative binding fields,
 and adapters.
 
+Typed decision providers (`decision.typed`) use the same selectable binding contract but declare
+`"layerKind": "decision-model"`. Core exposes that capability through its own Decision Models
+picker and keeps it separate from the Toolkits list. The canonical `decision.predict` tool remains
+stable when the provider changes.
+
+Tunnel adapters provide `network.tunnel` with `"layerKind": "tunnel"`. They appear in the node's VPN
+menu beside the built-in network backends instead of in Toolkits. See
+[Build a Tunnel Adapter](/docs/extend/develop/extensions/tunnel-adapters) for the route contract.
+
+Every selectable capability above accepts third-party providers. To add one, ship an app that declares
+the same capability in `provides`. Map the canonical verbs to your own tools declaratively, or with an
+adapter when a field map is not enough, or serve a route for route-backed capabilities such as
+`document.parse`. Core lists your app in the matching picker once it is installed and enabled.
+
 ## Setting overrides
 
-Override which provider fulfills a capability:
+An override chooses which provider serves a capability. Set it with
+`PUT /api/capabilities/bindings` (`set_capability_bindings` in `apps/core/src/server/mod.rs`). The
+body replaces the whole override map. Each key is a capability and each value is the id of an
+installed app that provides it. Core stores the map in the `binding.overrides` preference
+(`apps/core/src/plugins/binding.rs`).
 
-```json
-{
-  "overrides": {
-    "rag": "com.custom.rag",
-    "tts": "com.custom.tts"
-  }
-}
-```
-
-Or via the API (`apps/core/src/server/mod.rs`, `set_capability_bindings`):
+For example, `@ryu/exa` declares `"default": true` for `web.search`. To use Brave Search instead:
 
 ```bash
-curl -X PUT http://localhost:7980/api/capabilities/bindings \
+curl -X PUT http://127.0.0.1:7980/api/capabilities/bindings \
+  -H "Authorization: Bearer $RYU_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{ "overrides": { "rag": "com.custom.rag" } }'
+  -d '{ "overrides": { "web.search": "@ryu/brave" } }'
 ```
+
+Core validates the new map against the enabled plugins first. If an enabled consumer would become
+unbound or ambiguous, the request returns `409` with `error`, the affected `plugin`, and a
+`binding_error` field that holds one of the codes below. The old map stays in effect.
 
 `GET` the same route to read the current override map, and `GET /api/capabilities` for the full
 read model (candidate providers, which one is bound, and the verbs it serves).
 
 ## How it connects to the dependency graph
 
-Once resolved, the binding is lowered to a bare app-id edge. The existing plugin dependency graph
-(`apps/core/src/plugins/graph.rs`) handles:
-
-- **Topological ordering** - providers are enabled before consumers
-- **Cycle detection** - circular dependencies are rejected
-- **Cascade** - disabling a provider cascades to consumers
+Core lowers a resolved binding to a bare app-id edge in the plugin dependency graph
+(`apps/core/src/plugins/graph.rs`), so enable order, cycle detection, and disable cascades apply
+unchanged. See [Graph lowering](/docs/extend/integrate/capability-broker#graph-lowering).
 
 ## Error handling
 
-| Error | Meaning | Fix |
+| Error code | Meaning | Fix |
 |---|---|---|
-| `Ambiguous` | Multiple providers for one capability | Set an override |
-| `MissingDependency` | No provider for a required capability | Install a provider plugin |
-| `VersionMismatch` | Provider version doesn't satisfy requirement | Update the provider |
+| `capability_ambiguous` | Multiple providers for one strict capability | Set an override |
+| `capability_unprovided` | No provider for a required capability | Install a provider plugin |
+| `capability_override_not_provider` | The override names a plugin that does not provide the capability | Fix or clear the override |
+| `capability_version_unsatisfied` | The chosen provider's capability version does not satisfy the requirement | Update the provider |
+| `capability_invalid_version_req` | The requirement's version floor is malformed | Fix the `requires` entry |
+| `capability_selection_required` | Every candidate binds only through an explicit override | Pick a provider |
 
 ### Canonical tool effects
 
@@ -158,28 +155,29 @@ Canonical tools carry effect metadata through the shared registry. Read operatio
 such as search, snapshots, and screenshots remain available to read-only agents.
 Navigation, input, memory writes, and crawl-job creation are classified as mutations
 and are blocked for read-only or trial agents. The classification follows the
-canonical verb when the provider changes; provider grants and approvals still apply.
+canonical verb when the provider changes. Provider grants and approvals still apply.
 
 ### Adapter failures and multi-step calls
 
 An adapter receives provider results through `callTool` and its declared
 `callNamed` allowlist. MCP tool failures can arrive as a normal result with
-`isError: true`; HTTP tools can return an unavailable or non-success status
+`isError: true`. HTTP tools can return an unavailable or non-success status
 envelope. Check those results before transforming them or performing the next
 step. Preserve the failure payload instead of returning an empty result set or
 claiming that a write succeeded.
 
 Agent Browser stops a targeted action when switching tabs fails, and stops before
 pressing Enter when typing fails. Browser Run preserves failed responses without
-inventing a tab or screenshot. Exa and Parallel preserve free-search MCP errors;
+inventing a tab or screenshot. Browser Run projects page content and the caller-selected
+URL handle. Provider-specific snapshot fields remain in the raw response instead
+of becoming capability fields. Exa and Parallel preserve free-search MCP errors.
 Firecrawl stops polling when its status endpoint returns an error or an
 unrecognized response. These failures remain visible to the caller so it can
-correct the configuration or retry deliberately.
-
-## Related
+correct the configuration or retry.
 
 <Cards>
   <DocCard href="/docs/core/swappable-layers" />
+  <DocCard href="/docs/extend/develop/extensions/tunnel-adapters" />
   <DocCard href="/docs/core/app-manifest-lifecycle" />
   <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
   <DocCard href="/docs/start-here/architecture/platform-decomposition" />

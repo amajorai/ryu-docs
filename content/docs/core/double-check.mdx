@@ -3,80 +3,51 @@ title: "Double-Check"
 description: "A second model reviews each assistant reply, fired once per message as a turn-hook plugin"
 ---
 
-Double-check is a built-in feature that runs a second, separately configured model over the latest
-assistant answer and reports whether it spots a likely mistake. It fires **once per message** with
-no loop and no re-kick (unlike [Goals](/docs/core/goals), which re-judge every turn).
+Double-check runs a second, separately configured model over the latest assistant answer and adds
+the reviewer's verdict as a note: `Looks correct.` or a brief correction. It fires **once per message** with no loop and no re-kick
+(unlike [Goals](/docs/core/goals), which re-judge every turn).
 
-<Callout type="info">
-  Double-check runs as a `post_assistant_turn` plugin turn-hook (`io.ryu.double-check`), not as a
-  Core HTTP endpoint. The reviewer logic lives in `apps/core/src/server/mod.rs`; the hook is
-  dispatched by `apps/core/src/plugin_host/mod.rs` after each assistant reply via
-  `dispatch_turn_hooks`.
+<Callout type="warn">
+  Double-check ships as the `@ryu/double-check` plugin, marked `experimental`. It is off until you
+  turn on the **Double-check** toggle in the composer.
 </Callout>
 
 ## How it runs
 
-After each assistant turn the plugin host calls `dispatch_turn_hooks`. The `io.ryu.double-check`
-hook checks the `io.ryu.double-check` flag on the conversation; if it is `true`, it:
+The plugin declares one `post_assistant_turn` turn hook, `double-check.review`
+(`hooks/review.js` in the plugin package). It matches only when the conversation has
+the `io.ryu.double-check` flag, which the composer toggle sets. After each assistant turn the hook:
 
-1. Reads the recent transcript (`DOUBLE_CHECK_TRANSCRIPT_LIMIT = 6` messages).
-2. Takes the latest `assistant` message as the answer under review.
-3. Resolves the reviewer model and effort (see below).
-4. Calls `call_side_model` - one non-streaming `POST /v1/chat/completions` to the local gateway
-   with a fixed reviewer system prompt asking for a `VERDICT: ok` or `VERDICT: issues` first line.
-5. Runs `parse_double_check_verdict` to get `(ok, critique)`.
-6. Returns a `note` directive with the verdict so the client can show a badge and critique popover.
+1. Takes the latest `assistant` message as the answer under review, and the `user` message before
+   it as the question.
+2. Calls `host.sideModel` with a fixed reviewer system prompt. The reviewer replies `Looks correct.`
+   when the answer is correct and complete, or gives a brief, specific correction.
+3. Returns a `note` directive with the reviewer's text. An empty reply returns no directive.
 
-The reviewer judges **only from the text given** - it cannot run code or browse.
+`host.sideModel` sends one non-streaming `POST /v1/chat/completions` through the Gateway, so the
+firewall, budget, and audit pipeline applies. The plugin needs the `hook:side-model` grant. The
+reviewer judges only from the text it is given. It cannot run code or browse.
 
-## Reviewer model and effort
+## Reviewer model
 
-Nothing is hardcoded. The reviewer model resolves through this precedence:
+The reviewer model resolves through the plugin host's side-model chain
+(`apps/core/src/plugin_host/bridge.rs`, `resolve_model`):
 
 | Order | Source |
 |---|---|
-| 1 | `double-check-model` preference |
-| 2 | `RYU_DOUBLE_CHECK_MODEL` env var |
+| 1 | The `double-check-model` preference, set by **Reviewer model** in the plugin's **Double-check** settings tab |
+| 2 | The node-wide default selection |
 | 3 | `RYU_DEFAULT_LLM_MODEL` env var |
-| 4 | `registry::DEFAULT_LLM_MODEL` literal |
+| 4 | The bundled local chat model |
 
-Effort resolves the same way: the `double-check-effort` preference, else the
-`RYU_DOUBLE_CHECK_EFFORT` env var, else empty. When non-empty, effort is forwarded as
-`reasoning_effort` on the gateway request.
-
-<Callout type="info">
-  The model id is a free, gateway-routable id (any local stem, `openrouter/...` slug, or provider
-  id). The desktop config surfaces provider/model/effort as suggestions, not a constraint.
-</Callout>
-
-## Verdict parsing (fail-loud)
-
-`parse_double_check_verdict` is deliberately fail-loud, the opposite of the goal judge's
-fail-safe-stop. Flagging a false positive is cheaper than hiding a real mistake.
-
-| Reviewer reply | Result |
-|---|---|
-| First line starts with `ok` / `pass` / `correct` | `ok = true` |
-| First line starts with `issue` / `fail` / `wrong` / `no` | `ok = false`, detail as critique |
-| Unreadable or empty | `ok = false`, whole reply surfaced as the critique |
-
-Six unit tests (`double_check_tests`) cover these branches.
-
-<Callout type="warn">
-  `reasoning_effort` reaches OpenAI-compatible, local, and OpenRouter providers verbatim. The
-  Anthropic-direct transform (`to_anthropic_body`) rebuilds the request and currently drops
-  `reasoning_effort`. This is a known caveat, not a failure.
-</Callout>
-
-## Turning it on
-
-Double-check is driven by a composer toggle in the desktop chat. When on, the client sets the
-`io.ryu.double-check` flag on the conversation; the hook fires automatically after each assistant
-turn and the client shows a verdict badge plus a critique popover.
+A selection that carries an effort forwards it as `reasoning_effort` on the Gateway request. The
+model id is any Gateway-routable id, such as a local model stem, an `openrouter/...` slug, or a
+provider id.
 
 <TryInRyu page="chat" />
 
 <Cards>
+  <DocCard href="/docs/plugins/double-check" />
   <DocCard href="/docs/core/goals" />
   <DocCard href="/docs/core/side-questions" />
   <DocCard href="/docs/surfaces/desktop/user-guide/chat" />

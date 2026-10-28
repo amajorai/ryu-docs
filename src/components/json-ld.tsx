@@ -1,4 +1,14 @@
-type JsonLdData = Record<string, unknown>;
+type JsonLdValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | JsonLdData
+  | JsonLdValue[];
+interface JsonLdData {
+  [key: string]: JsonLdValue;
+}
 
 const lessThan = /</g;
 

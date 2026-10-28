@@ -1,0 +1,243 @@
+---
+title: "Local Box Mode"
+description: "Reference for the local Box service: the Docker and filesystem driver lifecycle, TTLs, and the /v1/boxes routes for setup, network, commands, files, previews, SSH, snapshots, prompts, and usage"
+---
+
+Local mode runs the Box service with the Docker driver, or the development-only filesystem driver.
+For the two modes and how Core uses Boxes, see [Persistent Boxes](/docs/core/boxes).
+
+## Lifecycle
+
+The local service keeps a smaller, provider-neutral lifecycle:
+
+| State | Meaning |
+| --- | --- |
+| `provisioning` | The driver is creating or restoring the workspace. |
+| `ready` | Commands, prompts, and interactive work may start. |
+| `running` | At least one foreground command is using the Box. Up to 16 run at once. |
+| `stopping` | The workspace is being saved before its machine is released. |
+| `stopped` | The driver stopped the workspace while its disk remains. |
+| `error` | Provisioning or execution failed and needs recovery. |
+| `deleted` | The driver resource was destroyed; the audit row remains. |
+
+Local create and fork requests require an `Idempotency-Key`. Every local Box has a TTL: 24 hours
+unless the request sets one, and at most 7 days. TTL deadlines are measured from creation, keep
+running while a Box is stopped, are restored after a service restart, and destroy the local resource
+at expiry. Commands use an argv array internally, keep `cwd` inside the workspace, and retain the
+most recent 1 MiB of output per process. Stop, resume, delete, and expiry first end every process
+the service started in the Box.
+
+Running time starts when the Box's machine is up, so repository clones and setup commands count;
+placing a machine and restoring saved state do not. If the service restarts while a Box is
+`stopping` or `provisioning`, it finishes that work on startup: an interrupted stop is saved and
+stopped, an interrupted resume returns to `stopped` with its saved state, and an interrupted create
+moves to `error`.
+
+The filesystem driver runs host processes and is disabled unless
+`RYU_BOX_ALLOW_UNSAFE_LOCAL=true`; it is also refused when `NODE_ENV=production`. It is for
+development and contract tests only. The Docker driver requires access to a **rootless Docker
+daemon** and refuses a rootful daemon, because a Docker socket backed by a rootful daemon is
+equivalent to host-root access. The one exception is a sandbox runtime: set
+`RYU_BOX_DOCKER_RUNTIME=runsc` (gVisor) or a Kata Containers runtime such as `kata-runtime`
+to run each Box under a user-space kernel or a lightweight VM. Use a rootless daemon or a sandbox
+runtime with no host socket exposed to an untrusted service, or use the connected provider path for
+untrusted agent work.
+
+## Routes and features
+
+Every route below is under `/v1/boxes/{id}` unless it starts with `/v1/` and uses the tenant
+bearer key. The [`@ryuhq/client`](https://www.npmjs.com/package/@ryuhq/client) package, version
+0.4.0 or later, wraps all of them with `createBoxClient({ apiKey, baseUrl })`; earlier releases do
+not include the Box client.
+
+## Create with setup, a repository, and secrets
+
+```json
+{
+  "name": "web",
+  "image": "ubuntu:24.04",
+  "network": "allowlist",
+  "allowedHosts": ["github.com", "*.githubusercontent.com", "registry.npmjs.org"],
+  "repo": { "url": "https://github.com/acme/web", "branch": "main", "tokenSecret": "GITHUB_TOKEN" },
+  "setup": ["apt-get update && apt-get install -y nodejs npm", "cd /workspace/web && npm ci"],
+  "secrets": ["GITHUB_TOKEN", "ANTHROPIC_API_KEY"],
+  "env": { "NODE_ENV": "development" }
+}
+```
+
+When `repo` or `setup` is present, create returns `202` with status `provisioning`. The service
+clones the repository into `/workspace/<name>`, runs each setup command as root, then marks the Box
+`ready`, or `error` with the failing command's output. A repository token is sent through Git's
+environment, so it never lands in `.git/config`. `snapshot` boots from a saved snapshot instead of
+`image`.
+
+Store secrets once per tenant with `PUT /v1/secrets/{NAME}` and `{ "value": "..." }`. They are
+encrypted at rest, never returned, and reach a Box only when it lists them in `secrets`. Commands see
+them as environment variables. A Box service without secrets encryption configured answers the
+secrets routes with `503 secrets_unavailable`.
+
+## Network
+
+| `network` | Outbound access |
+| --- | --- |
+| `none` | No network interface besides loopback. Previews, terminals, and tunnels still work. |
+| `allowlist` | Only HTTPS and plain HTTP to `allowedHosts`, through a filtering proxy. Private and link-local addresses are refused. |
+| `egress` | HTTP and HTTPS to any public hostname, through the same filtering proxy. IP literals and names that resolve to private, loopback, or link-local addresses (including cloud metadata), or to the Docker host's own addresses, are refused. |
+
+A fork keeps its source Box's network policy.
+
+The proxy opens HTTPS tunnels (`CONNECT`) only to port 443, so an allowed host cannot be reached
+over SSH, SMTP, or a database port through it. Plain HTTP requests may use port 80 or any port above
+1024, such as a development server on 8080. Other ports get `403 Forbidden`.
+
+The proxy also refuses the Docker host's own public addresses, so a Box cannot reach services on the
+host through a hostname that resolves to it. When the Box service runs directly on the host, the
+proxy finds those addresses on the host's network interfaces. When the service runs in a container,
+it sees only private addresses, so set `RYU_BOX_EGRESS_DENY_CIDRS` to the host's public addresses
+(comma-separated addresses or CIDR blocks); the service logs a warning at startup when it knows none.
+
+Every networked Box sits on a Docker network of its own, so Boxes cannot reach one another, and its
+only way out is its proxy. The Box sets `HTTP_PROXY` and `HTTPS_PROXY`, which package managers,
+`git`, `curl`, and most SDKs honor; raw TCP connections, such as SSH remotes or external databases,
+do not leave the Box. An operator whose host firewall already blocks private and link-local
+destinations for Box networks can set `RYU_BOX_DOCKER_RAW_EGRESS=true` to give `egress` Boxes
+direct outbound access on their own bridge instead. Without such a firewall, raw egress can reach
+the Docker host and cloud metadata. Each networked Box uses one Docker network, so size the
+daemon's address pools for the number of networked Boxes you run.
+
+## Commands and processes
+
+`POST /commands` takes `command`, `args`, `cwd`, `env`, `stdin`, `timeoutSecs`, and `user`
+(`box`, the default unprivileged user, or `root`). By default it waits and returns `stdout`,
+`stderr`, and `exitCode`. With `"stream": true` it returns Server-Sent Events (`process`, `stdout`,
+`stderr`, `exit`) as output arrives; disconnecting stops the command. With `"background": true` it
+returns `202` and a process id at once.
+
+`GET /processes` lists processes. `GET /processes/{pid}/logs?after=N&follow=true` replays output after
+sequence `N` and follows until exit. `POST /processes/{pid}/stdin` writes input, `POST
+/processes/{pid}/kill` stops one, and `POST /interrupt` stops all of them. `GET
+/events?follow=true` streams the Box's event log.
+
+## Files
+
+| Route | Purpose |
+| --- | --- |
+| `GET /files?path=` | List a directory |
+| `GET` or `PUT /files/content?path=` | Read or write one file, up to 64 MiB |
+| `POST /files/directories` | Create a directory |
+| `DELETE /files?path=` | Remove a file or directory |
+| `GET` or `PUT /files/archive?path=` | Download a directory as tar, or extract a tar into it |
+
+Relative paths resolve under `/workspace`.
+
+## Previews
+
+`POST /previews` with `{ "port": 3000, "visibility": "public" }` returns a URL that proxies HTTP
+and WebSocket traffic, including dev-server hot reload, to that port inside the Box. Private
+previews require the tenant bearer key. Set `RYU_BOX_PUBLIC_URL` so returned URLs are absolute, and
+`RYU_BOX_PREVIEW_DOMAIN` with a wildcard DNS record to serve each preview at
+`https://<token>.<domain>/`, which suits apps that expect to run at the root path.
+
+When a preview domain is set, each preview runs only on its own host: a `/preview/<token>/` URL on
+the service origin redirects there. Without one, previews are served by path from the service
+origin, where every preview shares one browser origin; use that only for a single tenant or for
+development. A service that hosts several tenants should use a preview domain on a separate
+registrable domain, not a subdomain of the domain that holds your sign-in cookies.
+
+A preview never forwards platform cookies to the workload, and the workload cannot set them. Cookies
+the workload sets lose any `Domain` attribute, so they stay on the preview host; in path mode their
+`Path` is placed under the preview's path. The workload's `Service-Worker-Allowed` and
+`Clear-Site-Data` response headers are dropped, so it cannot widen a service worker past its preview
+or clear cookies and storage it does not own. Response bodies stream to the browser as the workload
+sends them, and a WebSocket message larger than 16 MiB closes the socket with code `1009`.
+
+Each Box serves up to 32 preview requests and 16 preview WebSockets at a time, and a tenant up to 96
+requests and 32 WebSockets across its Boxes. A request past the limit waits for up to 30 seconds for
+a free slot, so a dev server that loads many modules at once still works; a request that gets no
+slot, or a WebSocket past the limit, gets `429 quota_exceeded`. A preview response is cancelled when
+the workload sends nothing for 10 minutes while the browser waits, and one that never starts gets
+`504 upstream_timeout`, so long-lived streams such as Server-Sent Events should send a heartbeat.
+
+## Terminal, tunnels, and SSH
+
+`POST /access-tokens` with `{ "scope": "terminal" }` or `{ "scope": "tunnel", "port": 5432 }`
+returns a WebSocket URL that is valid for two minutes. The `desktop` scope is different: its token
+is single-use, lasts 30 seconds, is bound to the viewer's origin, and travels as a WebSocket
+subprotocol rather than in the URL. See [Box API](/docs/standalone/box-api#desktop). A terminal socket carries keystrokes and
+output as binary frames and accepts `{ "type": "resize", "cols": 120, "rows": 40 }`. A tunnel socket
+is a raw TCP stream to the port.
+
+`POST /ssh` with `{ "publicKey": "ssh-ed25519 ..." }` installs OpenSSH if needed, starts an
+unprivileged `sshd` inside the Box, and returns a `proxyCommand` for your SSH config. The command
+runs `npx -y -p @ryuhq/client@^0.4.0 box-tunnel <id> 2222`, which reads `RYU_BOX_URL` and
+`RYU_BOX_API_KEY` from your environment and needs Node 22 or newer (or Bun) for its WebSocket.
+`box-tunnel` ships in `@ryuhq/client` 0.4.0 and later:
+
+```text
+Host web-box
+  User ryu
+  ProxyCommand npx -y -p @ryuhq/client@^0.4.0 box-tunnel bx_123 2222
+```
+
+Any WebSocket client that pipes stdin and stdout can stand in for `box-tunnel`. The tunnel is a
+binary WebSocket at `/v1/boxes/<id>/tunnel?port=2222` that accepts the tenant bearer key in the
+`Authorization` header.
+
+Editors with remote SSH support, such as VS Code and Cursor, can attach through the same host
+entry.
+
+## Snapshots and forks
+
+`POST /snapshots` with an optional `name` saves the Box's filesystem. `GET /v1/snapshots` lists
+them, and `DELETE /v1/snapshots/{id-or-name}` removes one. A tenant can keep up to 20 snapshots;
+past that, `POST /snapshots` returns `429 quota_exceeded` until one is deleted. Create a Box with
+`"snapshot": "<id-or-name>"` to restore it. `POST /fork` copies a running or stopped Box into a new one.
+
+## Managed agent prompts
+
+`POST /prompt` with `{ "provider": "claude", "text": "...", "execution": "managed" }` installs the
+provider's CLI if needed and runs the prompt inside the Box as the unprivileged user. The supported
+providers are `claude`, `codex`, `opencode`, and `cursor`. Credentials come from the Box's secrets
+or the run's `env`, for example `ANTHROPIC_API_KEY`, so the Box needs `egress` or an allowlist that includes the
+provider's API. The run's `processId` streams its output. Without `execution`, the prompt is queued
+for an external worker to claim.
+
+A managed prompt also accepts these optional fields. A worker prompt that sends them returns
+`400 invalid_request`.
+
+| Field | Rule |
+| --- | --- |
+| `cwd` | Working directory relative to `/workspace`, at most 256 characters, with no leading `/` or `\` and no `..` segment. Defaults to the cloned repository folder, or `/workspace` when the Box has no repository. |
+| `env` | Variables for the agent process only, validated like `/commands` env (at most 64 entries, reserved names rejected, values up to 32 KiB). They stay in memory for that run. They are never written to storage, events, logs, or responses. |
+| `timeoutSeconds` | Hard limit on the agent process, from 60 to 14400. The default is 14400. |
+
+Every prompt run response includes `status` (`queued`, `running`, `completed`, or `failed`),
+`exitCode`, `summary` (at most 4000 characters), `completedAt`, and `reason`. The `reason` field
+explains a failure that the agent did not report itself. For a managed run, every `env` value that
+appears in the agent's output is replaced with `[redacted]` before the summary is stored or sent.
+
+| `reason` | Cause |
+| --- | --- |
+| `canceled` | The run was canceled, or the Box was interrupted. |
+| `box_destroyed` | The Box was deleted or expired while the run was active. |
+| `service_restarted` | The Box service restarted while the run was active. |
+| `timeout` | The agent process passed `timeoutSeconds`. |
+
+`GET /prompts/{runId}` returns one run, or `404 not_found`. `POST /prompts/{runId}/cancel` fails an
+active managed run with reason `canceled` and stops its process. Canceling a finished run returns
+it unchanged. Canceling a worker run that has not finished returns `409 conflict`. Deleting a Box
+ends a running managed prompt before its processes stop.
+
+## Usage
+
+`GET /v1/usage?from=&to=` returns running seconds and resource-unit seconds per Box, measured per
+second. Metering pauses while a Box is stopped and ends when it is deleted. Ryu-hosted Boxes are
+settled hourly from this report; a self-hosted local service only reports it.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/boxes" />
+  <DocCard href="/docs/standalone/box-api" />
+  <DocCard href="/docs/standalone/box-lifecycle" />
+</Cards>

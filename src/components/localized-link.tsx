@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import type { ComponentProps } from "react";
+import { z } from "zod";
 
 import { localizeDocsHref } from "@/lib/docs-version";
 
@@ -12,8 +13,10 @@ type LocalizedLinkProps = ComponentProps<typeof Link>;
 export function LocalizedLink({ href, ...props }: LocalizedLinkProps) {
   const params = useParams<{ lang?: string }>();
   const locale = params.lang;
-  const localizedHref =
-    typeof href === "string" ? localizeDocsHref(href, locale) : href;
+  const textHref = z.string().safeParse(href);
+  const localizedHref = textHref.success
+    ? localizeDocsHref(textHref.data, locale)
+    : href;
 
   return <Link href={localizedHref ?? "#"} {...props} />;
 }

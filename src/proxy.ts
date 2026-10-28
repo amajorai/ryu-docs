@@ -1,20 +1,45 @@
 import { createI18nMiddleware } from "fumadocs-core/i18n/middleware";
-import { isMarkdownPreferred, rewritePath } from "fumadocs-core/negotiation";
+import { getNegotiator, rewritePath } from "fumadocs-core/negotiation";
 import {
   type NextFetchEvent,
   type NextRequest,
   NextResponse,
 } from "next/server";
 
-import { i18n, isDocsLocale } from "@/lib/i18n";
+import { DEFAULT_DOCS_LOCALE, i18n, isDocsLocale } from "@/lib/i18n";
 
 const { rewrite: rewriteMarkdown } = rewritePath(
   "/docs{/*path}",
   "/llms.mdx/docs{/*path}",
 );
 const i18nMiddleware = createI18nMiddleware(i18n);
-type I18nRequest = Parameters<typeof i18nMiddleware>[0];
-type I18nEvent = Parameters<typeof i18nMiddleware>[1];
+/** The media types fumadocs-core's `isMarkdownPreferred` answers with Markdown. */
+const MARKDOWN_MEDIA_TYPES = new Set([
+  "text/plain",
+  "text/markdown",
+  "text/x-markdown",
+]);
+
+/**
+ * Whether the request lists a Markdown media type with a weight above zero.
+ *
+ * Same decision as fumadocs-core's `isMarkdownPreferred`, except that the type
+ * and subtype are compared case-insensitively, as RFC 9110 section 8.3.1
+ * requires: the negotiator keeps the client's spelling, so `TEXT/MARKDOWN`
+ * used to get HTML here while the main site answered it with Markdown.
+ *
+ * `mediaType` is annotated because fumadocs-core's declaration imports the
+ * untyped `negotiator` package, so `getNegotiator()` is `any` to TypeScript.
+ * At runtime `mediaTypes()` returns `type/subtype` strings.
+ */
+function prefersMarkdown(request: NextRequest): boolean {
+  return getNegotiator(request)
+    .mediaTypes()
+    .some((mediaType: string) =>
+      MARKDOWN_MEDIA_TYPES.has(mediaType.toLowerCase()),
+    );
+}
+const DEFAULT_ENGLISH_DOCS_REWRITE = "x-fumadocs-default-english-rewrite";
 
 function markdownDestination(pathname: string): string | undefined {
   const segments = pathname.split("/").filter(Boolean);
@@ -32,7 +57,7 @@ export function proxy(request: NextRequest, event: NextFetchEvent) {
     return NextResponse.next();
   }
 
-  if (isMarkdownPreferred(request)) {
+  if (prefersMarkdown(request)) {
     const destination = markdownDestination(pathname);
     if (destination) {
       return NextResponse.rewrite(new URL(destination, request.url), {
@@ -41,14 +66,38 @@ export function proxy(request: NextRequest, event: NextFetchEvent) {
     }
   }
 
-  // The monorepo's hoisted install can expose a second Next.js type instance
-  // under apps/fumadocs. Both requests are the same runtime Web API object;
-  // keep this compatibility cast at the package boundary instead of leaking
-  // duplicate-Next nominal types through the app.
-  return i18nMiddleware(
-    request as unknown as I18nRequest,
-    event as unknown as I18nEvent,
-  );
+  if (
+    pathname.startsWith("/en/docs/") &&
+    request.headers.get(DEFAULT_ENGLISH_DOCS_REWRITE) === "1"
+  ) {
+    const headers = new Headers(request.headers);
+    headers.delete(DEFAULT_ENGLISH_DOCS_REWRITE);
+    return NextResponse.next({ request: { headers } });
+  }
+
+  // Resolve internal default-locale pages instead of redirecting back to the public URL.
+  if (
+    pathname === `/${DEFAULT_DOCS_LOCALE}` ||
+    pathname === `/${DEFAULT_DOCS_LOCALE}/` ||
+    pathname === `/${DEFAULT_DOCS_LOCALE}/docs` ||
+    pathname.startsWith(`/${DEFAULT_DOCS_LOCALE}/docs/`)
+  ) {
+    return NextResponse.next();
+  }
+
+  // Fumadocs hides the default English locale in browser URLs. Rewriting the
+  // default docs route internally avoids a redirect back to the same visible
+  // URL while still rendering through the `[lang]` route segment. The marker is
+  // consumed on an internal re-entry and removed before the page handler.
+  if (pathname === "/docs" || pathname.startsWith("/docs/")) {
+    const destination = request.nextUrl.clone();
+    destination.pathname = `/en${pathname}`;
+    const headers = new Headers(request.headers);
+    headers.set(DEFAULT_ENGLISH_DOCS_REWRITE, "1");
+    return NextResponse.rewrite(destination, { request: { headers } });
+  }
+
+  return i18nMiddleware(request, event);
 }
 
 export const config = {

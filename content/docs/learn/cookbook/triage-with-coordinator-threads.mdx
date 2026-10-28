@@ -1,11 +1,11 @@
 ---
-title: "Triage a backlog with a coordinator agent"
-description: "Have one agent spin up parallel worker threads to chew through a list of tasks, each isolated in its own git worktree, then read the results back."
+title: "Triage a Backlog with a Coordinator Agent"
+description: "How-to for a coordinator agent that uses the threads tools to start parallel worker threads for a task list, optionally in separate git worktrees, then read the results back."
 ---
 
 Use a coordinator agent to split independent tasks, such as bug reports, file summaries, or repo
-audits, into worker threads. The workers run in parallel in separate git worktrees, and the
-coordinator collects their results when they finish.
+audits, into worker threads. The workers run in parallel, optionally in separate git worktrees, and
+the coordinator collects their results when they finish.
 
 ## What you'll use
 
@@ -26,32 +26,29 @@ coordinator collects their results when they finish.
 ### Grant the coordinator the `threads` tools
 
 The `threads` tools are allowlist-gated. Only an agent whose tool allowlist grants `threads.*` can
-spawn and manage workers, so pick the agent that will act as your coordinator and add the threads
-tools to its allowlist on its edit page Tools tab.
+start and manage workers. Pick the agent that will act as your coordinator and add the threads tools
+to its allowlist on the **Tools** tab of its edit page.
 
-The built-in flagship `ryu` is seeded with the explicit `*` grant, so `threads.*` is reachable for
-that agent. A newly-created agent starts with no executable MCP tools: grant `threads.*` (or `*`) on
-its agent card before using it as a coordinator. Narrow an existing wildcard only if you want to
-scope the coordinator down to a specific set.
+The built-in `ryu` agent is seeded with the explicit `*` grant, so it can reach `threads.*`. A new
+agent has no executable MCP tools. Grant `threads.*` (or `*`) before you use it as a coordinator.
 
 <Callout type="info">
-This is an agent-facing capability today. There is no dedicated desktop coordinator screen yet: you
-drive it by chatting with the coordinator agent, and it calls the tools through its normal tool
-loop.
+This is an agent-facing capability with no dedicated coordinator screen in Desktop. You chat with
+the coordinator agent, and it calls the tools through its normal tool loop.
 </Callout>
 
 </Step>
 
 <Step>
 
-### Ask the coordinator to spin up a worker per task
+### Ask the coordinator to start a worker per task
 
-In a chat with the coordinator, hand it the list and ask it to create one worker thread per item and
-dispatch each one. Under the hood it calls `threads.create_thread` for each task, then
+In a chat with the coordinator, give it the list and ask it to create one worker thread per item and
+dispatch each one. It calls `threads.create_thread` for each task, then
 `threads.send_message_to_thread` to run that thread's agent on the instruction.
 
 By default `send_message_to_thread` runs in the background and returns immediately, so the
-coordinator fans out across the whole list rather than blocking on each worker:
+coordinator dispatches the whole list without waiting on each worker.
 
 ```json
 {
@@ -67,20 +64,20 @@ The response confirms the dispatch without waiting for the work to finish:
 { "ok": true, "thread_id": "<worker-id>", "dispatched": true, "status": "running" }
 ```
 
-Background fan-out is bounded by a process-global semaphore of 8 permits, so if you queue more than
-eight at once the extras wait for a slot rather than being rejected.
+A process-global limit of 8 concurrent background workers applies. If you queue more than eight at
+once, the extras wait for a slot instead of being rejected.
 
 </Step>
 
 <Step>
 
-### Let worktree isolation keep workers from colliding
+### Use worktree isolation to keep workers apart
 
-When the working directory is a git repo and `isolate` is true (the default), each worker runs in
-its own per-conversation git worktree. Two workers editing the same repo never step on each other's
-files, because each has its own checkout. The worktree is created lazily on the first
-`send_message_to_thread` and reused across that thread's later turns, keyed on its conversation id,
-so a worker keeps the same checkout as you give it follow-up instructions.
+When the working directory is a git repo and `isolate` is true, each worker runs in its own
+per-conversation git worktree. Two workers editing the same repo do not change each other's files,
+because each has its own checkout. When `isolate` is omitted, the **Worktrees** setting in the
+Gateway settings decides. That setting is off by default. The worktree is created on the first
+`send_message_to_thread` and reused for that thread's later turns, keyed on its conversation id.
 
 See [Git workspace](/docs/surfaces/desktop/user-guide/git-workspace) for how the per-conversation worktrees
 are created and how their diffs surface.
@@ -91,22 +88,24 @@ are created and how their diffs surface.
 
 ### Read the results back
 
-Since the workers run in the background, the coordinator polls them. `threads.list_threads` shows
-every thread with its `run_status`, title, message count, and pinned/archived flags;
-`threads.read_thread` returns a thread's most recent messages plus its `run_status`.
+The workers run in the background, so the coordinator checks on them. `threads.list_threads` shows
+every thread with its `run_status`, title, message count, and pinned and archived flags.
+`threads.wait_for_thread` blocks until a thread's run finishes, up to `timeout_ms` (default 30000,
+maximum 300000). `threads.read_thread` returns a thread's most recent messages plus its
+`run_status`. `limit` defaults to 20 and is capped at 100.
 
 ```json
 { "thread_id": "<worker-id>", "limit": 20 }
 ```
 
-Each message body is truncated to keep a long worker reply from flooding the coordinator's context,
-and `read_thread` reports `run_status` so the coordinator knows whether a worker is still running,
-done, or failed. Once a worker is finished, the coordinator can summarize it, archive it with
-`threads.set_thread_archived`, or pin the ones worth keeping in view with
+Each message body is truncated to 2,000 characters so a long worker reply does not fill the
+coordinator's context. `run_status` tells the coordinator whether a worker is `running`,
+`completed`, `failed`, or `interrupted`. Once a worker is finished, the coordinator can summarize
+it, archive it with `threads.set_thread_archived`, or pin the ones worth keeping in view with
 `threads.set_thread_pinned`.
 
-If you want a blocking call instead, pass `wait: true` to `send_message_to_thread` and it returns
-the reply inline rather than dispatching in the background.
+For a blocking call, pass `wait: true` to `send_message_to_thread`. It returns the reply inline
+instead of dispatching in the background.
 
 </Step>
 
@@ -115,20 +114,19 @@ the reply inline rather than dispatching in the background.
 ## Check your work
 
 - After dispatch, `threads.list_threads` shows one thread per task, each with a `run_status` that
-  moves from `running` to `done` (or `failed`) as workers finish.
+  moves from `running` to `completed` (or `failed`) as workers finish.
 - `threads.read_thread` returns a worker's latest messages plus its `run_status`, so the
   coordinator knows a result is ready before summarizing it.
-- With `isolate: true` in a git repo, each worker gets its own worktree, so two workers editing the
-  same files never clobber each other. More than 8 concurrent dispatches queue for a slot rather
-  than being rejected.
+- With `isolate: true` in a git repo, each worker gets its own worktree. More than 8 concurrent
+  dispatches wait for a slot instead of being rejected.
 
 ## Threads vs delegate: which one
 
-Both fan work out, but they answer different needs.
+Both split work across agents, for different needs.
 
 - Use [coordinator threads](/docs/core/coordinator-threads) when the work is **durable**: each worker
-  is a real, persistent conversation you can read, resume, and revisit. This is the right tool for a
-  backlog the coordinator checks back on over time.
+  is a persistent conversation you can read, resume, and revisit. Use it for a backlog the
+  coordinator checks on over time.
 - Use [`delegate.fanout`](/docs/core/delegation) when the work is **ephemeral**: parallel subtasks
   with clean contexts whose results come back in one call, with nothing to revisit afterward.
 

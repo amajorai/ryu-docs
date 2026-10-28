@@ -1,0 +1,95 @@
+---
+title: "OpenRouter Batch Inference"
+description: "Submit, inspect, and clean up asynchronous OpenRouter inference batches through the Gateway."
+---
+
+Use Gateway batches for work that can finish asynchronously: comparing prompts on one model, scoring evaluation datasets, bulk classification or summarization, and refreshing embeddings. OpenRouter accepts chat completions, Responses, Anthropic Messages, and embeddings in separate batches. Every request in one batch shares an endpoint and model, and every row returns independently under its `custom_id`.
+
+OpenRouter allows up to 24 hours to complete a batch. It reports that batch-capable provider endpoints generally cost about half their normal per-token price, with the exact discount varying by model. Results may arrive much sooner, but timing is variable; treat a batch as background work, not a latency-sensitive call or an SLA. See OpenRouter's [Batch API guide](https://openrouter.ai/docs/batch-quickstart) for current provider support and routing details.
+
+## Access and billing
+
+The hosted Ryu Gateway does not accept new batches: `POST /v1/batches` returns `403` with
+`code: "feature_not_permitted"`, because a batch sends every row upstream without the per-request
+screening, budget and organization attribution that the hosted Gateway applies to other calls. Run
+batches on a self-hosted Gateway with your own OpenRouter account. See
+[Hosted Gateway restrictions](/docs/gateway/managed-data-plane#hosted-gateway-restrictions).
+
+Batch operations require a Gateway master key. Core's `/api/gateway/batches` proxy keeps that Gateway credential on the server when a Core client is used. All Core batch operations, including listing and reading results, require node-owner access.
+
+Batch inference uses the configured OpenRouter account directly. It does not run each row through Gateway's normal per-request routing, budget, firewall, or wallet settlement path. OpenRouter applies the workspace's provider allowlist, data policy, and BYOK settings, then selects one eligible provider for the whole batch; you can optionally pin it with `provider.only`. OpenRouter returns token and cost usage on completion and includes batches in workspace logs. Review account and provider retention policies before submitting private data. OpenRouter retains batch inputs and results for up to 30 days. Deleting a terminal batch purges OpenRouter-held artifacts, but upstream provider deletion may be unsupported; inspect the deletion response's `deletion.upstream` status.
+
+Gateway refuses new batches when its OpenRouter configuration requires per-request `data_collection: "deny"` or zero-data-retention routing. The Batch API request shape does not document controls for either setting, so the Gateway cannot safely carry those guarantees into an asynchronous job.
+
+The same applies to Gateway's response-healing plugin and provider sort preference; OpenRouter's batch API accepts `provider.only` as its only request-level routing preference. Disable those options before submitting a batch. These Gateway checks are separate from OpenRouter's workspace-level data policy, which OpenRouter applies during provider selection.
+
+New submissions use the currently published provider configuration, including changes made after
+Gateway starts. A submission keeps the provider generation it began with while its request is in
+flight. Disabling or removing that account prevents later submissions; an unrelated provider
+configuration update preserves the unchanged account's batch capability.
+
+## Submit an eval dataset
+
+The published `@ryuhq/core-client/gateway` module includes `buildGatewayEvalBatchPlan`, which turns text eval cases into chat requests with stable row IDs. Expected answers, assertions, and other grading metadata remain in the returned local mapping and are not sent as prompts.
+
+```ts
+import type { ApiTarget } from "@ryuhq/core-client/client";
+import {
+  buildGatewayEvalBatchPlan,
+  createGatewayBatch,
+  getGatewayBatch,
+  scoreGatewayEvalBatch,
+} from "@ryuhq/core-client/gateway";
+
+declare const target: ApiTarget; // Authenticated Core target supplied by your host app.
+
+const plan = buildGatewayEvalBatchPlan("openai/gpt-4o-mini", [
+  {
+    id: "refund-policy",
+    prompt: "Summarize the refund policy in one sentence.",
+    expected: "30 days",
+  },
+]);
+
+const submitted = await createGatewayBatch(target, plan.request);
+let current = await getGatewayBatch(target, submitted.id);
+while (!["completed", "failed", "expired", "cancelled"].includes(current.status)) {
+  await new Promise((resolve) => setTimeout(resolve, 15_000));
+  current = await getGatewayBatch(target, submitted.id);
+}
+
+if (current.status === "completed") {
+  const scored = await scoreGatewayEvalBatch(target, plan, current);
+  console.log(scored.result?.aggregate);
+  console.log(scored.failures); // Per-row OpenRouter failures stay independent.
+}
+```
+
+The helper scores completed rows with Gateway's existing eval runner, including assertions, run-level evaluators, and judge calls. It sets each case's latency measurement to the whole batch turnaround because OpenRouter does not provide per-row latency; this reflects async job completion time and should not be compared directly with synchronous inference latency. Per-row provider cost is copied from the response when OpenRouter reports it.
+
+The helper leaves `provider_output_policy_pass` unset because batch generations did not traverse Gateway's firewall/policy path. Scored rows report `policy_available: false`; the aggregate excludes that dimension rather than counting it as either a pass or a failure.
+
+Submit one plan per model. The helper supports text prompts, ordered text messages, run-level system prompts/messages, simple `{{path.to.value}}` lookup, JSON variable transforms, and prompt prefixes/suffixes. It rejects Nunjucks filters/control blocks, cases that override the provider/model, precomputed outputs, and per-case response caching; pre-render advanced templates before building the batch plan.
+
+For bulk embeddings, submit `/v1/embeddings` with one `{ custom_id, body: { input } }` item per document or document group. The completed row's `response.body` has the normal embeddings response shape. Keep each `custom_id` stable enough to join the vectors back to your source records.
+
+## Batch lifecycle
+
+| Operation | Gateway route | Behavior |
+|---|---|---|
+| Submit | `POST /v1/batches` | Returns `202` with the OpenRouter batch ID and initial status |
+| List | `GET /v1/batches?limit=20&status=in_progress` | Cursor pagination uses `after`; `status` may be repeated |
+| Poll | `GET /v1/batches/{id}` | Returns status and request counts; completed results arrive inline |
+| Delete | `DELETE /v1/batches/{id}` | Deletes only terminal jobs; an in-flight job returns a conflict |
+
+A Submit that times out or loses its connection after sending returns `504`, because OpenRouter may already have created the batch: list recent batches (for example with `created_after`) before resubmitting, since a resubmission creates a separate billed batch. On a direct Gateway call, a `502` connection failure means the request never reached OpenRouter and is safe to retry; through the Core proxy, list batches before resubmitting after any failed Submit. A Poll or List that returns `504` timed out and is safe to repeat; a Delete that returns `504` may already have taken effect, so poll the batch before retrying.
+
+The Core proxy exposes the same resource under `/api/gateway/batches`. The client methods `createGatewayBatch`, `listGatewayBatches`, `getGatewayBatch`, and `deleteGatewayBatch` use that proxy.
+
+The Gateway accepts up to 10,000 rows and an 8 MiB submission body. List pages are bounded to 100 rows. Completed results are capped at 64 MiB per response. OpenRouter may reject a model without a batch-capable endpoint, unsupported request fields, or provider pins that have no eligible batch endpoint. Audio, video, and OpenRouter-managed web search are not supported in batch jobs; use the synchronous inference API for those requests.
+
+There is no in-flight cancellation operation. Delete a batch after it reaches `completed`, `failed`, `expired`, or `cancelled` to purge OpenRouter-held request/result artifacts sooner than the retention deadline; check the returned upstream deletion status separately. Image and file inputs, where supported by the selected provider, must use public URLs. Base64/data-URI images are rejected, and other multimodal support depends on the selected provider.
+
+## Related
+
+For synchronous model comparisons that must pass through Gateway policy and budgets, see [Gateway evals](/docs/gateway/evals).

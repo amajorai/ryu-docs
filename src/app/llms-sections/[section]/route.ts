@@ -1,55 +1,18 @@
 import { notFound } from "next/navigation";
 
+import { DOCS_SECTIONS, isDocsSection } from "@/lib/docs-sections";
 import { docsPathForLocale } from "@/lib/docs-version";
 import { localeFromInput } from "@/lib/i18n";
+import {
+  isReleaseNotesPage,
+  splitReleaseNotesForLlms,
+} from "@/lib/release-notes-docs";
 import { getLLMText, source } from "@/lib/source";
 
 export const revalidate = false;
 
 // Section projections can contain most of the docs corpus; generate them only
 // when requested so a cold deployment remains bounded.
-
-// Section slugs accepted by /llms-sections/{section}. Values are the URL prefix
-// that section owns (relative to /docs/{version}/). Legacy slugs from the
-// pre-reorg layout map onto the realm they now live in, so old clients that
-// asked for /llms-sections/desktop still get the desktop pages.
-const VALID_SECTIONS: Record<string, string> = {
-  "start-here": "start-here",
-  showcase: "showcase",
-  surfaces: "surfaces",
-  mobile: "mobile",
-  "browser-extension": "browser-extension",
-  hardware: "hardware",
-  core: "core",
-  gateway: "gateway",
-  standalone: "standalone",
-  providers: "providers",
-  ci: "ci",
-  extend: "extend",
-  ui: "ui",
-  apps: "apps",
-  programs: "programs",
-  plugins: "plugins",
-  security: "security",
-  legal: "legal",
-  billing: "billing",
-  reference: "reference",
-  learn: "learn",
-  roadmap: "roadmap",
-  // Legacy aliases → the realm that absorbed them.
-  desktop: "surfaces/desktop",
-  cli: "surfaces/cli",
-  island: "surfaces/island",
-  raycast: "surfaces/raycast",
-  develop: "extend/develop",
-  integrate: "extend/integrate",
-  skills: "extend/skills",
-  mcp: "extend/mcp",
-  cookbook: "learn/cookbook",
-  academy: "learn/academy",
-  defaults: "reference/defaults",
-  benchmark: "reference/benchmark",
-};
 
 export async function GET(
   _req: Request,
@@ -60,11 +23,10 @@ export async function GET(
   if (!locale) {
     return new Response("Unsupported documentation locale", { status: 400 });
   }
-  const prefix = VALID_SECTIONS[section];
-
-  if (!prefix) {
+  if (!isDocsSection(section)) {
     notFound();
   }
+  const prefix = DOCS_SECTIONS[section];
 
   const sectionPath = docsPathForLocale(locale, ...prefix.split("/"));
 
@@ -79,14 +41,29 @@ export async function GET(
     notFound();
   }
 
-  const scanned = await Promise.all(pages.map(getLLMText));
+  // The release notes archive is about 2 MB; inline only the index and the
+  // newest releases and link the rest, so the section stays a bounded response.
+  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com";
+  const { full, linked } = pages.every((page) => isReleaseNotesPage(page.slugs))
+    ? splitReleaseNotesForLlms(pages)
+    : { full: pages, linked: [] };
+
+  const scanned = await Promise.all(full.map(getLLMText));
+  const olderReleases = linked.length
+    ? `\n\n--- END OF PAGE ---\n\n## Older releases (${linked.length})\n\nThese pages are not inlined; fetch each URL for its notes.\n\n${linked
+        .map(
+          (page) =>
+            `- [${page.data.title}](${baseUrl}${page.url})${page.data.description ? `: ${page.data.description}` : ""}`,
+        )
+        .join("\n")}\n`
+    : "";
 
   const header = `# Ryu Docs — ${section}
 
 Locale: ${locale}
 Section: ${section}
-Pages: ${scanned.length}
-Base URL: ${process.env.NEXT_PUBLIC_SITE_URL || "https://docs.ryuhq.com"}
+Pages: ${pages.length}
+Base URL: ${baseUrl}
 
 Each page below starts with a Source/Title header followed by its full Markdown content.
 
@@ -94,10 +71,13 @@ Each page below starts with a Source/Title header followed by its full Markdown 
 
 `;
 
-  return new Response(header + scanned.join("\n\n--- END OF PAGE ---\n\n"), {
-    headers: {
-      "Content-Type": "text/markdown; charset=utf-8",
-      "Cache-Control": "public, max-age=86400",
+  return new Response(
+    header + scanned.join("\n\n--- END OF PAGE ---\n\n") + olderReleases,
+    {
+      headers: {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Cache-Control": "public, max-age=86400",
+      },
     },
-  });
+  );
 }

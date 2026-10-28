@@ -1,0 +1,410 @@
+---
+title: "Managed Agents SDK Quickstart"
+description: "Call the Ryu Managed Agents preview with curl, @ryuhq/services, the ryu_sdk.services Python client, the ryu-services CLI, and its MCP tools"
+tags: ["managed-agents", "sdk", "cli", "mcp", "standalone"]
+---
+
+<Callout type="warn">
+Preview: off until your organization turns on the Managed Agents feature.
+</Callout>
+
+This page makes a first call to [Ryu Managed Agents](/docs/standalone/managed-agents)
+with curl, with the `@ryuhq/services` TypeScript SDK, with the `ryu_sdk.services` Python client, with the `ryu-services`
+command line, and with its MCP tools. The full HTTP contract is on
+[Ryu Managed Agents API](/docs/standalone/managed-agents-api), and the event
+log and stream are on [Managed Agents events and streams](/docs/standalone/managed-agents-events).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## What you need
+
+- An organization where Managed Agents is turned on. An organization owner or
+  feature manager turns it on in **Organization → Features**, and the Ryu
+  deployment must also offer it. Until then, requests get
+  `403 feature_disabled` or `503 managed_agents_disabled`.
+- A `ryu_` API key with the `chat:write` scope (to start sessions and send
+  messages) and the `agents:read` scope (to read agents, environments,
+  sessions, and events).
+- An agent and an environment to run it in, whose ids (`magt_…` and
+  `menv_…`) the samples below use. Only people configure environments, with a
+  console session or a personal API key; an organization API key can then
+  start sessions in them. To create both from code, see
+  [Create an agent and an environment](#create-an-agent-and-an-environment),
+  or the curl requests under
+  [Ryu Managed Agents API examples](/docs/standalone/managed-agents-api#examples).
+  To find the ids of existing ones, call `agents.list()` and
+  `environments.list()`.
+
+Provider credentials for environments are added, rotated, and revoked only in
+the Ryu console, with a fresh identity confirmation. API keys can read the
+redacted credential list, so the SDK, the CLI, and the MCP tools expose
+credentials read-only.
+
+## Configure
+
+The SDK and the CLI read these environment variables. Options passed to
+`new Ryu()` win over them, and `new Ryu({ env: false })` turns env reads off.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RYU_API_URL` | `https://api.ryuhq.com` | Control-plane origin; the client appends /api/v1/managed-agents. |
+| `RYU_API_KEY` | none | A ryu_ key, sent as x-api-key to Managed Agents, Messaging and, unless another Mail key takes precedence, hosted Mail. Never sent to another origin. |
+| `RYU_ORGANIZATION_ID` | none | Sent as X-Ryu-Organization with the ryu_ key; required for personal keys. |
+
+```sh
+export RYU_API_KEY="ryu_..."
+export RYU_ORGANIZATION_ID="<organization-id>"
+```
+
+`RYU_API_KEY` is sent only to the control-plane origin: to Managed Agents,
+Messaging and hosted Mail there. The SDK never sends it to another host.
+
+## Create an agent and an environment
+
+Run this once with a personal `ryu_` key (and `RYU_ORGANIZATION_ID`), because
+only people configure environments. Creating an environment needs the
+`gateway:route` and `chat:write` scopes on the key, and the
+`gateway.configure` permission in the organization; see
+[Endpoint surface](/docs/standalone/managed-agents-api#endpoint-surface).
+An environment runs on a provider credential (`mcred_…`) that a person added
+in the Ryu console, and `credentials.list()` reads the redacted list:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// A personal ryu_ key in RYU_API_KEY, with RYU_ORGANIZATION_ID.
+const ryu = new Ryu({ result: "object" });
+
+const credentials = await ryu.managedAgents.credentials.list();
+const credential = credentials.data?.data.find((entry) => entry.provider === "anthropic");
+
+const agent = await ryu.managedAgents.agents.create({
+  name: "Support triage",
+  model: "<model-id>",
+  instructions: "You triage support tickets.",
+});
+if (agent.error) {
+  console.error(agent.error.code, agent.error.message);
+} else if (credential) {
+  const environment = await ryu.managedAgents.environments.create({
+    name: "claude-prod",
+    backend: "anthropic",
+    credential: { source: "byok", credentialId: credential.id },
+  });
+  if (environment.error) {
+    console.error(environment.error.code, environment.error.message);
+  } else {
+    console.log(agent.data.id, environment.data.id); // magt_… menv_…
+  }
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# A personal ryu_ key in RYU_API_KEY, with RYU_ORGANIZATION_ID.
+ryu = Ryu(result="object")
+
+credentials = ryu.managed_agents.credentials.list().data
+credential = next(
+    (entry for entry in (credentials or {}).get("data", []) if entry["provider"] == "anthropic"), None
+)
+
+agent, error, _ = ryu.managed_agents.agents.create(
+    {"name": "Support triage", "model": "<model-id>", "instructions": "You triage support tickets."}
+)
+if error:
+    print(error.code, error.message)
+elif agent and credential:
+    environment, env_error, _ = ryu.managed_agents.environments.create(
+        {"name": "claude-prod", "backend": "anthropic", "credential": {"source": "byok", "credentialId": credential["id"]}}
+    )
+    if env_error:
+        print(env_error.code, env_error.message)
+    elif environment:
+        print(agent["id"], environment["id"])  # magt_… menv_…
+```
+
+The other backends, and the agent's tools and MCP servers, are on
+[Ryu Managed Agents API](/docs/standalone/managed-agents-api).
+
+## First call with curl
+
+List one agent:
+
+```sh
+curl -sS "https://api.ryuhq.com/api/v1/managed-agents/agents?limit=1" \
+  -H "x-api-key: $RYU_API_KEY" \
+  -H "X-Ryu-Organization: $RYU_ORGANIZATION_ID"
+```
+
+Start a session with a first message. The `Idempotency-Key` makes a retry of
+the same request safe:
+
+```sh
+curl -sS -X POST "https://api.ryuhq.com/api/v1/managed-agents/sessions" \
+  -H "x-api-key: $RYU_API_KEY" \
+  -H "X-Ryu-Organization: $RYU_ORGANIZATION_ID" \
+  -H "Idempotency-Key: session-ticket-1234" \
+  -H "Content-Type: application/json" \
+  -d '{"agentId":"magt_<id>","environmentId":"menv_<id>","initialEvents":[{"type":"user.message","content":[{"type":"text","text":"Summarize ticket 1234"}]}]}'
+```
+
+## First call with the SDK
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors. `sessions.run()` creates the
+session, follows its event stream until the agent's turn ends, and re-reads
+the session:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_API_KEY, RYU_ORGANIZATION_ID and RYU_API_URL.
+const ryu = new Ryu({ result: "object" });
+
+const { data, error, meta } = await ryu.managedAgents.sessions.run({
+  agentId: "magt_<id>",
+  environmentId: "menv_<id>",
+  message: "Summarize ticket 1234",
+});
+
+if (error) {
+  console.error(error.code, error.hint ?? error.message, error.requestId);
+} else {
+  console.log(data.text);
+  console.log(data.session.status, data.session.stopReason, meta.requestId);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_API_KEY, RYU_ORGANIZATION_ID and RYU_API_URL.
+ryu = Ryu(result="object")
+
+data, error, meta = ryu.managed_agents.sessions.run(
+    {"agentId": "magt_<id>", "environmentId": "menv_<id>", "message": "Summarize ticket 1234"}
+)
+
+if error:
+    print(error.code, error.hint or error.message, error.request_id)
+elif data and meta:
+    print(data["text"])
+    print(data["session"]["status"], data["session"]["stopReason"], meta.request_id)
+```
+
+The same namespace wraps every method of the `@ryuhq/client` Managed Agents
+client, arranged by resource:
+
+| Namespace | Methods |
+|---|---|
+| `ryu.managedAgents.agents` | `list`, `iterate`, `get`, `create`, `update`, `archive`, `listVersions`, `getVersion` |
+| `ryu.managedAgents.environments` | `list`, `iterate`, `get`, `create`, `update`, `archive` |
+| `ryu.managedAgents.credentials` | `list`, `get` (read-only) |
+| `ryu.managedAgents.sessions` | `list`, `iterate`, `get`, `create`, `update`, `run`, `send`, `events`, `stream`, `follow`, `approveTool`, `denyTool`, `respondToApproval`, `cancel`, `complete`, `delete` |
+
+The Python client has the same methods in snake_case under its
+`managed_agents` namespace, such as `agents.list_versions` and
+`sessions.respond_to_approval`, plus `sessions.send_message(session_id, text)`,
+which sends one text message. Lower-level calls work too:
+
+```ts tab="Node"
+const created = await ryu.managedAgents.sessions.create({
+  agentId: "magt_<id>",
+  environmentId: "menv_<id>",
+});
+if (created.data) {
+  const sessionId = created.data.id;
+  const sent = await ryu.managedAgents.sessions.send(sessionId, [
+    { type: "user.message", content: [{ type: "text", text: "Draft a reply." }] },
+  ]);
+  // Start just before the message you sent.
+  const after = (sent.data?.[0]?.seq ?? 1) - 1;
+  for await (const event of ryu.managedAgents.sessions.follow(sessionId, { after })) {
+    console.log(event.seq, event.type);
+  }
+}
+```
+
+```python tab="Python"
+created = ryu.managed_agents.sessions.create({"agentId": "magt_<id>", "environmentId": "menv_<id>"})
+if created.data:
+    session_id = created.data["id"]
+    sent = ryu.managed_agents.sessions.send(
+        session_id, [{"type": "user.message", "content": [{"type": "text", "text": "Draft a reply."}]}]
+    )
+    # Start just before the message you sent.
+    after = (sent.data[0]["seq"] if sent.data else 1) - 1
+    for event in ryu.managed_agents.sessions.follow(session_id, after=after):
+        print(event["seq"], event["type"])
+```
+
+With `AsyncRyu`, await each call and iterate with `async for`. Leaving the
+loop early does not close the event stream on its own, so wrap the iterator in
+`contextlib.aclosing()` (Python 3.10 and later):
+
+```python
+import asyncio
+from contextlib import aclosing
+
+from ryu_sdk.services import AsyncRyu
+
+
+async def main(session_id: str) -> None:
+    async with AsyncRyu() as ryu:
+        async with aclosing(ryu.managed_agents.sessions.follow(session_id)) as events:
+            async for event in events:
+                print(event["seq"], event["type"])
+                if event["type"] == "agent.message":
+                    break
+
+
+asyncio.run(main("msess_<id>"))
+```
+
+The stream goes through the same HTTP client as every other call, with the
+same headers and hooks. Its response headers must arrive within `timeout`;
+after that, events may be any time apart.
+
+`sessions.follow()` first reads the head of the log. It stops at the head when
+the latest turn is already answered, and otherwise at the next `idle` status
+that answers the last user message. An `idle` left by an earlier turn never
+stops it. Pass `{ until: "terminal" }` to keep going until the session ends.
+`sessions.stream()` is the client's stream, which ends only at a terminal
+status. Both resume a dropped connection from the last `seq`. Iterators always
+throw a `RyuError` on failure, also in object mode.
+
+A tool declared with `"requireApproval": true` stops the turn with
+`requires_action` until you allow or deny the call. To answer from code, see
+[Managed Agents tool approvals](/docs/standalone/sdk/managed-agents-tool-approvals).
+
+To walk a whole collection, use `iterate()` on agents, environments, or
+sessions. It sends `cursor` and follows `nextCursor`.
+
+```ts tab="Node"
+for await (const agent of ryu.managedAgents.agents.iterate({ limit: 100 })) {
+  console.log(agent.id, agent.name, agent.version);
+}
+```
+
+```python tab="Python"
+for agent in ryu.managed_agents.agents.iterate(limit=100):
+    print(agent["id"], agent["name"], agent["version"])
+```
+
+## Expected response
+
+A list of agents returns one page with `data` and `nextCursor`. Example from
+the [OpenAPI document](https://ryuhq.com/openapi/managed-agents.json):
+
+```json
+{
+  "data": [
+    {
+      "id": "magt_01jb6f2k8x3n4p5q6r7s8t9v0w",
+      "name": "Support triage",
+      "description": null,
+      "model": "<model-id>",
+      "instructions": "You triage support tickets.",
+      "tools": [
+        { "type": "builtin", "name": "web_search", "allowedDomains": ["docs.example.com"] }
+      ],
+      "mcpServers": [],
+      "reasoningEffort": null,
+      "metadata": {},
+      "version": 1,
+      "archivedAt": null,
+      "createdAt": "2026-10-10T12:00:00.000Z",
+      "updatedAt": "2026-10-10T12:00:00.000Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+## Errors
+
+Every non-2xx response has the body
+`{ "error": { "code", "message", "requestId", "details" } }`. The SDK turns it
+into a `RyuError` subclass with the same `code`, `requestId`, `details`, and
+`retryAfterSeconds`. Branch on `error.code`, and quote `error.requestId` when
+you contact support.
+
+| Status and code | SDK error | Notes |
+|---|---|---|
+| `503 managed_agents_disabled` | `RyuUnavailableError` | The deployment does not offer the preview. Carries a `hint` and a `docs` link. Never retried. |
+| `403 feature_disabled` | `RyuPermissionError` | The preview is off for the organization or member. Carries a `hint` and a `docs` link. Never retried. |
+| `401 unauthenticated` | `RyuAuthenticationError` | A missing, invalid, or OAuth credential. |
+| `402 insufficient_credits` | `RyuPaymentRequiredError` | Never retried. |
+| `409` codes such as `version_conflict` | `RyuConflictError` | `409 idempotency_in_progress` is retried after `Retry-After`. |
+| `429 rate_limited` | `RyuRateLimitError` | Retried after `Retry-After`. |
+
+A missing `RYU_API_KEY` gives a `RyuConfigurationError` that names the
+variable. Errors that happen inside a running session are not HTTP errors.
+They arrive as `session.error` events in the log.
+
+## Idempotency and retries
+
+The SDK adds an `Idempotency-Key` (a UUID, which matches the server's
+`^[A-Za-z0-9_-]{16,128}$` rule) to the writes the server deduplicates, and
+reuses it on every retry of that call. To choose the key yourself, bind it for
+one call:
+
+```ts tab="Node"
+await ryu.managedAgents
+  .with({ idempotencyKey: "ticket-1234-message-2" })
+  .sessions.send("msess_<id>", [
+    { type: "user.message", content: [{ type: "text", text: "Draft a reply." }] },
+  ]);
+```
+
+```python tab="Python"
+ryu.managed_agents.with_options(idempotency_key="ticket-1234-message-2").sessions.send(
+    "msess_<id>", [{"type": "user.message", "content": [{"type": "text", "text": "Draft a reply."}]}]
+)
+```
+
+| Method | Path |
+|---|---|
+| `POST` | `/agents` |
+| `PATCH` | `/agents/{agentId}` |
+| `POST` | `/environments` |
+| `PATCH` | `/environments/{environmentId}` |
+| `POST` | `/credentials` |
+| `POST` | `/sessions` |
+| `POST` | `/sessions/{sessionId}/events` |
+
+Reads, `PUT` and `DELETE` requests, and the writes in this table (which always
+carry a key unless you turn `autoIdempotency` off), are retried on network
+errors, timeouts, and `408`, `425`, `500`, `502`, `503`, and `504` responses.
+`503 managed_agents_disabled`, `503 backend_disabled`, `402`, and
+`501 backend_not_implemented` are never retried. Other writes, such as archive, cancel,
+and complete, are not retried on those failures; the server treats them as
+safe to repeat, so you can retry them yourself. A `429` is retried for any
+method when the server says how long to wait. The stream reconnects by itself,
+so the SDK never retries the stream request. The defaults are two retries and
+a 60-second timeout until response headers arrive; change them with
+`maxRetries` and `timeoutMs`.
+
+## CLI and MCP
+
+[Managed Agents CLI and MCP](/docs/standalone/sdk/managed-agents-cli-mcp) runs
+these calls, including approval answers, with the `ryu-services` command line
+and its MCP tools.
+Until `@ryuhq/services-cli` is on npm, run them through `ryu-cli`, as
+[Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli) shows.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/managed-agents" />
+  <DocCard href="/docs/standalone/managed-agents-api" />
+  <DocCard href="/docs/standalone/managed-agents-events" />
+</Cards>

@@ -1,0 +1,90 @@
+---
+title: "Box SDK Errors and Retries"
+description: "Box error codes and their SDK error classes, and which Box requests the SDK retries and keys with Idempotency-Key"
+tags: ["box", "errors", "idempotency", "sdk", "standalone"]
+---
+
+<Callout type="warn">
+Early access: hosted at https://box.ryuhq.com and enabled per organization by Ryu; the self-hosted service is not yet published.
+</Callout>
+
+This page lists the errors the Box client raises and how it retries. The
+samples use the `ryu` client from the
+[Box SDK quickstart](/docs/standalone/sdk/box#first-call-with-the-sdk).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## Errors
+
+Every non-2xx response carries `code`, `message`, `requestId` and a nested
+`error` with the same fields plus `details`, in the `box.error` envelope. The
+SDK asks for `application/problem+json` first, so a Box server that negotiates
+RFC 9457 problem details answers with them and keeps those members
+(`error.envelope` is then `problem+json` and `error.docs` links the code's
+entry on [Box API](/docs/standalone/box-api)); a server that does not
+negotiate them keeps the `box.error` envelope. Either way the SDK turns it
+into a `RyuError` subclass with the same `code`, `requestId`, and `details`.
+Branch on `error.code`, and quote `error.requestId` when you contact support.
+
+| Status and code | SDK error | Notes |
+|---|---|---|
+| `429 quota_exceeded` | `RyuQuotaExceededError` | An active-Box, resource, snapshot, or storage quota. `details` names it. Never retried. Delete Boxes you no longer need, as in [Clean up](/docs/standalone/sdk/box#clean-up). |
+| `402 insufficient_credits` | `RyuPaymentRequiredError` | Ryu-hosted Box only. Never retried. |
+| `401 unauthorized` | `RyuAuthenticationError` | A missing or unknown tenant key. |
+| `404 not_found` | `RyuNotFoundError` | An unknown or foreign Box, process, preview, or snapshot. |
+| `409 conflict` | `RyuConflictError` | A Box or snapshot with that name already exists in the tenant. Choose another name, or delete the old one first. |
+| `409 box_not_ready`, `box_busy`, `idempotency_conflict` | `RyuConflictError` | The Box is in the wrong state, or a key was reused with a different body. |
+| `409 idempotency_key_resource_deleted` | `RyuConflictError` | A create or fork replayed the key of a Box that has since been deleted. Send a new key. Never retried. |
+| `503 driver_unavailable` | `RyuUnavailableError` | Reads and keyed creates are retried; commands are not. |
+| `503 driver_not_safe` | `RyuUnavailableError` | The configured driver cannot run commands safely; fix the service configuration. Never retried. |
+| `503 secrets_unavailable` | `RyuUnavailableError` | The service has no secrets key configured, so a retry cannot help; fix the service configuration. Never retried. |
+
+`box.run()` adds two codes of its own: `box_failed` and `box_ready_timeout`.
+
+## Idempotency and retries
+
+The Box client already sends an `Idempotency-Key` on these routes, and the
+SDK keeps that key for every retry of the call. To choose the key yourself,
+bind it for one call. A key belongs to one request body: reusing
+`build-runner-1` from the curl sample with another body answers
+`409 idempotency_conflict`, so this sample uses a new key and name:
+
+```ts tab="Node"
+await ryu.box.with({ idempotencyKey: "nightly-runner-1" }).create({ name: "nightly-runner", size: "small" });
+```
+
+```python tab="Python"
+ryu.box.with_options(idempotency_key="nightly-runner-1").create({"name": "nightly-runner", "size": "small"})
+```
+
+| Method | Path |
+|---|---|
+| `POST` | `/v1/boxes` |
+| `POST` | `/v1/boxes/{boxId}/fork` |
+
+Reads, `PUT` and `DELETE` requests, and the two keyed creates are retried on
+network errors, timeouts, and `5xx` responses. Commands, `stop`, `resume`,
+and other writes are not retried, so a command never runs twice because of
+the SDK. A `429 quota_exceeded` is never retried. Streamed output (`execStream`,
+`processes.followLogs`, `events.follow`) is never retried either. The defaults
+are two retries and a 60-second timeout until response headers arrive; change them
+with `maxRetries` and `timeoutMs`.
+
+`openTerminal`, `openTunnel`, and the SSH proxy go through the client's
+`webSocket` option, not through the SDK's HTTP transport. Only the
+access-token request before each socket is retried and mapped to `RyuError`;
+the open socket itself gets no retries or timeouts.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/box" />
+  <DocCard href="/docs/standalone/sdk/box-cli-mcp" />
+  <DocCard href="/docs/standalone/box-api" />
+</Cards>

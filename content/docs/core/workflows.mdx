@@ -1,32 +1,30 @@
 ---
 title: "Workflows"
-description: "A DAG of typed nodes with branching, durable resume, retries, timeouts, and triggers"
-tags: ["workflow", "dag", "orchestration", "durable", "automation", "trigger", "schedule", "dry-run"]
+description: "Reference for Core workflows: the typed node kinds, shared node fields, template variables, and how runs, triggers, and chat fit together"
+tags: ["workflow", "dag", "orchestration", "durable", "automation", "trigger", "schedule", "dry-run", "parallel", "foreach", "time-travel", "fork"]
 ---
 
-A **workflow** is a directed acyclic graph (DAG) of typed nodes that Core executes in process
-(`apps/core/src/workflow/`). Workflows are Runnables (see [The Runnable model](/docs/start-here/architecture/runnable-model)):
+A **workflow** is a directed acyclic graph (DAG) of typed nodes that Core executes in process.
+Workflows are Runnables (see [The Runnable Model](/docs/start-here/architecture/runnable-model)):
 an agent can invoke a workflow as a named tool, and a workflow can call agents as steps. The engine
 is file backed and resumable: every node and every loop iteration is checkpointed to disk, so a run
 survives a Core restart.
 
-This page is the engine reference. To build a workflow visually or record desktop steps into one,
-see [Recipes and the canvas](/docs/surfaces/desktop/productivity/recipes). To author a workflow as a
+To build a workflow visually or record desktop steps into one, see [Recipes and the canvas](/docs/surfaces/desktop/productivity/recipes). To author a workflow as a
 Runnable in code, see [Authoring workflows](/docs/extend/develop/extensions/author-workflows).
 
 ## A run in the desktop
 
-The engine's states become a readable run surface: steps, activity, progress, and tool output stay
-visible together while the graph executes.
+The desktop shows a run's steps, activity, progress, and tool output together while the graph
+executes. The chat ignores malformed node progress instead of displaying a partial checklist.
 
 <SurfacePreview surface="workflow" />
 
 ## Node kinds
 
-A workflow is a set of `WorkflowNode` entries connected by `WorkflowEdge` edges
-(`apps/core/src/workflow/mod.rs`). An edge can carry an optional `branch` label, so a `Condition`
-or one-shot `While` routes down a true or false path. `NodeKind` is a tagged enum (`type`,
-snake_case) with 22 variants:
+A workflow is a set of typed node entries connected by edges. An edge can carry an optional
+`branch` label, so a `condition` or one-shot `while` routes down a true or false path. `NodeKind` is a tagged enum (`type`,
+snake_case) with 27 variants:
 
 | Node (`type`) | What it does | Key fields |
 |---|---|---|
@@ -41,17 +39,22 @@ snake_case) with 22 variants:
 | `set_state` | Writes a resolved template into the run's `state` map, then passes input through unchanged | `key`, `value` |
 | `delay` | Pauses for `ms` milliseconds (a durable timer, see below) | `ms` |
 | `note` | A documentation-only annotation that forwards its input unchanged | `text` |
-| `while` | A bounded loop or a one-shot branch gate (see [While loops](#while-loops)) | `expr`, `body_workflow_id?` |
+| `while` | A bounded loop or a one-shot branch gate (see [While loops](/docs/core/workflow-loops-and-fan-out#while-loops)) | `expr`, `body_workflow_id?` |
 | `guardrails` | Routes the incoming text through the Gateway firewall and fails the run on a block | `checks` |
 | `sub_workflow` | Runs another persisted workflow by id and forwards its output (max depth 8) | `workflow_id` |
+| `for_each` | Runs a body workflow once per element of a JSON array and collects the results in order (see [Map over a list](/docs/core/workflow-loops-and-fan-out#map-over-a-list-for_each)) | `body_workflow_id`, `items?`, `max_concurrency?` |
+| `parallel` | Runs several workflows at once and joins their results by branch id (see [Fan out to several workflows](/docs/core/workflow-loops-and-fan-out#fan-out-to-several-workflows-parallel)) | `branches`, `max_concurrency?` |
 | `agent_delegate` | Fans out to sub-agents with caps (see [Delegation](/docs/core/delegation)) | - |
-| `agent` | Runs one installed agent on a task as a single in-context step (the first-class alternative to a raw `prompt`) | `agent_id`, `task?` |
-| `skill` | Applies an installed Agent Skill (its `SKILL.md` body) to the input, under an optional `agent_id` or the default gateway LLM | `skill`, `agent_id?`, `task?` |
+| `script` | Runs JavaScript that orchestrates sub-agents with `agent()`, `parallel()`, `pipeline()`, and `phase()` (see [Workflow scripts](/docs/core/workflow-code-and-scripts#workflow-scripts)) | `code`, `agent_id?`, `preset?` |
+| `agent` | Runs one installed agent on a task as a single in-context step (the alternative to a raw `prompt`) | `agent_id`, `task?` |
+| `skill` | Applies an installed Agent Skill (its `SKILL.md` body) to the input, under an optional `agent_id` or the default Gateway model | `skill`, `agent_id?`, `task?` |
 | `plugin` | Runs a Runnable an installed plugin bundles, dispatched to that kind's path (tool, agent, workflow, or skill) | `plugin_id`, `runnable_id`, `args` |
 | `awakeable` | A durable pause for human-in-the-loop input | - |
 | `recipe` | Replays a whole recorded ghost desktop automation by name | `recipe`, `params` |
 | `ghost_action` | Runs a single recorded desktop action (click, type, scroll, ...) | `action`, `target`, `params` |
 | `notify_user` | Pings org/team/members across devices, optionally suspending as a HITL ack gate (see [Notify and provider steps](#notify-and-provider-steps)) | `target`, `title`, `body`, `ack_mode`, `ack_timeout_ms?` |
+| `channel_send` | Sends a message to an external channel (Telegram, Slack, Discord, or an HTTP webhook) | `platform`, `recipient`, `text` |
+| `code` | Runs or checks a Lean 4, Bend, or BAML program (see [Code steps](/docs/core/workflow-code-and-scripts#code-steps-lean-bend-and-baml)) | `language`, `source`, `mode?`, `input?`, `function?`, `args?`, `model?` |
 
 The `guardrails` `checks` field names the firewall categories to enforce (`pii`, `jailbreak`,
 `moderation`), mapped to the Gateway firewall's scan categories server side. The `recipe` and
@@ -59,13 +62,12 @@ The `guardrails` `checks` field names the firewall categories to enforce (`pii`,
 
 ### Notify and provider steps
 
-Five of the kinds are the object-model bridge - a workflow step that runs any peer Runnable
-(`AGENTS.md` Runnable union), so the graph is not limited to prompts and raw tools. `agent`, `skill`,
-and `plugin` each decide *what runs* (Core), while every model call they make stays gateway-governed.
-`mcp` is the two-field sibling of `tool` - an author picks a `server` and a `tool` separately instead
-of hand-assembling the compound `<server>.<tool>` id, and the executor reuses the `tool` path so the
-idempotency key and `input` folding behave identically
-(`apps/core/src/workflow/executor.rs`, the `Mcp` arm).
+`agent`, `skill`, and `plugin` run a peer Runnable as a workflow step, so a graph is not limited to
+prompts and raw tools. Core decides *what runs*. Gateway governs model requests routed through its
+endpoint; provider-native runtimes and direct tool integrations can use other destinations.
+`mcp` is the two-field form of `tool` - an author picks a `server` and a `tool` separately instead
+of writing the compound `<server>.<tool>` id. The executor reuses the `tool` path, so the
+idempotency key and `input` folding behave the same.
 
 `notify_user` pings one or more org members, a team, or an explicit member set across their devices
 (the app inbox, the desktop OS toast, and mobile push). Its `target` is a tagged `NotifyTargetSpec`
@@ -77,14 +79,13 @@ with three forms:
 | `team` | Every member of one team in the org | `team_id` |
 | `members` | A hand-picked set of member user ids, verified against the bound organization when the node runs | `user_ids` |
 
-The `ack_mode` field decides the node's shape (`AckMode` in `apps/core/src/workflow/mod.rs`). Absent
-or `none` is fire-and-forget - deliver, emit a JSON receipt as the node output, and continue
-downstream. Any of `first`, `all`, `quorum` (with `n`), or `percentage` (with `percent`) turns the
+The `ack_mode` field decides the node's shape. Absent or `none` is fire-and-forget: deliver, emit a
+JSON receipt as the node output, and continue downstream. Any of `first`, `all`, `quorum` (with `n`), or `percentage` (with `percent`) turns the
 node into a human-in-the-loop gate - it delivers, then suspends the run to `AwaitingInput` until the
 ack policy is met, exactly like an `awakeable`. `quorum` requires a count; `percentage` uses ceiling
 rounding, so 50% of 3 recipients requires 2 approvals. Each selected member receives an inbox Ack
 action, and the run resumes automatically once the threshold is reached. A direct workflow resume
-cannot bypass a notification gate. Membership is resolved over the gateway key against the node's
+cannot bypass a notification gate. Membership is resolved over the Gateway key against the node's
 bound org (the control plane owns *who is a member*).
 
 The Workflows editor exposes the bound organization directory in the `Members` target. Select one or
@@ -93,13 +94,21 @@ stored in the workflow definition, while Core re-checks that every ID is still a
 before delivery. `first` and `all` remain available for one-person and unanimous approval flows.
 
 <Callout type="warn">
-  `recipe` and `ghost_action` are cross-platform and no-op with a clear error until the ghost sidecar
-  is installed. See [Recipes](/docs/surfaces/desktop/productivity/recipes).
+  `recipe` and `ghost_action` fail with an error until the ghost sidecar is installed. See [Recipes](/docs/surfaces/desktop/productivity/recipes).
 </Callout>
 
-Every node also carries two optional, orthogonal fields that any kind may use: a `retry` policy and
-a `timeout_ms`. Both default to absent (run once, unbounded) and are covered under
-[Reliability and durable execution](#reliability-and-durable-execution).
+### Code and script steps
+
+`code` steps run or check a Lean 4, Bend, or BAML program, and `script` steps orchestrate
+sub-agents from JavaScript. Both are covered in
+[Workflow code and script steps](/docs/core/workflow-code-and-scripts).
+
+### Shared node fields
+
+Every node also carries three optional, orthogonal fields: a `retry` policy, a `timeout_ms`, and a
+`repeat` policy. All default to absent (run once, unbounded). Retry and timeout are covered under
+[Reliability and durable execution](/docs/core/workflow-execution#reliability-and-durable-execution), and repeat under
+[Repeating a step](/docs/core/workflow-loops-and-fan-out#repeating-a-step).
 
 A graph wires these node kinds together. A `Condition` routes down a true or false path:
 
@@ -117,9 +126,9 @@ flowchart LR
 
 ## Template variables
 
-String fields can reference run data with `{{...}}` tokens, resolved just before the node runs
-(`apps/core/src/workflow/template.rs`). The resolver is deliberately tiny: everything is a string,
-JSON passes through verbatim, and any unknown token or missing key resolves to the empty string.
+String fields can reference run data with `{{...}}` tokens, resolved just before the node runs.
+Everything is treated as a string, JSON passes through verbatim, and any unknown token or missing
+key resolves to the empty string.
 
 | Token | Resolves to |
 |---|---|
@@ -127,211 +136,52 @@ JSON passes through verbatim, and any unknown token or missing key resolves to t
 | `{{nodes.<id>}}` | The output string of an upstream node |
 | `{{state.<key>}}` | A value from the run's `state` map (written by `set_state`) |
 | `{{trigger.<field>}}` | A dotted JSON path into the trigger payload, for example `{{trigger.body.email}}` |
+| `{{loop.iteration}}` | Inside a [repeating step](/docs/core/workflow-loops-and-fan-out#repeating-a-step): the current pass, starting at 1 |
+| `{{loop.previous}}` | Inside a repeating step: the previous pass's output (empty on the first pass) |
+| `{{loop.original}}` | Inside a repeating step: the value the step first received |
 
 The resolver runs in `prompt`, `transform` (the template op), `tool` args, `webhook` url,
 `set_state`, `recipe` and `ghost_action` params, and the `condition` and `while` expression
 evaluator.
 
-## Execution and resume
+## Execution and reliability
 
-The executor (`apps/core/src/workflow/executor.rs`) runs nodes in topological order, persisting each
-node's state to disk after every step. Runs are stored as JSON under
-`~/.ryu/workflow-runs/<id>.json`.
+Runs execute nodes in dependency order, run independent branches concurrently, and checkpoint each
+node so a run survives a restart. For concurrent branches, run states, read-only dry runs, retries,
+timeouts, durable timers, and automatic resume, see
+[Workflow Execution and Reliability](/docs/core/workflow-execution).
 
-A run carries a `RunStatus` of `Running`, `Completed`, `Failed`, or `AwaitingInput`. When an
-`awakeable` node is reached (or a `notify_user` node whose `ack_mode` requires waiting), the run
-suspends to `AwaitingInput` and waits for a human or an external signal. Because node state is
-persisted, a resumed run skips already-completed nodes and reuses their output.
+## Loops and fan-out
 
-```mermaid
-stateDiagram-v2
-  [*] --> Running
-  Running --> Completed
-  Running --> Failed
-  Running --> AwaitingInput: reached an awakeable node
-  AwaitingInput --> Running: resume with payload
-  Completed --> [*]
-  Failed --> [*]
-```
+A `while` node loops over a body workflow, `for_each` maps a body workflow over a list, `parallel`
+fans out to several workflows at once, and a `repeat` policy loops one step on its own output. See
+[Workflow Loops and Fan-Out](/docs/core/workflow-loops-and-fan-out) for their fields, limits, and resume behavior.
 
-### Read-only dry runs
+## Triggers, schedules, and version history
 
-The same `POST /workflows/:id/run` endpoint accepts `dryRun: true` for a transient, read-only
-projection:
+A workflow declares zero or more triggers in its `triggers` array (`WorkflowTrigger` in
+`apps/core/src/workflow/mod.rs`): `manual`, `schedule`, `webhook`, or `composio`. On every save, Core
+reconciles those declarations into the scheduler jobs and subscriptions that fire the workflow
+(`apps/core/src/workflow/triggers.rs`). A Composio event payload is seeded into the run's reserved
+`state["trigger"]` key, so `{{trigger.<field>}}` tokens resolve against the live event.
 
-```json
-{
-  "input": { "text": "hello" },
-  "dryRun": true
-}
-```
+For trigger types, webhook signing, schedule rules, template previews, and version history, see
+[Workflow Triggers and History](/docs/core/workflow-triggers-and-history).
 
-Core validates and walks the saved graph in memory. Input, transform, condition, state-template,
-output, note, delay, and loop-control evaluation can run without persistence. An MCP `tool` or
-`mcp` node runs only when Core classifies the tool as `read` or `preview`; unknown and effectful
-tools are skipped. Prompts, agents, skills, delegation, plugins, guardrail checks, webhooks,
-notifications, channel sends, recipe replay, ghost actions, and human-in-the-loop gates are also
-skipped and appear as `skipped` nodes with a reason.
+## Run history and routes
 
-The response is marked `dryRun: true`. Core does not create or overwrite a run file, fire workflow
-lifecycle hooks, create approvals, checkpoint timers, or make the response resumable. A caller
-provided `runId` is ignored in this mode. A normal request without `dryRun` keeps the durable,
-effectful behavior described above.
-
-## While loops
-
-The `while` node has two forms, distinguished by whether `body_workflow_id` is set
-(`apps/core/src/workflow/mod.rs`).
-
-A **bounded loop** (`body_workflow_id` set) re-executes the named body workflow as long as `expr`
-holds, up to `MAX_WHILE_ITERATIONS` (100, `apps/core/src/workflow/executor.rs`,
-`run_while_loop`). Iteration is implemented as recursion: each iteration runs as its own
-`WorkflowRun` through the same path as a `sub_workflow`, so the outer DAG never gains a cycle and DAG
-validation is untouched. The loop variable, the carry, is seeded with the node's incoming value; the
-condition is evaluated against the carry (use the `input` keyword, for example `input < 10`), and
-each iteration's body output replaces the carry. On exit the node produces the final carry as a plain
-data value. The iteration counter persists to the run `state` and is checkpointed after every
-iteration, so a loop survives a Core restart and resumes from the persisted iteration.
-
-A **one-shot branch gate** (`body_workflow_id` absent) evaluates `expr` once and activates only the
-matching true or false outgoing edge, behaving like a `condition`. This is the back-compatible form.
-
-<Callout type="warn">
-  Loops are at-least-once, not exactly-once: a side-effecting body node (`tool`, `webhook`,
-  `ghost_action`, `prompt`) interrupted mid-call re-runs on resume. An `awakeable` gate inside a loop
-  body is rejected in v1 with a clear error; propagating a mid-loop suspend is future work. The
-  on-canvas back-edge form (drawing a body to `while` edge directly) is also deferred, so v1 authors
-  the loop body as a separate sub-workflow named by `body_workflow_id`.
-</Callout>
-
-## Reliability and durable execution
-
-Durable execution lives directly on this engine (`apps/core/src/workflow/durable.rs`). The Restate
-spike was evaluated and dropped: the in-process `FallbackEngine` already gives crash-recoverable,
-resumable runs without an extra sidecar, and the petgraph executor owns the loop and HITL semantics.
-A `DurableEngine` seam is retained so a future backend can slot in without changing the server
-handler, but there is one engine today.
-
-Every node and every loop iteration rewrites the full run state to disk through an atomic, fsync'd
-temp-then-rename write (`apps/core/src/workflow/store.rs`, `save_run`), so a crash mid-write can never
-leave a torn run file and a resumed run skips already-completed nodes.
-
-On top of that checkpointing, nodes opt into Temporal- and Restate-style durability features. All are
-opt-in with serde-default back-compat, so existing run and workflow JSON loads unchanged.
-
-| Feature | Field | Behavior |
-|---|---|---|
-| Per-node retry | `retry` (`RetryPolicy`) | Re-runs a failed attempt with exponential backoff `min(initial * coeff^(n-1), max)` plus optional decorrelated jitter. `attempts` persists in `NodeRunState`, so the budget is total across a Core restart, per node per run |
-| Per-node timeout | `timeout_ms` | Wraps one attempt in a wall-clock timeout (the Temporal `StartToClose` analogue). A timeout is a retryable error, so it composes with retry |
-| Idempotency keys | (automatic) | A stable `<run_id>:<node_id>` key, identical across crash and resume, is threaded into `tool` args as `__ryu_idempotency_key` (never clobbering an author-set value) and into the `webhook` `Idempotency-Key` header |
-| Durable timers | `delay` `ms` | A `delay` computes and persists a `wake_at` instant and checkpoints before sleeping, so a crash mid-sleep resumes with only the remaining time |
-
-The `RetryPolicy` fields are `max_attempts` (default 1, so a bare `"retry": {}` is inert until
-raised), `initial_interval_ms` (100), `backoff_coefficient` (2.0), `max_interval_ms` (60000),
-`jitter_fraction` (0.0), and `non_retryable_errors`. An `awakeable` suspend is never treated as a
-retryable error.
-
-The `guardrails` node is the exception to Core's no-policy rule: it routes the incoming text to the
-Gateway firewall (`POST /v1/firewall/check`) and fails the run on a block, because deciding what is
-allowed is a [Gateway](/docs/start-here/architecture/core-vs-gateway) concern. It fails closed when
-the gateway is unreachable, unless `RYU_ALLOW_GATEWAY_FALLBACK=1` is set.
-
-In the desktop canvas, retry and timeout are edited through a shared **Reliability** section
-(`ReliabilityFields` in `apps/desktop/src/components/workflows/WorkflowCanvas.tsx`): a "Retry on
-failure" toggle plus the full policy editor and a "Timeout (ms)" field, shown for the fallible node
-kinds (prompt, tool, webhook, agent_delegate, ghost_action, recipe, sub_workflow, guardrails, delay,
-while). The fields ride the node's `extra` spread, so there is no separate API.
-
-<Callout type="warn">
-  The durability and dry-run paths are covered by focused unit and contract tests, but live crash
-  and resume and the HITL `awakeable` round-trip have not been exercised against a running Core.
-</Callout>
-
-## Catalog and version previews
-
-Installing a workflow template accepts `dryRun: true` and returns the template metadata, body count,
-fresh workflow count, and trigger-write plan without creating workflow files or scheduler jobs. The
-version restore route also supports the same preview flag when a client needs to show the target
-version and undo behavior before changing the current definition.
-
-## Triggers and schedules
-
-A workflow declares zero or more triggers in its `triggers` array (`apps/core/src/workflow/mod.rs`,
-`WorkflowTrigger`). On every save, `create_workflow` reconciles those declarations into the external
-resources that actually fire the workflow, idempotently, so a re-save converges to the declared set
-(`apps/core/src/workflow/triggers.rs`).
-
-| Trigger | Fires when | Reconciles into |
-|---|---|---|
-| `manual` | The "Run now" button or `POST /workflows/:id/run` | Nothing (no external resource) |
-| `schedule` | A cron expression or `every` interval | A scheduler job with a deterministic id `wf-sched-<workflow_id>-<idx>` and target `JobTarget::Workflow` |
-| `webhook` | An HTTP POST hits the workflow's public ingress URL | A status surface on the webhook-ingress seam; `secret` is the HMAC signing secret |
-| `composio` | A Composio event fires | A Composio trigger subscription whose `target_kind` is `workflow` |
-
-For a `schedule` trigger, `cron` wins when both `cron` and `every` are present, and a trigger with
-neither is skipped. Stale scheduler jobs no longer backed by a trigger are deleted on reconcile, and
-all of a workflow's jobs and subscriptions are torn down when the workflow is deleted. The scheduler
-runs fired jobs with bounded concurrency (`MAX_CONCURRENT_JOBS = 8`), so one slow run never stalls
-the tick. See [Scheduler](/docs/core/scheduler) for the job loop.
-
-When a Composio trigger fires, the event payload is seeded into the run's reserved `state["trigger"]`
-key before execution (`apps/core/src/composio_triggers/mod.rs`, `run_workflow_for_trigger`), so
-`{{trigger.<field>}}` tokens resolve against the live event. Triggers are configured in the desktop
-canvas through `TriggerConfig` (`apps/desktop/src/components/workflows/TriggerConfig.tsx`).
-
-<Callout type="info">
-  Saving a Composio trigger reconciles the project's V3 webhook subscription
-  against the node's current public ingress URL before the trigger instance is
-  created. If the URL or signing secret cannot be made ready, Ryu keeps the
-  existing workflow subscriptions instead of replacing them with an unreachable
-  configuration. See [Node and presence](/docs/core/node-and-presence).
-</Callout>
-
-## Version history
-
-Every workflow keeps an immutable, server-backed source history in the node-local Git repository at
-`~/.ryu/source-history/workflows/<workflow_id>.json` (`apps/core/src/workflow/store.rs`). A commit
-contains the full `Workflow` JSON plus a short checkpoint label, and the existing generic
-`VersionHistory` control still provides the list, diff, and restore experience. Git is the history
-primitive here; the old `~/.ryu/workflow-versions/` JSON snapshots remain readable as a migration
-fallback for nodes that already have them.
-
-Saving a workflow checkpoints its current definition. A restore records the current definition as a
-named undo point, then re-persists the captured definition through the shared `persist_workflow`
-write path, so triggers reconcile and `updated_at` is re-stamped. Unlabeled identical saves are
-coalesced; explicit labels remain visible as named Git checkpoints. Git history is local and
-immutable rather than capped at an application-defined number of versions. The repository contains
-source/config artifacts only; run state, credentials, and provider data are not committed.
-
-| Action | Endpoint |
-|---|---|
-| List a workflow's versions (newest first) | `GET /workflows/:id/versions` |
-| Snapshot the current definition | `POST /workflows/:id/versions` |
-| Fetch one version in full | `GET /workflows/:id/versions/:version_id` |
-| Restore a version (snapshots current first) | `POST /workflows/:id/versions/:version_id/restore` |
-
-This is the same snapshot / diff / restore shape Spaces documents and Prompt Studio use through the
-transport-agnostic `VersionHistory` primitive. Spaces keeps its SQLite `document_versions` records
-for realtime conflict/retry bookkeeping and legacy fallback, while Git is the user-facing source
-history; see [Spaces and RAG](/docs/core/spaces-rag) for that surface.
+For run checkpoints, time travel, forking a run, and the workflow routes, see
+[Workflow Run History and API](/docs/core/workflow-runs-and-api).
 
 ## Natural-language builder
 
-A workflow can be assembled by chat instead of by hand on the canvas. The builder meta-agent (the
-left pane of the desktop Workflows page) drives three in-process tools exposed through the MCP
-registry (`apps/core/src/runnable/workflow_builder.rs`): `workflow_builder.get_workflow`,
-`workflow_builder.create_workflow`, and `workflow_builder.configure_workflow`. This is the workflow
-analog of the agent builder - describe a flow in natural language and the model authors the DAG.
+A workflow can be assembled through the chat builder or on the canvas. Describe a flow in natural
+language and the builder creates a draft graph that you can review and refine.
 
-`configure_workflow` applies a partial patch, so the model edits incrementally rather than rewriting
-the whole graph - `nodes_upsert` (add or replace nodes by id), `nodes_remove` (with automatic incident
--edge cascade), `edges_add`, and `edges_remove`. A DAG-validation failure returns a **soft**
-`{ success: false, error }` value rather than a hard tool error, so the model reads the message and
-self-corrects within the same turn.
+The builder applies incremental changes and checks the graph after each edit. If validation fails,
+it returns the error to the builder so it can correct the draft.
 
-Every save routes through the shared `persist_workflow` path - the same write path the REST
-`POST /workflows` handler uses - so a chat edit and a canvas save behave identically, including DAG
-validation, id minting, and trigger reconciliation.
+Chat and canvas saves use the same validation and update configured triggers.
 
 <Callout type="warn">
   The builder reads and writes the **persisted** definition, and the React Flow canvas is a second
@@ -343,17 +193,17 @@ validation, id minting, and trigger reconciliation.
 
 A workflow can be run directly from the chat composer, without leaving the thread for the Workflows
 app. Type `@` and pick a workflow in the new **Workflows** group (or `@WorkflowName` inline), then
-send — the message text becomes the workflow's initial input, its nodes stream back as a live
+send. The message text becomes the workflow's initial input, its nodes stream back as a live
 checklist (for example `agent · planner → agent · implementer → agent · verifier`), and the run's
 output is delivered as the assistant reply in the same conversation.
 
 Only workflows that **accept a chat input** appear as targets: a workflow is chat-triggerable when at
 least one *root* node (no incoming edges) is an `input` node, because that is the node that reads the
-typed message. A workflow whose entry never consumes the run input would silently ignore everything
-you type, so it is filtered out of the mention list and rejected (with a clear error) if you target
-it directly. `GET /workflows` stamps this as a `chat_input` field on each workflow.
+typed message. A workflow whose entry never reads the run input is left out of the mention list and
+rejected with an error if you target it directly. `GET /workflows` stamps this as a `chat_input`
+field on each workflow.
 
-On the wire, the chat turn carries a `workflow_id` alongside `agent_id` / `team_id`:
+On the wire, the chat turn carries a `workflow_id` alongside `agent_id` and `team_id`.
 
 | Field | Meaning |
 |---|---|
@@ -362,27 +212,13 @@ On the wire, the chat turn carries a `workflow_id` alongside `agent_id` / `team_
 If the run suspends at an `awakeable` (human-in-the-loop) gate, the reply reports what input the gate
 is waiting for and the run stays resumable from the Workflows app (`POST /workflows/runs/:run_id/resume`).
 
-## Working with workflows
-
-These routes are mounted under the Core API at `/api`.
-
-| Action | Endpoint |
-|---|---|
-| List workflows | `GET /workflows` |
-| Create or persist a workflow | `POST /workflows` |
-| Fetch a workflow | `GET /workflows/:id` |
-| Delete a workflow | `DELETE /workflows/:id` |
-| Run a workflow | `POST /workflows/:id/run` |
-| Fetch a run's state | `GET /workflows/runs/:run_id` |
-| Resume a suspended run | `POST /workflows/runs/:run_id/resume` |
-
-Creating a workflow validates the DAG before persisting it. Running one executes end to end and
-returns the run with its status and outputs. Resuming supplies the payload an `awakeable` was waiting
-for.
-
 ## Related
 
 <Cards>
+  <DocCard href="/docs/core/workflow-execution" />
+  <DocCard href="/docs/core/workflow-loops-and-fan-out" />
+  <DocCard href="/docs/core/workflow-triggers-and-history" />
+  <DocCard href="/docs/core/workflow-code-and-scripts" />
   <DocCard href="/docs/surfaces/desktop/productivity/recipes" />
   <DocCard href="/docs/extend/develop/extensions/author-workflows" />
   <DocCard href="/docs/core/delegation" />

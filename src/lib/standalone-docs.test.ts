@@ -3,16 +3,10 @@ import { expect, test } from "bun:test";
 const docsRoot = new URL("../../content/docs/", import.meta.url);
 
 const servicePages = [
-	["Gateway", ["standalone/gateway.mdx", "standalone/gateway-api.mdx"]],
-	[
-		"Passport",
-		["standalone/passport.mdx", "standalone/passport-api.mdx"],
-	],
-	[
-		"Connect",
-		["standalone/connect.mdx", "standalone/connect-api.mdx"],
-	],
-	[
+  ["Gateway", ["standalone/gateway.mdx", "standalone/gateway-api.mdx"]],
+  ["Passport", ["standalone/passport.mdx", "standalone/passport-api.mdx"]],
+  ["Connect", ["standalone/connect.mdx", "standalone/connect-api.mdx"]],
+  [
     "Box",
     [
       "standalone/box.mdx",
@@ -29,6 +23,14 @@ const servicePages = [
     ],
   ],
   [
+    "Messaging",
+    [
+      "standalone/messaging.mdx",
+      "standalone/messaging-api.mdx",
+      "standalone/messaging-numbers.mdx",
+    ],
+  ],
+  [
     "Notify",
     [
       "standalone/notify.mdx",
@@ -36,7 +38,16 @@ const servicePages = [
       "standalone/notify-streams.mdx",
     ],
   ],
+  ["Sites", ["standalone/sites.mdx", "standalone/sites-api.mdx"]],
   ["Hire", ["standalone/hire.mdx"]],
+  [
+    "Managed Agents",
+    [
+      "standalone/managed-agents.mdx",
+      "standalone/managed-agents-api.mdx",
+      "standalone/managed-agents-events.mdx",
+    ],
+  ],
 ] as const;
 
 test("standalone services have published guides", async () => {

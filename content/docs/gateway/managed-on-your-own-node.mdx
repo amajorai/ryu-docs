@@ -1,5 +1,5 @@
 ---
-title: "Managed inference on your own server"
+title: "Managed Inference on Your Own Server"
 description: "Run the Ryu managed provider on a server you host yourself: plan credits go through the hosted fleet while your own API keys keep using your local Gateway."
 ---
 
@@ -12,9 +12,9 @@ They are not exclusive. Selecting the managed provider does not disable your loc
 
 ## Why the managed provider needs the fleet
 
-The managed provider is deliberately pinned to Gateway routing and cannot be set to `direct`, so managed egress is always metered. But a **local** Gateway holds no Ryu provider keys. It only has whatever keys you gave it. So the managed provider has to reach the hosted fleet, which is where the pooled provider credentials and your organization's credit budget live.
+The managed provider is pinned to Gateway routing and cannot be set to `direct`, so managed egress is always metered. A **local** Gateway holds no Ryu provider keys, only the keys you gave it. The managed provider must reach the hosted fleet, which holds the pooled provider credentials and your organization's credit budget.
 
-Until you supply fleet coordinates, the managed provider falls back to your local Gateway. That is a safe default, not a working one: if you have not configured the fleet, pick a BYOK provider instead.
+Until you supply fleet coordinates, the managed provider falls back to your local Gateway, which cannot serve it. If you have not configured the fleet, pick a BYOK provider instead.
 
 ```mermaid
 flowchart LR
@@ -43,11 +43,11 @@ the server.
 1. Sign in to Desktop and make the self-hosted Core the active server.
 2. Open **Gateway settings → Workspace → Organization binding**.
 3. Select the organization whose managed subscription the server should use.
-4. Give the server a name of 1 to 128 characters, then select **Bind server**.
+4. Give the server a name of 1 to 128 characters, then select **Bind node**.
 
-Desktop creates a ten-minute enrollment code through the organization service
-and immediately gives it to the active Core. The code is the only organization
-authority. Core cannot submit a different organization, plan, owner, or billing
+Desktop first asks you to confirm it's you, then creates a ten-minute
+enrollment code through the organization service and immediately gives it to
+the active Core. The code is the only organization authority. Core cannot submit a different organization, plan, owner, or billing
 tier. No secret appears in the form or clipboard.
 
 The completed card shows the bound organization, stable server ID, and managed
@@ -89,7 +89,7 @@ scope model used by the rest of the app:
 Use the date-range picker, 15-minute/hourly/daily/weekly/monthly granularity, and provider/model
 filters to compare traffic. The dashboard separates managed, BYOK, local, and self-hosted sources,
 so **Credit spend** is shown only for managed requests. Local, BYOK, and self-hosted rows are
-consumption data and are intentionally labeled **Not billed** by Ryu.
+consumption data and are labeled **Not billed** by Ryu.
 
 Gateway and organization services aggregate activity into canonical 15-minute
 UTC buckets before the desktop renders it. This keeps long-range totals complete
@@ -110,7 +110,9 @@ You need two values, both scoped to your organization:
 | Fleet base URL | `managed-gateway-url` | `RYU_MANAGED_GATEWAY_URL` |
 | Organization token | `managed-gateway-token` | `RYU_MANAGED_GATEWAY_TOKEN` |
 
-The token is an organization Gateway token (`rgw_…`). Issue one from your organization's Gateway keys page; it is shown once at issue time, so store it when you create it. Revoking it in the organization immediately stops that server from spending credits.
+The token is an organization Gateway token (`rgw_…`). Issue one from your organization's Gateway keys page; it is shown once at issue time, so store it when you create it. Revoking it in the organization stops that server from spending credits within about a minute, because the hosted Gateway caches a resolved token for up to 60 seconds (see [the resolve cache](/docs/gateway/managed-data-plane#the-resolve-cache)).
+
+The Gateway keys page pairs the **managed inference key** with the fleet URL. Copy both from the issue card before dismissing it; the list keeps only key metadata and prefixes. The relay key is the value for `managed-gateway-token` / `RYU_MANAGED_GATEWAY_TOKEN`. Revoking a credential in the pair disables both its control and inference credentials.
 
 Both values are required. A URL without a token is refused rather than silently sent, because the fleet would reject an unauthenticated bearer anyway.
 
@@ -122,10 +124,20 @@ without a restart. Clearing both fields returns the managed provider to your
 local Gateway. This manual pair is a compatibility fallback, not a second
 organization binding.
 
+Save requires both fields or neither. If Core rejects either preference write,
+the entered values remain in the form and **Save** is available for a retry.
+
+Switching the selected node reloads that node's saved fleet URL and organization token.
+A save already sent to the previous node finishes there and cannot change the new node's
+form or report its result as a save for the new node.
+Returning to that node or reopening settings waits for its pending save before loading
+an editable form. A failed read shows **Retry** and keeps saving unavailable, so unloaded
+fields cannot accidentally clear the saved fleet configuration.
+
 ### Using environment variables
 
 Environment values win over enrolled and manually stored credentials. Use them
-only when you deliberately want a service unit or container to override its
+only when you want a service unit or container to override its
 enrollment:
 
 ```bash
@@ -140,15 +152,18 @@ Preferences persist across restarts and take effect immediately. Core re-reads b
 
 ```bash
 curl -X PUT "http://127.0.0.1:7980/api/preferences/managed-gateway-url" \
+  -H "Authorization: Bearer $RYU_TOKEN" \
   -H "content-type: application/json" \
   -d '{"value":"https://<your-fleet-host>"}'
 
 curl -X PUT "http://127.0.0.1:7980/api/preferences/managed-gateway-token" \
+  -H "Authorization: Bearer $RYU_TOKEN" \
   -H "content-type: application/json" \
   -d '{"value":"rgw_..."}'
 ```
 
-If your server runs with a token set, add `-H "Authorization: Bearer $RYU_TOKEN"` to each call.
+`$RYU_TOKEN` is the node token Core accepts on its API. `127.0.0.1:7980` is Core's default
+address for the release profile.
 
 ## Per-request routing preferences
 
@@ -161,7 +176,8 @@ additively. It never changes your organization's budget, provider keys,
 entitlement, or locked guardrails.
 
 The desktop stores the same atomic envelope under `node-routing-prefs`. For
-headless setups, its value is JSON:
+headless setups, its value is JSON. If Core rejects a save in Gateway settings,
+the draft stays in the form for correction or retry:
 
 ```json
 {
@@ -187,15 +203,15 @@ Once configured, selecting a provider decides which plane the request takes:
 | **Ryu Gateway (governed)** | your local Gateway | your own keys |
 | any BYOK provider (OpenAI, Anthropic, a local engine, …) | your local Gateway | your own keys |
 
-Switching between them is just changing the active provider; nothing needs restarting and no keys move.
+To switch, change the active provider. Nothing restarts and no keys move.
 
 ## What the fleet decides, and what stays yours
 
-The hosted fleet resolves your token to an organization on every request and enforces the parts that protect the shared pool: your credit budget, your plan entitlement, and any organization-level firewall policy your admins authored. Those cannot be overridden from a client, by design. A server that could set its own budget could spend the organization's credits without limit.
+The hosted fleet resolves your token to an organization on every request and enforces the parts that protect the shared pool: your credit budget, your plan entitlement, and any organization-level firewall policy your admins authored. A client cannot override them. A server that could set its own budget could spend the organization's credits without limit.
 
 Everything that is a local preference (which local engine is resident, your own
 Gateway's provider list, and your BYOK keys) stays on your machine and is never
-sent to the fleet. The routing envelope above is the deliberate exception: it
+sent to the fleet. The routing envelope above is the one exception. It
 contains preferences only, not credentials or budget controls, and is clamped
 by the fleet before use.
 
@@ -218,6 +234,6 @@ balance moves. If it does not:
   <DocCard href="/docs/gateway/routing-planes" />
   <DocCard href="/docs/gateway/configuration" />
   <DocCard href="/docs/billing/credits" />
+  <DocCard href="/docs/start-here/getting-started/self-host" />
+  <DocCard href="/docs/core/node-and-presence" />
 </Cards>
-
-Continue with [Gateway](/docs/gateway), [managed data plane](/docs/gateway/managed-data-plane), [self-hosting guide](/docs/start-here/getting-started/self-host), and [node and presence](/docs/core/node-and-presence).

@@ -1,18 +1,21 @@
 ---
-title: "Data Folder & Storage"
-description: "Move your data folder to another disk, back it up, export to a zip, and restore"
+title: "Data Folder and Storage"
+description: "Where Ryu keeps its data folder, what is inside it, and how to move it, export an encrypted backup zip, restore it, or reset a node"
 ---
 
 Ryu keeps your chats, Spaces, memories, media, models, and engine files in one data folder. It is
-`~/.ryu` by default. Use this page to move, back up, export, or restore that folder.
+`~/.ryu` by default. You can move, back up, export, or restore that folder.
 
 When multiple desktop release channels are installed, their Core profiles can use different default
 folders while the packaged desktop UI store remains shared. See [Ryu Release Channels](/docs/start-here/release-channels)
 for the full profile and data-sharing matrix.
 
-All of the path logic lives in Core (`apps/core/src/paths.rs` resolves the folder,
-`apps/core/src/data_path.rs` owns the copy/export/import operations). The desktop **Settings ->
-System -> Storage** tab (`apps/desktop/src/components/settings/StorageSettings.tsx`) is the UI.
+Standalone desktop apps keep their own sign-in and preference stores. They do not inherit
+Ryu Desktop’s older sign-in files during an upgrade. Ryu Desktop upgrades preserve existing
+sign-ins and preferences without replacing files already saved by the newer installation.
+
+Core owns data-folder resolution and the copy, export, and import operations. To manage the folder,
+open the node selector, choose **Gateway settings**, then open **This device → Storage**.
 
 <TryInRyu page="settings" />
 
@@ -29,8 +32,68 @@ needs a Core restart) in this order:
 
 The pointer file is `data-path.json` in the OS config dir (`%APPDATA%\ryu` on Windows,
 `~/.config/ryu` on Linux, `~/Library/Application Support/ryu` on macOS). It lives outside the data
-folder on purpose: the preferences DB is *inside* the data folder, so it cannot record its own
-location.
+folder because the preferences DB is inside the data folder and cannot record its own location.
+
+Restart and update recovery refuse to guess a folder when its location settings
+are invalid or cannot be read. Repair those settings before retrying.
+
+## What's in the data folder
+
+Core, the Gateway, the desktop app, and app sidecars all use the same layout inside the data folder,
+so moving, exporting, or resetting the folder covers every part of it. Other release profiles use the
+same layout in their own folder (for example `~/.ryu-dev`).
+
+```text
+~/.ryu/
+├── models/        downloaded model weights, one folder per kind of model
+├── engines/       inference engines (llama.cpp, Ollama, sd.cpp, …) and their libraries
+├── bin/           Core and Gateway runtime versions, the Island bundle, and small helper tools
+├── plugins/       installed app and plugin packages
+├── plugin-data/   each app's or plugin's own data (databases, preferences, media)
+├── runtimes/      agent runtimes: the managed Pi and its config, ACP agents, Codex home, npm
+├── services/      state for built-in services such as Ghost, Shadow, Restate, mesh, and OpenTunnel
+├── db/            Core databases (conversations, agents, preferences, traces, audit, …)
+├── state/         Core settings and state files (MCP servers, nodes, workflows, schedules, …)
+├── files/         your content: attachments, media, voice recordings, version history
+├── secrets/       node tokens, account and plugin credentials, and the key file fallback
+├── cache/         caches Ryu can rebuild
+├── logs/          log files, including ryu-core.log
+└── tmp/           scratch space and in-progress downloads
+```
+
+Models and engines are grouped the same way, so an engine under `engines/chat/` serves the weights
+under `models/chat/`.
+
+```text
+models/
+├── chat/              GGUF chat models and their vision projectors
+│   ├── snapshots/     safetensors and MLX repositories, one folder per repository
+│   └── ollama/  omlx/  mlx-serve/    model stores for engines Ryu manages
+├── embedding/  rerank/  classifier/
+├── image/sdcpp/  video/sdcpp/
+├── speech-to-text/    whisper/, parakeet/, audio-cpp/
+├── text-to-speech/    kokoro/, outetts/, audio-cpp/
+├── vad/  tool-routing/  vision/
+├── adapters/          fine-tuned LoRA adapters
+└── hf/  torch/        shared Hugging Face and PyTorch download caches
+engines/
+├── chat/              llamacpp/, ollama/, mesh-llm/, mlx-serve/
+├── image/             sdcpp/
+├── audio/             whispercpp/, audiocpp/, ryutts/
+└── tool-routing/      needle2/, needle3/
+```
+
+- **App data** lives in `plugin-data/<id>/`, where `<id>` is the app id with `/` replaced by `+`.
+  Mail, for example, keeps `plugin-data/@ryu+mail/mail.db`. Uninstalling an app keeps it unless the
+  **App files** cleanup option is chosen; see [Uninstall and app data](/docs/extend/develop/sdk/plugin-api#uninstall-and-app-data).
+- **Engine downloads stay inside the folder.** Ollama, oMLX, and MLX Serve started by Ryu keep their
+  models under `models/chat/`, and the Python engines (vLLM, SGLang, MLX) download into
+  `models/hf/` instead of your home folder's Hugging Face cache. See
+  [Chat engines](/docs/surfaces/desktop/engines/chat-engines#where-models-are-stored).
+- **Skills are shared.** Agent Skills install into the standard `~/.claude/skills/` folder, outside
+  the data folder, so other agents can use them too. See [Skills](/docs/surfaces/desktop/skills).
+- **Keys.** When no OS keychain is available, the encryption key is kept in `secrets/master.key`.
+  Keep the whole `secrets/` folder private.
 
 ## See the current location and free space
 
@@ -40,16 +103,30 @@ before moving.
 
 ## Move to another disk
 
-Open **Settings -> System -> Storage**, pick a target folder, and choose one of two paths. They are
-deliberately different operations:
+Open **This device → Storage** in Gateway settings, pick a target folder, and choose one of two
+operations:
 
 | Choice | What happens | API / mechanism |
 |---|---|---|
 | **Copy data & restart** | Copies the whole folder to the new disk, then points Core at it | Offline `ryu-core data-path migrate` subcommand, orchestrated by the Tauri command `migrate_data_folder` |
 | **Start fresh here** | Points Core at the new (empty) folder; the old data stays intact | `POST /api/data-path/switch` (point-only, no copy) |
 
-Before either, the desktop validates the target with `POST /api/data-path/validate`: the folder must
+Before either, the desktop validates the target with `POST /api/data-path/validate`. The folder must
 be writable, empty, not nested inside the current data folder, and have enough free space for a copy.
+
+The location, size, and upload limit on the Storage tab come from the node that is selected now.
+Folder validation, **Start fresh here**, **Reset**, and **Export** are sent to that node too. If you
+select a different node while a folder is picked or still being checked, the tab reloads that node's
+values and clears the picked folder. Pick it again so the new node validates it; a check made by one
+node never enables **Start fresh here** on another. If you select a different node while the
+**Export** save dialog is open, nothing is exported; choose **Export** again to back up the node
+selected now. **Start fresh here** and **Reset** record the new location on the selected node and
+then restart the desktop app; a remote node uses the new folder after its own Core restarts.
+
+**Copy data & restart**, **Restore**, and **Copy to another profile** do not go through the selected
+node. They act on this device's own data folder and the Core the desktop app runs, then restart the
+desktop app. With a remote node selected, the free-space check shown for a picked folder comes from
+that node, not from this device.
 
 A switch or copy takes effect on the next Core restart. The point-only `switch` returns
 `{ "ok": true, "restart_required": true }`.
@@ -58,38 +135,75 @@ A switch or copy takes effect on the next Core restart. The point-only `switch` 
 The **Copy data & restart** path runs offline because copying a live `.db` (with its `-wal`/`-shm`
 files) while Core has it open corrupts it. The Tauri command stops the managed Core, **waits until
 `/api/health` is actually down**, runs the `ryu-core data-path migrate` subcommand (forwarding
-progress to the `data-folder-progress` event), then restarts. In dev, Core is owned by `turbo`, so
-the desktop **refuses** the copy rather than risk a live DB. Verified by `cargo test path` and
-desktop `tsc`; a live copy + restart needs a packaged app.
+progress to the `data-folder-progress` event), then restarts. This path needs a packaged desktop app
+that manages its own Core.
 </Callout>
 
 To go back to the default `~/.ryu`, use **Reset** (`POST /api/data-path/reset`, also point-only).
 
-## Back up by exporting a zip
+## Back up by exporting an encrypted zip
 
 For automatic encrypted off-node backups, use [S3 backups](/docs/surfaces/desktop/user-guide/s3-backups).
 They support whole nodes, individual Spaces and app-owned snapshots, with schedules, retention,
 connection tests and recovery on another machine.
 
-`POST /api/data-path/export` zips the current data folder to an output path you choose. Export is
-read-only on the data folder, so it runs **online** with no restart. Use it for a portable backup
-you can move to another machine. The backup deliberately omits node identity, node-admittance,
-saved-node, provider-account, Fleet enrollment/control credentials, MCP/plugin credential stores,
+`POST /api/data-path/export` zips the current data folder to an output path you choose and encrypts
+it with a passphrase (`{ "out": "…", "passphrase": "…" }`). Export is read-only on the data folder,
+so it runs **online** with no restart. Use it for a portable backup you can move to another machine.
+
+In the desktop app, **Export…** asks for the passphrase twice before it opens the save dialog. The
+passphrase must be at least 12 characters. Ryu derives the key with PBKDF2-HMAC-SHA256, encrypts
+the archive in authenticated AES-256-GCM frames, writes it owner-only, and never stores the
+passphrase, so a lost passphrase cannot be recovered and the backup cannot be restored without it.
+An export without a passphrase is refused. The unencrypted zip exists only in a temporary file
+with no name while the export runs.
+
+An export of the data folder Ryu is running from always carries its encryption key inside the
+encrypted archive, whether the key lives in the OS keychain or in a
+file, together with any earlier keys Ryu still keeps for older data, so the backup restores on a new
+machine without a separate key. From a terminal, `ryu-core data-path export --out <file>
+--passphrase-stdin` reads the passphrase from the first line of standard input.
+
+The backup omits node identity, node-admittance, saved-node, provider-account, Fleet enrollment/control credentials, MCP/plugin credential stores,
 pairing state, and runtime-process files; restoring it therefore creates a fresh node identity and
 requires you to sign in and reconnect any external nodes, providers, plugins, or Fleet enrollment.
 
 ## Restore from a zip
 
 Restoring overwrites the live DB files, so it is the offline twin of export: the
-`ryu-core data-path import` subcommand, orchestrated by the Tauri command `import_data_folder`. The
-desktop runs the same stop-Core -> wait-for-health-down -> subcommand -> restart sequence the copy
-migration uses. The zip importer is zip-slip guarded.
+`ryu-core data-path import` subcommand, orchestrated by the Tauri command `import_data_folder`.
+Enter the backup's passphrase in the restore confirmation; the desktop passes it to the subcommand
+in its environment, never on its command line (from a terminal, add `--passphrase-stdin`). A wrong
+passphrase or a modified file is refused before anything is replaced. Zips exported by builds before
+encryption restore without a passphrase.
+
+When the backup carries a key, the restore adopts it before any file is replaced: it becomes the folder's key (in the OS keychain when available, else in the
+key file), and the key the folder had before is kept as an earlier key, so anything that install
+already encrypted still opens. This is what lets you restore onto a fresh install that has already
+created its own key. Restoring into a folder other than the one Ryu is using stores the backup's key
+in that folder's key file and never touches the OS keychain entry, which belongs to the folder in
+use. A restore is refused, with nothing replaced, only when the folder already keeps four earlier keys or its current key cannot be read; restore into a new profile in that case.
+
+The desktop runs the same stop-Core -> wait-for-health-down -> subcommand -> restart sequence the copy
+migration uses. The zip importer is zip-slip guarded. It verifies the archived files and their
+checksums before replacing existing files, so a damaged entry discovered later in the archive leaves
+your previous files and data-folder location intact.
+
+Archives that use the same path as both a file and a parent directory are refused before any
+existing file is replaced.
+
+It also checks extracted bytes against each entry's declared size and ignores protected credential
+filenames and every file beneath protected credential directories, regardless of letter case. This
+applies to archives created outside Ryu too, so a restore cannot replace the new node's credentials
+through a nested directory or case alias. Malformed backups cannot expand beyond their checked size.
 
 <Callout type="info">
-Export and import are one zip. Export the folder on the old machine, then import that zip on the new
-one to move your encrypted conversations, Spaces, memory, media, models, and engine binaries without
-carrying a reusable node, account, plugin, or Fleet credential. Keep the backup itself private: it
-still contains your Customer Data and the local encryption key needed to restore it.
+Export and import are one encrypted zip. Export the folder on the old machine, then import that file
+on the new one with the same passphrase to move your encrypted conversations, Spaces, memory, media,
+models, and engine binaries without carrying a reusable node, account, plugin, or Fleet credential.
+Inside the encryption the backup holds your Customer Data and the key that encrypts it; anyone with
+the file and the passphrase can read both, so choose a strong passphrase and store it apart from the
+backup.
 </Callout>
 
 This full-data zip is different from a [portable package](/docs/extend/develop/extensions/portable-packages).
@@ -98,29 +212,29 @@ theme, or other package kind. It does not include chat history, session runs, me
 full-text and semantic indexes used to search them. Use the data-folder export when you need the
 complete node state.
 
-## Cross-device sync
+## Delete data or reset a node
 
-Cross-device sync is an opt-in live mirror for the devices signed in to your Ryu account. Open
-**Settings -> Connections -> Cross-device sync** to enable it on each node. It is off by default,
-starts without a restart, and normally converges within a minute.
+Open the node selector, choose **Gateway settings**, then open **Danger → Danger zone**. Every action
+there is permanent and asks you to confirm it first.
 
-The mirror currently includes:
+- The **Delete all** rows and their counts come from the selected node. Type the row's confirm word to
+  delete; a row with nothing in it cannot be deleted.
+- **Reset node** wipes everything on the selected node and runs onboarding again. Type the node's name
+  to confirm. The desktop restarts its own Core for the local node; a remote node is restarted by its
+  own host. Shared organization nodes refuse a reset.
+- **Deep clean** removes the folders of the profiles you choose on this device, and optionally the
+  shadow and ghost folders that every profile shares, then restarts into setup.
 
-- chats and their messages;
-- editable Spaces pages, databases, whiteboards, and app-owned documents;
-- stable Space and document identities, so links keep pointing to the same page on each node.
+If a different node becomes selected while a delete or reset confirmation is open, the confirmation
+closes without deleting anything, because it described the other node. Open it again to act on the
+node that is selected now.
 
-Messages merge by their stable identity. Document snapshots use the most recent edit time when two
-nodes changed the same document independently. Content stored by the mirror is encrypted at rest.
+## Sync between devices
 
-Binary file attachments, downloaded models, engine binaries, long-term memory, and local app setup
-are not part of this mirror. Use the full-data zip when you need to move those too.
-
-<Callout type="info">
-Cross-device sync and live collaboration solve different problems. The mirror moves durable data
-between nodes. When two clients open the same node, realtime rooms deliver chat updates, presence,
-shared app changes, and CRDT document edits immediately.
-</Callout>
+[Cross-device sync](/docs/surfaces/desktop/user-guide/cross-device-sync) is an opt-in mirror of
+chats and editable Spaces documents through your Ryu account. The same page covers desktop settings
+sync. Neither replaces the full-data zip: attachments, models, engines, and long-term memory move
+only with an export and restore.
 
 ## Related
 

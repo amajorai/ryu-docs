@@ -1,21 +1,24 @@
 ---
-title: "SDK runnables and model clients"
-description: "Build runnable agents, workflows, tools, actions, and skills, then connect them to models and gateway policy."
+title: "SDK Runnables and Model Clients"
+description: "Reference for the TypeScript SDK Runnable factories (defineAgent, defineWorkflow, defineTool, defineSkill, defineAction), the defineModel client, and Gateway egress enforcement."
 ---
 
-Part of the [Ryu SDKs and libraries](/docs/extend/develop/sdk) guide.
+A Runnable is the unit of work a Ryu plugin ships: an agent, workflow, tool, or skill with a
+`run(input, ctx)` function. This page is part of the [Ryu SDKs and Libraries](/docs/extend/develop/sdk)
+reference.
 
 ## Runnable factories
 
-The four kind factories take an options object and return a `Runnable` with a fixed `kind`. The
-semantic `defineAction` facade is also exported from `.` (`packages/sdk/src/runnable/`).
+Each factory takes an options object and returns a `Runnable` with a fixed `kind`. All five are
+exported from `@ryuhq/sdk` (`packages/sdk/src/runnable/`). `defineAction` is a semantic facade
+that returns a `tool` Runnable with effect and approval metadata.
 
 | Factory | `kind` | Distinct option | Returns |
 |---|---|---|---|
 | `defineAction` | `tool` | description, input/output schema, effect, approval | `ActionRunnable<TInput, TOutput>` |
 | `defineAgent` | `agent` | `tools?: readonly Runnable[]` | `Runnable<TInput, TOutput>` |
 | `defineWorkflow` | `workflow` | `steps?: readonly Runnable[]` | `Runnable<TInput, TOutput>` |
-| `defineTool` | `tool` | `schema: ToolSchema` (required) | `ToolRunnable<TInput, TOutput>` |
+| `defineTool` | `tool` | `schema` (required), a Standard Schema (zod, valibot, arktype) or `ToolSchema` | `ToolRunnable<TInput, TOutput>` |
 | `defineSkill` | `skill` | none | `Runnable<TInput, TOutput>` |
 
 Every options object shares `id`, `name`, and `run(input, ctx)`.
@@ -33,6 +36,12 @@ function defineAgent<TInput, TOutput>(options: {
 
 Creates a `kind: "agent"` Runnable. The optional `tools` array lists other Runnables (including
 workflows) the agent can invoke as named tools.
+
+`defineAgent` also accepts `identityMode` (`"managed"`, `"individual"` or `"mixed"`), which
+`toManifest()` writes as the agent's `config.identity_mode`. When it is omitted, Ryu creates the
+agent acting as the user (`managed`). An unknown value throws. There is no option for which
+accounts the agent may use; the user sets that on their own node. See
+[Add your Runnables](/docs/extend/develop/extensions/plugin-json-manifest#2-add-your-runnables).
 
 ```typescript
 const myAgent = defineAgent({
@@ -59,6 +68,11 @@ function defineWorkflow<TInput, TOutput>(options: {
 Creates a `kind: "workflow"` Runnable that orchestrates other Runnables as steps. A step is any
 `Runnable` (`WorkflowStep` is an alias), invoked directly with `step.run(input, ctx)`.
 
+For a declarative, typed graph with parallel branches, loops, suspend/resume, streaming, and
+compilation to a Core workflow, use `createWorkflow` from `@ryuhq/sdk/workflow` (see
+[Workflow DSL](/docs/extend/develop/extensions/workflow-dsl)). A committed DSL workflow is itself a
+`kind: "workflow"` Runnable.
+
 ### defineTool
 
 ```typescript
@@ -74,6 +88,11 @@ Creates a `kind: "tool"` Runnable with a JSON Schema. The input is validated aga
 `run` time, so a missing required field or a primitive-type mismatch throws a descriptive `Error`
 naming the failing field before the body executes. Tools do not require a model call, but if one is
 needed it must use `ctx.gateway`.
+
+`schema` can also be a typed Standard Schema such as `z.object({ … })`. Then the `run` argument
+type is inferred from the schema, the input is parsed by the schema before `run`, and the exposed
+`schema` field holds the converted JSON Schema. See
+[Typed schemas and structured output](/docs/extend/develop/sdk/typed-schemas).
 
 `ToolRunnable` extends `Runnable` with a public `schema` field. The schema types are:
 
@@ -104,17 +123,20 @@ function defineAction<TInput extends Record<string, unknown>, TOutput>(options: 
   schema: ToolSchema;
   outputSchema?: Record<string, unknown>;
   effect: "read" | "mutate";
+  annotations?: ActionAnnotations;   // extra MCP-compatible effect hints
   needsApproval?: boolean;
   run(input: TInput, ctx: RunnableContext): Promise<TOutput>;
 }): ActionRunnable<TInput, TOutput>;
 ```
 
 `defineAction` is the canonical authoring contract for a business operation. It returns a Tool
-Runnable for compatibility with Core, but adds the metadata that makes the operation explicit to
-Ryu's governed runtime:
+Runnable for compatibility with Core and adds effect and approval metadata for Ryu's governed
+runtime (`packages/sdk/src/runnable/action.ts`):
 
 - `effect: "read"` lowers to `readOnlyHint: true`.
 - `effect: "mutate"` lowers to `destructiveHint: true`.
+- An `annotations` value that contradicts `effect` (a read Action with `destructiveHint: true`, or
+  a mutate Action with `readOnlyHint: true`) throws.
 - `needsApproval: true` makes the existing Core approval gate queue the call before dispatch.
 - `outputSchema` is preserved for structured MCP/Core results.
 
@@ -133,8 +155,9 @@ function defineSkill<TInput, TOutput>(options: {
 }): Runnable<TInput, TOutput>;
 ```
 
-Creates a `kind: "skill"` Runnable that encapsulates a reusable prompt pattern. Like a tool it is
-stateless, but its job is a reusable prompt rather than a side-effectful function.
+Creates a `kind: "skill"` Runnable for a reusable prompt pattern. Like a tool, a skill is
+stateless. A skill builds a prompt and calls `ctx.gateway`, where a tool runs a side-effectful
+function.
 
 ## The model client
 
@@ -145,7 +168,7 @@ client is a thin TypeScript wrapper over the `@ryuhq/sdk-native` addon, whose `M
 ```typescript
 function defineModel(modelId: string, options?: {
   baseUrl?: string;   // defaults to RYU_GATEWAY_URL, then the Rust core default
-  token?: string;     // defaults to RYU_GATEWAY_TOKEN; the gateway token, never a provider key
+  token?: string;     // defaults to RYU_GATEWAY_TOKEN; the Gateway token, never a provider key
 }): ModelClient;
 
 const model = defineModel("gemma4");
@@ -158,7 +181,7 @@ for await (const delta of model.stream(messages)) {
 ```
 
 Constructing a `ModelClient` validates egress in the Rust core, so a direct-provider base URL throws
-immediately rather than at request time. The wire types are an OpenAI-compatible subset:
+at construction, not at request time. The wire types are an OpenAI-compatible subset:
 
 ```typescript
 interface ChatMessage { role: "system" | "user" | "assistant"; content: string }
@@ -170,19 +193,30 @@ interface ChatResult  {
 }
 ```
 
-`usage` is present only when the gateway reports token counts; otherwise it is `undefined`.
+`usage` is present only when the Gateway reports token counts. Otherwise it is `undefined`.
 
 ## Gateway enforcement
 
 The Gateway path is enforced by construction (`packages/sdk/src/model/gateway.ts`, backed by
 `crates/sdk/core/src/gateway.rs`):
 
-- Every `RunnableContext` carries a `GatewayClient`; there is no context without one.
-- The SDK ships **no provider bindings**, so credentials live in the Gateway, not in your code.
-- `assertAllowedEgressUrl(baseUrl)` rejects direct-provider hosts at construction time. Only the
-  configured gateway, loopback, or private addresses are allowed.
-- It fails closed: a client that cannot reach the Gateway throws rather than calling a provider
-  directly.
+- Every `RunnableContext` carries a `GatewayClient`. A context cannot exist without one.
+- The SDK ships no provider bindings, so credentials live in the Gateway, not in your code.
+- `assertAllowedEgressUrl(baseUrl)` rejects, at construction time, a base URL that matches the
+  blocklist of known direct-provider hosts (for example `api.openai.com`, `api.anthropic.com`,
+  `generativelanguage.googleapis.com`, and `openrouter.ai`). Any other URL, including loopback and
+  private addresses, passes.
+- A client that cannot reach the Gateway throws. It never falls back to a provider. In an agent's
+  own loop (`agent.generate()`, `agent.stream()`), a refused connection fails with
+  `could not reach the Ryu Gateway at <origin>`, and a call whose `AbortSignal.timeout` signal
+  fires, before the response starts or while it streams, fails with
+  `the Ryu Gateway at <origin> did not respond in time`. Both name `RYU_GATEWAY_URL` (or
+  `node.baseUrl`) and `RYU_GATEWAY_TOKEN` (or `node.token`), and neither includes the token. An
+  error status fails with `[ryu-sdk] gateway <status> at <origin>`, which on `401` or `403` adds
+  `check RYU_GATEWAY_TOKEN`. Every message names the origin only, never a base path or userinfo.
+  The Python SDK's agent loop uses the same wording, except that a timeout while connecting
+  reads `could not reach`. In TypeScript that case reads `did not respond in time`, because an
+  abort signal does not say which phase it interrupted.
 
 These helpers are exported for advanced use:
 

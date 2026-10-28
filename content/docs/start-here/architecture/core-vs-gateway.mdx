@@ -1,25 +1,25 @@
 ---
 title: Core vs Gateway
-description: The single design rule that decides where every piece of code lives, with a request-flow walkthrough.
+description: The ownership rule that splits Ryu Core (what runs) from Ryu Gateway (what is allowed), a request-flow walkthrough, and which agents bypass Gateway.
 ---
 
-Ryu has two Rust services, and one rule decides which one any given feature belongs to.
+Ryu has two Rust services. One rule decides which service owns a feature.
 
 - If code decides **what runs** (which agent, session, workflow, or tool), it is **Core**.
 - If code decides **what is allowed, shared, measured, or paid for** (security, routing, registry,
   evals, budgets, org policy, audit), it is **Gateway**.
 
-Core never enforces policy inline. It routes every model call through the Gateway. The Gateway is
-the shared part a team adopts and an enterprise buys.
+Gateway owns policy for model requests routed through its endpoint. Core orchestrates execution;
+provider-native runtimes and direct integrations can have separate destinations. Check
+[runtime routing](/docs/surfaces/desktop/engines/agent-runtimes) before relying on Gateway controls.
 
 ## Why the split matters
 
-The Gateway is the control layer. Agents are commoditized; the control layer around them is not. Keeping
-all policy in one place means:
+Gateway is the control layer. Keeping policy in one service has these results:
 
-- A single chokepoint governs every model call — firewall, PII/DLP, budgets, audit.
-- The same Gateway can front any engine or any third-party agent framework with no code change.
-- Core stays a clean orchestration layer that is easy to open-source and self-host.
+- Gateway applies firewall, PII/DLP, budgets, and audit to requests routed through it.
+- Compatible clients can use Gateway endpoints after they configure their protocol, credentials, and routing.
+- Core contains orchestration only, so it can be self-hosted without the policy layer.
 
 ## How a request flows
 
@@ -27,7 +27,7 @@ A default chat request travels through both services:
 
 ```mermaid
 flowchart TD
-  Client["🖥️ Client\n Desktop · Web · Mobile · TUI"]
+  Client["Client\n Desktop · Web · Mobile · terminal client"]
 
   subgraph Core["Ryu Core (:7980)"]
     C1["1. Receive request\nPOST /api/chat/stream"]
@@ -43,7 +43,7 @@ flowchart TD
     G3["7. Call provider\nforward to upstream"]
   end
 
-  Engine["🌐 Upstream Provider\nOpenAI · Anthropic · Local"]
+  Engine["Upstream Provider\nOpenAI · Anthropic · Local"]
 
   Client --> C1
   C1 --> C2 --> C3 --> C4
@@ -61,13 +61,13 @@ flowchart TD
    injects allowlisted tools, and selects an adapter.
 3. For the default OpenAI-compatible route, Core forwards the model call to the Gateway with
    `via_gateway: true` (`apps/core/src/sidecar/adapters/mod.rs`). Core does not authenticate to its
-   own Gateway; it points at the local Gateway URL.
+   own Gateway. It calls the local Gateway URL.
 4. The Gateway applies routing, firewall, budgets, caching, and audit, then calls the upstream
    provider.
 5. The response streams back through Core to the client.
 
 Core manages the Gateway as a sidecar (`apps/core/src/sidecar/gateway.rs`). On spawn, Core passes
-the Gateway a `--bind` derived from `RYU_GATEWAY_URL` and sets `LOCAL_LLM_URL` so the active local
+the Gateway a `--bind=<addr>` argument derived from `RYU_GATEWAY_URL` and sets `LOCAL_LLM_URL` so the active local
 engine is a routable provider.
 
 ## What lives where
@@ -76,28 +76,28 @@ engine is a routable provider.
 |---|---|---|
 | Chat routing and the agent tool loop | Core | `apps/core/src/sidecar/adapters/` |
 | Sessions, conversations, memory | Core | `apps/core/src/server/` |
-| Spaces (RAG), retrieval | Core | `apps/core/src/server/spaces.rs`, `retrieval.rs` |
+| Spaces (RAG), retrieval | Core | `apps/core/src/server/spaces.rs` |
 | Workflows, delegation, scheduler | Core | `apps/core/src/workflow/`, `scheduler/` |
-| Sidecar lifecycle, model and skill catalogs | Core | `apps/core/src/sidecar/`, `model_catalog/`, `skills_catalog/` |
-| Capability broker + binding registry | Core | `apps/core/src/plugins/binding.rs` |
+| Sidecar lifecycle, model and skill catalogs | Core | `apps/core/src/sidecar/`, `model_catalog_host.rs`, `skills_catalog/` |
+| Capability broker and binding registry | Core | `apps/core/src/plugins/binding.rs` |
 | Plugin lifecycle (install/enable/disable) | Core | `apps/core/src/plugins/` |
 | Model routing and fallback | Gateway | `apps/gateway/src/router/` |
 | Firewall, PII/DLP, prompt-injection | Gateway | `apps/gateway/src/firewall/` |
-| Caching, rate limiting, circuit breaker | Gateway | `apps/gateway/src/cache/`, `rate_limit/`, `circuit_breaker/` |
-| Budgets, evals, audit | Gateway | `apps/gateway/src/budget/`, `evals/`, `audit/` |
+| Caching, rate limiting, circuit breaker | Gateway | `apps/gateway/src/cache.rs`, `rate_limit/`, `circuit_breaker/` |
+| Budgets, evals, audit | Gateway | `apps/gateway/src/budget.rs`, `evals.rs`, `audit.rs` |
 | Passthrough proxy (Claude Code, Codex) | Gateway | `apps/gateway/src/passthrough/` |
 | Unified tool surface | Gateway | `apps/gateway/src/tools/` |
 
 ## The known bypass
 
 ACP agents run as subprocesses that make their own provider calls internally. Core can redirect
-routable agents through base-URL injection or the subscription-preserving passthrough; agents with
-provider-native protocols that expose no redirect hook remain genuine chat-egress bypasses.
+routable agents through base-URL injection or the subscription-preserving passthrough. Agents with
+provider-native protocols that expose no redirect hook bypass Gateway for chat egress.
 
-The default OpenAI-compatible route and new/auto-installed routable ACP agents route through the
-Gateway by default. Gemini CLI, OpenClaw, Hermes, and any other non-wirable agent remain bypasses.
-When you need firewall, budget, and audit coverage to be absolute, use a gateway-routed agent and
-leave its direct-egress opt-out disabled.
+The default OpenAI-compatible route and new or auto-installed routable ACP agents route through
+Gateway by default. Gemini CLI, OpenClaw, Hermes, and other agents without a redirect hook carry
+`gateway_bypass: true` (`apps/core/src/sidecar/adapters/acp.rs`). When you need full firewall,
+budget, and audit coverage, use a Gateway-routed agent and leave its direct-egress opt-out disabled.
 
 ```mermaid
 flowchart LR
@@ -119,10 +119,9 @@ flowchart LR
   ToolEgress["Tool egress\nalways governed\nMCP bridge"]
 ```
 
-<Callout type="info">
-  The Gateway is already on the default chat path for routable agents. The remaining boundary is
-  the provider-native ACP bypass (plus governance **surfaces** such as firewall, PII/DLP, and budget
-  configuration UIs), not the data-plane wiring.
+<Callout type="warn">
+  Gateway is on the default chat path for routable agents. Provider-native ACP agents remain a chat
+  bypass. Gateway sees only their tool egress through the MCP bridge.
 </Callout>
 
 ## Related
@@ -132,6 +131,6 @@ flowchart LR
   <DocCard href="/docs/gateway/gateway-for-any-agent" />
   <DocCard href="/docs/start-here/architecture/runnable-model" />
   <DocCard href="/docs/start-here/architecture/capability-layers" />
+  <DocCard href="/docs/gateway/routing" />
+  <DocCard href="/docs/extend/integrate" />
 </Cards>
-
-Continue with [Architecture](/docs/start-here/architecture), [Core](/docs/core), [Gateway](/docs/gateway), [Integrate with Ryu](/docs/extend/integrate), and [Gateway routing](/docs/gateway/routing).

@@ -1,0 +1,127 @@
+---
+title: "Connect Trigger Management"
+description: "Create, reconcile, and delete tenant-scoped Composio trigger instances."
+tags: ["connect", "api", "composio", "triggers"]
+---
+
+Connect provisions and manages Composio trigger instances for each tenant. For signed event
+delivery and Core agent or workflow targets, see [trigger event delivery](/docs/standalone/connect-api-trigger-events).
+
+## Native trigger management
+
+Connect creates provider trigger instances for active Connect-linked accounts.
+All trigger management endpoints require the tenant's separate management bearer;
+runtime tool and event-consumer tokens are rejected.
+
+| Endpoint | Request | Result |
+|---|---|---|
+| `POST /v1/composio/triggers` | `{ "triggerSlug": "GMAIL_NEW_GMAIL_MESSAGE", "triggerConfig": {} }` | Local `id`, provider `triggerId`, `triggerSlug`, `connectedAccountId`, `userId`, `authConfigId`, and `status` |
+| `GET /v1/composio/triggers` | No body | `{ "triggers": [...] }`, including pending and deleted records |
+| `DELETE /v1/composio/triggers/{id}` | No body; use the local ID | Same projection with `status: "deleted"` on confirmed deletion |
+| `POST /v1/composio/triggers/{id}/reconcile` | `{ "triggerConfig": {} }` with the generation's original configuration | Same projection after provider-state reconciliation |
+
+### Ownership and account constraints
+
+`userId` and `authConfigId` are read-only ownership metadata taken from the
+persisted binding, never accepted from request fields. The local `id` identifies
+one generation and changes after deletion and recreation.
+
+Creation also accepts optional `expectedAccountId`, a nonempty string that must
+equal the effective tenant account. A mismatch returns `403` with
+`code: "trigger_denied"` before any provider request or trigger reservation.
+It only constrains the assigned account; it cannot select or override one.
+Invalid types or blank values return `400`. Reconciliation does not accept this
+field because its local ID already identifies the saved generation.
+
+Operators grant exact trigger slugs separately from tools. No grants means no
+creation. Requests cannot choose a tenant, account, user, auth config, project
+credential, version, or webhook URL. Unknown top-level fields are rejected. The
+body limit is 512 KiB and `triggerConfig` is limited to 16,384 serialized
+characters. Composio validates the trigger-specific configuration. Connect does
+not execute agents or workflows; those remain Core responsibilities.
+
+### Project webhook prerequisite
+
+Provision the project webhook subscription before enabling grants: use the
+Connect public HTTPS ingress, V3, and `composio.trigger.message`, with its signing
+secret in the operator secret environment. Connect verifies the configured
+subscription ID, URL, version, event selection, and any returned secret before
+creation. Tenant APIs never create, overwrite, or rotate project subscriptions.
+Tenants sharing a project share this source; use one credential reference per
+project. Created trigger IDs immediately become exact signed ingress bindings,
+without static environment edits. Static bindings cannot override managed
+reservations, including deletion tombstones.
+
+### Idempotency and generations
+
+There is one non-deleted generation per tenant and trigger slug. Repeating an
+equivalent active request returns its record without another provider upsert.
+Nested object keys are canonicalized; array order remains significant. Changed
+configuration and pending/deleting generations return `409` on creation. After
+confirmed deletion, ordinary creation allocates a fresh local generation and
+upserts the configured provider trigger. Retained provider IDs can never activate
+another generation: a reused old ID returns `409`, preserving delivery denial.
+
+A tenant can hold at most 256 non-deleted generations. Deleted generations are
+kept as tombstones but never count toward that limit, so confirmed deletion
+always frees a slot. Listings return at most 256 locally managed records per
+tenant: non-deleted generations first, then tombstones, each ordered by local
+ID. There is no pagination or provider-wide enumeration, so the oldest
+tombstones may be omitted from a listing.
+
+### Deletion and recovery
+
+Deletion persists local ingress denial before provider I/O. Failure returns
+`503` and leaves `deleting` durable across restart; retry deletion after fixing
+the provider failure. Confirmed deletion is idempotent. Lost creation responses
+remain `pending`; call the management reconciliation endpoint with the original
+configuration. Connect re-verifies the account and project source, then reads
+provider instances filtered by account, user, auth config, slug and, when known,
+trigger ID. It includes disabled instances and bounds pagination to six pages of
+50 under a 25-second listing deadline. Returned ownership and configuration are
+checked again instead of trusting provider filters. Exactly one matching enabled
+instance can activate a pending generation without another upsert. Ambiguous,
+disabled, or changed instances remain denied; incomplete reads fail with `503`.
+
+Reconciliation of `deleting` recovers an unknown provider ID and deletes it without
+activating delivery. For a known ID, a complete filtered read with no instance
+confirms deletion, including a lost delete response followed by provider `404`.
+An old local ID never addresses a later generation, and late creation responses
+cannot overwrite a deleted generation or its retained provider ID.
+
+Composio does not document an operation-status or generation-fencing contract for
+upsert. If an uncertain create has no visible matching instance, absence cannot
+prove it never ran or will not complete later. Reconciliation returns `409` and
+can be retried; it does not replay upsert or release that unresolved slot.
+Provider-added configuration defaults that prevent an exact match also require
+operator investigation. Confirmed deletion and ordinary recreation are supported.
+Deletion of a reservation without a provider ID records denial and returns
+`409` until reconciliation identifies it. Existing queued events
+and claimed work are not recalled. Local account revocation stops new managed
+ingress.
+
+Success returns `200`; invalid input `400`, wrong credentials `401`, ungranted
+or foreign resources `403`, conflicts `409`, unsupported methods `405`, and
+unavailable provider/configuration `503`. Errors have a stable `code` and the
+standard request-ID header without raw provider diagnostics. Retained lifecycle
+state supplies operation metadata; there is no separate trigger audit feed.
+
+### Persistence and backups
+
+The version-2 trigger store retains ownership, provider IDs, state, and a
+configuration hash, never signing secrets or raw trigger configuration. Future
+schema versions are refused. Version 1 upgrades transactionally without losing
+IDs, ownership, or tombstones. Because old stores retained only an order-dependent
+hash, their first verification requires the original configuration ordering;
+successful verification upgrades that hash to canonical ordering. Preserve SQLite state and its
+WAL in backups; restoring an old snapshot can lose deletion decisions. Disable ingress and
+management access before recovery, reconcile provider state, and prefer rolling
+forward. Core trigger import and automatic uncertain-operation recovery are not
+provided.
+
+Provider contracts follow Composio's official
+[upsert](https://docs.composio.dev/reference/api-reference/triggers/postTriggerInstancesBySlugUpsert),
+[instance listing](https://docs.composio.dev/reference/api-reference/triggers/getTriggerInstancesActive),
+[deletion](https://docs.composio.dev/reference/api-reference/triggers/deleteTriggerInstancesManageByTriggerId),
+and [subscription](https://docs.composio.dev/reference/api-reference/webhook-subscriptions/getWebhookSubscriptionsById)
+APIs.

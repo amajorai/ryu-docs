@@ -4,58 +4,186 @@ description: "Run MCP hosting, Skill hosting, governed tools, and Composio behin
 tags: ["connect", "mcp", "skills", "tools", "composio", "standalone"]
 ---
 
-Ryu Connect is the standalone integration edge for products that need MCP
-hosting, `SKILL.md` content, governed tool calls, and Composio actions. It gives
-those lanes one tenant-scoped bearer boundary while preserving the existing
-Ryu-native ownership seams:
+<Callout type="warn">
+  Hosted Ryu Connect is in **early access** and is not open for new
+  organizations yet. Ryu enables it one organization at a time. Composio tools
+  that your plan runs through Ryu Gateway are separate and keep working.
+</Callout>
+
+Ryu Connect is the standalone integration edge for developers whose products
+or agents need MCP hosting, `SKILL.md` content, governed tool calls, and Composio actions. It gives
+those lanes one tenant-scoped bearer boundary and keeps each lane's existing
+owner:
 
 | Lane | Connect owns | Execution owner |
 |---|---|---|
 | MCP | Native Skill resource server at `/mcp`, with optional forwarding below `/mcp/` | Connect for Skill resources; configured upstream for forwarded requests |
-| Skills | Local catalog and `SKILL.md` hosting | The configured Skill source directory |
+| Skills | One shared catalog and `SKILL.md` hosting | The configured Skill source directory |
 | Tools | Native tenant-bound registry and exact tool grants | Connect calls registered MCP servers directly |
-| Composio | Tenant-bound account, version, credential, and tool grants | Connect calls the Composio execution API directly |
+| Composio | Tenant-bound account, version, credential, and tool grants | Connect calls the Composio execution API directly, or serves a toolkit itself when the operator moves it (see [natively served toolkits](#natively-served-toolkits)) |
 
 Connect serves Skill resources directly over MCP without Core or Gateway.
 Initialize the server, list resources, and read a `ryu-skill:///` resource
-using your Connect bearer. It uses stateless Streamable HTTP with JSON responses.
+using your Connect bearer. The endpoint uses stateless Streamable HTTP: send
+`Accept: application/json, text/event-stream`, and read the response's
+`Content-Type`, because the plain `initialize` handshake and other 2025-era
+requests are answered as a single server-sent `message` event instead of a bare
+JSON body.
+See [Hosted MCP](/docs/standalone/connect-api-mcp#hosted-mcp).
+
 Native MCP tools and Composio actions use one discovery and execution surface.
 Alternatively, a separate single-tenant compatibility mode forwards to existing
 Core and Gateway upstreams. It cannot be combined with native registrations.
-When a lane is not configured, its route returns an explicit unavailable
-response and `/health` reports that state.
+When a lane is not configured, its route returns an explicit `503` code, such
+as `skills_unavailable` or `native_composio_unavailable`, and `/health` reports
+that state.
 
-## Start Connect
+The Skill catalog is shared: every tenant of a deployment can list and read
+every Skill in the configured directory. Put only content that all tenants may
+see there.
 
-```sh
-RYU_CONNECT_API_TOKEN=replace-me \
-RYU_CONNECT_TENANT_ID=demo \
-RYU_CONNECT_SKILLS_DIR=$PWD/apps/skills \
-bun run apps/connect/src/index.ts
-```
+Ryu's catalog includes `ryu-connect`, the operating guide for agents that call
+tools through Connect: what calls cost, the caller's maximum, the failure codes
+and which to retry, `Idempotency-Key`, and connection prompts. Point an agent at
+`GET /v1/skills/ryu-connect` or the `ryu-skill:///ryu-connect/SKILL.md`
+resource before it starts calling tools.
 
-The default bind is `127.0.0.1:8094`.
+Connect masks the credentials it sends to a provider out of every answer it
+returns, so a provider that quotes its `Authorization` header or API key back
+does not hand it to the caller. See
+[credentials in answers](/docs/standalone/connect-api-mcp#credentials-in-answers).
 
-The default Skill directory is resolved relative to the service, so repository
-startup from the Connect package works independently of the shell directory.
-Set `RYU_CONNECT_SKILLS_DIR` explicitly for packaged deployments.
+Composio trigger delivery is described in
+[trigger management](/docs/standalone/connect-api-triggers) and
+[trigger events](/docs/standalone/connect-api-trigger-events). Signed webhook
+ingress resolves a configured endpoint and verifies the payload before reading
+its trigger record, and removed triggers and revoked accounts stay excluded.
 
-For compatibility mode, configure the upstreams explicitly:
+## Availability
 
-```sh
-RYU_CONNECT_CORE_URL=http://127.0.0.1:7980 \
-RYU_CONNECT_CORE_TOKEN=core-token \
-RYU_CONNECT_GATEWAY_URL=http://127.0.0.1:7981 \
-RYU_CONNECT_GATEWAY_TOKEN=gateway-token \
-RYU_CONNECT_MCP_UPSTREAM=http://127.0.0.1:3000 \
-RYU_CONNECT_MCP_TOKEN=mcp-upstream-token \
-bun run apps/connect/src/index.ts
-```
+<Callout type="warn">
+Connect is not distributed for self-hosting yet. There is no published source
+tree, package, container image, or release binary for the service, and the
+hosted product is in early access. Where an organization has Ryu-hosted
+Connect, its members create their own keys in the Ryu console (see
+[Connect keys](#connect-keys)). The settings in
+[Connect configuration](/docs/standalone/connect-configuration) document the
+service contract for early-access deployments; they are not a download or
+install path.
+</Callout>
 
-The Connect bearer is never forwarded upstream. Operator-configured upstream
-credentials are kept in process memory and are never returned by Connect.
+[Connect configuration](/docs/standalone/connect-configuration) lists every
+environment setting, the trigger data key and rollback rules, the bind address,
+and the compatibility-mode upstreams.
 
-## Use Connect beside Passport
+## Connect keys
+
+On Ryu-hosted Connect, members create Connect keys in the Ryu console under
+**Connect keys** in their organization. A key starts with `ryu_connect_` and
+is sent as `Authorization: Bearer <key>`, like any runtime bearer.
+
+- **Organization keys** are created, rotated, and revoked by organization
+  admins. **Member keys** belong to the member who created them: only that
+  member can rotate one, and the member or an admin can revoke it. A member
+  key stops working when its member leaves the organization or is changed to
+  the viewer role, and a viewer cannot rotate one.
+- A key is shown once, when it is created or rotated. Ryu stores only a hash
+  of it, so a lost key cannot be shown again; rotate or revoke it instead.
+- Every key of an organization calls Connect as the same tenant. Usage,
+  credit holds, and refusals for exhausted credit apply to the organization,
+  whichever key made the call, and every call is charged to the
+  organization's credits. Creating a key needs credit on the organization;
+  there is no free starter credit.
+- A new key starts working, and a revoked or expired key stops working,
+  within about a minute.
+- Rotation replaces a key with a new one of the same name and scope. The old
+  key stops at once, or after a grace period of 1 or 24 hours so you can move
+  your deployments over.
+- An organization whose Connect access Ryu set up directly keeps the keys it
+  was given and cannot create keys in the console.
+
+Each change in the console may ask you to confirm your identity again and is
+recorded in the organization's audit log. `/health` reports `selfServeKeys`
+as configured on deployments that accept console keys.
+
+Instead of a long-lived key, a member or an OAuth client can get a
+10-minute [access token](/docs/standalone/connect-api-access-policy#access-tokens)
+for the same tenant, optionally for one team. `/health` reports
+`accessTokens` and `toolPolicy` on deployments that accept tokens and apply
+[tool policy](/docs/standalone/connect-api-access-policy#tool-policy).
+
+## Natively served toolkits
+
+Connect can serve a toolkit with your own OAuth app instead of through
+Composio, one toolkit at a time. Composio stays the default: nothing changes
+until you set a toolkit to `native` in `RYU_CONNECT_TOOLKIT_PROVIDERS`, and
+only tenants with a native grant for that toolkit move. Tools keep their
+`composio.<SLUG>` IDs and every route keeps its shape, so callers need no
+change. Setting the toolkit back to `composio` moves every tenant back at once.
+Connect serves GitHub, Linear, Notion and Slack natively; a tenant can also
+link through its own OAuth app instead of yours (see
+[native toolkits](/docs/standalone/connect-api-native-toolkits)).
+
+Users authorize the toolkit again when it moves, because tokens held by
+Composio cannot be transferred. Connect stores the new tokens encrypted with
+`RYU_CONNECT_TOKEN_KEY`; keep that key with your backups, because without it
+every user must reconnect. The link, callback, and action list are in
+[natively served toolkits](/docs/standalone/connect-api-composio#natively-served-toolkits).
+
+## Health and readiness
+
+`GET /health` is public. Each lane reports `configured`. The Composio,
+`nativeToolkits`, and trigger-delivery lanes also report `ready`, which stays
+`false` while a required provider key, OAuth client secret, or webhook signing
+secret is missing from the environment. Neither flag proves that a provider or
+upstream is reachable. The `version` field is the running service's release version.
+
+## Pricing
+
+Ryu-hosted Connect charges each Composio execution at the published Composio
+rates, the same as calls made through Ryu Core. The rates are listed under
+[Composio usage](/docs/billing/credits#composio-usage-and-zero-data-retention).
+There is no separate Connect platform fee. Calls are charged hourly to the
+organization's Ryu credits, spending the plan's
+[included pool](/docs/billing/credits#included-pool) first. A call that Core
+made through Connect and already charged is never charged a second time.
+
+Executions of a toolkit Connect serves natively, called directly with a
+Connect key, are charged **$0.40** per 1,000 calls, with no Composio add-ons,
+as their own Connect tool-call line on the organization's ledger. A native
+toolkit call that Ryu Core makes through Connect is still charged by the Ryu
+Gateway as a Composio tool call, at the Composio own-app rate plus the project's
+Composio add-ons, under **Tool calls**; Connect's response for that call reports
+the native price, but the Gateway's charge is the one on the ledger. Calls that
+fail because of a provider outage, a rate limit, or an expired authorization
+are not charged.
+
+Every execution response says what the call cost and what Ryu charges for it.
+Send `x-ryu-max-cost-micro-usd` to refuse a call estimated above your maximum,
+as on the Ryu Gateway. A Ryu-hosted Connect also holds each call's estimate
+against the organization's remaining credit before running it. See
+[call cost and the caller's maximum](/docs/standalone/connect-api-billing#call-cost-and-the-callers-maximum).
+
+When the organization's credits are exhausted, a Ryu-hosted Connect refuses
+tool execution with `402` and `code: "insufficient_credits"` until credits are
+added. Listing tools, reads, and the usage report keep working, so the
+organization can still see what it used. See
+[the Connect API](/docs/standalone/connect-api#tools-and-composio) for the
+refusal on each execution path.
+
+A self-hosted Connect is never billed by Ryu and never refuses calls for
+credits. Its Composio usage is billed to
+the configured Composio project, and Connect only lists it in its own
+[usage report](/docs/standalone/connect-api-usage): one line for each
+execution that returned a billing receipt.
+
+Connect enforces exact tool grants. It applies a quota only where a binding
+sets `limits` - a per-minute call limit, a cap on Composio premium charges per
+period, or both. See [call limits](/docs/standalone/connect-api-composio#call-limits).
+For other Ryu-managed usage, see [Metering Rates](/docs/billing/metering) and
+[Credits & AI pools](/docs/billing/credits).
+
+## Use Connect with Core and Passport
 
 ### Core Composio execution
 
@@ -70,8 +198,16 @@ errors never fall back to Core's provider credential. Native execution and catal
 endpoints do not forward through compatibility mode. Core's unified tool search
 uses Connect's tenant-filtered Composio catalog with the verified caller identity;
 local discovery requires the same explicit `local` mapping as local execution.
+When Connect refuses a call with `precondition_required` because the
+toolkit's account is not linked or has expired, Core pauses the run on the
+same connect prompt its embedded Composio path shows, naming the toolkit to
+connect in Integrations, instead of failing the call.
+
 Core's connection, callback, and workflow-trigger surfaces use the same Connect
-management and target-binding contracts; Connect remains the owner of provider
+management and target-binding contracts. An agent with its own identity gets its
+own account inside its owner's tenant when the binding enables
+[agent accounts](/docs/standalone/connect-api-composio#agent-accounts-inside-a-tenant);
+triggers on those accounts are not available through Connect; Connect remains the owner of provider
 accounts, signed ingress, and leased event delivery. Legacy Core provider
 webhook routes fail closed in remote mode instead of executing outside Connect.
 
@@ -84,8 +220,6 @@ services.
 
 <Cards>
   <DocCard href="/docs/standalone/connect-api" />
-  <DocCard href="/docs/standalone/passport" title="Ryu Passport" description="Keep agent identity connections encrypted and explicit." />
+  <DocCard href="/docs/standalone/connect-configuration" />
+  <DocCard href="/docs/standalone/passport" />
 </Cards>
-
-Continue with [Standalone services](/docs/standalone) and the
-[Connect API](/docs/standalone/connect-api).

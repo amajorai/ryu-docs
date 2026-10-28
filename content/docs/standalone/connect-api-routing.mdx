@@ -1,0 +1,288 @@
+---
+title: "Connect Routed Capability Calls"
+description: "Reference for Ryu Connect routed capability calls and comparison arenas - jobs and candidates, the routing policy, the answer, money rules, and refusals"
+tags: ["Standalone", "Connect", "routing", "capabilities", "pricing"]
+---
+
+A [vendor call](/docs/standalone/connect-api-relay#the-credential-ladder) names one
+vendor and one endpoint. A routed call names a **job** instead, such as
+`web.search`, and lets Connect choose which endpoint does it, under rules you
+send with every call.
+
+- Connect chooses only when you ask it to. Every routed call must say how to
+  choose (`policy.sort`); there is no default.
+- Connect chooses only among endpoints with a **verified** entry in
+  [Ryu's catalog](/docs/standalone/connect-api-catalog) and a verified
+  per-call price. An unpriced or unverified endpoint is listed with its reason
+  but never chosen. If nothing qualifies, the call is refused before anything
+  is sent.
+- Every answer says which provider and endpoint served it, the price, which
+  key paid, and why it was chosen.
+- Connect never moves to another endpoint after one it sent the call to unless
+  you allowed it, and every move is listed in the answer.
+
+## Jobs and candidates
+
+`GET /v1/capabilities` lists the jobs Connect can route, the input each one
+takes, and every candidate endpoint with its price, reliability and whether it
+can be chosen. `GET /v1/capabilities/<job>` shows one.
+
+| Job | Input | Candidates |
+|---|---|---|
+| `web.search` | `query` (1 to 2000 characters), `maxResults` (1 to 10, default 5) | Brave web search, Tavily basic and advanced search, Exa search |
+| `web.extract` | `urls` (1 to 10 `http` or `https` URLs) | Exa contents |
+
+<Callout type="warn">
+  Exa's search and contents endpoints are priced per result or per page, not
+  per call, so they are listed with the reason `unpriced` and cannot be chosen.
+  While Exa contents is its only candidate, a `web.extract` call is refused.
+</Callout>
+
+A candidate's `reason` says why it cannot be chosen.
+
+| Reason | Meaning |
+|---|---|
+| `unpriced` | Ryu has no verified per-call price for it |
+| `not_verified` | Ryu's catalog has not verified it, or it has drifted |
+| `not_in_catalog` | This deployment has no catalog entry for it |
+| `provider_not_allowed` | Your `policy.providers` leaves it out |
+
+A deployment may also list endpoints that **Treg** serves, each with the
+per-call price agreed for it. They are candidates like any other, with
+`provider` and `servedBy` set to `treg`. They run through Ryu Gateway, which
+refuses the call when its estimate is above the listed price. If Treg then
+reports a higher cost, that cost is charged and the difference is disclosed
+as `overranMicroUsd` (see [Money](#money)).
+
+## Make a routed call
+
+```sh
+curl -X POST https://connect.example/v1/capabilities/web.search/call \
+  -H "Authorization: Bearer $RYU_CONNECT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": { "query": "open source agent runtimes", "maxResults": 5 },
+    "policy": { "sort": "cheapest" }
+  }'
+```
+
+The `policy` object takes these fields.
+
+| Field | Values | Default |
+|---|---|---|
+| `sort` | `cheapest` (lowest verified per-call price first) or `reliable` (best success rate over the last seven days first, from at least five calls) | Required |
+| `providers` | A list of provider ids to allow: vendor ids such as `brave` or `tavily`, and `treg` for Treg-served endpoints | All |
+| `overflow` | `none`, or `next` to let a refused, rate-limited or failed call move to the next candidate, and to let a call on Ryu's key move to another of Ryu's accounts for the same vendor | `none` |
+| `onMiss` | `return`, or `next` to also move on when a vendor answers with no results (needs `overflow: "next"` and a ceiling) | `return` |
+| `maxAttempts` | 1 to 3 candidates sent to in one call (above 1 needs `overflow: "next"`) | 1, or 3 with `overflow: "next"` |
+| `maxCostMicroUsd` | The most the whole call may charge, across every attempt | None |
+
+`x-ryu-max-cost-micro-usd` also sets the ceiling; the lower of the two
+applies. Candidates whose price would exceed what is left of the ceiling are
+passed over.
+
+A call with no `policy.sort` returns `400 routing_policy_required` and nothing
+is sent.
+
+## The answer
+
+```json
+{
+  "object": "routed_call",
+  "ok": true,
+  "outcome": "served",
+  "capability": "web.search",
+  "ryuCallId": "call_…",
+  "status": 200,
+  "result": {
+    "results": [
+      { "title": "…", "url": "https://…", "snippet": "…" }
+    ]
+  },
+  "answer": { "…": "the vendor's own answer" },
+  "route": {
+    "policy": { "sort": "cheapest", "overflow": "none", "onMiss": "return", "maxAttempts": 1, "maxCostMicroUsd": null, "providers": null },
+    "chosen": {
+      "provider": "brave",
+      "vendor": "brave",
+      "endpoint": "brave.web_search",
+      "servedBy": "ryu",
+      "rung": "operator",
+      "priceMicroUsd": 5000,
+      "priceSource": "ryu_catalog",
+      "ryuCallId": "call_…",
+      "ledgerRefId": "composio:rvx_…",
+      "why": {
+        "policy": "cheapest",
+        "rank": 1,
+        "of": 3,
+        "priceMicroUsd": 5000,
+        "successRate": null,
+        "skipped": [],
+        "summary": "brave.web_search (served by Ryu on brave): 5000 micro-USD per call, the cheapest of 3 eligible candidates."
+      }
+    },
+    "attempts": [ { "endpoint": "brave.web_search", "outcome": "served", "status": 200, "chargedMicroUsd": 5000, "…": "…" } ],
+    "candidates": [ { "endpoint": "brave.web_search", "status": "chosen", "…": "…" } ],
+    "overflowed": false,
+    "chargedMicroUsd": 5000
+  }
+}
+```
+
+- `result` is the answer in Ryu's shape for the job (search results with
+  title, URL and snippet; extracted pages with URL, title and text). `answer`
+  is the vendor's own answer, with any credential masked.
+- `outcome` is `served`, `miss` (the vendor answered with nothing found),
+  `failed` (the vendor answered with an error, or did not answer) or
+  `refused` (the chosen endpoint was refused before it ran). A failed or
+  refused call answers with that status and `ok: false`.
+- `route.chosen.rung` says which key paid: `team` or `org` for your own key
+  (never charged by Ryu), `operator` for Ryu's key, `treg` for Treg through
+  Ryu Gateway.
+- `route.candidates` lists every candidate with its `status` - `chosen`,
+  `attempted`, `refused` (passed over before anything was sent, with a
+  `reason` such as `credential_required` or `max_cost_exceeded`),
+  `not_tried`, or `excluded`.
+- The same choice is in the headers: `x-ryu-routed: true`,
+  `x-ryu-route-endpoint`, `x-ryu-route-provider`, `x-ryu-route-served-by`,
+  `x-ryu-route-policy`, `x-ryu-route-attempts`, `x-ryu-overflowed` and
+  `x-ryu-charged-micro-usd` (the total, or `none` when Ryu does not bill you).
+- `route.overflowed` and `x-ryu-overflowed` are `true` when the call moved to
+  another candidate or to another of Ryu's accounts for the same vendor.
+  A move between Ryu's accounts is named in `route.accountOverflowed`, in
+  `accountOverflow` (`from` and `reason`) on the attempt and on
+  `route.chosen`, and in `x-ryu-overflow-from` and `x-ryu-overflow-reason`.
+
+## Preview a choice
+
+`POST /v1/capabilities/<job>/plan` takes the same body and returns every
+candidate in order with what would happen to it for you now (`would_run` with
+the key that would pay, or `refused` with the reason) and the one a call would
+choose. Nothing is sent, held or charged.
+
+## Money
+
+Routing never changes what an endpoint costs or adds a fee.
+
+- On Ryu's key, each endpoint is charged its verified per-call price, the same
+  as a direct [vendor call](/docs/standalone/connect-api-relay#the-credential-ladder):
+  held against your credit before it is sent, charged once if the vendor
+  answers 2xx, and not charged for a vendor error or rate limit.
+- On your own key, Ryu charges nothing.
+- A Treg-served endpoint is charged by Ryu Gateway to your organization. The
+  Gateway refuses it before it runs when its estimate is above the listed
+  price or the ceiling. The cost Treg reports afterwards is charged in full,
+  even when it is higher, because that is what Treg bills; the excess is
+  disclosed as `overranMicroUsd` on the attempt, on `route.chosen` and on
+  `route` (total), and in `x-ryu-route-overran-micro-usd`. It counts against
+  what is left of the ceiling for any later attempt, but it can take one
+  Treg-served attempt past `maxCostMicroUsd`.
+- Each attempt is charged under its own call id, so a retry never charges it
+  twice. With `onMiss: "next"`, every vendor that answered is charged, which
+  is why a ceiling is required.
+
+## Refusals
+
+| Status, code | Meaning |
+|---|---|
+| `400 routing_policy_required` | No `policy.sort`; nothing was chosen or sent |
+| `400 max_cost_required` | `onMiss: "next"` without a ceiling |
+| `400 invalid_input` | The input does not fit the job; the answer lists its fields |
+| `404 capability_not_routable` | Connect does not route this job; the answer lists the ones it does |
+| `403 no_verified_priced_candidate` | No candidate has a verified price your policy allows; nothing was sent |
+| `403 no_eligible_candidate` | Every candidate was refused for you; `candidates[].reason` says why |
+| `402 insufficient_credits` or `max_cost_exceeded` | Every candidate needs more credit than the call may spend; nothing was sent |
+
+A routed call answers buffered JSON only: `x-ryu-response: stream` or `spool`
+returns `400`, and routed calls do not run as [async tasks](/docs/standalone/connect-api-tasks).
+`Idempotency-Key` works as on other calls: the same key and body replays the
+first answer without calling again.
+
+## Access
+
+Listing and planning need a key or a token with `tools:read`; a routed call
+needs `tools:exec`. Your organization's
+[tool policy](/docs/standalone/connect-api-access-policy) applies: an endpoint
+its URL rules deny is passed over with the reason `url_denied_by_policy`.
+
+## Comparison arenas
+
+An arena runs one input on several endpoints you name, side by side, so you
+can compare their answers, latency and price before you pick one. Nothing is
+chosen for you, and every endpoint that runs is charged.
+
+```sh
+curl -X POST https://connect.example/v1/capabilities/web.search/arena \
+  -H "Authorization: Bearer $RYU_CONNECT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": { "query": "open source agent runtimes", "maxResults": 3 },
+    "endpoints": ["brave.web_search", "tavily.search.basic"],
+    "maxCostMicroUsd": 20000
+  }'
+```
+
+- `endpoints` lists 2 to 6 endpoint ids. Each must be a candidate the job's
+  listing shows with `routable: true` (verified, with a verified per-call
+  price, or an operator-priced Treg endpoint); otherwise the arena is refused
+  with `403 arena_endpoint_not_eligible` and nothing is sent.
+- A ceiling is required: `maxCostMicroUsd` or `x-ryu-max-cost-micro-usd` (the
+  lower applies). When the listed prices add up to more than it, the arena is
+  refused with `402 max_cost_exceeded` before anything is held or sent.
+- Every endpoint's price is held against your credit before any is sent. An
+  endpoint that does not fit, or is refused for you (no key, a policy rule),
+  is listed with `outcome: "refused"` and its `code`; the others still run.
+- The endpoints run at the same time. Each is charged on its own call id,
+  exactly as a direct [vendor call](/docs/standalone/connect-api-relay#the-credential-ladder):
+  on Ryu's key at its verified price when the vendor answers 2xx, never on
+  your own key. A Treg-served endpoint is charged the cost Treg reports; a
+  cost above its listed price is disclosed as `overranMicroUsd` on its result.
+
+```json
+{
+  "object": "arena_run",
+  "ok": true,
+  "arenaId": "arn_…",
+  "capability": "web.search",
+  "estimateMicroUsd": 13000,
+  "maxCostMicroUsd": 20000,
+  "chargedMicroUsd": 13000,
+  "results": [
+    {
+      "endpoint": "brave.web_search",
+      "provider": "brave",
+      "outcome": "served",
+      "status": 200,
+      "hits": 3,
+      "latencyMs": 412,
+      "fastest": true,
+      "priceMicroUsd": 5000,
+      "chargedMicroUsd": 5000,
+      "ryuCallId": "call_…",
+      "reviewable": true,
+      "result": { "results": [ { "title": "…", "url": "https://…", "snippet": "…" } ] }
+    }
+  ]
+}
+```
+
+Each attempt's outcome (served, missed, failed, and which endpoint was the
+fastest to serve) is recorded as arena evidence, and each call is also counted
+in the endpoint's [reliability](/docs/standalone/connect-api-catalog) like any
+other call. `GET /v1/capabilities/<job>/arena` is the leaderboard: every
+candidate with its arena record over the last 30 days, best served rate first;
+the job's listing carries the same `arena` record per candidate. You can
+[review](/docs/standalone/connect-api-reviews) each result by its `ryuCallId`.
+
+`POST /v1/capabilities/<job>/arena/plan` takes the same body and shows what
+each endpoint would do for you now and the total estimate. Nothing is sent,
+held or charged. `Idempotency-Key` replays the first arena's answer.
+
+| Status, code | Meaning |
+|---|---|
+| `400 invalid_arena` | `endpoints` is not 2 to 6 distinct ids, or the body has other fields |
+| `400 max_cost_required` | No ceiling was given |
+| `403 arena_endpoint_not_eligible` | A listed endpoint cannot run; `ineligible[].reason` says why |
+| `402 max_cost_exceeded` | The listed prices add up to more than the ceiling |
+| `403 no_eligible_candidate`, `402 insufficient_credits` | Every listed endpoint was refused for you; nothing was sent |

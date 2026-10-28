@@ -1,31 +1,30 @@
 ---
 title: "Plugin Runtime (Turn Hooks)"
-description: "Server-side installable plugins that run plugin-authored JS in a Deno sandbox and react to the chat turn lifecycle through capability-gated host functions"
+description: "Reference for turn hooks - plugin JavaScript that Core runs in a sandbox at chat-turn boundaries, with the ctx fields, host calls, directives, phases, and lifecycle routes"
 ---
 
 The plugin runtime runs plugin code at chat-turn boundaries. It lets developers ship features such
 as double-check, goal, and advisor as installable plugins instead of hardcoded Core endpoints.
 
 A plugin declares a **turn hook** in its `manifest.json`. The hook is plugin-authored JavaScript.
-It runs in a deny-by-default Deno sandbox, like [programmatic tool calling](/docs/core/programmatic-tool-calling),
+It runs in a deny-by-default JS sandbox, like [programmatic tool calling](/docs/core/programmatic-tool-calling),
 and reaches Core only through capability-gated host functions.
 
 It lives in `apps/core/src/plugin_host/` (`mod.rs`, `bridge.rs`) and is wired into the chat path once,
 at the top-level handler, so the CLI, bots, and desktop all receive hooks. The declarative
 manifest that carries a hook is described in
-[Bundle Runnables with manifest.json](/docs/extend/develop/extensions/plugin-json-manifest); this page covers
-the runtime that executes it.
+[Bundle Runnables with manifest.json](/docs/extend/develop/extensions/plugin-json-manifest).
 
 <Callout type="warn">
   The Core sandbox layer is live-verified: the `plugin_host::tests::live_*` tests run the shipped
-  double-check, goal, and advisor fixture hooks in a real Deno 2.x sandbox, round-trip
+  double-check, goal, and advisor fixture hooks in the real JS sandbox, round-trip
   `host.sideModel` / `host.storage` through the capability bridge, and assert the correct directives.
   The **desktop** side is compile-checked only. The `data-plugin_note` banner render, the `continue`
   multi-turn streamed render, and the end-to-end double-check / goal flow through a running desktop
   are not yet live-verified. Beyond `post_assistant_turn`, a `pre_user_turn` boundary and a set of
   Claude-Code-style phases (`session_start`, `pre_tool_use`, `post_tool_use`, `subagent_stop`,
   `session_end`, `notification`) also exist, but their maturity varies - see
-  [Beyond the turn boundary](#beyond-the-turn-boundary-the-claude-parity-phases). There is no
+  [Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases). There is no
   per-token hook.
 </Callout>
 
@@ -52,9 +51,10 @@ Each hook body runs in a fresh sandbox with exactly two globals in scope, the wa
 only its message in scope. There is no module system, no captured closure, and no filesystem or
 network outside the host bridge.
 
-### `ctx`: the turn context
+### `ctx` - the turn context
 
-`ctx` is the serialized `HookContext`. A hook reads it to decide whether and how to act:
+`ctx` is the serialized `HookContext`. A hook reads it to decide whether and how to act. The core
+fields are below; some phases add more (for example `ctx.event` and `ctx.project_rules`).
 
 | Field | Type | What it carries |
 |---|---|---|
@@ -63,30 +63,40 @@ network outside the host bridge.
 | `transcript` | `{ role, content }[]` | Recent messages, oldest to newest, so the hook can inspect the last answer. |
 | `flags` | `{ [pluginId]: boolean }` | Per-request plugin flags set by the client, for example a composer toggle. A hook reads its own flag to decide whether to act this turn. |
 
-### `host`: the capability bridge
+### `host` - the capability bridge
 
 `host` is the only way out of the sandbox. Every call is routed through `PluginHookBridge`
-(`plugin_host/bridge.rs`) and gated by a manifest `permission_grants` entry. The capability surface is
-deliberately small:
+(`plugin_host/bridge.rs`) and gated by a manifest `permission_grants` entry. The most common calls are below. The bridge also
+exposes calls for agents, Spaces, preferences, and navigation, each behind its own grant; see the
+[plugin-api reference](/docs/extend/develop/sdk/plugin-api).
 
 | Call | Grant required | Returns |
 |---|---|---|
-| `await host.sideModel({ prompt, system?, model?, model_pref_key?, effort? })` | `hook:side-model` | One non-streaming Gateway completion as text. The model is resolved through the configured model/provider policy; a hook should not assume a particular backend. |
+| `await host.sideModel({ prompt, system?, model?, model_pref_key?, effort?, images? })` | `hook:side-model` | One non-streaming Gateway completion as text. The model is resolved through the configured model/provider policy; a hook should not assume a particular backend. Optional `images` takes up to 8 inline PNG, JPEG or WebP data URIs (1.5 MiB in total, and the whole encoded request at most 2 MiB) for a vision-capable model. |
 | `await host.storage.get(key, namespace?)` | `storage:kv` | The stored string, or `null`. |
 | `await host.storage.set(key, value, namespace?)` | `storage:kv` | `true`. Non-string values are JSON-stringified. |
 | `await host.storage.delete(key, namespace?)` | `storage:kv` | `true`. |
 | `await host.storage.keys(namespace?)` | `storage:kv` | The namespace's keys. |
 | `await host.notify({ title, body })` | `notifications:send` | One bounded, informational app notification for the active user. The host sanitizes the text and routes it through the normal notification store. |
+| `await host.usage({ agent_id })` | `usage:read` | One agent's subscription usage windows, the same reading the composer shows. See [subscription usage in hooks](#subscription-usage-in-hooks). |
+| `await host.usage({ provider_id, account_id? })` | `usage:read` | Every saved account of one subscription provider with its cached usage, without account names. Node owner and admins only. |
+| `await host.subscriptions.list({ providerId?, usage? })` | `subscriptions:read` | Each subscription provider with its saved accounts, their names, and their usage. Node owner and admins only. |
+| `await host.subscriptions.usage({ providerId, accountId? })` | `subscriptions:read` | The usage reading for one saved account (the active account when `accountId` is omitted). Node owner and admins only. |
 | `host.log(...args)` | none | Captured logs. |
+| `await host.gatewayAudit({ limit? })` | `usage:audit` | Administrative Gateway audit records; requires node administrator authority and separately approved access. |
+
+`usage:read` permits ordinary usage summaries, not administrative audit records. Those records
+can span callers and contain command or error details. An administrator must permit `usage:audit`
+and approve it for the app. Adding the declaration to a manifest does not upgrade existing approvals.
 
 Storage is namespaced per plugin (`namespace` defaults to `"default"`), so one plugin can never read
 another plugin's keys. Values are limited to 1 MiB, each plugin has a 16 MiB/10,000-key durable
 quota, and key listings are bounded to 10,000 entries. Oversized or control-character identifiers
 are rejected before SQLite is touched.
 
-`host.notify` is intentionally small: it cannot select another user, address an arbitrary device,
-or bypass the notification store. Keep it for actionable, user-visible events such as “the last
-agent finished” and let the normal notification settings decide where that event is delivered. The
+`host.notify` cannot select another user, address an arbitrary device,
+or bypass the notification store. Keep it for actionable, user-visible events such as "the last
+agent finished" and let the normal notification settings decide where that event is delivered. The
 call is bounded and grant-gated; an unavailable store, missing active user, denied grant, or invalid
 payload is a failure, not a silent success.
 
@@ -96,6 +106,57 @@ just because a capability is discoverable. The host advertises what is available
 applies the declared grant and caller policy at invocation time. Unsupported surfaces should hide or
 disable a contribution while keeping it installable and inspectable; a missing permission must fail
 closed.
+
+### Subscription usage in hooks
+
+`host.usage` takes exactly one of two forms. Passing both `agent_id` and `provider_id`, or
+`account_id` without `provider_id`, is rejected.
+
+- **`{ agent_id }`** returns one usage snapshot (`available`, `windows`, and so on) for the agent.
+  When `agent_id` is a Ryu subscription provider id such as `claude-pro-max`, the reading comes
+  from that provider's active saved account in Ryu, not from a CLI login on the machine. Ordinary
+  agent ids are unchanged. A snapshot read from a saved account also carries `provider_id` and
+  `account_id`.
+- **`{ provider_id, account_id? }`** returns every saved account of one provider:
+
+  ```jsonc
+  {
+    "provider_id": "claude-pro-max",
+    "usage_supported": true,
+    "pool_strategy": "quota_first", // or "manual", "round_robin", "fill_first", "reset_first", null
+    "accounts": [
+      {
+        "account_id": "acct_…",
+        "active": true,
+        "eligible": true, // in the pool and not waiting for a fresh login
+        "needs_reauth": false,
+        "state": "ok", // "pending", "unavailable", "needs_reauth", "pool_disabled", "unsupported"
+        "usage": { "available": true, "windows": [] }, // or null
+        "observed_at": "2026-10-14T09:30:00Z"
+      }
+    ]
+  }
+  ```
+
+  This form never includes account names, because they are often email addresses. It is cache-only,
+  so a hook never waits on the provider: an account with no recent reading has state `pending`, and
+  Ryu reads it in the background for a later turn. An unknown `account_id` returns
+  `{ accounts: [], error: "account_not_found" }`; Ryu never substitutes another account. Only the node
+  owner and admins can use this form, so handle a rejected call and fall back to `{ agent_id }` or
+  `{ kind: "none" }`.
+
+`host.subscriptions.list` and `host.subscriptions.usage` are the labelled inventory that
+[Desktop companion apps](/docs/extend/develop/extensions/desktop-companion-runtime#subscription-accounts-and-usage)
+use through `window.ryu.subscriptions`, with the same arguments, results, and `subscriptions:read`
+consent (**See your subscription accounts**). They answer only when the turn's caller is the node
+owner or an admin. `list` is cached by default; `usage: "refresh"` and `subscriptions.usage` may read
+the provider, so avoid them on every turn. Ryu limits how often one plugin can trigger a live read of
+the same account.
+
+Per-account usage covers Claude Pro/Max, ChatGPT, OpenAI Codex, and GitHub Copilot. ChatGPT plan,
+Kiro, Kimi, Radius, Ant Ling, and CLI logins report no per-account usage: their accounts have state
+`unsupported`. Older Ryu hosts do not have `host.subscriptions`, and an unknown host method rejects
+the call, so check for it before use.
 
 <Callout type="warn">
   Gating returns an error, it does not silently pass. An ungranted capability call (or an unknown
@@ -108,17 +169,17 @@ closed.
 ## The directive contract
 
 A hook returns a directive that the chat path applies. The shape is the `HookDirective` enum in
-`plugin_host/mod.rs`:
+`plugin_host/mod.rs`.
 
 | Directive | Effect |
 |---|---|
-| `{ kind: "none" }` | Do nothing. This is also the fail-safe for any error, unparseable result, or missing Deno binary. |
+| `{ kind: "none" }` | Do nothing. This is also the fail-safe for any error, unparseable result, or a build without the sandbox. |
 | `{ kind: "note", text }` | Surface `text` to the user out-of-band as a `data-plugin_note` AI-SDK part. It never enters chat history. This is double-check's review. |
 | `{ kind: "continue", text }` | Inject `text` as a follow-up user turn and run another assistant turn, streamed into the **same** response. This is goal's loop, capped server-side at `MAX_CONTINUE_TURNS` (25). |
 
 A missing, `null`, or unparseable return value, an explicit `{ kind: "none" }`, a thrown hook, an
-unsupported sandbox pause, or a missing Deno binary all resolve to `{ kind: "none" }`. The runtime is
-fail-open by construction: a plugin can never wedge a turn.
+unsupported sandbox pause, or a build without the sandbox all resolve to `{ kind: "none" }`. The runtime is
+fail-open: a plugin cannot block a turn.
 
 ### Cross-platform authoring
 
@@ -127,70 +188,12 @@ working-directory-dependent path: Core invokes the `code_file` body in its sandb
 and `host` available. Do not add `bash`/PowerShell/`cmd` wrappers, Node/Bun/Deno imports, `process`
 or filesystem access, or hard-coded home and temporary paths. Use the grant-gated host API for
 effects; if a plugin needs a file, process, or OS integration, put that work in an app sidecar and
-expose a typed capability. See [Cross-platform hook bodies](/docs/extend/develop/extensions/hooks-lifecycle#cross-platform-hook-bodies)
+expose a typed capability. See [Keep hook bodies cross-platform](/docs/extend/develop/extensions/hooks-authoring#keep-hook-bodies-cross-platform)
 for the source and `code_file` rules.
 
-## Beyond the turn boundary: the Claude-parity phases
-
-`post_assistant_turn` is one of several **phases** a hook can declare (via the `on` field of a
-`contributes.turn_hooks` entry). The additional phase constants live in `plugin_host/mod.rs`, each
-mapping to a Claude Code hook event. A plugin authored against Claude's naming can use `stop`, which
-`phase_matches` normalises to `post_assistant_turn`.
-
-| Phase constant | `on` value | Fires | Directives applied |
-|---|---|---|---|
-| `ON_PRE_USER_TURN` | `pre_user_turn` | Before the user message reaches the model | `Replace`, `Inject` |
-| `ON_SESSION_START` | `session_start` | On the first turn of a conversation | `Inject`, `Note` |
-| `ON_CONTEXT` | `context` | After Core assembles the complete outbound context, immediately before model dispatch | `Rewrite` for message arrays, `Replace` for ACP prompts |
-| `ON_PRE_TOOL_USE` | `pre_tool_use` | Before a tool call executes | `Deny` (blocks the call) |
-| `ON_POST_TOOL_USE` | `post_tool_use` | After a tool call returns | none (observation only, v1) |
-| `ON_SUBAGENT_STOP` | `subagent_stop` | When a delegated sub-agent finishes | none (observation only) |
-| `ON_SESSION_END` | `session_end` | When a conversation is deleted | none (observation only) |
-| `ON_NOTIFICATION` | `notification` | When a notification is fanned out | none (observation only) |
-
-The `pre_*` phases add directives to the small set from
-[the directive contract](#the-directive-contract):
-
-| Directive | Effect |
-|---|---|
-| `{ kind: "replace", text }` | Swap the pending outgoing user message for `text` before it reaches the model. The rewritten text is what gets sent and persisted (a `pre_user_turn` directive - the auto-expand plugin uses this). |
-| `{ kind: "inject", text }` | Append `text` as additional context to the outgoing message (additive, not a replacement). Emitted by `session_start` (setup context) and `pre_user_turn` (per-message context), mirroring Claude Code's `SessionStart` / `UserPromptSubmit`. |
-| `{ kind: "deny", reason }` | Block a pending tool call (a `pre_tool_use` directive). `reason` is returned to the model as the tool's error result, so it can adapt instead of treating the call as done - a plugin-authored tool firewall. |
-| `{ kind: "rewrite", messages }` | Replace the complete OpenAI-compatible message array during `context`. Preserve multimodal and tool parts you do not intend to change. |
-| `{ kind: "replace", text, fresh_session? }` | Replace the flattened ACP prompt during `context`. Set `fresh_session: true` when hidden context changed so a pooled ACP session cannot retain the old copy. |
-
-During `context`, `ctx.project_instructions` contains the exact legacy root instruction block and `ctx.project_rules` contains normalized Cursor, Claude, and `AGENTS.md` rule records for the active workspace. Core discovers the files; the plugin decides which records apply and whether to inject them.
-
-### The process-global dispatcher
-
-The on-chat-path phases (`session_start`, `stop`) fire inside `run_chat_with_hooks` where the
-`ServerState` is already in scope. The off-path phases fire at sites that have no `ServerState` - the
-shared tool-dispatch core (`pre_tool_use` / `post_tool_use`), the delegation engine
-(`subagent_stop`), and the notification fan-out. Those reach the runtime through a **process-global
-dispatcher** - `dispatch_global(phase, ctx)` over the `HookDispatch` trait, installed once at boot
-via `set_global` (`plugin_host/mod.rs`). It returns an empty vec when no dispatcher is installed, so
-callers stay fail-open. Every off-path dispatch first runs a DB-free gate (`any_manifest_declares`):
-if no loaded manifest declares the phase, it returns instantly, so a tool call pays nothing on the
-hot path unless a tool-hook plugin is actually loaded.
-
-### The `tools` glob gate
-
-A `pre_tool_use` / `post_tool_use` hook usually cares about only some tools. The manifest `match`
-block's `tools` list is a spawn-avoidance gate evaluated in Rust before any sandbox spawn: the hook
-runs only when the tool being called matches one of its patterns. The matcher (`glob_match`) is
-deliberately tiny - `*` matches everything, `bash*` a prefix, `*write` a suffix, `*edit*` a
-substring, anything else an exact match. A hook whose gate does not match the current tool never
-spawns Deno.
-
-<Callout type="warn">
-Maturity varies by phase. `session_start`, `pre_user_turn`, and `post_assistant_turn` fire on the
-chat path; `pre_tool_use` fires at the tool-dispatch core and its `Deny` **is** applied (the call is
-blocked). `post_tool_use`, `subagent_stop`, `session_end`, and `notification` are **observation only**
-in v1 - they fire (detached, fail-open) but their directives are not applied to the result. The same
-live-verification caveat from the top of this page applies: the sandbox and the `post_assistant_turn`
-path are live-tested, the extended phases are wired but not all exercised end-to-end. Treat the
-observation-only phases as telemetry, not control points, until that changes.
-</Callout>
+Hooks can also run at session, tool, sub-agent, and notification phases. See
+[Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases) for the phase table, the extra directives, the
+process-global dispatcher, and the `tools` glob gate.
 
 ## Where it runs (Core vs Gateway)
 
@@ -204,7 +207,7 @@ assistant turn streams and persists, `dispatch_turn_hooks` collects every enable
 hook, runs each one, and applies the directives in plugin order: a `note` is emitted as a
 `data-plugin_note` frame, a `continue` rebuilds the request from the persisted transcript and loops.
 When no plugin contributes a hook (the common case) or the sandbox backend is absent, the inner stream
-is returned unwrapped, so there is zero overhead on the hot path.
+is returned unwrapped, so the hot path has no extra work.
 
 ```mermaid
 flowchart TD
@@ -212,7 +215,7 @@ flowchart TD
   B --> C{Any enabled turn hooks?}
   C -->|No| Z[Return stream unwrapped, zero overhead]
   C -->|Yes| D[Build HookContext from persisted transcript]
-  D --> E[Run each hook in the Deno sandbox]
+  D --> E[Run each hook in the JS sandbox]
   E --> F{Directive}
   F -->|note| G[Emit data-plugin_note frame, not in history]
   F -->|continue| H[Inject follow-up user turn, loop &lt; 25]
@@ -222,52 +225,23 @@ flowchart TD
 
 ## Plugin lifecycle
 
-The runtime reads from the live, hot-updated manifest set, so enable and disable take effect on the
-next turn with no restart. The lifecycle routes are defined in `apps/core/src/server/mod.rs` and
-backed by `apps/core/src/plugins/lifecycle.rs`:
-
-| Method + path | Purpose |
-|---|---|
-| `GET /api/plugins` | List installed plugins and their enabled state. |
-| `GET /api/plugins/contributions` | Serve the declarative UI contributions (composer controls, settings tabs, slash commands) verbatim for the renderer. |
-| `POST /api/plugins/install` | Install by URL: fetch the manifest, validate, write under `~/.ryu/plugins/`, hot-reload. |
-| `POST /api/plugins/:id/install` | Install a known catalog plugin by id. |
-| `POST /api/plugins/:id/enable` | Validate grants via the Gateway, then activate the plugin's contributions. |
-| `POST /api/plugins/:id/disable` | Deactivate the plugin; its hooks stop firing on the next turn. |
-| `POST /api/plugins/:id/update` | Update an installed plugin to a newer manifest. |
-
-A `post_assistant_turn` hook fires only while its plugin is **enabled**. `collect_enabled_hooks`
-(`plugin_host/mod.rs`) filters the manifest set by enabled state on every assistant turn, so a toggle
-in the store is immediate. Running hooks requires the Core sandbox runtime; when it is unavailable,
-the runtime no-ops and logs, the same graceful-degrade posture as the rest of the sandbox.
-
-Runtime deactivation is generation-aware. Core publishes a plugin generation only after its
-registrations finish, holds a work lease while a hook is running, and drains those leases before
-removing the plugin's tools, contributions, policies, and sidecars. A callback from an older
-generation cannot republish stale runtime state. New work after re-enable uses a new generation;
-mandatory and load-bearing Core plugins remain protected by the lifecycle guards.
-
-Declarative contributions (`composer_controls`, `settings_tabs`, `slash_commands`, `agent_edit_panels`) are the
-complementary half: Core stores them verbatim and serves them at `GET /api/plugins/contributions`, and
-the renderer interprets them. An `agent_edit_panels` entry mounts a supported native panel in the
-agent editor and is tagged with its owning plugin id; disabling that plugin removes both its panel and
-its hooks. Logic is real sandboxed code; UI is declarative. This mirrors the VS Code split.
+Enable and disable apply on the next turn with no restart. The lifecycle routes, grant rechecks,
+and generation-aware deactivation are in [Plugin lifecycle routes](/docs/extend/develop/extensions/plugin-lifecycle).
 
 ## Building one
 
-1. Write a `manifest.json` with `id` (reverse-domain), `version` (semver), the `permission_grants` your
+1. Write a `manifest.json` with `id` (for example `@example/my-hook`), `version` (semver), the `permission_grants` your
    hook needs (for example `hook:side-model`), and a `contributes.turn_hooks` entry whose `code` is
    your self-contained JS hook body.
-2. Drop it at `~/.ryu/plugins/<id>/manifest.json`, or host it and install by URL.
-3. Enable it (`POST /api/plugins/:id/enable`, or via the desktop store).
+2. Drop it at `plugins/<dir>/manifest.json` in the node's [data folder](/docs/surfaces/desktop/user-guide/data-and-storage#whats-in-the-data-folder) (`<dir>` is the id with `/` replaced by `+`), or host it and install by URL.
+3. Enable it (`POST /api/plugins/:id/enable`, or from the Store in Desktop).
 4. Your hook runs after each assistant turn while the Core sandbox runtime is available; if it is
    unavailable, the hook degrades to a no-op and the turn continues.
 
-The bundled plugins in `plugins-store/{plugins,lsp,external_plugins}/` are the worked reference: `plugins-store/plugins/double-check/`
-returns a `note`, `plugins-store/plugins/goal/` returns a `continue`, and `plugins-store/plugins/advisor/`
+The bundled plugins, published in the public `amajorai/ryu-marketplace` repository, are the worked
+reference: `double-check` returns a `note`, `goal` returns a `continue`, and `advisor`
 consults a stronger model and returns either, depending on the composer toggle or a `/advisor`
-slash command. Each was built as a manifest plus inline JS, with no Core or desktop edits to add
-the plugin itself.
+slash command. Each is a manifest plus a JS hook body, with no Core or Desktop code specific to the plugin.
 
 Rather than hand-writing the manifest JSON, the TypeScript SDK gives you typed factories:
 
@@ -310,14 +284,16 @@ Gateway-side message compression (headroom) is a related plugin mechanism but a 
 enters the Core sandbox. Reach for a turn hook when you need to react to a finished turn from Core;
 reach for a compression policy when you need to transform requests on the way out through the Gateway.
 
-This page describes the **sandboxed** half of what a plugin can contribute. A plugin that also ships a
-sidecar or an MCP server runs that part with Ryu's own privileges, under a different set of rules -
-see [Plugin isolation](/docs/security/plugin-isolation) for what your users are trusting when they
+Turn hooks are the **sandboxed** half of what a plugin can contribute. A plugin that also ships a
+sidecar or an MCP server runs that part with Ryu's own privileges, under a different set of rules.
+See [Plugin isolation](/docs/security/plugin-isolation) for what your users are trusting when they
 install it.
 
 ## Related
 
 <Cards>
+  <DocCard href="/docs/extend/develop/extensions/plugin-runtime-phases" />
+  <DocCard href="/docs/extend/develop/extensions/plugin-lifecycle" />
   <DocCard href="/docs/security/plugin-isolation" />
   <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
   <DocCard href="/docs/extend/develop/sdk/plugin-api" />

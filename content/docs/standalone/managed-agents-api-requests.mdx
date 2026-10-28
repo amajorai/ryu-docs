@@ -1,0 +1,118 @@
+---
+title: "Managed Agents API Requests"
+description: "Authenticate to the hosted Managed Agents API, read its request and error envelope, retry with Idempotency-Key, and page through lists"
+tags: ["managed-agents", "api", "standalone"]
+---
+
+This reference covers the conventions every Managed Agents request follows.
+Every path on this page is relative to `/api/v1/managed-agents`. For the route table, rate limits, and error codes, see the
+[Ryu Managed Agents API](/docs/standalone/managed-agents-api).
+
+## Authentication
+
+Send an API key in one of two headers:
+
+```text
+x-api-key: <api-key>
+Authorization: Bearer <api-key>
+```
+
+A signed-in Ryu console session also works. OAuth and MCP access tokens are not
+accepted and get `401 unauthenticated`. A `401` carries a `WWW-Authenticate:
+Bearer resource_metadata="..."` challenge that points at the Ryu API's protected
+resource metadata. That document names no authorization server, because this
+API takes API keys rather than OAuth tokens. Do not start an OAuth flow from it.
+
+| Credential | `X-Ryu-Organization` header | Notes |
+|---|---|---|
+| Organization API key | Optional | The key belongs to one organization. A different header value gets `403 organization_mismatch`. |
+| Personal API key | Required | The key acts for its owner in the named organization. The owner must be a member, and the organization's access policy applies, including required two-factor authentication. |
+| Console session | Optional when the session has an active organization | The organization's access policy applies. |
+
+The header value must be a valid organization id. A malformed value gets
+`400 invalid_request` before any lookup. Managed Agents must also be turned on
+for the organization, and for the member when a person makes the request.
+Otherwise the request gets `403 feature_disabled`. See
+[Tokens, OAuth apps, and revocation](/docs/security/authentication-tokens) for
+personal keys and [Organization admin controls](/docs/security/organization-admin-controls)
+for the IP allowlist and two-factor policy.
+
+## Requests, responses, and errors
+
+A request with a non-empty body must send `Content-Type: application/json`.
+Request bodies are closed: an unknown field gets `400 invalid_request`. A body
+over the route's limit gets `413 payload_too_large`.
+
+Every response carries `X-Request-ID: req_<32 hex>`. The server creates the id
+and ignores an inbound value. Responses also list at least
+`X-Request-ID, Idempotent-Replayed, Retry-After, RateLimit, RateLimit-Policy`
+in `Access-Control-Expose-Headers`, so browser clients can read those headers.
+
+Every non-2xx response, including `401`, `403`, and `413`, uses one envelope:
+
+```json
+{
+  "error": {
+    "code": "version_conflict",
+    "message": "agent version 3 is not the latest (4)",
+    "requestId": "req_4f2c…",
+    "details": { "latestVersion": 4 }
+  }
+}
+```
+
+The `code` value is stable. The `message` value is safe English text that can
+change. Branch on `code`, and treat an unknown code by its HTTP status. The
+`details` object is optional. An unknown id, another organization's id, and a
+malformed id all get `404 not_found` with no further detail.
+
+## Idempotency
+
+Routes marked **Key** in the
+[endpoint table](/docs/standalone/managed-agents-api#endpoint-surface) accept an `Idempotency-Key` header.
+The value must match `^[A-Za-z0-9_-]{16,128}$`, sent bare or as a quoted
+Structured Field string (`"create-agent-0001"`). Both forms name the same key.
+Any other value gets `400 invalid_idempotency_key`.
+
+| Case | Result |
+|---|---|
+| Same key, same body | Replays the original status with the resource's current representation and sets `Idempotent-Replayed: true`. |
+| Same key, different body | `409 idempotency_key_reused`. |
+| Same key while the first request is still running | `409 idempotency_in_progress` with `Retry-After: 1`. |
+| The first request failed with `5xx`, `429`, `402`, `403`, or a network error | The key is released at once, so a retry with the same key runs again. |
+| The first request failed with `400`, `404`, `409`, `413`, or `422` | The failure is stored and replayed with `Idempotent-Replayed: true`. |
+
+A request that Ryu rejects before it runs the operation is not recorded under
+its key. This covers authentication, permission, and rate-limit failures, an
+oversized body, and a body that fails the schema. A retry runs the checks again
+and gets a response without `Idempotent-Replayed`.
+
+A key is scoped to the organization, the caller, the route, and the resource,
+and it is kept for 24 hours. Routes marked **Safe** have the same result when
+you repeat them, so they need no key. Without a key, a retried
+`POST /sessions/{sessionId}/events` can append a duplicate message. See
+[Managed Agents events and streams](/docs/standalone/managed-agents-events) for
+how to deduplicate.
+
+## Pagination
+
+The agent, version, environment, credential, and session lists return
+`{ "data": [...], "nextCursor": string | null }`. Send `?limit=` (default 20,
+maximum 100) and the previous `nextCursor` as `?cursor=`. Lists are newest
+first. Versions are ordered by version number, highest first. A malformed
+cursor gets `400 invalid_cursor`. An item created during a traversal appears
+only when you start a new traversal.
+
+| List | Extra query parameters |
+|---|---|
+| `GET /agents`, `GET /environments` | `includeArchived=true` adds archived resources. |
+| `GET /credentials` | `includeRevoked=true` adds revoked credentials. |
+| `GET /sessions` | `status`, `agentId`, and `environmentId` filter the list. |
+
+Events use their `seq` number as the cursor. See
+[Managed Agents events and streams](/docs/standalone/managed-agents-events).
+
+<Cards>
+  <DocCard href="/docs/standalone/managed-agents-api" />
+  <DocCard href="/docs/standalone/managed-agents-events" />
+</Cards>

@@ -1,6 +1,6 @@
 ---
-title: "Permissions and roles"
-description: "The organization, team, node, resource-ACL, and notification permission model used across Ryu."
+title: "Permissions and Roles"
+description: "Reference for Ryu's permission model: the 44 permission keys, built-in and custom roles, how Core gates requests on organization-bound nodes, and how custom roles are resolved and cached."
 ---
 
 Ryu is local-first and single-tenant by default, but a node can be bound to an organization (a shared "company brain"). On such a node, Core enforces org/team role-based access control on its REST surface, keyed to a per-user identity verified from a signed JWT. The permission vocabulary and the built-in role sets are a contract shared byte-for-byte with the TypeScript control plane (`apps/core/src/identity_verify/permissions.rs`), so an effective-permission check agrees on both sides.
@@ -8,7 +8,7 @@ Ryu is local-first and single-tenant by default, but a node can be bound to an o
 <Callout type="warn">
 This is Core-side enforcement of a caller's role. Ryu's classic and fine-grained personal access
 tokens, organization API keys, and official MCP OAuth grants are separate control-plane credentials.
-They do not become a node bearer automatically. The one deliberate exception is the short-lived
+They do not become a node bearer automatically. The one exception is the short-lived
 `userJwt` returned for an organization-bound managed node; Core verifies it against the control-plane
 JWKS and still applies the node's organization, team, personal-owner, and route checks. See
 [Authentication and pairing](/docs/security/authentication-and-pairing) for the credential boundaries.
@@ -16,7 +16,7 @@ JWKS and still applies the node's organization, team, personal-owner, and route 
 
 ## The permission vocabulary
 
-37 `resource.action` keys, defined in `PERMISSIONS` (`apps/core/src/identity_verify/permissions.rs`). The Rust constants and the TypeScript control-plane array must match exactly.
+44 `resource.action` keys, defined in `PERMISSIONS` (`apps/core/src/identity_verify/permissions.rs`). The Rust constants and the TypeScript control-plane array must match exactly.
 
 | Key | Grants |
 |---|---|
@@ -33,22 +33,27 @@ JWKS and still applies the node's organization, team, personal-owner, and route 
 | `agent.run` | Run an agent |
 | `agent.edit` | Create or edit an agent |
 | `agent.delete` | Delete an agent; channels and their session history remain |
-| `channel.manage` | Edit a shared organization channel configuration or credentials |
+| `channel.manage` | Create an organization channel, or edit a shared organization channel configuration or credentials |
 | `channel.delete` | Delete a channel configuration; its shared Core session history remains |
 | `tool.exec` | Execute a tool |
 | `notifications.view` | Read notification policy and delivery status |
 | `notifications.manage` | Change organization notification switches and recipient roles |
 | `mail.read` | Read messages in an organization-owned Agent Mail inbox |
 | `mail.manage` | Create, edit, delete, and send from organization-owned Agent Mail inboxes |
+| `messaging.read` | Read Ryu Messaging numbers, messages, opt-outs, senders, and settings |
+| `messaging.manage` | Send Ryu Messaging messages, lease and release numbers, and change Messaging settings |
 | `teams.manage` | Create and manage organization teams |
-| `projects.manage` | Create organization projects |
+| `projects.manage` | Create organization projects, and rename or archive unassigned projects and projects in your own teams |
 | `registry.manage` | Curate registry entries, grants, governance, and integration credentials |
 | `nodes.view` | Discover managed nodes in the caller's allowed org/team/personal scope |
 | `nodes.manage` | Create, configure, revoke, and operate managed node resources |
 | `members.manage` | Add, remove, and re-role members |
 | `roles.manage` | Create, edit, and assign custom roles |
+| `features.manage` | Manage organization feature controls, member and team overrides, and app feature rollouts |
 | `billing.manage` | Manage billing and subscriptions |
 | `audit.view` | Read the audit log |
+| `access.manage` | Read and change organization access policy (IP allowlist, required two-factor, session lifetime) and SSO/SCIM configuration |
+| `data.manage` | Read and change data controls: log retention and SIEM audit streaming |
 | `app.install` | Install a marketplace package on a node |
 | `app.update` | Download and apply a new package release on a node |
 | `app.enable` | Enable an installed package on a node |
@@ -57,24 +62,45 @@ JWKS and still applies the node's organization, team, personal-owner, and route 
 | `marketplace.view` | Browse marketplace packages |
 | `marketplace.publish` | Publish a marketplace package |
 | `marketplace.transfer` | Transfer marketplace package ownership |
+| `approvals.view` | Read the node's approval inbox and its live events, including approval rows in the activity feed |
+| `approvals.decide` | Approve or reject a pending request and change the approval mode |
 
 ## Built-in roles
 
-Four built-in roles map from a caller's Better Auth org role (`permissions_for_role`). An unknown role fails closed to `viewer` (the least-privileged floor).
+Four built-in roles map from a caller's Better Auth org role (`permissions_for_role`). An unknown role fails closed to `viewer`, the least-privileged set.
 
 | Role | Permission set |
 |---|---|
 | `owner` | Every permission |
 | `admin` | Every permission except `billing.manage` |
-| `member` | `gateway.view`, `workflow.view`, `workflow.run`, `space.read`, `space.write`, `agent.view`, `agent.run`, `tool.exec`, `notifications.view`, `mail.read`, `projects.manage`, `nodes.view`, `marketplace.view` |
-| `viewer` | `gateway.view`, `workflow.view`, `space.read`, `agent.view`, `notifications.view`, `mail.read`, `nodes.view`, `marketplace.view` |
+| `member` | `gateway.view`, `workflow.view`, `workflow.run`, `space.read`, `space.write`, `agent.view`, `agent.run`, `tool.exec`, `notifications.view`, `mail.read`, `messaging.read`, `projects.manage`, `nodes.view`, `marketplace.view` |
+| `viewer` | `gateway.view`, `workflow.view`, `space.read`, `agent.view`, `notifications.view`, `mail.read`, `messaging.read`, `nodes.view`, `marketplace.view` |
 
-A member's **effective** permissions are the built-in set of their role UNION every applicable permission granted by a custom role assigned to them. Organization assignments apply at organization scope; a team assignment applies only when the caller is a member of that team and the resource is in that team. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
+The built-in `billing` role is not a rung on this ladder. It is additive: Core adds `billing.manage` to the set of the caller's other role, or to `viewer` when `billing` is the only role (`permissions_for_ba_role`). For what each role is for, see [Organization admin controls](/docs/security/organization-admin-controls#roles).
 
-Better Auth remains the source of truth for membership, invitations, and teams. Better Auth's
-dynamic organization roles can govern Better Auth's own actions, but Ryu capability keys and team
-scopes are resolved by the control plane and carried to Core separately. This avoids treating a
-role that merely looks like `admin` as proof of a Ryu capability.
+A member's **effective** permissions are the built-in set of their role plus every applicable permission granted by a custom role assigned to them. Organization assignments apply at organization scope; a team assignment applies only when the caller is a member of that team and the resource is in that team. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
+
+Better Auth remains the source of truth for membership, invitations, and teams, using only the
+static roles above. Custom roles are Ryu's own: they are resolved by the control plane and carried
+to Core separately, so a role that merely looks like `admin` is never proof of a Ryu capability.
+
+Custom-role changes are bounded by the person making them:
+
+- You can only grant permissions you hold yourself, and the same limit applies to taking them away.
+  Editing or deleting a custom role, or removing it from a member, is refused when the role carries
+  a permission you do not hold.
+- You cannot change the custom roles of a member whose built-in role is above yours, and only the
+  primary owner can change the primary owner's custom roles.
+- When a member leaves or is removed, their custom-role assignments and the vault policies bound
+  directly to them are deleted, so they do not come back if the same person is invited again.
+
+### Owners and the primary owner
+
+Each organization has one **primary owner** above the other owners. Nobody can demote or remove the
+primary owner, and only the primary owner can grant or revoke the owner role, transfer primary
+ownership, or delete the organization. The primary owner has the same permission set as any owner,
+so every permission check above treats them as `owner`. See
+[Organization admin controls](/docs/security/organization-admin-controls#primary-owner).
 
 ### Self-hosted node binding
 
@@ -87,7 +113,9 @@ widen to organization, personal, or another team's nodes.
 Desktop and the web Fleet page use the same effective-permission result to show
 or disable the action, but the organization service remains authoritative. It
 checks the permission when it issues the ten-minute enrollment code and again
-on first redemption. Losing membership, removing the custom role, or revoking
+on first redemption. Issuing the code also asks the caller to confirm it's you
+(the same step-up that issuing a gateway key needs), because an enrolled node
+can resolve members' shared secrets. Losing membership, removing the custom role, or revoking
 the grant therefore stops a code from creating a binding even if an older page
 still has its form open.
 
@@ -99,12 +127,13 @@ explicit revoke-and-rebind flow.
 
 By default, only organization owners and admins can delete agents or Spaces. A custom role may grant
 the corresponding delete permission explicitly, but Core still checks that effective permission on
-the server. The desktop surfaces the same boundary and requires a deliberate slide confirmation for
+the server. Desktop shows the same boundary and requires a slide confirmation for
 destructive agent, Space, channel, and team actions; cancelling or failing the request leaves the
 resource unchanged.
 
-Shared organization channel records are visible to organization members, but only the creator or a
-caller with `channel.manage` can edit their routing, enablement, platform settings, or credentials.
+Creating an organization channel requires `channel.manage`. Shared organization channel records are
+visible to organization members, but only the creator or a caller with `channel.manage` can edit their
+routing, enablement, platform settings, or credentials.
 Only `channel.delete` removes a shared channel record.
 
 ## How Core gates a request
@@ -120,8 +149,14 @@ caller's node capability with `enforce_permission(state, caller, perm)`.
 Hosted MCP delegations carry the verified subject, organization, team, exact node, exact agent,
 scopes, audience, issuer, unique ID, and a short expiry in one signed envelope. Core verifies all of
 those fields locally. A destination path cannot select a different agent than the signed binding.
+The `gateway:route` OAuth scope permits routing and vault metadata reads; changing or deleting a
+vault secret requires separate `vault:write` consent. Reads that release secret or key material
+need `vault:write` consent too, even though they are `GET` requests: value subkeys, TOTP codes,
+static-role credentials, passwords generated from a password policy, and transit key export and
+backup. Shared node, team, and organization secrets
+also require the handler's existing management permission.
 
-Enforcement branches on whether **this node** is bound to an org (`registered_org()`), because per-user RBAC only makes sense on a shared node and the single-user local flow must never be degraded.
+Enforcement branches on whether **this node** is bound to an org (`registered_org()`). Per-user role-based access control (RBAC) applies only on a shared node, so the single-user local flow is unchanged.
 
 | Node state | Caller | Result |
 |---|---|---|
@@ -135,79 +170,23 @@ Enforcement branches on whether **this node** is bound to an org (`registered_or
 
 For a member, the built-in role tier is checked first (no network on the common path). On a miss, Core resolves the custom-role slice from the control plane and unions it in.
 
-### Handlers gated today
-
-Core wires `enforce_permission` into these handler families (call sites in `apps/core/src/server/mod.rs`):
-
-| Permission | Surface |
-|---|---|
-| `gateway.view` | Read gateway configuration, status, and Doctor reports |
-| `gateway.configure` | `PUT /api/gateway/config` (the "employees can't edit the gateway" gate) |
-| `workflow.view` / `run` / `edit` / `delete` | Workflow REST handlers |
-| `space.read` / `write` / `delete` | Space document REST handlers |
-| `agent.view` | Agent REST reads plus sync scans, status, and exports |
-| `agent.run` | Agent runs, ACP resume, and proactive openings |
-| `agent.edit` | Agent writes plus sync profiles, imports, and conflict resolution |
-| `agent.delete` | Agent deletion |
-
-The `notifications.*` keys govern the organization notification page; `mail.*` gates hosted Agent
-Mail; `teams.manage`, `projects.manage`, `registry.manage`, and `nodes.manage` gate their matching
-control-plane mutations. The `channel.manage` key is enforced by the control plane for updates to
-an organization-owned channel created by another member. The `marketplace.*` keys govern catalog
-visibility, publishing, and ownership transfer on the control plane. The remaining keys
-(`tool.exec`, `members.manage`, `roles.manage`, `billing.manage`, `audit.view`) are part of the
-shared vocabulary; member, role, and billing management remain behind their Better Auth and
-billing policy boundaries.
-`audit.view` gates the organization Audit log, which merges org control changes with reported
-Gateway control changes; the local Gateway audit endpoint retains its own master-key gate.
-
-## Node-scoped marketplace lifecycle
-
-Marketplace packages use the five independent `app.*` permissions above, regardless of whether the
-package is an app, plugin, skill, agent, workflow, theme, output style, Space, profile, or bundle.
-There is no implicit implication between install, update, enable, disable, and uninstall.
-
-Core validates the node scope before resolving the ACL:
-
-| Node scope | Caller requirement |
-|---|---|
-| Organization | Caller belongs to the organization |
-| Team | Caller belongs to the team, or is an organization owner/admin |
-| Personal | Caller is the owning user; organization administration does not bypass this |
-| Unbound | Existing local-token owner behavior is preserved |
-
-Owners/admins receive the default lifecycle permissions on organization and team nodes. Ordinary
-members/viewers receive none by default; team, member, role, and custom-role grants are explicit.
-An individual deny overrides a team grant. The stable node ID is preserved when a gateway credential
-rotates, so an ACL continues to govern the same machine.
-
-The read-only desktop explanation is `GET /api/plugins/lifecycle-capabilities`. Node ACLs are read or
-edited with `GET`/`PUT /api/acl/resources/node/:nodeId`; editing requires `roles.manage`, with a
-personal-node owner and an organization owner/admin receiving implicit management authority. A
-denied lifecycle request returns a structured `403` with `required_permission` and `node_scope`,
-before filesystem or package state changes.
-
-### App-owned sidecar routes
-
-Apps can publish a separate `permission_levels` vocabulary for their own proxied sidecar routes.
-Core validates that every protected non-health route is annotated, matches the incoming HTTP method,
-and checks the caller's effective app level before waking the sidecar or buffering the request body.
-When one path serves both reads and writes, the manifest declares separate method rows (for example,
-`GET /drafts` with `drafts.view` and `POST /drafts` with `drafts.edit`). Missing levels and method
-overlaps are rejected at manifest load; an org-bound caller without the required level receives
-`403`. These app levels govern access to the app surface, not the OS capabilities of its sidecar
-process; native sidecars remain publisher-trust boundaries as described in [Plugin isolation](/docs/security/plugin-isolation).
+For the handlers and control-plane surfaces each key gates, see
+[Permission enforcement by surface](/docs/security/permissions-enforcement). For the `app.*`
+lifecycle keys, node and resource ACL edits, and app permission levels, see
+[Marketplace and app permissions](/docs/security/permissions-marketplace).
 
 ## Custom-role resolution and caching
 
-The custom-role slice Core cannot compute locally is fetched from the control plane (`resolve_permissions`, `apps/core/src/sidecar/control_plane.rs`). Core sends only its gateway credential and the organization/team scope is derived server-side from that credential and the registered node.
+The custom-role slice Core cannot compute locally is fetched from the control plane (`try_resolve_permission_context`, `apps/core/src/sidecar/control_plane.rs`). Core sends only its gateway credential and the organization/team scope is derived server-side from that credential and the registered node.
 
-- The lookup is **fail-closed** - any failure (no gateway key, network error, non-2xx, decode error) returns an empty set, never an error and never a wide set. The caller falls back to the built-in role tier alone (never full access).
+- The lookup is **fail-closed**. Any failure (no gateway key, network error, non-2xx, decode error) returns an empty set, never an error and never a wide set. The caller falls back to the built-in role tier alone.
 - Only **successful** lookups are cached, for `PERMISSIONS_TTL` (30 seconds), keyed by user id and registered team scope. A transient failure is not cached, so it never denies a user for the whole window. A role or grant change propagates within 30 seconds.
 
 ## Related
 
 <Cards>
+  <DocCard href="/docs/security/permissions-enforcement" />
+  <DocCard href="/docs/security/permissions-marketplace" />
   <DocCard href="/docs/security/access-hierarchy" />
   <DocCard href="/docs/security/network-binding-auth" />
   <DocCard href="/docs/security/trust-model" />

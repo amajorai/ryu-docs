@@ -1,60 +1,64 @@
 ---
-title: "The RSI operating model"
-description: "A shared improvement contract that connects Learning, Experiments, evaluation, and safe promotion."
+title: "RSI Operating Model"
+description: "The shared improvement record, its Core API and promotion states, and which Ryu surface owns each part of the loop."
 ---
 
-The central design decision is simple: **Learning and Experiments should share an improvement
-contract, not share an implementation.** Learning owns experience and skill proposals. Research
-owns campaign execution and winner selection. Core owns execution and workspaces; Gateway owns
-policy, measurement, budgets, and audit; the owning app owns its domain state.
+Learning and Experiments share an improvement contract, not an implementation. Learning owns
+experience and skill proposals. Research owns campaign execution and winner selection. Core owns
+execution, workspaces, and the improvement record. Gateway owns policy, measurement, budgets, and
+audit. The owning app owns its domain state.
 
-That follows Ryu's [platform consistency rules](/docs/start-here/architecture/platform-consistency):
+This follows Ryu's [platform consistency rules](/docs/start-here/architecture/platform-consistency):
 one owner, one canonical contract, explicit projections, and evidence that says what actually ran.
 
-## The proposed improvement record
+## The improvement record
 
-The first shared slice of that primitive now exists as a versioned pure-data contract. Learning cycle
-responses and Research campaign initialization can carry an optional `improvementRunId`, so a
-proposal, experiment, and later promotion can be joined without either app becoming the authority
-for the other. The full durable record and promotion store are still the next platform step.
+The improvement record joins a proposal, an experiment, and a later promotion without making
+either app the authority for the other. Its fields:
 
 | Field | Why it matters |
 |---|---|
 | Objective | Names the user or system outcome being improved. |
-| Scope | Identifies the artifact kind: skill, prompt, memory rule, workflow, tool, app, route, or model. |
+| Scope | Identifies the artifact kind: `skill`, `prompt`, `memory_rule`, `workflow`, `tool`, `app`, `sidecar`, `provider_route`, or `model_adapter`. |
 | Baseline | Pins the current artifact, task set, model/provider context, and starting score. |
 | Candidate | Records the proposed diff, parent version, and input snapshot digest. |
 | Evaluation | Links deterministic tests, offline evals, safety checks, and host/browser proof. |
 | Guardrails | Sets cost, latency, privacy, capability, and regression limits. |
-| Decision | Uses explicit states such as draft, running, verified, promoted, rejected, or rolled back. |
+| Decision | Records the explicit decision and the lifecycle state (see [Promotion states](#promotion-states)). |
 | Provenance | Records the user, agent, campaign, skill set, and source traces that produced it. |
 | Rollback | Points to the last known-good version and the operation that restores it. |
 
 The record should be append-only for decisions and evidence. Mutable settings can be updated through
 their owning app, but a past score or approval must not silently change underneath an old result.
 
-<Callout type="info">
-The correlation field is additive and does not promote anything by itself. The owning app still
-controls approval, activation, and rollback; an invalid reference is rejected before Research starts
-a workspace. The next step is to persist the complete improvement record and its evidence envelope.
-
 ## Core record API
 
-The first durable projection is node-local and protected by Core's normal node-admittance boundary:
+The record is stored node-locally in Core (`apps/core/src/server/improvement_api.rs`) and requires
+the node bearer token like other protected Core routes:
 
-- `POST /api/improvements` creates a draft record;
-- `GET /api/improvements` returns bounded newest-first history;
-- `GET /api/improvements/{id}` reads one record; and
-- `POST /api/improvements/{id}/transition` applies one guarded lifecycle transition.
+| Route | Purpose |
+|---|---|
+| `POST /api/improvements` | Create a draft record |
+| `GET /api/improvements` | Read newest-first history (`limit` query, default 50, capped at 100) |
+| `GET /api/improvements/{id}` | Read one record |
+| `POST /api/improvements/{id}/transition` | Apply one guarded lifecycle transition |
 
-The transition endpoint accepts the candidate, evaluation evidence, guardrail result, decision, and
-rollback reference needed for that transition. It validates the whole resulting record before the
-SQLite update, so a rejected transition cannot leave a half-promoted record behind. The API is a
-Core persistence and lifecycle seam; it does not execute an experiment or silently approve a change.
+The transition body names the target state in `to` and carries the `candidate`, `evaluation`,
+`guardrails`, `decision`, and `rollback` fields that the transition needs. Core validates the whole
+resulting record before the SQLite update, so a rejected transition cannot leave a half-promoted
+record behind. The API stores records and enforces the lifecycle. It does not run an experiment or
+approve a change.
 
-The Learning cycle and Research workspace APIs can carry the same opaque `improvementRunId`, which
-lets an owner join experience, experiment, evidence, and promotion history without copying private
-conversation content between stores.
+## Correlating Learning and Research
+
+`POST /api/learn/cycle` (Learning) and `POST /api/research/workspace` (Research) accept an optional
+opaque `improvementRunId`. It lets an owner join experience, experiment, evidence, and promotion
+history without copying private conversation content between stores. Research rejects an invalid
+id with `400` (`invalid_improvement_run_id`) before it starts a workspace.
+
+<Callout type="info">
+`improvementRunId` is a correlation id, not an approval mechanism. It does not promote anything by
+itself. The owning app still controls approval, activation, and rollback.
 </Callout>
 
 ## Where each responsibility belongs
@@ -68,20 +72,23 @@ conversation content between stores.
 | Render progress and decisions | Desktop, Web, Mobile, or Companion | A bounded view of the same run. |
 | Publish the public contract | Fumadocs | Usage, authoring, safety, and evidence guidance. |
 
-Do not put a second policy engine inside the Learning app, or a second skill store inside Research.
-The apps should link to the same run, while retaining their distinct product boundaries.
+Learning has no policy engine of its own, and Research has no skill store of its own. Both apps link
+to the same run and keep their separate product boundaries.
 
 ## Promotion states
 
-Promotion should be a monotonic, inspectable path:
+Promotion is a one-way, inspectable path. Core accepts only these transitions:
 
 ```text
 draft → baseline → candidate → verified → approved → canary → promoted
-                         ↘ rejected
-promoted → rolled back
+candidate, verified, approved, or canary → rejected
+promoted → rolled_back
 ```
 
-The exact storage can evolve, but the semantics should not. A candidate that has only been generated
+`rejected` and `rolled_back` are terminal. A record that reaches `rolled_back` must carry a
+rollback reference and a rollback decision.
+
+The storage can change; these semantics do not. A candidate that has only been generated
 is not verified. A candidate that passed an offline score is not automatically safe to run. A canary
 that improved one benchmark is not a global promotion until its guardrails and holdout checks pass.
 
@@ -93,12 +100,12 @@ Keep three signals separate:
 - **Experiment signal:** a controlled comparison against a baseline.
 - **Promotion signal:** an authorized decision that the artifact may affect future work.
 
-This prevents a thumbs-up from becoming an automatic code release and prevents a model judge from
-being the sole authority for its own improvement.
+A thumbs-up does not become an automatic code release, and a model judge is not the sole authority
+for its own improvement.
 
-## How to use this now
+## Applying the model
 
-Until the shared record lands, make the fields explicit in each campaign or design note:
+When a campaign or design note uses the model, make the fields explicit:
 
 - name the objective and baseline before changing anything;
 - keep candidate changes in a bounded workspace;
@@ -107,5 +114,5 @@ Until the shared record lands, make the fields explicit in each campaign or desi
 - require approval for activation; and
 - record the previous version and the rollback action.
 
-The [guardrails](/docs/rsi/guardrails) page defines the minimum evidence by change class, and the
-[adoption roadmap](/docs/rsi/roadmap) turns this model into implementation phases.
+The [guardrails](/docs/rsi/guardrails#the-promotion-ladder) page defines the minimum evidence by change class, and the
+[RSI maturity model](/docs/rsi/roadmap) describes how the pieces fit together.

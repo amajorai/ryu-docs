@@ -1,14 +1,14 @@
 ---
 title: "Model Catalog"
-description: "Browse Hugging Face for GGUF/MLX models with device-fit verdicts, install, and switch the active model."
+description: "Core reference for the model catalog: Hugging Face search, device-fit verdicts, checksum-verified installs, the active-model switch, and the /api/models routes"
 ---
 
 The model catalog is the Core subsystem that searches the Hugging Face Hub, computes a GPU-aware
 "runs on my device" verdict for every weight file, installs the chosen artifact with checksum
-verification, and switches which installed model the local engine serves. All logic lives in Core
-(`apps/core/src/model_catalog/`) so every client - desktop, mobile, extension - gets the same
-verdict from one place. Catalog entries are models only; the separate engine runtimes that serve
-them are documented under [Engines](/docs/surfaces/desktop/engines).
+verification, and switches which installed model the local engine serves. The logic lives in Core
+(`crates/core/model-catalog/`), so every client (Desktop, mobile, extension) gets the same
+verdict from one place. Catalog entries are models only. The engine runtimes that serve them are
+documented under [Engines](/docs/surfaces/desktop/engines).
 
 <Callout type="info">
   Looking for the click-through how-to (browse, install, pick the active model)? See
@@ -17,9 +17,9 @@ them are documented under [Engines](/docs/surfaces/desktop/engines).
 
 ## What it does
 
-Deciding whether a model *can run* on this machine is an orchestration question ("what runs"), so
-per the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule it lives in Core,
-never the Gateway. The catalog has four responsibilities:
+Whether a model can run on this machine is an orchestration question ("what runs"). Per the
+[Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule, it lives in Core, not the
+Gateway. The catalog has four responsibilities:
 
 - **Search** the HF Hub for models, filtered by task (`pipeline_tag`).
 - **Detail** a model: README, every quant file with real size and SHA-256, and a per-file device-fit
@@ -27,28 +27,54 @@ never the Gateway. The catalog has four responsibilities:
 - **Install** a chosen artifact via the shared checksum-verified downloader, tracking provenance.
 - **Switch** which installed model the resident local engine serves (the active-model selection).
 
+## Model task filters
+
+The Marketplace category filter uses Hugging Face `pipeline_tag` values. It covers chat and text,
+vision, image captioning/generation/editing/classification/detection/segmentation, text-to-video,
+image-to-video and video classification, embeddings and feature extraction, reranking, speech and
+audio tasks, question answering, translation, and summarization. Each selection filters to its
+specific task tag. **All categories** leaves the task unset, so other Hub task types remain
+available too. The category filter is disabled for installed-only results because installed files
+do not retain task metadata.
+
+Image filters include `image-text-to-text`, `image-to-text`, `text-to-image`, `image-to-image`,
+`image-classification`, `object-detection`, and `image-segmentation`. Video filters include
+`text-to-video`, `image-to-video`, and `video-classification`. Audio filters include
+`automatic-speech-recognition`, `text-to-speech`, `text-to-audio`, `audio-to-audio`,
+`audio-classification`, and `voice-activity-detection`. Retrieval and text filters include
+`sentence-similarity`, `feature-extraction`, `text-ranking`, `text-classification`,
+`question-answering`, `translation`, and `summarization`.
+
+Hosted typed-decision providers such as Cloudflare Clef are selected in the separate
+[Decision Models layer](/docs/core/decision-models). They are not presented as locally downloadable
+model weights.
+
 ## Routes
 
 | Route | Purpose |
 |---|---|
-| `GET /api/models/catalog` | Search the Hub. Query params `query`, `sort`, `limit`, `installed_only` |
+| `GET /api/models/catalog` | Search the Hub. Query params `query`, `sort`, `format`, `task`, `author`, `limit`, `cursor`, `installed_only` |
 | `GET /api/models/catalog/detail` | Full detail for one repo: README, quant files, fit verdicts |
 | `POST /api/models/catalog/install` | Install a chosen file (or snapshot repo) |
 | `POST /api/models/catalog/uninstall` | Remove an installed file (also removes its vision adapter) |
 | `GET /api/models/device` | The detected machine spec used for fit verdicts |
 | `GET /api/models/llmfit-estimate` | Optional, on-demand context/quant-aware speed estimate for one model |
 | `GET /api/models/engines` | Engines available to serve a given model format on this node |
+| `GET /api/models/installed` | Installed models by stem, with fine-tune provenance |
+| `GET /api/models/updates` | Installed GGUF models with a newer file available upstream |
+| `GET /api/models/context-window` | A model's context window (`?model=`) |
+| `GET /api/models/insight` | Hover-card insight for a model (`?model=`, optional `provider`) |
 | `GET /api/models/active` | The current active-model selection |
-| `POST /api/models/active` | Switch or preview the active model (`{ id, dryRun? }`); a live switch restarts the engine and refreshes the gateway |
+| `POST /api/models/active` | Switch or preview the active model (`{ id, dryRun? }`); a live switch restarts the engine and refreshes the Gateway |
 
-Handlers live in `apps/core/src/server/mod.rs` (routes registered around line 476); the catalog
-logic is in `apps/core/src/model_catalog/mod.rs`. A small in-process TTL cache in `mod.rs` makes
-repeat detail and list fetches fast for every client.
+Handlers live in `apps/core/src/server/mod.rs`. The catalog logic is in
+`crates/core/model-catalog/src/lib.rs`. An in-process TTL cache there holds list results for 60
+seconds and detail results for 300 seconds, so repeat fetches skip the Hub.
 
 ## Device-fit verdicts
 
-`apps/core/src/model_catalog/device.rs` detects the machine and computes a plain-language fit
-verdict per file, with zero new dependencies. It probes total physical RAM and GPU VRAM using small
+`crates/core/model-catalog/src/device.rs` detects the machine and computes a plain-language fit
+verdict per file. It probes total physical RAM and GPU VRAM using small
 platform-specific commands - PowerShell on Windows, `/proc/meminfo` on Linux, `sysctl` on macOS for
 RAM, and `nvidia-smi` for discrete NVIDIA VRAM. Apple Silicon is treated as unified memory, where
 RAM doubles as VRAM. Detection never fails: unknown fields stay `None` and the verdict degrades to
@@ -72,19 +98,19 @@ a remote node sees that node's hardware, not its own).
 
 ## Optional LLM Fit estimate
 
-The native fit verdict remains the catalog's primary recommendation: it is local, fast, available
+The native fit verdict remains the catalog's primary recommendation. It is local, fast, available
 for every model file, and does not require an extra binary. The optional `llmfit` sidecar adds a
 more detailed estimate for one model when a user explicitly requests it:
 
-```
+```http
 GET /api/models/llmfit-estimate?repo=author%2Fname&context=32768&quant=Q4_K_M
 ```
 
 `context` is the requested context window in tokens and `quant` is the selected model-weight
 quantization. The desktop detail page passes both when known, so LLM Fit evaluates the same
-recommendation shown in the download picker. The call is intentionally on-demand because it can be
-networked and slow, and the sidecar only recognizes its curated model catalog; missing, unmatched,
-or failed estimates return a non-matching result so clients can keep showing the native verdict.
+recommendation shown in the download picker. The call is on-demand because it can be
+networked and slow, and the sidecar only recognizes its curated model catalog. Missing, unmatched,
+or failed estimates return a non-matching result, so clients can keep showing the native verdict.
 Successful estimates report `tps` as estimated output tokens per second. LLM Fit is not used to
 re-rank every Marketplace card.
 
@@ -94,36 +120,37 @@ The catalog is format-aware, not GGUF-only. Each model exposes a `ModelFormat` (
 MLX), and the engine that serves a model is *derived* from that format - the model is the slot you
 pick, the engine follows. `GET /api/models/engines` returns, per format, whether a serving engine is
 supported on this node and, when it is not, the human label of the engine that *would* serve it
-(`format_compat` in `apps/core/src/server/mod.rs`, backed by `crate::model_format`). MLX engines, for
+(`format_compat` in `crates/core/model-catalog/src/lib.rs`, backed by `ryu_model_format`). MLX engines, for
 example, are Apple-Silicon-only, so a non-Apple node reports MLX formats as not-compatible with the
 engine that would be needed.
 
 ## Artificial Analysis enrichment (optional)
 
-When `ARTIFICIAL_ANALYSIS_API_KEY` is set, `apps/core/src/model_catalog/aa.rs` enriches detail
-results with third-party model stats. The AA model list is cached to disk at
-`~/.ryu/aa-models-cache.json` with a daily TTL, so the rate-limited API is hit at most once a day.
-The `aa-mode` preference (desktop Settings -> Integrations "Live data" switch) toggles between the
-cached default and a live fetch.
+When an Artificial Analysis API key is configured, `crates/core/model-catalog/src/aa.rs` enriches
+detail results with third-party model stats. The key resolves from the key saved in desktop
+**Settings → Integrations**, then `ARTIFICIAL_ANALYSIS_API_KEY`. The AA model list is cached to disk at
+`~/.ryu/cache/aa-models-cache.json` with a daily TTL, so the rate-limited API is hit at most once a day.
+The `aa-mode` preference (the **Live data** switch in desktop **Settings → Integrations**) toggles
+between the cached default and a live fetch.
 
 <Callout type="warn">
-  Artificial Analysis has no anonymous endpoint. Without `ARTIFICIAL_ANALYSIS_API_KEY` the
-  enrichment is skipped gracefully (the catalog still works); the key is free-tier.
+  Artificial Analysis has no anonymous endpoint. Without a key the enrichment is skipped and the
+  catalog still works, showing models without those stats.
 </Callout>
 
 ## Install and provenance
 
 `POST /api/models/catalog/install` installs a chosen GGUF (or a multi-file snapshot for
 safetensors/MLX repos) via the shared checksum-verified downloader, with provenance recorded in
-`apps/core/src/model_catalog/installed.rs`. Installs surface in the Download Center and are tracked
+`crates/core/model-catalog/src/installed.rs`. Installs surface in the Download Center and are tracked
 so the catalog can mark already-installed files. `installed_only=true` on the search route restricts
 results to what is on disk.
 
 Both catalog mutations support a read-only plan. Send `dryRun: true` to
 `POST /api/models/catalog/install` to resolve the active source and model detail
 without downloading weights or creating a Download Center task. Send `dryRun: true`
-to `/api/models/catalog/uninstall` to validate the GGUF filename and see whether
-the weight and its vision adapter exist; neither file is removed.
+to `POST /api/models/catalog/uninstall` to validate the GGUF filename and see whether
+the weight and its vision adapter exist. Neither file is removed.
 
 ### Vision adapters (mmproj)
 
@@ -142,42 +169,44 @@ or being presented as a model the local engine can serve.
 
 ## Switching the active model
 
-The local engine used to serve whatever the model registry resolved at startup, with no runtime
-knob. The active-model selection adds one. `POST /api/models/active` with `{ id }` (a repo id or an
+The active-model selection chooses which installed model the local engine serves at runtime.
+`POST /api/models/active` with `{ id }` (a repo id or an
 installed stem) persists the `local-chat-model` preference, restarts the resident local engine, and
-refreshes the gateway so the new model is served immediately. `GET /api/models/active` returns the
+refreshes the Gateway so the new model is served immediately. `GET /api/models/active` returns the
 current selection.
 
 The plumbing:
 
 - `installed.rs` owns `ACTIVE_MODEL_PREF`, `resolve_to_stem`, and `model_file_path`.
-- `apps/core/src/providers/llamacpp/mod.rs` `resolve_active_chat_model()` consults the preference,
+- `resolve_active_chat_model()` in `apps/core/src/sidecar/providers/llamacpp/mod.rs` consults the preference,
   overriding the launch config and `--model` flag, and falls back to the registry when no selection
   is set.
 - `model_catalog::active_model_ref_for_engine(engine)` is the runtime-switch source feeding each
   provider's `start()`, sitting below an explicit `with_model` override.
 
 Send `dryRun: true` to the same route to resolve the installed model, compatible engine, current
-resident engine, and planned preference/engine/gateway effects without persisting the selection or
+resident engine, and planned preference, engine, and Gateway effects without persisting the selection or
 restarting anything. The response is marked `dryRun: true` and includes `writes` as an explicit
 side-effect summary.
 
 The same switch is reachable from a [deep link](/docs/surfaces/desktop/user-guide/deep-links)
-(`ryu://models/<source>/<id>`) and from the desktop "Use this model" button (`ActiveModelControl`).
+(`ryu://models/<source>/<id>`) and from the desktop **Chat with this model** action. The desktop
+resolves the node-supported engine, installs it when needed, switches the active model, then opens a
+new Ryu chat with that model selected for the tab.
 
 ## Behavior and guarantees
 
 - One source of fit truth: every client gets the verdict the Core node computed.
 - Checksum-verified installs (SHA-256), with provenance for the installed view.
-- Switching the active model is atomic from the caller's view: the route persists, restarts the
-  engine, and refreshes the gateway before returning.
-- Nothing hardcoded: the active model, the HF endpoint (swappable `HfEndpoint`, including ModelScope
-  and custom base URLs), and the serving engine are all config-driven defaults.
+- Switching the active model is atomic from the caller's view. The route persists, restarts the
+  engine, and refreshes the Gateway before returning.
+- Config-driven defaults: the active model, the HF endpoint (swappable `HfEndpoint`, including ModelScope
+  and custom base URLs), and the serving engine are all configurable.
 
 <Callout type="warn">
   Device detection relies on platform probes (`nvidia-smi`, PowerShell, `sysctl`,
   `/proc/meminfo`). On a machine where those are unavailable the verdict is `unknown` rather than
-  wrong, but it is not a guarantee that a `great`-verdict model will perform well under real load.
+  wrong. A `great` verdict does not guarantee that a model performs well under real load.
 </Callout>
 
 ## Related

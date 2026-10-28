@@ -1,0 +1,174 @@
+---
+title: "Connection Provider Calls"
+description: "Reference for Gateway connection calls through Treg and Composio: which provider serves a call, how connection calls are screened, and how they are priced and debited."
+tags: ["Gateway", "Tools", "Treg", "Composio", "Billing"]
+---
+Some tool and account operations run through a managed **connection provider** that holds the
+third-party account: Treg for metered tool APIs, and Composio for OAuth connected accounts and
+toolkit actions. Treg is the default and Composio the fallback: Treg calls are billed at the
+provider's own cost price, passed through, while Composio calls are billed at a per-execution rate.
+The Gateway owns their credentials and the wallet debit; callers send an operation, never a
+provider key.
+
+The connections layer is a separate swappable layer from the
+[routing layer](/docs/providers/upstream-routers). The `backends.connections` setting selects it:
+
+| Value | Calls that do not name a provider go to |
+|---|---|
+| `builtin` (default) | Treg when Treg can serve the call, otherwise Composio. With neither configured, the caller must name one |
+| `treg` | Treg, for every call |
+| `composio` | Composio, for every call |
+
+A call that sets `provider` to `builtin` is routed the same way as a call that names no provider, so
+an app that must always send a provider can still opt in to per-call routing. Agents with limited
+account access must name `treg` or `composio` instead.
+
+Under `builtin`, each call is routed on its own. Treg answers when its catalog lists the endpoint as
+callable. Composio answers what Treg cannot: connecting, listing and disconnecting accounts,
+toolkit actions Treg's catalog does not list, and endpoints Treg marks as unavailable for platform
+use. When Composio is not configured, or neither provider can serve the call, Treg answers and its
+own error reaches the caller. An explicit `treg` or `composio` selection never falls back.
+
+A call that names its provider always reaches that provider, so changing the selection never
+re-routes an existing integration. Tool IDs stay provider-native: the selection chooses who answers
+a call; it does not translate one provider's tool IDs into another's. The selection applies live
+through `PUT /v1/config` with `{"backends": {"connections": "composio"}}`; omitted stages keep their
+saved selection, and an unknown provider is rejected before it is saved. `GET /v1/config` returns the
+current `backends` selection.
+
+`GET /v1/providers` reports the layer for Core's trusted forwarder: the selection, the provider it
+resolves to, the configured providers in preference order (`order`), the provider calls fall back
+to under `builtin` (`fallback`), and whether each provider is configured. It never returns
+credentials.
+
+## Screening connection calls
+
+Before any provider request, including a Treg catalog price lookup, `POST /v1/providers/call` runs
+the resolved firewall and the locked guardrails over every string the provider receives: the tool
+ID, the method, the connected account ID, the organization ID, the query and the body. Body keys are
+action arguments here, so the chat rules for media and control fields do not apply:
+
+- Object keys are screened like values, at every depth and inside stringified JSON.
+- URLs, `data:` URIs and long base64 runs are screened under every key, `url`, `file` and `image`
+  included.
+- Each string is also screened with its percent escapes decoded and, when it is base64 of text,
+  decoded from base64.
+
+A match is refused with `403 policy_violation`. The body is never rewritten, so a `sanitize` policy
+refuses a match instead of redacting it. After the screen:
+
+- The method must be `GET`, `POST`, `PUT`, `PATCH` or `DELETE`.
+- The tool ID must be a plain identifier of letters, digits, `.`, `_`, `-` and `:`. A `%` escape,
+  `?`, `#`, `/` or whitespace is refused with `400`, because providers place the tool ID in the
+  request path.
+- A trusted forwarder may bill an organization other than its own only when it presents Core's proof
+  for that organization. Without the proof the call is refused with `401`. The billed organization's
+  wallet, not the forwarder's, gates the call.
+
+Every refusal after authentication, including a malformed `x-ryu-max-cost-micro-usd` or an unknown provider, and every
+executed call writes one tool-execution audit row.
+
+## Paying for connection calls
+
+When the Gateway bills an organization wallet for a call (`[credits]` is enabled and the call has an
+organization), `POST /v1/providers/call` checks the money before any provider request:
+
+1. **Price.** The Gateway prices the call itself. A Treg endpoint is priced from `[treg.prices]`
+   when the operator set a row for it, otherwise from Treg's catalog estimate for that endpoint. A
+   Composio execution is priced at `cost_per_tool_call_micro_usd`. A billable call with no known
+   price, including a Treg endpoint the catalog does not list, is refused with `403 tool_unpriced`;
+   it is never run free. A catalog price quoted per a batch of calls (`per` other than 1) is not
+   used as a per-call price, so price such an endpoint with a `[treg.prices]` row. An invalid
+   endpoint id is a `400`. If the Treg catalog cannot be read, the call is refused with the
+   retryable `503 credit_accounting_unavailable`.
+2. **Ceiling.** A caller can send `x-ryu-max-cost-micro-usd` with the most it expects one call to
+   charge, after markup. An estimate above the ceiling is refused with `402 max_cost_exceeded`
+   before the call runs. The ceiling does not lower the charge afterwards: if the provider reports
+   a higher cost, that cost is what the provider bills, so it is charged in full and the response
+   sets `exceededMaxCost`. An app's provider call and the agent `treg.call` tool can set it with
+   `max_cost_micro_usd`, and Core sends it to the Gateway for you.
+3. **Hold.** The estimate is held against the organization's spendable balance until the charge is
+   recorded, so parallel calls cannot spend the same money. A call the balance cannot cover is
+   refused with `402 insufficient_credits`. With `[credits] reserve_enabled = false` nothing is
+   held, but a call the balance cannot cover is still refused. An organization with no spendable
+   balance left is refused even for a call priced at zero, because the provider can still report a
+   cost that is charged afterwards.
+
+Before any of these steps, a call that is not made with the master key is checked against the
+request-rate caps and the spend limits that apply to the caller (organization, team, member, key and
+the tools budget). A call over a rate cap is refused with `429`, and a call over a blocking spend
+limit with `402 budget_exceeded`, before any provider request is made.
+
+The `402` error body adds the figures a caller needs, in micro-USD after markup:
+
+```json
+{
+  "error": {
+    "type": "insufficient_credits",
+    "code": "insufficient_credits",
+    "message": "organization credit balance does not cover this tool call",
+    "balance_micro_usd": 1000,
+    "estimate_micro_usd": 2200,
+    "top_up_url": "https://ryuhq.com/organizations/billing"
+  }
+}
+```
+
+A successful response carries Ryu's own record of the call:
+
+| Field | Meaning |
+|---|---|
+| `provider` | The connection provider that answered the call |
+| `fellBackFrom` | Under `builtin`, the preferred provider that could not serve the call (`treg`), else `null` |
+| `callId` | The provider's own transaction id (Treg's call id, or the Composio execution log id), when it returned one. Unchanged from earlier releases |
+| `providerCallId` | The same provider transaction id, under an explicit name |
+| `ryuCallId` | Ryu's id for the call. The same caller retry (same idempotency key, or the same provider transaction) gets the same id, and the charge is recorded under it, so a retry is never charged twice. A retry is charged what the first attempt was |
+| `costMicroUsd` | The provider-reported raw cost, before markup |
+| `chargedMicroUsd` | What the wallet is charged, after markup. `null` when the call is not wallet-billed |
+| `estimated` | `true` when the charge used the Gateway's estimate because the provider reported no cost |
+| `priceSource` | `operator`, `catalog` or `configured_rate` |
+| `exceededMaxCost` | `true` when the provider-reported charge went above the caller's `x-ryu-max-cost-micro-usd` |
+| `ledgerRefId` | The ledger reference of the charge. It equals `ryuCallId`, except for a Composio execution, which keeps its `composio:<receipt>` reference |
+
+These Treg protections apply on every tier:
+
+- **Idempotency is scoped per caller.** The Gateway reaches Treg with one service token, so a
+  caller's `idempotencyKey` is hashed together with its organization, the calling app and the
+  endpoint before it is sent. Two organizations, or two apps in one organization, that pick the same
+  key never share a stored result. A retry must reuse the same key on the same endpoint.
+- **Responses are size-capped.** A Treg response larger than `[treg] max_response_bytes` (default
+  2 MiB) fails with `502 provider_response_too_large`. Treg has already run the call, so it is
+  charged like any other call (the error carries `charged_micro_usd`); only the body is not
+  returned. Ask for smaller pages rather than retrying the same request.
+- **Platform-blocked and own-account endpoints are refused.** A Treg endpoint its catalog marks as
+  platform-blocked, or scoped to the caller's own account (such as a user's Slack workspace), cannot
+  run on the shared service token. The call is refused with `403 tool_not_servable` whether or not
+  the provider was named, and a `[treg.prices]` row does not change that. Under `builtin` routing the
+  call goes to Composio instead.
+- **A response cut mid-stream is still charged.** If Treg answers and then the connection drops
+  before the body is read, the call has already run and been metered. It is charged like any other
+  call and fails with `502 provider_body_unreadable` (the error carries `charged_micro_usd`).
+
+A Composio tool ID must be a plain action slug (letters, digits, `_` and `-`); anything else is
+refused with `400` before a request is made.
+
+```toml
+[treg]
+max_response_bytes = 2097152   # also RYU_TREG_MAX_RESPONSE_BYTES
+price_cache_secs = 600         # how long a catalog estimate is reused
+
+[treg.prices]                  # raw micro-USD per call, before markup
+"<endpoint-id>" = 15000
+```
+
+A Gateway without `[credits]` (a standalone install on its own provider accounts) skips the price,
+ceiling and hold steps.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/gateway/tools" />
+  <DocCard href="/docs/gateway/configuration-access" />
+  <DocCard href="/docs/providers/upstream-routers" />
+  <DocCard href="/docs/billing/metering" />
+</Cards>

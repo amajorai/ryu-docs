@@ -1,0 +1,163 @@
+---
+title: AG-UI protocol
+description: Serve a Ryu SDK agent to CopilotKit and other AG-UI frontends, or convert agent and durable-run streams into AG-UI events.
+tags: ["ag-ui", "copilotkit", "agent", "sse", "sdk"]
+---
+
+`@ryuhq/sdk/agui` adds [AG-UI](https://docs.ag-ui.com) support to SDK agents. AG-UI is the
+event protocol that agent frontends such as CopilotKit use. The client POSTs a `RunAgentInput`
+and reads a Server-Sent Events stream of typed events. Use this module to:
+
+- give an `Agent` an HTTP endpoint any AG-UI client can call, with tool approvals as interrupts
+  that the client can resume, and
+- convert an SDK `AgentEvent` stream, or a durable [harness](/docs/extend/develop/sdk/harness)
+  run, into AG-UI events for your own transport.
+
+<Callout type="warn">
+  `@ryuhq/sdk/agui` is newer than `@ryuhq/sdk` 0.3.0, the current npm release.
+  [What you can install today](/docs/standalone/sdk/choose-an-sdk#what-you-can-install-today) lists
+  what each published version includes.
+</Callout>
+
+```typescript
+import { Agent } from "@ryuhq/sdk/agent";
+import { toAgUiHandler } from "@ryuhq/sdk/agui";
+
+const agent = new Agent({
+  name: "ops",
+  model: "openai/gpt-4o",
+  instructions: "You help with deployments.",
+  tools: { deploy },
+});
+
+const handler = toAgUiHandler(agent);
+
+// Bun / Deno / Workers / Next.js route handlers all take a Fetch handler.
+Bun.serve({ port: 8787, fetch: (request) => handler(request) });
+```
+
+Point the frontend's generic AG-UI HTTP agent (for example CopilotKit's `HttpAgent`) at that
+URL. Inference and tools still run through the agent's own Ryu node, as in any SDK agent.
+
+The handler does not authenticate callers. Anyone who can reach the route can run the agent with
+its node credentials and answer its approvals, so mount it behind your app's own authentication.
+
+## Event mapping
+
+| Ryu event | AG-UI events |
+|---|---|
+| Run start | `RUN_STARTED` (`threadId`, `runId`, and `parentRunId` on a resumed run) |
+| Model text | `TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END` |
+| Model output segment | `STEP_STARTED` / `STEP_FINISHED` (`step-1`, `step-2`, …); a tool result closes the segment |
+| `tool_call` | `TOOL_CALL_START` (with `parentMessageId`), `TOOL_CALL_ARGS`, `TOOL_CALL_END` |
+| `tool_result` | `TOOL_CALL_RESULT` (`content` is the output, JSON-encoded unless it is a string) |
+| `approval_requested` | `CUSTOM` `on_interrupt`, then `RUN_FINISHED` with `outcome: "interrupt"` |
+| `auth_required` (account connection) | `CUSTOM` `on_interrupt` with `reason: "auth_required"` and the connect URL, then `RUN_FINISHED` with `outcome: "interrupt"` |
+| `output_repair` | `CUSTOM` `ryu.output_repair` |
+| `result` | `MESSAGES_SNAPSHOT`, then `RUN_FINISHED` with `outcome: "success"` and `result: { text, steps, output?, usage? }` |
+| `error` | `RUN_ERROR` (`code` is kept when the SDK sets one) |
+
+`MESSAGES_SNAPSHOT` holds the client's messages plus every assistant and tool message the run
+produced, so a client can replace its transcript in one step.
+
+## Approvals and resuming
+
+When a tool marked `needsApproval`, or a Core permission request on a `sessionId` agent, needs a
+decision, the handler keeps the run paused in memory and ends the response:
+
+```json
+{ "type": "CUSTOM", "name": "on_interrupt",
+  "value": { "id": "sdk_approval_…", "reason": "tool_approval",
+             "payload": { "approvalId": "sdk_approval_…", "toolName": "deploy",
+                          "toolCallId": "call_1", "input": { "env": "prod" },
+                          "summary": "The agent requested permission to run deploy.",
+                          "options": [] } } }
+{ "type": "RUN_FINISHED", "threadId": "t1", "runId": "r1", "outcome": "interrupt",
+  "interrupt": { "id": "sdk_approval_…", "reason": "tool_approval", "payload": { … } } }
+```
+
+To continue, POST the same thread with a `resume` entry. The paused run resumes and streams into
+the new response:
+
+```json
+{ "threadId": "t1", "runId": "r2", "messages": [],
+  "resume": { "interruptId": "sdk_approval_…", "payload": { "approved": true } } }
+```
+
+CopilotKit's `forwardedProps: { command: { resume: … } }` form is also accepted. Without an
+`interruptId`, the thread's paused run is used. An `interruptId` only resumes the thread that
+raised it, so a request that names a different `threadId` gets `interrupt_not_found`. The
+payload can be:
+
+| Payload | Decision |
+|---|---|
+| `true`, `"approve"`, `"allow"`, `"yes"`, `{ "approved": true }` | Approve |
+| `{ "optionId": "…" }`, or a string equal to one of the request's `options` ids | Pick that permission option (harness runs) |
+| `false`, `"deny"`, `"no"`, `{ "approved": false }`, or anything else | Deny |
+
+Unrecognized payloads always deny, so a typo can never approve a tool.
+
+Paused runs live in the handler's process. Unless resumed within `interruptTimeoutMs` (default
+10 minutes), the tool is denied and the run finishes in the background. A resume that matches no
+paused run gets `RUN_ERROR` with `code: "interrupt_not_found"`. If the agent already has an
+`approvalHandler`, that handler decides and no interrupt is raised. If the client disconnects
+while a run is streaming, the handler stops the run and denies any approval it is waiting on.
+
+An `auth_required` interrupt ends the run, because the tool needs an account connection first.
+Once the user has connected the account, resume it like an approval (same thread, with the
+conversation in `messages`). The handler then starts a new run of the thread, with the paused
+run's id as `parentRunId`.
+
+## Shared state
+
+Pass `reduceState` to keep AG-UI shared state up to date as the agent works. The handler sends the
+client's `state` as `STATE_SNAPSHOT` at the start of the run. When the reducer returns a different
+state, the handler sends a `STATE_DELTA` with an RFC 6902 JSON Patch:
+
+```typescript
+const handler = toAgUiHandler(agent, {
+  reduceState: (state, event) =>
+    event.type === "tool_result" ? { lastTool: event.name } : state,
+});
+```
+
+`diffJsonState(prev, next)` and `applyJsonPatch(doc, patch)` are exported for building or
+applying patches yourself.
+
+## Input handling
+
+- `messages` become the agent transcript: user, system and developer messages, and assistant
+  messages with `toolCalls` and tool results. Text parts of multi-part user content are joined.
+- `context` entries are added as a user message just before the last user turn.
+- A `sessionId` agent runs in Core, so only the last user message is sent as the prompt, with
+  the `context` entries placed ahead of it.
+- An agent with [`handoff()`](/docs/extend/develop/sdk/multi-agent) tools follows its
+  handoffs within the run. Approvals inside a handoff target are decided by that target's
+  own `approvalHandler` and do not become interrupts.
+- Frontend-declared `tools` are accepted but not exposed to the model. Give the agent
+  SDK tools instead.
+- A non-POST request gets `405`. A body that is not a valid `RunAgentInput` gets `400`.
+
+## Converting streams yourself
+
+```typescript
+import { agentEventsToAgUi, encodeAgUiEvent, harnessEventsToAgUi } from "@ryuhq/sdk/agui";
+import { HarnessAPI } from "@ryuhq/client";
+
+for await (const event of agentEventsToAgUi(agent.stream("Plan the release"), {
+  threadId: "t1",
+  runId: "r1",
+})) {
+  socket.send(encodeAgUiEvent(event));
+}
+
+const harness = new HarnessAPI({ baseUrl: coreUrl, token });
+for await (const event of harnessEventsToAgUi(harness.events(runId))) {
+  // threadId/runId default to the harness session and run ids
+}
+```
+
+Durable-run housekeeping events (`input_accepted`, `checkpoint`, `ui_frame`) are passed through
+as `RAW` events with `source: "ryu.harness"`. `run_canceled` and `run_interrupted` become
+`RUN_ERROR` with codes `canceled` and `interrupted`. `AgUiEventMapper` gives you the same mapping
+one event at a time, and `parseAgUiStream` decodes an AG-UI SSE body.

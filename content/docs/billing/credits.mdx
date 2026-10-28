@@ -1,6 +1,6 @@
 ---
-title: "Credits & AI pools"
-description: "How Polar-backed prepaid credits, included pools, deposit fees, and organization usage work."
+title: "Credits and AI Pools"
+description: "How Polar-backed prepaid credits, included pools, deposit fees, top-ups, and spend controls work."
 ---
 
 Ryu Cloud uses **prepaid USD credits**. Polar keeps the authoritative credit
@@ -9,63 +9,154 @@ customer state, and applies the product access decision. Your balance is spent
 down as work runs. When it reaches zero, managed inference pauses or falls back
 to a free local model; Ryu does not bill you after the fact.
 
-## Polar API compatibility
-
-Ryu currently pins every outbound Polar API request to the stable `2026-04`
-contract with Polar's `Polar-Version` header. The pin covers billing, checkout,
-customer, seat, credit-meter, and subscription operations, and is independent
-of the installed Polar SDK package version. This keeps the billing contract
-stable while the provider releases newer date-based API versions.
+Before a managed completion starts, its output is capped at what the remaining
+balance can pay for after the prompt's estimated cost. That cap is priced before
+the call from an estimate of the prompt and from the Gateway's per-model price
+or flat rate. The remaining balance accounts for your most recent charge and for
+requests still running, so parallel requests cannot each spend the same balance.
+The charge afterwards uses the real token counts, or the provider-reported cost
+on OpenRouter routes, so a request can finish past zero by the difference. The
+next managed request then stops or falls back until the balance is restored.
 
 ## Who owns the balance
+
+For one-time or monthly funding restricted to standalone services, see
+[Standalone service credits](/docs/billing/standalone-credits). These purchased
+credits have a separate spending scope from workspace allowances and general
+top-ups, while sharing the organization's usage meter.
 
 Polar owns subscriptions, credit grants, top-up products, usage meters, and the
 provider-side balance. Ryu keeps a small synchronized projection so the desktop,
 web, and gateway can render and enforce the same organization state. A signed
 provider event or a fresh provider-state read is authoritative; a stale browser
-value is never permission to spend.
+value is never permission to spend. Ryu pins Polar API requests to the `2026-04` contract
+with the `Polar-Version` header.
 
-Polar does not block an action automatically when a meter reaches zero. Ryu
-therefore still checks the balance before managed work and stops or falls back
-according to the active product policy. This is enforcement, not a second
+Polar does not block an action when a meter reaches zero. Ryu checks the
+balance before managed work and stops or falls back by the active product policy. This is enforcement, not a second
 financial ledger.
 
-Promotional and referral credits for allocated providers use separate Polar
-meters. A grant is recorded on the meter for its own Ryu tier, and only usage
-served by that matching provider can spend it. When that allocation is empty,
-the request may continue against the shared Polar meter if the organization has
-plan or purchased credit. Ryu keeps the grant expiry and routing metadata as a
-small local projection so the gateway and the Credits view can enforce and
-explain the same provider restriction; the balance itself remains Polar-owned.
+## Free credit
+
+Promotional, referral, and challenge credit is **free credit**. You never pick
+it: Ryu spends it automatically, before any other credit, whenever it can.
+
+- The model picker has one managed provider, **Ryu Router**. You choose models
+  by their usual names, such as `anthropic/claude-sonnet-4.5` or `openai/o3`.
+  Ryu never shows which provider served a request.
+- While you have free credit, models it can pay for carry a small **Free** tag
+  in the Ryu Router list. Picking a Free model spends your free credit first,
+  then your plan credit, then purchased credit. Any free credit you hold can pay
+  for any Free model, whichever offer or referral it came from.
+- Models without the tag use your plan and purchased credit as usual. Free
+  credit never pays for them, or for anything you run on your own provider key.
+- The set of Free models changes over time. Ryu adds models, and a model loses
+  its tag when Ryu can no longer serve it for free. The desktop app picks up
+  changes within about ten minutes, with no app update.
+- When the default **Auto** model is selected and you have free credit, Ryu
+  picks a Free model for the request.
+- Responses, the `x-routed-model` header, usage, and the credit ledger always
+  show the model id you picked. The `x-provider` header reads `ryu`.
+- If a Free model is briefly unavailable, Ryu serves the request through Ryu
+  Router as usual instead of failing it. That request is paid with plan or
+  purchased credit.
+
+Free credit can expire. The Credits view shows one **Free credit** balance with
+the nearest expiry date. In Polar-billed organizations, free credit is also
+held on separate Polar meters, and the balance itself remains Polar-owned.
+
+## Managed tool providers
+
+Agent tool calls that run through a managed provider spend the organization's
+shared credits. Treg is the default provider and Composio the fallback:
+
+- **Treg** answers every call its catalog can serve. Each call is billed at the
+  cost Treg reports for that endpoint, passed through. Endpoint prices differ, so
+  the Integrations Store shows each endpoint's listed price where Treg publishes one.
+  A call to an endpoint with no known price is refused rather than run free.
+- **Composio** answers what Treg cannot: connected user accounts (OAuth), toolkit
+  actions Treg does not list, and trigger events. It is billed at the
+  [Composio rates](#composio-usage-and-zero-data-retention) below.
+
+A tool or integration you pin to a specific provider always uses that provider.
+
+## Composio usage and zero data retention
+
+Managed Composio usage spends the organization's shared credits. Tool calls and
+delivered trigger events have separate rates. One delivered event is billed once,
+even when it starts several agents or workflows. Polling is not a delivered event.
+
+| Usage | Managed OAuth apps | Own OAuth app or API credentials |
+|---|---:|---:|
+| Tool calls | $0.0005 per call | $0.0003 per call |
+| Delivered trigger events | $0.005 per event | $0.003 per event |
+| Direct execution outside a Session | +$0.0001 per call | +$0.0001 per call |
+| Enabled zero data retention add-on | +$0.0001 per tool call | +$0.0001 per tool call |
+
+Premium or Instant tools using Composio's provider accounts carry a separate
+provider charge. Ryu uses the exact reported USD amount, which already includes
+Composio's provider fee. It does not estimate premium charges from toolkit names
+or add that fee a second time. Tool discovery and meta operations are free.
+Other enabled Composio add-ons can add to the call price.
+
+These are usage rates, not a free allowance for each Ryu organization. Composio's
+allowances and monthly plan credit belong to the upstream Composio account.
+Its Hobby plan stops at its caps; Composio Pro is required for paid overages.
+
+OpenRouter ZDR is required for every Ryu plan. Requests exclude data-collecting
+providers and restrict inference to ZDR endpoints. Credits use the actual reported
+provider cost, with no separate Ryu ZDR surcharge.
+
+<Callout type="warn">
+  Composio ZDR is behind a global rollout flag that is off by default. While it is
+  off, no ZDR surcharge is billed. Once it is on, the $0.0001 tool-call surcharge
+  applies equally to every organization, with no user opt-out or plan gate.
+  **Gateway > Integrations** shows the current rollout status. Direct managed calls
+  cost $0.0006 before rollout and $0.0007 after rollout, before premium charges.
+</Callout>
+
+ZDR has limited coverage. Composio excludes triggers, sandbox, staged files, and
+managed OAuth apps on Pro from full ZDR coverage. Instant tools do not store their
+payloads at Composio, but their underlying providers may retain data. Audit and
+billing metadata remain available. OpenRouter's ZDR option restricts inference to
+eligible provider endpoints; it does not govern tools, plugins, or Ryu's own logs.
+
+See [Composio pricing](https://composio.dev/pricing),
+[Composio ZDR coverage](https://docs.composio.dev/docs/security/zero-data-retention),
+and [Composio Instant tools](https://docs.composio.dev/docs/instant-tools).
 
 ## How credits work
 
-1. **Included pool** — Teams and Business receive one shared grant each billing
-   period. It is use-it-or-lose-it and does not roll over; Teams grows at each
-   additional five billed seats, while Business grants one $100 pool for five
+1. **Included pool:** Teams and Business receive one shared grant each billing
+   period. It is use-it-or-lose-it and does not roll over; Teams adds $50 for each
+   started five-seat bundle, while Business grants one $100 pool for five
    through nine seats and adds another at each completed five-seat bundle.
-2. **Top-up balance** — you can buy additional credits. Top-ups roll over and
-   never expire.
-3. **Spend order** — matching provider-specific credit is spent first, then the
+2. **Top-up balance:** an organization owner or billing manager can buy additional
+   credits without a managed plan. No-plan purchases use the 27% base deposit
+   fee with a $5 minimum; active managed plans use their discounted rate.
+   Top-ups roll over and never expire. A positive prepaid balance enables
+   Ryu-managed Gateway inference without a monthly pool or a separate Ryu node;
+   requests stop when eligible balance is exhausted. This balance does not grant
+   unrelated product entitlements.
+3. **Spend order:** free credit is spent first on models marked Free, then the
    expiring included plan pool, then redeemed gift balance, then your paid
    rollover top-up balance.
 
 The Credits view keeps these sources separate. **Available now** is the total;
-it includes the remaining plan credits, gift balance, on-demand credits, and any
-provider-specific allocations. The view also shows each provider-specific
-allocation on its own row, including how much is left and any expiry date.
+it includes your free credit, remaining plan credits, gift balance, and
+on-demand credits. Free credit is shown as one balance with its nearest expiry
+date.
 
 | Balance | What it means | Where it can be used |
 |---|---|---|
-| **Free-provider credits** | A promotional allocation funded for one free provider | Only the allocated free provider shown on that row; it cannot be moved to another provider |
+| **Free credit** | Promotional, referral, and challenge credit | Used automatically, first, on Ryu Router models marked Free; never on other models or your own provider keys |
 | **Plan credits** | The remaining included credit from the current plan | Managed providers and eligible first-party metered work; resets at the next billing period and does not roll over |
 | **Gift balance** | A credit gift or gift card redeemed to your personal workspace | Credit gifts expire 12 months after redemption; gift cards do not. Gift balance is spent before paid top-ups |
-| **On-demand credits** | Credit purchased by an organization owner or admin | Managed providers and eligible first-party metered work; paid top-ups roll over between billing periods |
+| **On-demand credits** | Credit purchased by an organization owner or billing manager | Managed Gateway inference; other first-party products only where their own access and metering are enabled; paid top-ups roll over between billing periods |
 
-Info icons beside each balance explain the rule in the product. Matching
-provider-specific credit is spent first, followed by plan credit and then
-on-demand credit. Provider-specific balances are part of the total, not an
-extra balance to add on top.
+Info icons beside each balance explain the rule in the product. Free credit is
+spent first on models marked Free, followed by plan credit and then on-demand
+credit. Free credit is part of the total, not an extra balance to add on top.
 
 Before payment, the Credits page shows a **Current → After top-up** preview with
 your wallet balance and the amount that will be added. Continue to checkout only
@@ -81,32 +172,40 @@ Checkout APIs also require an `Idempotency-Key` header. Keep the same key when
 retrying a request so a timeout cannot create a second checkout; the web and
 desktop clients generate this header for you.
 
-After hosted checkout, Ryu returns to a receipt page with a printed payment confirmation. The
+After checkout, Ryu returns to a receipt printer that feeds the payment confirmation
+through its output slot, then shows **Receipt ready**. Reduced-motion preferences show the paper
+immediately. The animation confirms the receipt presentation; wallet settlement can still be syncing. The
 signed Polar webhook is the normal fast path. The return page also sends the opaque checkout id to
 Ryu, which re-reads the provider checkout and paid order before applying the same idempotent ledger
-write; this closes the localhost/sandbox case where Polar cannot deliver a webhook to a development
-server. Until the provider order is visible, the receipt says the wallet is syncing instead of
+write, so credit still lands if the webhook is delayed. Until the provider order is visible, the receipt says the wallet is syncing instead of
 claiming credit that has not been verified. The Credits page refreshes the provider state when the
 payment settles.
 
-Polar's current webhook setup returns a Standard Webhooks secret beginning with `whsec_`. Store and
-pass that value exactly, including its prefix; it is already an encoded signing key. Older Ryu
-deployments may still have a raw legacy secret, which remains supported. Both formats are verified
-against the unparsed body and signed delivery headers before any billing state changes.
+A top-up adds wallet credit without changing your plan, so returning from it shows only the
+receipt, not the plan confirmation and welcome card that follow a plan purchase.
 
 Closing the receipt page stops its local verification retries. Reopening the receipt
 or refreshing Billing can check again; leaving the page does not cancel a payment.
 
 Top-ups require a valid provider settlement amount. Missing or malformed payment amounts do not grant wallet credit, and the credited amount cannot exceed the verified settlement. Checkout metadata alone is insufficient to increase a balance.
 
+Ryu's automated fraud checks pause manual top-ups (new checkouts) for up to 24
+hours when an organization or the paying account shows a pattern typical of
+card testing, such as several small top-ups within an hour or repeated failed
+automatic top-ups. While paused, a top-up request returns `429` with
+`code: "topup_temporarily_unavailable"` and a `Retry-After` header; credit you
+already hold is unaffected. A Ryu reviewer looks at every pause. Contact support
+if you think one is a mistake: when a reviewer agrees, the pause ends at once and
+the same check does not pause your organization again for the period they set.
+
 ## Included pool
 
 | Plan | Monthly pool |
 |---|---:|
 | Free | $0 |
-| Pro | **$15/mo for one personal workspace** |
+| Pro | **$14/mo for one personal workspace** |
 | Max | **$30/mo for one personal workspace** |
-| Teams | **$50/mo at five billed seats; +$50 per additional five billed seats, pooled across the organization** |
+| Teams | **$50/mo for each started five-seat bundle ($50 at 5 billed seats, $100 at 6–10), pooled across the organization** |
 | Business | **$100/mo for 5–9 billed seats; +$100 at each completed five-seat bundle, pooled across the organization** |
 | Enterprise | Contracted |
 
@@ -115,8 +214,20 @@ separately issued private individual offer uses its own fixed pool and recorded
 pricing version; changing the public parent-plan price does not rewrite that
 private contract.
 
-A Major Pass and the local desktop license do not include managed inference and
-cannot open a managed-credit top-up. Top-ups require an active managed plan.
+A Major Pass and the local desktop license do not include a monthly managed
+credit pool. Owners and billing managers can still buy manual prepaid credits for managed
+Gateway use. Automatic top-up remains limited to organizations with an active
+managed plan.
+
+The deposit fee is **26.5% on Pro** and **26% on Max, Teams, and Business**, with
+a **$5 minimum**. Without a managed plan, the base fee is **27% with the same
+$5 minimum**. The fee is added to the amount credited: a $5 top-up credits $5
+and charges $10 at the minimum fee. This fee covers provider funding and
+payment costs; model usage itself is metered at cost with no per-token markup.
+OpenRouter routes bill the provider-reported cost. Other routes bill from the
+Gateway's per-model price table, or from a flat estimate recorded as estimated
+on the charge's credit ledger entry; see
+[Metering rates](/docs/billing/metering#models).
 
 The included pool is attached to the organization's pricing version and shared
 across its seats, workflows, and agents. It is calculated from **billed** seats,
@@ -129,17 +240,69 @@ organizations keep the snapshot attached to their agreement.
 
 Teams and Business included pools are the organization's unrestricted subscription balance. They
 can fund eligible managed provider inference and first-party metered work such
-as tool calls, media, and sandbox runtime when those surfaces are enabled for
-the deployment. The pool is shared across the organization; it is not locked to
-one agent.
+as tool calls, media, sandbox runtime, and Ryu-hosted services when those
+surfaces are enabled for the deployment. The pool is shared across the
+organization; it is not locked to one agent.
+
+### What a monthly pool roughly buys
+
+The [pricing page](https://ryuhq.com/pricing) shows how far each public plan's pool goes if you
+spend all of it on one kind of usage. These are estimates: credits are shared
+across all your usage, so spending on one thing leaves less for the others.
+
+| Plan pool | Agent steps | Small Box running hours | Composio tool calls |
+|---|---:|---:|---:|
+| Pro, $14 | ~9,000 | ~560 | ~28,000 |
+| Max, $30 | ~19,000 | ~1,200 | ~60,000 |
+| Teams, $50 per 5 seats | ~32,000 | ~2,000 | ~100,000 |
+| Business, $100 per full 5 seats | ~64,000 | ~4,000 | ~200,000 |
+
+An agent step here is 20k input tokens, 70% of them cached, plus 1k output tokens
+on DeepSeek V4.1 Flash, about $0.0015 a step. Box hours use the current small
+Box rate (2 vCPU and 4 GiB at $0.0250 an hour while running), and tool calls use
+the managed-app Composio rate of $0.0005 a call.
 
 ## What credits cover
 
 Credits cover managed model inference, agent tool calls, image/video generation,
-audio, voice recognition, and sandbox compute. Model usage is metered at cost by
-default; a provider-level billing policy can explicitly select raw-cost
-pass-through or inherit the Gateway's configured markup. See
+audio, voice recognition, sandbox compute, and Ryu-hosted Box, Notify, Passport,
+Connect, and Messaging usage, plus Mail sends beyond a paid plan's allowance. Model usage is
+metered at cost by default (provider-reported cost where the provider reports
+one, otherwise the Gateway's configured per-model price or a flat estimate); a
+provider-level billing policy can explicitly select raw-cost pass-through or
+inherit the Gateway's configured markup. See
 [Metering rates](/docs/billing/metering) for the current unit details.
+
+### Ryu-hosted service usage
+
+Hosted service usage is settled hourly from each service's usage report and
+charged with no pool, so the included plan pool is spent first, then gift
+balance, then top-up credit. Free allowances are per organization per calendar
+month (UTC). Self-hosted services are never billed by Ryu.
+
+| Service | Rate | Free each month |
+|---|---|---|
+| Box | Small, default, or large: **$0.025, $0.04 or $0.07 per hour** while running, per minute with a 5-minute minimum per start (a resume within the hour already paid owes no new minimum); **$0.05** per GiB-month of saved workspaces and snapshots | 25 GiB of Box storage per organization on a paid plan, 10 GiB without one |
+| Notify | **$0.10** per 1,000 accepted events | 10,000 events |
+| Passport | **$0.10** per connection-month (30 days) and **$0.10** per 1,000 upstream fetches | 5 connection-months and 10,000 fetches |
+| Connect | Each direct Composio execution at the [Composio rates](#composio-usage-and-zero-data-retention); each direct call of a toolkit Connect serves natively at **$0.40** per 1,000 calls (a native call Ryu Core makes through Connect is charged as a Composio tool call) | None |
+| Mail | **$1.00** per 1,000 recipients beyond a paid plan's monthly allowance | The plan's allowance |
+| Messaging | Each message and 30-day phone number lease at the [AWS End User Messaging price](https://aws.amazon.com/end-user-messaging/pricing/), with no markup | None |
+
+Box create and resume from the Ryu dashboard need a plan pool or a positive
+balance, and running Boxes are stopped within minutes when credits run out, even
+ones started through the Box service's own API. Notify, Passport, and Connect keep working and can
+take the balance below zero; low-balance alerts and automatic top-up apply.
+Mail overage is charged only from a positive balance; otherwise a send beyond
+the allowance is refused. Messaging is charged per message rather than hourly:
+each send or lease holds its maximum price first and is refused when the
+available balance cannot cover the hold, so it never goes below zero. See
+[Metering rates](/docs/billing/metering#ryu-hosted-services).
+
+
+A Claude Code or Codex task that runs on your own Claude or ChatGPT plan uses that plan's usage,
+not Ryu credits. When such a task runs in a Ryu Box, the Box time is still billed in Ryu credits.
+See [Cloud sessions on your own plan](/docs/surfaces/desktop/user-guide/cloud-sessions-on-your-plan).
 
 ## When credits run out in chat
 
@@ -157,112 +320,8 @@ a **Retry** action for after you restore capacity or change models.
 Sending a different follow-up also clears the stopped error state, so the
 conversation does not remain locked after a provider rejects one turn.
 
-## Usage analytics
+## Top-ups, deposit fees, and moving credit
 
-In the desktop app, open **Settings → Usage** to see the credit ledger alongside
-usage analytics. Choose **You**, **Organization**, or **This server**, then narrow
-the view by date range, time resolution, provider, or model.
-
-The dashboard includes activity-over-time, consumption-source, provider, model,
-feature, and activity-rhythm charts. In the activity-over-time card, switch between
-**Requests**, **Tokens**, **Errors**, and **Credit spend** so the selected metric gets
-its own readable scale and tooltip. **Credit spend** counts only recorded credit
-debits. BYOK, local, and self-hosted activity remains visible for comparison but
-is shown as **Not billed** when Ryu has no managed-cost record for it.
-
-Organization and server charts use complete, server-owned 15-minute rollups rather
-than totals inferred from a capped raw-event page. The desktop combines those
-buckets into the selected resolution and compacts very long chart series for
-rendering without changing the KPI, source, provider, model, or feature totals.
-Organization results include organization-wide servers plus the signed-in member's
-team and personal servers; raw server audit and rollup reads remain owner-only.
-
-### Subscription account view
-
-The same **Usage** page also shows a live card for every ChatGPT, Claude, or GitHub
-Copilot subscription account connected through Ryu on the selected server. Accounts
-stay grouped under their provider, and each row shows the plan, whether it is
-selected for you or the shared Gateway, every provider-reported usage window, reset
-time, and any provider-reported balance or extra-usage meter.
-
-This is a view of the provider's own limits, not an invoice. API-equivalent token
-cost is a comparison metric; direct subscription traffic does not debit Ryu credits,
-and Ryu cannot infer the provider's subscription bill from a percentage-used window.
-If a provider does not expose a readable account window, the row says whether the
-account needs reconnection, has no metered plan, is rate-limited, or is unavailable.
-Usage is read per saved account without switching the account used for the next chat
-turn.
-
-## Managed server billing and sidebar warnings
-
-Managed-server inference uses the **active organization's wallet**. The server is the
-execution path, not a separate billing account. When a managed server connects, its
-organization binding tells the gateway which organization balance to check and
-debit. All managed servers in that organization therefore draw from the same
-wallet. BYOK provider balances remain with the provider credentials configured on
-the server and are not Ryu credit balances.
-
-The desktop shows the organization wallet below the active managed server in the
-sidebar. A subscription with an included pool shows a low-credit warning when
-20% or less of that pool remains, and the warning includes the next subscription
-reset when the server provides one. Select **Add credits** to open the Credits
-settings. Switching to a local or BYOK server hides the managed-wallet warning.
-
-## Deposit fees
-
-The one-time deposit fee covers upstream credit purchase and payment handling.
-The fee is charged **on top of** the amount deposited, and the full face value
-is credited to your wallet.
-
-From **September 18, 2026**, the economics reserve 9% Singapore GST on Ryu's
-OpenRouter credit-purchase subtotal when that upstream tax is not recoverable.
-This provider cost is included in the deposit-fee guard; any tax that applies to
-your own checkout is itemized separately by the payment provider.
-
-| Plan | Fee rate | Minimum |
-|---|---:|---:|
-| Pro | **26.5%** | **$5** |
-| Max | **26%** | **$5** |
-| Teams | **26%** | **$5** |
-| Business | **26%** | **$5** |
-| Enterprise | Contracted | Contracted |
-
-The fee is the greater of the percentage and the minimum. A $100 Teams or Business top-up
-charges $126 and credits the wallet the full $100. A $5 face-value top-up charges
-$10 at the base rate. A negotiated seat allowance
-does not change the deposit-fee tier.
-
-## Auto-recharge and spend controls
-
-Teams, Business, and Enterprise organizations can enable automatic top-up, set a monthly
-cap, and configure low-balance alerts from **Organization settings → Billing → Spend
-controls**. The tab shows the amount charged this month and keeps the refill bounded by the
-monthly cap. Each agent run may also have a per-run dollar budget cap.
-
-Automatic top-up uses a fixed, verified one-time payment product. A missing or zero monthly cap
-uses a bounded default of ten refill amounts; a configured cap cannot exceed one hundred refill
-amounts per calendar month. If the payment provider, product price, or accounting response cannot
-be verified, Ryu does not issue the credit and managed provider calls pause until the state is
-reconciled.
-
-Automatic top-up charges only the payment customer bound to the organization. Ryu verifies that
-binding again before each charge. If a saved setup points to a different or missing customer,
-automatic top-up is disabled and must be configured again after the organization's billing
-identity is reconciled. A shared payer email does not authorize another organization's card.
-
-Organization owners and admins manage top-ups and auto-recharge. Polar records
-the credit movement; Ryu stores only the organization policy that decides when
-an automatic refill may be requested. The balance is shared by the organization,
-not split into individual seat wallets.
-
-## Changing or cancelling
-
-Changing or cancelling a plan never claws back top-up credits. Included credits
-follow the effective plan and seat change for the remainder of the current
-billing period; credits already spent are never returned. Cancellation stops
-future included grants and leaves top-up balance available. See [Changing or
-cancelling your plan](/docs/billing/plan-changes).
-
-Campaign offer pages refresh their visible seat count without reloading the page.
-Checks pause while the page is hidden and refresh when you return. During temporary
-service failures, the card keeps its last successful count.
+See [Top-ups and Deposit Fees](/docs/billing/top-ups) for the fee schedule, top-ups, spend
+controls, and moving credit; [plan changes](/docs/billing/plan-changes#what-changes-with-your-plan)
+for credits when a plan changes; and [Usage Analytics](/docs/billing/usage-analytics) for history.

@@ -1,25 +1,26 @@
 ---
 title: "Rust SDK (ryu-sdk)"
-description: "The shared Rust kernel - manifest validation, the RunnableKind model, and the gateway-mandatory model client"
+description: "Reference for the ryu-sdk Rust kernel: manifest validation, the RunnableKind model, and the Gateway-mandatory model and embedding clients."
 ---
 
-`sdk/core` (`crates/sdk/core/`) is the **shared Rust kernel** every Ryu language binding builds on. It
-is not a Rust-only SDK; it is the one implementation of the parts that must never drift across
-languages:
+The `ryu-sdk` crate (`crates/sdk/core/`) is the shared Rust kernel that every Ryu language binding
+builds on. It holds the one implementation of the parts that must not drift across languages:
 
-- **Shared local logic** (bound out via FFI): the `manifest.json` manifest / Runnable model + its
-  validation (`manifest.rs`, `runnable.rs`) and the gateway egress rules (`gateway.rs`).
-- **Transport** (per-language, contract from OpenAPI): the gateway-mandatory model and embedding
-  clients (`model.rs`, `embedding.rs`) speaking the gateway's OpenAI-compat API.
+- **Shared local logic**, bound out through FFI: the `manifest.json` and Runnable model with its
+  validation (`manifest.rs`, `runnable.rs`), and the Gateway egress rules (`gateway.rs`). The
+  manifest and Runnable types are re-exported from the `ryu-kernel-contracts` crate
+  (`crates/core/kernel-contracts/`), which Core also uses.
+- **Transport**: the Gateway-mandatory model and embedding clients (`model.rs`, `embedding.rs`),
+  which call the Gateway's OpenAI-compatible API.
 
-For the manifest *format* and the full Runnable kind table, see
-[manifest.json manifest](/docs/extend/develop/extensions/plugin-json-manifest) and
-[Plugin API](/docs/extend/develop/sdk/plugin-api). For the Runnable *concept*, see
+For the manifest format and the full Runnable kind table, see
+[Plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest) and
+[Plugin API](/docs/extend/develop/sdk/plugin-api). For the Runnable concept, see
 [the Runnable model](/docs/start-here/architecture/runnable-model). This page documents the Rust
 surface only.
 
 <Callout type="warn">
-  This is the lower-level kernel crate at version `0.2.5`. Most application developers should use a
+  This is the lower-level kernel crate (version `0.4.0`). Most application developers should use a
   client library instead: [`@ryuhq/client`](/docs/extend/develop/sdk/client),
   [`@ryuhq/core-client`](/docs/extend/develop/sdk/core-client), or the
   [Java library](/docs/extend/develop/sdk/java).
@@ -27,18 +28,17 @@ surface only.
 
 ## The Runnable model
 
-`RunnableKind` (`crates/sdk/core/src/runnable.rs`) is the union of every executable thing in Ryu. It
-mirrors `RunnableKind` in `apps/core/src/runnable/mod.rs` byte-for-byte (same
-`#[serde(rename_all = "snake_case")]` wire form), so a manifest authored against this enum
-deserializes identically in Core. The eight kinds and their meaning are documented once on
-[the Runnable model](/docs/start-here/architecture/runnable-model);
-`RunnableKind::as_str()` returns the stable lowercase identifier, and a
-`RunnableMeta { id, name, kind }` is the kind-agnostic identity snapshot.
+`RunnableKind` is the union of every executable thing in Ryu. `ryu-sdk` re-exports it from
+`ryu_kernel_contracts::runnable`, and `apps/core/src/runnable/mod.rs` re-exports the same type, so
+a manifest authored against this enum deserializes identically in Core. The eight kinds are
+documented once on [the Runnable model](/docs/start-here/architecture/runnable-model).
+`RunnableKind::as_str()` returns the stable lowercase identifier. `RunnableMeta { id, name, kind }`
+is the kind-agnostic identity snapshot.
 
 ### Per-kind config and validation
 
-A `RunnableEntry` is one entry inside a manifest: identity fields plus an optional typed `config`
-blob whose required shape is driven by `kind`. Each kind has a dedicated config struct
+A `RunnableEntry` is one entry inside a manifest. It holds identity fields plus an optional
+`config` value whose required shape depends on `kind`. Each kind has a dedicated config struct
 (`AgentConfig`, `WorkflowConfig`, `ToolConfig`, `SkillConfig`, `CompanionConfig`, `ChannelConfig`,
 `EngineConfig`, `PolicyConfig`).
 
@@ -52,10 +52,9 @@ pub struct RunnableEntry {
 ```
 
 `validate_runnable(entry)` enforces each kind's contract and returns a descriptive `String` error
-when it fails. It mirrors `validate_runnable` in Core's
-`apps/core/src/plugin_manifest/schema.rs` (same error substrings, so Core's tests and any binding's
-tests agree). The per-kind required-field table is owned by
-[Plugin API](/docs/extend/develop/sdk/plugin-api); the Rust call site is the same contract:
+when it fails. It is the same function Core uses: `apps/core/src/plugin_manifest/schema.rs`
+re-exports `ryu_kernel_contracts::schema`. The per-kind required-field table lives on
+[Plugin API](/docs/extend/develop/sdk/plugin-api).
 
 ```rust
 use ryu_sdk::{validate_runnable, RunnableEntry, RunnableKind};
@@ -71,8 +70,10 @@ validate_runnable(&entry)?; // Ok(()) - tool has a non-empty slug
 
 ## Manifest validation
 
-`PluginManifest` (`crates/sdk/core/src/manifest.rs`) is the in-memory model of a `manifest.json`,
-mirroring `PluginManifest` in `apps/core/src/plugin_manifest/mod.rs`.
+`PluginManifest` is the in-memory model of a `manifest.json`. It is defined in
+`crates/core/kernel-contracts/src/manifest.rs` and is the same type Core loads. The excerpt below
+shows the identity fields. The full struct also carries `contributes`, `requires`, `targets`, and
+other optional sections.
 
 ```rust
 pub struct PluginManifest {
@@ -82,11 +83,12 @@ pub struct PluginManifest {
     pub runnables: Vec<RunnableEntry>,
     pub permission_grants: Vec<String>,
     pub companion: Option<CompanionSurface>,
+    // ... contributes, requires, targets, and more
 }
 ```
 
-The single entry point for loading an untrusted manifest is `parse_and_validate`, which parses JSON
-then runs full validation (id, semver, every Runnable entry):
+To load an untrusted manifest, call `parse_and_validate`. It parses the JSON, then runs full
+validation:
 
 ```rust
 use ryu_sdk::PluginManifest;
@@ -97,16 +99,24 @@ for meta in manifest.runnable_metas() {
 }
 ```
 
-`validate()` checks three things: `validate_plugin_id` (reverse-domain, no path separators / `..` /
-leading-trailing dots - safe as both an identity key and a filesystem directory name), semver via
-the `semver` crate, and `validate_runnable` for every entry.
+`validate()` runs `validate_plugin_id` (reverse-domain, with no path separators, `..`, or leading
+or trailing dots, so the id is safe as an identity key and a directory name), parses the version
+with the `semver` crate, and runs `validate_runnable` on every entry. It then checks declared
+capabilities, event subscriptions, surface commands, MCP OAuth settings, code sources, the
+declarative HTTP policy, and each `contributes` section.
 
 ### Loading installed plugins
 
-`plugins_dir()` resolves the scan directory exactly as Core does (`RYU_PLUGINS_DIR`, then legacy
-`RYU_APPS_DIR`, then `~/.ryu/plugins`, with a legacy `~/.ryu/apps` fallback). `load_user_plugins()`
-scans it for `manifest.json` (or legacy `ryu.json`) manifests and returns only those that pass
-id/semver/duplicate validation:
+`plugins_dir()` resolves the scan directory the same way Core does: `RYU_PLUGINS_DIR`, then the
+legacy `RYU_APPS_DIR`, then `<data dir>/plugins` (for example `~/.ryu/plugins` on the release
+profile). The data dir is `RYU_DIR`, then the folder chosen in the desktop Storage setting, then
+`~/.ryu` with the profile suffix (`~/.ryu-dev` when `RYU_PROFILE=dev`). An unrecognized
+`RYU_PROFILE` resolves to the release layout instead of failing. The SDK no longer falls back to
+the old `~/.ryu/apps` folder when `~/.ryu/plugins` is missing; set `RYU_APPS_DIR` to keep scanning
+it. `load_user_plugins()` scans it for `manifest.json`, `plugin.json`, or legacy `ryu.json`
+files (first match wins) and returns only manifests that pass id, semver, and duplicate checks.
+Built-in manifests are not on disk. To list every manifest Core loaded, including built-ins, call
+`GET /api/plugins`.
 
 ```rust
 use ryu_sdk::load_user_plugins;
@@ -118,27 +128,26 @@ for manifest in load_user_plugins() {
 
 ### JSON Schema export
 
-`ryu_sdk::json_schema::plugin_manifest_schema()` emits the JSON Schema for `PluginManifest` (derived
-from the Rust types via `schemars`). This is the "validate everywhere, bind only where it pays" path:
-any language can validate a `manifest.json` against this schema without a Rust FFI binding, and the
-schema stays in lockstep with the Rust types.
+`ryu_sdk::json_schema::plugin_manifest_schema()` emits the JSON Schema for `PluginManifest`,
+derived from the Rust types with `schemars`. Any language can validate a `manifest.json` against
+this schema without a Rust FFI binding. The schema stays in lockstep with the Rust types.
 
-## The gateway-mandatory model client
+## The Gateway-mandatory model client
 
-Every model call routes through the Ryu Gateway. The crate enforces this by construction.
+Every model call routes through the Ryu Gateway. The crate enforces this at construction.
 
-`DEFAULT_GATEWAY_URL` is `http://127.0.0.1:7981` (Core 7980 / Gateway 7981). `resolve_gateway_url()`
-reads `RYU_GATEWAY_URL` (falling back to the default); `resolve_gateway_token()` reads
-`RYU_GATEWAY_TOKEN`.
+`DEFAULT_GATEWAY_URL` is `http://127.0.0.1:7981`. `resolve_gateway_url()` reads `RYU_GATEWAY_URL`
+and falls back to the default. `resolve_gateway_token()` reads `RYU_GATEWAY_TOKEN`.
 
-`assert_allowed_egress(base_url)` (`crates/sdk/core/src/gateway.rs`) rejects known direct-provider
-hosts (`api.openai.com`, `api.anthropic.com`, `openrouter.ai`, Google, Cohere, Mistral, Groq,
-Together, Replicate, Perplexity) with an `EgressNotAllowed` error. Loopback, the configured gateway,
-and private addresses are allowed. Provider credentials belong in the Gateway, never in SDK config.
+`assert_allowed_egress(base_url)` (`crates/sdk/core/src/gateway.rs`) rejects a URL that matches the
+blocklist of known direct-provider hosts (`api.openai.com`, `api.anthropic.com`, `openrouter.ai`,
+and the Google, Cohere, Mistral, Groq, Together, Replicate, and Perplexity APIs) with an
+`EgressNotAllowed` error. Any other URL passes, including loopback, the configured Gateway, and
+private addresses. Provider credentials belong in the Gateway, never in SDK config.
 
-`ModelClient` (`crates/sdk/core/src/model.rs`) POSTs to `{base}/v1/chat/completions`. It is
-constructed via `ModelClient::new(model, options)` or the `define_model(model, options)` convenience
-factory (mirroring the TS `defineModel`). The egress check runs at construction time, so a
+`ModelClient` (`crates/sdk/core/src/model.rs`) sends `POST {base}/v1/chat/completions`. Build it
+with `ModelClient::new(model, options)` or the `define_model(model, options)` factory, which
+mirrors the TypeScript `defineModel`. The egress check runs at construction time, so a
 direct-provider base URL fails before any request.
 
 ```rust
@@ -153,7 +162,7 @@ if let Some(usage) = result.usage {
     println!("tokens: {}", usage.total_tokens);
 }
 
-// Streaming (OpenAI-compat SSE, hand-parsed):
+// Streaming (OpenAI-compatible SSE):
 use futures_util::StreamExt;
 let messages = [ChatMessage::user("write a haiku")];
 let mut stream = model.stream(&messages);
@@ -163,18 +172,18 @@ while let Some(delta) = stream.next().await {
 }
 ```
 
-`ChatMessage` has `system` / `user` / `assistant` constructors. `ChatResult` carries `content`, an
-optional `finish_reason`, and optional `Usage`. `ChatDelta` carries an incremental `content` fragment
-and an optional `finish_reason` on the final chunk. `ModelError` distinguishes `Egress` (blocked
-URL), `Transport` (network failure), and `Http { status, url, body }` (non-2xx from the gateway).
+`ChatMessage` has `system`, `user`, and `assistant` constructors. `ChatResult` carries `content`,
+an optional `finish_reason`, and an optional `Usage`. `ChatDelta` carries an incremental `content`
+fragment and an optional `finish_reason` on the final chunk. `ModelError` has three variants:
+`Egress` (blocked URL), `Transport` (network failure), and `Http { status, url, body }` (non-2xx
+from the Gateway).
 
-## The gateway-mandatory embedding client
+## The Gateway-mandatory embedding client
 
-`EmbeddingClient` (`crates/sdk/core/src/embedding.rs`) is the retrieval-side sibling of `ModelClient`.
-It POSTs to `{base}/v1/embeddings` on the gateway and is constructed via
-`EmbeddingClient::new(model, options)` or the `define_embedding(model, options)` factory. The same
-`assert_allowed_egress` rule runs at construction, so a direct-provider base URL is rejected before
-any request, exactly as for chat.
+`EmbeddingClient` (`crates/sdk/core/src/embedding.rs`) sends `POST {base}/v1/embeddings` to the
+Gateway. Build it with `EmbeddingClient::new(model, options)` or the
+`define_embedding(model, options)` factory. The same `assert_allowed_egress` check runs at
+construction, so a direct-provider base URL fails before any request.
 
 ```rust
 use ryu_sdk::{define_embedding, EmbeddingClientOptions};
@@ -186,22 +195,23 @@ for vector in result.vectors() {
 }
 ```
 
-The input is always sent as an array, so one call embeds a single text or a batch. `EmbeddingResult`
-holds `embeddings` (one `Embedding { index, vector }` per input, in input order) plus optional
-`EmbeddingUsage`, with `vectors()` and `first_vector()` convenience accessors. `EmbeddingError`
-mirrors `ModelError` with `Egress`, `Transport`, and `Http { status, url, body }` variants.
+The input is always sent as an array, so one call embeds a single text or a batch. `embed_one(text)`
+returns one vector. `EmbeddingResult` holds `embeddings` (one `Embedding { index, vector }` per
+input, in input order) and an optional `EmbeddingUsage`, with `vectors()` and `first_vector()`
+accessors. `EmbeddingError` has the same `Egress`, `Transport`, and `Http { status, url, body }`
+variants as `ModelError`.
 
 ## OpenAPI codegen (optional)
 
 The canonical OpenAPI specs are vendored under `crates/sdk/core/specs/`
-(`core-openapi.json`, `gateway-openapi.yaml`) as the contract. The crate ships a
-`reqwest` client as the shipping transport; an optional `codegen` Cargo feature can generate a client
-from the vendored spec.
+(`core-openapi.json`, `gateway-openapi.yaml`) as the contract. The crate's transport is a
+hand-written `reqwest` client. An optional `codegen` Cargo feature generates a client from the
+vendored spec.
 
-<Callout type="info">
-  `codegen` is **off by default**: the vendored specs are OpenAPI 3.1, which the `progenitor`
-  generator does not fully support, so the default build never depends on the generator and can never
-  be reddened by a generator change. The spec is still exercised by the `spec_conformance` test.
+<Callout type="warn">
+  `codegen` is off by default. The vendored specs are OpenAPI 3.1, which the `progenitor` generator
+  does not fully support, so the default build does not depend on the generator. The
+  `spec_conformance` test still exercises the spec.
 </Callout>
 
 ## Crate API at a glance
@@ -223,42 +233,26 @@ pub use runnable::{ validate_runnable, AgentConfig, ChannelConfig, CompanionConf
 
 ## Language bindings
 
-The shared local logic (manifest model + validation + egress rules) is implemented once in this
-crate and bound out to other languages, while each target reuses its own first-class HTTP for the
-model transport (the vendored OpenAPI spec is the contract). Three binding crates wrap the same
-`ryu_sdk::*` functions, so manifest rules, the egress blocklist, and the model/embedding transport
-never drift across languages:
+Three binding crates wrap the same `ryu_sdk::*` functions, so manifest rules, the egress blocklist,
+and the model and embedding transport stay identical across languages:
 
 | Crate | Target | Mechanism |
 |---|---|---|
 | `crates/sdk/napi` | TypeScript / JS | napi-rs native addon (keeps the streaming closure boundary via `ThreadsafeFunction`) |
-| `crates/sdk/ffi` | Go (today) | raw C-ABI |
-| `crates/sdk/uniffi` | Python / Swift / Kotlin | `uniffi-bindgen` generated |
+| `crates/sdk/ffi` | C and Go | raw C ABI |
+| `crates/sdk/uniffi` | Python / Swift / Kotlin | generated by `uniffi-bindgen` |
 | `crates/sdk/uniffi` + `uniffi-bindgen-cs` | C# | version-matched third-party generator |
 
 The UniFFI surface (`crates/sdk/uniffi/src/lib.rs`) exports `validate_plugin_id`,
-`parse_and_validate_manifest`, `plugin_manifest_json_schema`, the gateway resolvers,
-`assert_allowed_egress`, and blocking `ModelClient` / `EmbeddingClient` objects. The
-`uniffi::setup_scaffolding!("ryu_sdk")` namespace makes the emitted package import as `ryu_sdk`
-in Python. Bindings are emitted on demand by the `uniffi-bindgen` driver
-(`crates/sdk/uniffi/src/bin/uniffi-bindgen.rs`).
+`parse_and_validate_manifest`, `plugin_manifest_json_schema`, the Gateway resolvers,
+`assert_allowed_egress`, and blocking `ModelClient` and `EmbeddingClient` objects, plus streaming
+through the `ChatSink` callback interface. `uniffi::setup_scaffolding!("ryu_sdk")` makes the emitted
+Python package import as `ryu_sdk`. The `uniffi-bindgen` driver
+(`crates/sdk/uniffi/src/bin/uniffi-bindgen.rs`) emits bindings on demand. See
+[Libraries and bindings](/docs/extend/develop/sdk/language-bindings) for per-language commands.
 
-<Callout type="info">
-  The UniFFI surface includes blocking chat and embeddings plus streaming through the
-  `ChatSink` callback interface. Python, Swift, Kotlin, and C# example projects run the generated
-  bindings against the same Rust kernel; Go uses the tested hand-written C ABI. See
-  [Language bindings](/docs/extend/develop/sdk/language-bindings) for commands and toolchain notes.
-</Callout>
-
-For TypeScript, prefer the published packages over the napi addon directly:
+For TypeScript, use the published packages instead of the napi addon:
 [`@ryuhq/sdk`](/docs/extend/develop/sdk) for authoring and [`@ryuhq/client`](/docs/extend/develop/sdk/client) for
-calling a Core node. For any language without a binding, validate manifests against the exported JSON
+calling a Core node. For a language without a binding, validate manifests against the exported JSON
 Schema and call Core's [HTTP API](/docs/extend/develop/api-reference) and the Gateway's
-`/v1/chat/completions` directly.
-
-<Cards>
-  <DocCard href="/docs/extend/develop/sdk/plugin-api" />
-  <DocCard href="/docs/extend/develop/sdk/client" />
-  <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
-  <DocCard href="/docs/start-here/architecture/runnable-model" />
-</Cards>
+`POST /v1/chat/completions` directly.

@@ -1,29 +1,53 @@
 ---
-title: "Ryu Box lifecycle and workers"
-description: "Understand Box states, commands, prompts, expiry, billing, and lifecycle events"
+title: "Ryu Box Lifecycle and Workers"
+description: "How a Ryu Box moves through its states, runs commands and prompt workers, parks, expires, and reports usage"
 tags: ["box", "lifecycle", "agents", "standalone"]
 ---
 
-Box lifecycle state is stored in SQLite and projected through the tenant-scoped
-API. One Box admits one command at a time. The service restores expiry timers
-after a restart and retains lifecycle events after a resource is deleted.
+This page describes what happens to a [Ryu Box](/docs/standalone/box) over its
+life, for developers who drive Boxes through the [Box API](/docs/standalone/box-api).
+The service stores lifecycle state in SQLite, restores expiry timers after a
+restart, and keeps lifecycle events after a Box is deleted.
 
 ## States
 
 | State | Meaning | Allowed next states |
 |---|---|---|
-| `provisioning` | The selected driver is creating the workspace | `ready`, `error`, `deleted` |
-| `ready` | Commands, prompts, and interactive work may start | `running`, `stopped`, `deleted`, `error` |
-| `running` | A command is using the workspace | `ready`, `stopped`, `deleted`, `error` |
-| `stopped` | The workspace is stopped while its disk remains | `ready`, `deleted`, `error` |
-| `error` | Provisioning or execution needs recovery | `ready`, `deleted` |
+| `provisioning` | The selected driver is creating or restoring the workspace | `ready`, `error`, `deleted` |
+| `ready` | Commands, prompts, and interactive work may start | `running`, `stopping`, `stopped`, `deleted`, `error` |
+| `running` | At least one foreground command is using the workspace | `ready`, `stopping`, `stopped`, `deleted`, `error` |
+| `stopping` | The workspace is being saved before its machine is released | `stopped`, `deleted`, `error` |
+| `stopped` | The workspace is stopped while its disk remains | `provisioning`, `ready`, `deleted`, `error` |
+| `error` | Provisioning or execution needs recovery | `ready`, `stopped`, `deleted` |
 | `deleted` | The driver resource is destroyed; the audit row remains | none |
+
+When a Box enters `error`, for example after a failed setup step or expiry, the
+local service stops its machine if one exists and keeps its disk, so `resume`
+brings it back. The Box keeps `error` and its original `lastError` even if that
+stop fails, and its running time stops counting until it resumes.
+
+A local service that runs the disk watchdog also stops a Box whose disk use
+exceeds its size's storage allowance. It records `box.storage_exceeded` and sets
+`lastError`. The Box can be resumed to delete files during one cleanup window,
+one watchdog interval from the first resume, and `lastError` shows the deadline.
+Stopping and resuming does not extend the window. A Box still over when it ends
+is stopped at the next check, and resume then answers `429 quota_exceeded`;
+delete the Box to free the space. While it is over, fork and snapshot answer
+`429 quota_exceeded` too.
 
 ## Create, run, and stop
 
-Creation emits `box.provisioning` and waits for the driver to report ready
-before returning the created resource. A command moves the Box to `running`,
-emits `command.started`, then returns it to `ready` after the driver completes.
+Creation emits `box.provisioning`. A local driver waits for the workspace to be
+ready before returning the created resource. On Ryu-hosted Box, where a Box
+gets its own virtual machine or a sandboxed slot on a shared overflow host,
+create, stop, and resume answer `202` at once and the Box moves through
+`provisioning` or `stopping` in the background; poll `GET /v1/boxes/:id`. See
+[Asynchronous lifecycle](/docs/standalone/box-api#asynchronous-lifecycle).
+
+A command moves the Box to `running`, emits `command.started`, then returns it
+to `ready` after the last running command completes. The examples use the
+`BOX_API_BASE` and `BOX_API_TOKEN` variables from
+[Create a Box](/docs/standalone/box-api#create-a-box).
 
 ```sh
 BOX_ID=bx_replace_me
@@ -41,8 +65,50 @@ curl -fsS -X POST "${BOX_API_BASE}/boxes/$BOX_ID/resume" \
 ```
 
 Commands use an argv array internally, keep `cwd` inside the workspace, and
-bound combined stdout and stderr to 1 MiB. A second command while the Box is
-running returns `409 box_busy`.
+bound combined stdout and stderr to 1 MiB. A Box runs up to 16 foreground and
+background commands at the same time, all in the same workspace. The service
+does not serialize them: callers that need one command at a time, such as Git
+operations or package installs from several workers, must serialize that work
+themselves.
+
+`409 box_busy` means the Box cannot take the request right now. A 17th
+concurrent command gets it, as does a command sent while the Box is stopping,
+resuming, or being deleted. Stop, resume, and delete also return it while a
+foreground command is still running.
+
+## Park and resume
+
+Stopping a Box parks it: its workspace is saved, and on Ryu-hosted Box its
+machine is released. `POST /v1/boxes/:id/stop` takes an optional `reason`,
+recorded on the Box's events:
+
+| `reason` | Who parks the Box |
+|---|---|
+| `user` | You, or an API client (the default) |
+| `idle` | Ryu Core, after a session Box saw no activity and no viewer for its idle time |
+| `balance` | Credits ran out |
+| `budget` | A spending budget was reached |
+| `liveness` | The Box service, when the Core that meters the Box stopped reporting it |
+| `suspended` | Billing for the organization is suspended |
+| `ttl` | The session's lifetime ended |
+
+Resume restores the saved workspace, on a fresh machine when the Box is
+Ryu-hosted. Files, installed packages, and the browser profile survive a park;
+running processes and memory do not.
+
+A Box that Ryu Core meters is kept alive by Core's per-second metering. If the
+Box service hears nothing from Core for about two minutes, for example because
+the node went offline or its credits ran out, it parks the Box with reason
+`liveness`, so an unmetered Box never keeps running.
+
+## Desktop
+
+A Box created with `"desktop": true` starts its virtual desktop and browser
+with the workspace, and starts them again on every resume.
+`GET /v1/boxes/:id` reports `desktop.ready` once the screen accepts streams and
+actions, and the current number of viewers under `desktop.viewers`. Parking, stopping, or
+deleting the Box closes every stream with WebSocket code `1001`, and a billing
+suspension closes them within about a minute. See [Desktop](/docs/standalone/box-api#desktop).
 
 ## Fork and expiry
 
@@ -52,7 +118,7 @@ require an idempotency key and emit `box.forked` for the new resource.
 Every Box has a finite TTL. If `ttlSeconds` is omitted or `null`, the service
 uses a 24-hour default; an explicit value may be no more than seven days. The
 deadline starts at creation. Expiry destroys the driver resource and emits
-`box.expired`. A busy Box retries expiry rather than destroying a workspace
+`box.expired`. A busy Box retries expiry instead of destroying a workspace
 during an admitted command.
 
 ## Prompt workers
@@ -62,6 +128,25 @@ during an admitted command.
 `POST /v1/boxes/:id/prompts/:run/claim`, runs the work inside or against the
 Box, and reports `completed` or `failed` through the matching `complete` route.
 
+With `"execution": "managed"`, the service installs and runs the provider's CLI
+inside the Box itself. A managed run moves from `queued` to `running`, and ends
+as `completed` or `failed`. A run that fails without an agent result carries
+one of these reasons.
+
+| `reason` | Cause | Event |
+|---|---|---|
+| `canceled` | `POST /v1/boxes/:id/prompts/:run/cancel`, or `POST /v1/boxes/:id/interrupt` | `prompt.canceled` |
+| `box_destroyed` | The Box was deleted or its TTL expired during the run | `prompt.failed` |
+| `service_restarted` | The service found the run still active at startup | `prompt.failed` |
+| `timeout` | The agent process passed the run's `timeoutSeconds` | `prompt.completed` with status `failed` |
+
+TTL expiry and deletion end active managed runs before the service stops their
+processes. `GET /v1/boxes/:id/prompts/:run` reads one run. The
+`prompt.completed` event is sent only when the agent process ends, never after
+a run was canceled or its Box destroyed. See
+[Managed agent prompts](/docs/core/boxes-local-mode#managed-agent-prompts) for the request
+fields.
+
 Prompt listing omits prompt text. Do not put long-lived model credentials in
 prompt bodies, command arguments, or event payloads.
 
@@ -69,21 +154,105 @@ prompt bodies, command arguments, or event payloads.
 
 Box events are local lifecycle history. Use `GET /v1/boxes/:id/events` for a
 bounded list. If another product needs a shared event stream, publish only the
-Box id and status to [Ryu Notify](/docs/standalone/notify). The [Box to Notify
-example](/docs/standalone/notify-streams#box-and-agent-mail-examples) keeps the
-two bearer credentials separate.
+Box id and status to [Ryu Notify](/docs/standalone/notify), as described in
+[Compose with Box and Mail](/docs/standalone/notify-streams#compose-with-box-and-mail).
+Keep the Box and Notify bearer credentials separate.
 
-## Metering and security
+## Usage report
 
-Ryu-owned capacity uses the Gateway sandbox heartbeat and the rates in
-[Metering Rates](/docs/billing/metering). Connected provider mode uses that
-provider's subscription as the machine-capacity authority, so Core does not
-debit the same machine time again.
+`GET /v1/usage?from=<ISO>&to=<ISO>` returns one line per Box that existed or ran
+in the window. `seconds` and `resourceUnitSeconds` count running time only: they
+stop when a Box is stopped or enters `error`, and restart when it resumes. A Box
+deleted inside the window still appears, counted up to its deletion. A fork
+counts from its own creation. Snapshots are not Boxes and have no line.
+
+`billableSeconds` is the running time Box compute is charged on: each start or
+resume counts at least 5 minutes, then whole minutes. A waived start
+(`billing.minimumWaived` is `true`) counts whole minutes only. The minimum is
+counted in the window where the running interval started, so an interval that
+spans two windows is never charged twice. `totals.billableSeconds` is the sum
+over the lines.
+
+`stateBytes` is the size of the Box's newest saved state, the work kept while a
+Box is stopped, and `stateByteSeconds` is those bytes multiplied by the seconds
+they were kept in the window. Saved state and snapshots are the storage that is
+charged, above the storage your organization includes. A Box that keeps no saved
+state outside itself reports `0` for both.
+
+`storageSeconds` (time the Box existed) and `storageAllowanceGib` (the disk size
+of its size) are kept for older clients. Storage is not charged on either.
+
+`snapshots` lists each snapshot that existed in the window: `sizeBytes`, its
+image size measured when it was taken, and `storageSeconds`, the time it existed
+in the window, counted up to its deletion. Storage stops when `DELETE` answers.
+A fork's private image is not listed or charged as a snapshot. If a snapshot's
+size could not be measured yet, the report returns `503 driver_unavailable`
+instead of counting it as 0 bytes; retry it shortly.
+
+Without `from`, the report covers the 30 days before `to`, which defaults to
+now. A window longer than 31 days, or one whose `from` is after `to`, returns
+`400 invalid_request`.
+
+```json
+{
+  "type": "usage.summary",
+  "ok": true,
+  "from": "2026-10-01T00:00:00.000Z",
+  "to": "2026-10-01T01:00:00.000Z",
+  "boxes": [
+    {
+      "boxId": "bx_replace_me",
+      "size": "small",
+      "seconds": 1800,
+      "billableSeconds": 1800,
+      "resourceUnitSeconds": 1800,
+      "stateBytes": 1073741824,
+      "stateByteSeconds": 1932735283200,
+      "storageAllowanceGib": 40,
+      "storageSeconds": 3600
+    }
+  ],
+  "snapshots": [
+    {
+      "snapshotId": "snap_replace_me",
+      "sizeBytes": 2147483648,
+      "storageSeconds": 3600
+    }
+  ],
+  "totals": {
+    "seconds": 1800,
+    "billableSeconds": 1800,
+    "resourceUnitSeconds": 1800
+  }
+}
+```
+
+### Storage limit errors
+
+When an organization without a paid plan, or on a paid plan in its free trial,
+reaches its included storage (see
+[Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing)), creating,
+resuming or forking a Box and taking a snapshot return `429 quota_exceeded` with
+`details.resource` set to `storage_bytes`. Stopping a Box always saves its
+state, even at the limit.
+
+## Billing and security
+
+Ryu-hosted Box billing, the Core sandbox heartbeat path, and connected-provider
+billing are on [Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing).
+A self-hosted Box is never billed by Ryu. When a Ryu-hosted organization runs out
+of credits, Ryu stops its running Boxes and refuses new work with
+`402 insufficient_credits`. See [Idempotency and errors](/docs/standalone/box-api#idempotency-and-errors)
+for the routes that still work.
 
 Keep the service behind TLS and a Ryu-authenticated network boundary. Keep the
 Docker socket private, allowlist images with `RYU_BOX_ALLOWED_IMAGES`, and
-leave network access off unless a Box needs egress. Treat desktop, VNC, SSH,
-artifact, and snapshot URLs as secrets.
+leave network access off unless a Box needs egress. Treat SSH, artifact, and
+snapshot URLs as secrets. Set `RYU_BOX_STREAM_ORIGINS` to the origins your
+desktop viewers use and `RYU_BOX_PUBLIC_URL` to the service's public `https`
+address (see [Desktop](/docs/standalone/box-api#desktop)). A
+self-hosted service runs desktop Boxes from `RYU_BOX_DESKTOP_IMAGE`, which must
+also be in `RYU_BOX_ALLOWED_IMAGES`.
 
 <Cards>
   <DocCard href="/docs/standalone/box-api" />

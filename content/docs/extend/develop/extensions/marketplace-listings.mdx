@@ -1,0 +1,191 @@
+---
+title: "Manage Marketplace Listings"
+description: "Reference for how a published Marketplace listing shows support, searches, versions, deprecation and yanking, remixes, reviews, creator profiles, and share previews."
+---
+
+This page covers what happens to a package after it is published. To publish one, start at
+[Publish to the Marketplace](/docs/extend/develop/extensions/marketplace).
+
+## Publish a clear support and extension story
+
+The Marketplace shows three separate facts from a package:
+
+| Field | Author it with | Meaning |
+| --- | --- | --- |
+| **Support** | `surfaces` (or legacy `targets`) | The hosts where the package can appear, plus the support level for each host. |
+| **Extends** | `provides` and `contributes` | The existing capability or shell slot the package adds to. For example, `browser.control` extends the Browser capability, while `dock_panels` extends the shared Ryu shell. |
+| **Where it lives** | `runnables`, `contributes`, `mcp_servers`, and `sidecars` | The implementation boundary: Core runtime, shared Ryu shell, or the package's sidecar. |
+
+The Web app, Mobile app, and Browser extension reuse the Desktop shell contract. A support row may
+therefore say **inherited from Desktop**. That is shared shell composition, not access to Desktop-only
+native APIs. Keep the package's actual process and capability ownership in its own satellite or
+plugin directory; do not add a bespoke Core route to make a contribution visible on another
+wrapper host.
+
+The detail page derives these disclosures from the signed manifest and keeps the raw executable
+bindings out of the public catalog projection. A marketplace description should explain the user
+outcome; the support/extension rows explain where that outcome is hosted.
+
+### Search several kinds at once
+
+`GET /api/marketplace/catalog?kind=<kind>&query=<text>` searches one kind. To search more than
+one, send `kinds` instead. It takes a comma-separated list of kinds, where `all` means every kind and
+`template` means `agent`, `stack_template`, and `workflow`. For example,
+`GET /api/marketplace/catalog?kinds=template&query=invoice`.
+
+The `query` is split into words, and a listing matches when every word appears in its name,
+description, id, author, category, example prompts, or manifest keywords and tags. Filler words such
+as "any", "for", and "templates" are ignored. An unknown entry in `kinds` returns 400, the same as
+an unknown `kind`. When both are sent, `kind` wins. A `kinds` response carries
+the expanded list as `kinds` in place of `kind`; every item still has its own `kind`. `category`,
+`limit`, and `cursor` work the same for both forms, and results are still ranked with exact id and
+name matches first.
+
+Agents use the same search through the built-in `marketplace.search` tool, so a person can ask
+"is there a template for X?" in chat.
+
+### Read listing media without downloading install contents
+
+Use `GET /api/marketplace/catalog/detail?kind=<kind>&id=<id>&view=presentation` when
+you only need listing artwork, screenshots, bundle references, and community counts.
+This response omits executable UI code and package artifacts. Item and collection
+visibility checks still apply. Omit `view=presentation` for the complete detail response
+used by installers.
+## Manage published listings
+
+### Installing a specific version
+
+A listing's **Versions** tab can install an exact release of a GitHub-published package. Ryu serves
+a release only after Marketplace review:
+
+- the listing's current published version, or the build currently promoted on a prerelease
+  channel, served exactly as reviewed;
+- an older release whose latest review decision was an approval, and only while its GitHub release
+  still contains the package that was reviewed. A moved tag, a re-uploaded asset, or a second tag
+  for the same version is refused.
+
+Ryu finds an older release by its version among the repository's immutable GitHub Releases and
+reads it at that release's own tag, so a repository can tag `v1.1.0` or `1.1.0`. If GitHub no longer
+lists an immutable release for an approved version, that version is refused with `422`.
+
+A release that is waiting for review, a rejected release, and a tag that was never submitted are
+refused with `404` and the reason. The listing detail returns the versions that can be installed in
+`approvedVersions` (yanked versions are left out), and the Versions tab offers install only for
+those, including for an app you already installed. Each version's latest review decision is kept
+when older release history is trimmed.
+
+For a listing whose earlier releases were approved before release history was recorded, only the
+current builds can be installed. Its older tags have no review on record, so they are refused
+rather than signed unreviewed.
+
+### Deprecating and yanking releases
+
+Members of the publishing organization with publish permission, and Ryu moderators, can flag a
+whole listing or one released version:
+
+| Action | Catalog | Detail | Install |
+| --- | --- | --- | --- |
+| **Deprecate** (`POST /api/marketplace/deprecate`) | Shown with a deprecation flag and reason | Flagged | Still installable |
+| **Yank** (`POST /api/marketplace/yank`) | Hidden while the current version is yanked | Flagged; install contents withheld | Not installable or downloadable |
+
+Both take `{ kind, id, version?, reason?, revert? }`. Omit `version` to flag the whole listing;
+pass `revert: true` to clear a flag. Yanking an older version only blocks that version. When a new
+release is approved, flags on the previous version do not carry over; listing-wide flags do.
+
+A flag set by a Ryu moderator can only be cleared or replaced by a Ryu moderator. If the publishing
+organization tries to revert or overwrite it, the request is refused with `403`.
+
+Clients that know which versions are installed can call `POST /api/marketplace/updates/check` with
+`{ items: [{ kind, id, version }] }` (up to 200). Each published listing returns its latest
+version, whether an update is available, the listing's flags, and whether the installed version
+itself was deprecated or yanked. Catalog cards don't include installed-version state.
+
+### Remixing listings
+
+Every listing can be remixed unless its author opts out. A remix is your own editable copy of a
+listing that you publish as a new listing with a credit to the original.
+
+To remix a listing:
+
+1. Make an editable copy. Use **Remix** on the listing page: a listing published from GitHub opens a
+   fork of its repository, and an agent or workflow template is added in Ryu, which installs it as
+   a new copy you own.
+2. Give the copy its own `id`, change what you want, and credit the original with a `remixedFrom`
+   entry in your package's `ryu.package.json` file.
+
+   ```json
+   "remixedFrom": {
+     "kind": "agent",
+     "id": "ryu/animator",
+     "version": "1.0.0"
+   }
+   ```
+
+3. Publish it from GitHub like any other listing.
+
+The original's listing page shows how many live public remixes credit it, and each remix shows a
+**Remixed from** link back to the original.
+
+To stop others remixing your listing, set `"allowRemix": false` in its manifest. The listing page
+then shows that remixing is not allowed and offers no Remix action. A publish whose `remixedFrom`
+names that listing is refused with `remix_not_allowed`, unless it comes from the organization that
+published the original. The check also runs when a GitHub-backed listing is refreshed. A credit to
+a listing that isn't in the Marketplace, such as one that ships with Ryu, is accepted as written.
+
+`allowRemix` is a Marketplace policy. It doesn't change what an installed copy can do, and it
+doesn't replace the license in your repository.
+
+### Reviews
+
+Members of the publishing organization can't review the organization's own listings. New reviews
+appear immediately. Ryu moderators can hide or restore a review, and hidden reviews don't count
+toward the listing's rating. Editing a hidden review doesn't make it visible again.
+## Creator profiles
+
+Every publisher organization with a live public listing also appears on the Marketplace
+**Creators** tab, with a profile page that lists its public listings and totals. Organization
+members with the marketplace.publish permission set the profile bio, secure website, GitHub
+username, and X handle from **Sell → Creator profile**. Profiles never disclose verified
+domain names or email addresses.
+
+The authenticated creator-profile endpoints read and update the active organization's profile.
+Clients can include the `organizationId` returned by `GET /api/marketplace/creator-profile`
+alongside the profile fields in `PUT /api/marketplace/creator-profile`. A supplied ID must match
+the authenticated active organization; a mismatch returns HTTP 409 with the code
+`creator_profile_organization_changed`. Reload the profile before saving a draft for a different
+organization. Existing clients that omit this optional field continue to use the active
+organization. Organization membership and publishing permission are still required for updates.
+## Sharing a listing
+
+Each Marketplace listing page has a **Share** panel with **Post on X**, **Share on LinkedIn**, and
+**Copy link**. A shared listing link previews as a card built from the listing's own catalog
+record: its icon when it ships a PNG, JPEG, or GIF icon (otherwise its first letter), its name, its
+publisher, the start of its description, and its type and category, over Ryu's Prism gradient.
+Listings without a description show none; nothing is added in its place. Long names and
+descriptions are shortened to fit.
+
+Catalog entries mirrored from other sources, such as models, skills, and MCP servers under
+`/store`, have the same share panel and keep the simpler title-only preview. Other public pages and
+documentation links use that title-only layout with their own page title, and the Ryu homepage keeps
+its logo-and-name image. Social services may cache an older preview until they refresh the link.
+
+## Reference
+
+| Surface | Where | Notes |
+|---|---|---|
+| `GET /api/marketplace/catalog` | Ryu Marketplace API | Public search; see [Search several kinds at once](#search-several-kinds-at-once) |
+| `GET /api/marketplace/catalog/detail` | Ryu Marketplace API | Listing detail; `view=presentation` omits install contents |
+| `POST /api/marketplace/deprecate`, `POST /api/marketplace/yank` | Ryu Marketplace API | Flag a listing or one released version; publisher organization or Ryu moderator |
+| `POST /api/marketplace/updates/check` | Ryu Marketplace API | Compare installed `{ kind, id, version }` entries against published listings |
+| `GET /api/marketplace/creators` | Ryu Marketplace API | Public creator directory; `query` and `sort` (`popular`, `listings`, `rating`, `newest`, `name`) |
+| `GET /api/marketplace/creators/:handle` | Ryu Marketplace API | One creator's profile and live public listings, by organization slug or id |
+| `GET/PUT /api/marketplace/creator-profile` | Ryu Marketplace API | Read or update the active organization's creator bio and links |
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/extend/develop/extensions/marketplace" />
+  <DocCard href="/docs/extend/develop/extensions/organization-marketplaces" />
+  <DocCard href="/docs/extend/develop/extensions/store-listing-metadata" />
+  <DocCard href="/docs/surfaces/desktop/user-guide/marketplace" />
+</Cards>

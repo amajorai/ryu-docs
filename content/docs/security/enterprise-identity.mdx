@@ -1,9 +1,9 @@
 ---
 title: "Enterprise SSO and SCIM"
-description: "Configure organization-level single sign-on and directory provisioning in Ryu."
+description: "How organization owners and admins set up OIDC or SAML single sign-on and SCIM directory provisioning for a Ryu organization."
 ---
 
-Ryu's Enterprise identity controls connect an organization's existing identity system to its Ryu workspace. Employees sign in with the company identity provider, while the directory can keep Ryu membership in sync when people join, change teams, or leave.
+Enterprise identity controls connect an organization's identity system to its Ryu workspace. Employees sign in with the company identity provider (single sign-on, SSO), and the directory can keep Ryu membership in sync through SCIM (System for Cross-domain Identity Management) when people join, change teams, or leave.
 
 SSO answers **"how does this person sign in?"** SCIM answers **"which people should have an account, and are they still active?"** They work together, but one does not replace the other.
 
@@ -12,26 +12,27 @@ SSO answers **"how does this person sign in?"** SCIM answers **"which people sho
 You need:
 
 - an active Enterprise entitlement for the organization;
-- an organization owner or admin account;
+- an organization owner or admin account (a custom role with `access.manage` can view this
+  configuration and revoke a SCIM connection, but registering, updating, verifying, or deleting an
+  SSO provider and generating or rotating a SCIM token need the owner or admin role);
 - a public HTTPS Ryu auth URL reachable by your identity provider and directory service; and
 - an administrator account in Okta, Microsoft Entra ID, Google Workspace, or another OIDC/SAML/SCIM-compatible system.
 
-SCIM also requires a MongoDB deployment with transaction support (for example, a replica set or sharded cluster). Ryu passes the native MongoDB client to Better Auth so multi-record provisioning changes are committed together.
+A self-hosted deployment that uses SCIM also needs a MongoDB deployment with transaction support (for example, a replica set or sharded cluster), so multi-record provisioning changes are committed together.
 
 Open **Organizations → your organization → Security**. If the organization is not entitled, the page explains how to contact Ryu about Enterprise access. Protocol endpoints remain server-side; provider secrets and SCIM bearer tokens are not returned in list responses.
 
-Organization settings remain grouped in the Security area. Production deployments
-must keep identity encryption keys and provider credentials in server-side secret
-storage; those values are never sent to the browser.
+Production deployments must keep identity encryption keys and provider credentials in server-side
+secret storage. Those values are never sent to the browser.
 
 ## Configure SSO
 
-Ryu supports OIDC and SAML 2.0 connections. Start with OIDC when your provider supports it; SAML is useful when your organization's identity policy requires it.
+Ryu supports OIDC and SAML 2.0 connections. Start with OIDC when your provider supports it; SAML is useful when your organization's identity policy requires it. The Security page shows only provider types included in the organization's Enterprise entitlement.
 
 ### OIDC
 
 1. In your identity provider, create a web application for Ryu.
-2. In Ryu, choose **OIDC** and enter a short provider ID, your company domain, the issuer URL, client ID, and client secret.
+2. In Ryu, choose **OIDC (Okta, Entra ID, Google Workspace)** and enter a short provider ID, your company domain, the issuer URL, client ID, and client secret.
 3. Save the connection. Copy the redirect URI returned for the provider into the identity provider's allowed callback URLs.
 4. Ask Ryu to issue a domain-verification record, add the TXT record to DNS, and choose **Verify now**.
 5. Test sign-in from the Ryu login page with a work email.
@@ -54,17 +55,41 @@ https://<your-ryu-auth-host>/api/auth/sso/saml2/sp/acs/<provider-id>
 
 Keep signing certificates current. When a certificate or endpoint changes, update the connection, run a test login, and keep a break-glass owner/admin account available until the new assertion works.
 
-Self-hosted and hosted deployments enable these controls through the organization's
-server-side entitlement. Availability and included capabilities vary by deployment;
-the entitlement is checked on the server and is never a browser credential.
-
 ## Employee sign-in
 
-The login page includes **Continue with SSO**. An employee enters their work email; Ryu resolves the matching verified provider and redirects to the company's identity provider. After the callback, the user is associated with the configured organization as a member by default. An organization admin can change roles separately.
+The login page includes **Continue with SSO**. An employee enters their work email; Ryu resolves the matching verified provider and redirects to the company's identity provider. After the callback, the user joins the configured organization as a member. An organization admin can change roles separately.
 
-After a successful SSO callback, that organization is also selected as the
-user's active organization for the new session, so the employee lands in the
-workspace that owns the connection instead of their personal organization.
+Joining through SSO follows the same admission rules as an invitation. It uses one
+of the organization's unassigned paid seats, and the employee's work email must be
+verified. If no seat is free, or the email is not verified yet, sign-in still
+completes, but the employee does not join the organization. They join the next
+time they sign in through SSO after an admin frees or adds a seat, or after they
+verify their email. An employee with a pending invitation accepts that invitation
+instead. Signing in with a social account whose email domain matches the verified
+provider does not add anyone to the organization.
+
+An employee's first SSO sign-in creates their Ryu account. That sign-in does not
+ask for the sign-up page's date-of-birth check, because the organization's
+identity provider vouches for the person, as with SCIM and admin provisioning.
+The organization is responsible for making sure the people it provisions meet
+Ryu's minimum age. This exemption applies only to a provider attached to an
+organization whose domain is verified, and only when the new account's email is
+in that verified domain or one of its subdomains. An identity provider that lets
+anyone sign in, such as a public Google client, does not exempt accounts outside
+the domain. Any other new account, including one created through Google, still
+needs the age check first.
+
+After a successful SSO callback that leaves the employee as a member, that
+organization is also selected as the user's active organization for the new
+session, so the employee lands in the workspace that owns the connection instead
+of their personal organization.
+
+An SSO connection only signs in addresses on its verified domain (or a subdomain
+of it). Ryu refuses an SSO login, and creates no account, when the identity
+provider asserts an email outside that domain. It also refuses an SSO login to an
+existing Ryu account whose email is no longer on that domain, for example after
+the account's email was changed. Those people sign in with another method, such as
+an email code, or join through an invitation.
 
 SSO does not automatically make someone an owner or admin. Do not use an email-domain match or an unreviewed IdP claim as a privileged role grant.
 
@@ -83,37 +108,83 @@ https://<your-ryu-auth-host>/api/auth/scim/v2
 
 5. Start with a small assigned group and verify create, update, deactivate, and remove behavior before assigning the full company directory.
 
+Generating or rotating a SCIM token requires the built-in owner or admin role together with
+`access.manage` and `members.manage`, because a SCIM token can remove any member who is not an
+owner, admins included.
+
 SCIM connections are scoped to the organization. Ryu stores the token hashed, displays the plaintext
 only at creation or rotation, and gives the credential a one-year lifetime. Generating a new token
-invalidates the previous one. Revoke a connection from the Security page when the directory
+invalidates the previous one: once the new token is shown, every earlier token for that connection
+is refused. The replacement is all-or-nothing: if it fails, the previous token keeps
+working and no new token exists. Revoke a connection from the Security page when the directory
 application is removed or its credential may have been exposed.
 
-SCIM deactivation removes access to the Ryu account flow; it does not delete the company's source directory record. Keep the source directory as the system of record and use the Ryu audit log to investigate provisioning changes.
+When the directory deactivates a user (`active: false`) or deletes them, and they have no other active
+directory record in the organization, Ryu:
+
+- signs them out of their current sessions, unless another organization's directory still lists them as active;
+- removes their organization membership, including team memberships and custom role assignments;
+- revokes the personal gateway keys and Fleet nodes the organization issued to them;
+- records the removal in the organization audit log.
+
+They can still sign in to their own personal Ryu account, but not to the organization.
+Reactivating the user in the directory does not restore membership: they rejoin through SSO
+sign-in (subject to the usual seat and email checks) or a new invitation.
+
+SCIM never removes an organization owner: only an owner can remove another owner, so remove or
+demote owners in Ryu. Revoking a SCIM connection retires the connection and signs out the users it
+provisioned, but does not remove their memberships. A replacement connection takes over: when it
+deactivates or deletes a user, Ryu removes their access even if the revoked connection still listed
+them as active.
+
+Employees who signed in through SSO before SCIM was set up are matched to their existing Ryu
+account when their verified email is on one of the organization's verified SSO domains and they
+are not an owner. This lets the directory deprovision them later. SCIM does not change these
+accounts' name or email.
+
+SCIM cannot create an account for a Ryu platform administrator's address, or change an account's
+email to one; the request is refused with `403`. If the directory changes the email of an account
+it created, the new address starts unverified, and any platform-administrator role on that account
+is removed in the same write.
+
+SCIM does not delete the company's source directory record. Keep the source directory as the system
+of record, and use the Ryu audit log to investigate provisioning changes.
 
 ## Recovery and safe rollout
 
 - Keep at least one owner/admin account with a working non-SSO recovery method until the first SSO login succeeds.
 - Test an employee account and an intentionally unassigned account.
-- Verify that an inactive directory user cannot continue to use Ryu.
+- Deactivate a test user in the directory, then verify that they no longer appear as an organization member and cannot open the organization.
 - Rotate the SCIM token after testing if the setup was performed in a shared screen or ticket.
 - Remove a provider only after the replacement connection has been tested.
 
 ## Audit export
 
-Organizations with audit export enabled can open
-**Organizations → your organization → Audit log** and choose **Export CSV**.
-The export combines organization and gateway control activity, includes actor
-identity, event type, action, target, agent/request/session correlation IDs,
-timestamp, outcome, and redacted detail summaries, and never includes request
-bodies, provider secrets, or SCIM tokens. The export action itself is recorded
-in the control audit log.
+Provisioning and sign-in changes appear in the organization audit log. To export it as CSV, see
+[Audit log export](/docs/security/organization-admin-controls#audit-log-export).
 
-For larger rollouts, start with one organization and one directory group. Group-to-role mapping, private networking, dedicated deployment, data-region controls, and contractual support remain separately gated capabilities and should only be promised when they are included in the organization's Enterprise agreement and have been verified in its deployment.
+For larger rollouts, start with one organization and one directory group.
+
+<Callout type="warn">
+Group-to-role mapping, private networking, dedicated deployment, data-region controls, and
+contractual support are separately gated capabilities. They depend on the organization's Enterprise
+agreement and deployment. Confirm each one is included and verified before you rely on it.
+</Callout>
 
 ## Availability
 
-Enterprise identity controls are available on eligible plans and deployments.
-They complement your identity provider, directory, HTTPS, and database operations;
-contact Ryu when you need provisioning or rollout support.
+Visit [Ryu for enterprise](https://ryuhq.com/enterprise) for an overview of
+identity, agent governance, and deployment choices. Use **Talk to sales** to
+discuss your organization's rollout, required controls, and Enterprise access.
+
+Enterprise identity controls are available on eligible plans and deployments. The server checks
+the organization's Enterprise entitlement; it is never a browser credential. Availability and the
+included capabilities vary by deployment.
+
+The entitlement is checked on every SSO sign-in and every SCIM request, not only when
+an admin changes the configuration. If it is suspended or expires, sign-in through the
+organization's providers and directory requests with its SCIM tokens are refused right
+away, before any account, session, or membership change. Providers and SCIM connections
+stay configured, so access resumes when the entitlement is active again.
 
 Continue with [Security](/docs/security), [organization authentication](/docs/security/authentication-organizations), [Gateway governance](/docs/gateway/governance), [organization access](/docs/billing/organization-access), and [privacy](/docs/legal/privacy).

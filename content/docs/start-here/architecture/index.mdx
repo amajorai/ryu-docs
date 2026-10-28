@@ -3,13 +3,14 @@ title: "Architecture"
 description: "The system at a glance: clients, Core, Gateway, engines, capability layers, and how one request flows through them."
 ---
 
-Ryu runs around AI agent engines. The engines already exist, including OpenAI, Claude Code, Gemma,
+Ryu runs around existing AI agent engines, such as OpenAI models, Claude Code, local Gemma models,
 and other OpenAI-compatible runtimes. Ryu controls what an agent can reach, which tools it can use,
 what data it can send, and what each call costs.
 
-Bot is the managed consumer surface. Console is the admin surface. Platform is the SDK, Core, and
-Gateway layer. Apps are extensions. Infra is where the node runs. This page maps these parts; each
-one has its own deeper section.
+Bot is the managed consumer surface. Agent is the desktop admin surface, and Console is the web
+admin for accounts and organizations. Platform is the SDK, Core, and Gateway layer. Apps are
+extensions. Infra is where the node runs. See
+[Ryu Products, Services, and Infra](/docs/start-here/architecture/three-products) for each one.
 
 ## The full architecture
 
@@ -17,13 +18,13 @@ one has its own deeper section.
 flowchart TB
   subgraph Surfaces["Client surfaces"]
     direction LR
-    D["🖥️ Ryu Console\nTauri v2"]
-    W["🌐 Web\nNext.js"]
-    M["📱 Mobile\nExpo/RN"]
-    T["💻 TUI\nBun + OpenTUI"]
-    E["🧩 Extension\nWXT"]
-    I["🏝️ Island\nElectron"]
-    B["💬 Ryu Bot + channels\nTG · Slack · WA · DC"]
+    D["Desktop: Bot, OS, Agent\nTauri v2"]
+    W["Web Console\nNext.js"]
+    M["Mobile\nExpo/RN"]
+    T["Terminal client\nBun + OpenTUI"]
+    E["Browser extension\nWXT"]
+    I["Island\nElectron"]
+    B["Bot + channels\nTG · Slack · WA · DC"]
   end
 
   subgraph Gateway["Ryu Gateway · the control plane"]
@@ -43,23 +44,23 @@ flowchart TB
     CR_R["Runnable Registry\nagent · workflow · tool · skill"]
     CR_M["Memory + RAG\nspaces · retrieval · search"]
     CR_W["Workflows\nDAG engine · durable execution"]
-    CR_SC["Sidecar Manager\n~16 engines · health-check"]
+    CR_SC["Sidecar Manager\nlocal engines · health checks"]
     CR_PL["Plugin Lifecycle\ninstall · enable · disable"]
     CR_CB["Capability Broker\nresolve abstract → concrete"]
   end
 
   subgraph Engines["Any engine (BYO everything)"]
     direction LR
-    EN_L["llama.cpp + Gemma 4\n(local default)"]
-    EN_O["OpenAI\nGPT-4o · o1 · o3"]
-    EN_A["Anthropic\nClaude Opus · Sonnet"]
-    EN_G["Google\nGemini 2.5 Pro/Flash"]
+    EN_L["llama.cpp + Gemma 4 E2B\n(local default)"]
+    EN_O["OpenAI"]
+    EN_A["Anthropic"]
+    EN_G["Google Gemini"]
     EN_OR["OpenRouter\nmeta-routing"]
     EN_ACP["ACP agents\nClaude Code · Codex · Pi"]
   end
 
   D & W & M & T & E & I & B -->|"HTTP/SSE :7980"| CR_S
-  CR_S -->|"every model call"| GW_R
+  CR_S -->|"Gateway-routed model requests"| GW_R
   GW_R --> GW_F --> GW_B --> GW_E
   GW_C --> GW_R
   GW_T --> CR_R
@@ -70,135 +71,20 @@ flowchart TB
   CR_R --> CR_M & CR_W & CR_PL
 ```
 
-## The single most important rule
+Core (`apps/core`, default `127.0.0.1:7980`) decides what runs. Gateway (`apps/gateway`, default
+`127.0.0.1:7981`) decides what is allowed, routed, measured, and paid for.
+[Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) states the rule and the known
+bypasses.
 
-Two Rust services do the work: **Ryu Core** (`apps/core`, default `127.0.0.1:7980`) and **Ryu
-Gateway** (`apps/gateway`). They are split by one rule:
-
-- If code decides **what runs** (which agent, session, workflow, or tool) it is **Core**.
-- If code decides **what is allowed, shared, measured, or paid for** (security, routing, registry,
-  evals, budgets, org policy, audit) it is **Gateway**.
-
-Core never enforces policy inline. It routes every model call through the Gateway. SDKs connect
-products to Core and Gateway; Ryu Cloud and self-hosted nodes are the Infra deployment choices.
-Enterprise spans those layers with organization controls, identity, audit, deployment, support,
-and compliance requirements.
-
-## How one request flows
-
-A request from any client travels down through Core (which decides what runs), into the Gateway
-(which governs the model call), out to an engine, and back.
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Core
-  participant Gateway
-  participant Engine
-
-  Client->>Core: POST /api/chat/stream
-  Note over Core: Pick agent, assemble memory,<br/>inject allowlisted tools
-  Core->>Gateway: Forward model call<br/>(via_gateway: true)
-  Note over Gateway: Route, firewall, budget,<br/>cache, audit
-  Gateway->>Engine: Call upstream provider
-  Engine-->>Gateway: Streaming response
-  Note over Gateway: Response DLP, audit
-  Gateway-->>Core: Governed response
-  Core-->>Client: Stream to client
-```
-
-## The capability layer model
-
-Ryu decomposes into ~40 self-contained packages in layers (L0-L3 + Gateway). Each layer
-depends only on layers below it, forming a DAG with no cycles.
-
-```mermaid
-flowchart TB
-  K["Kernel\nsessions · registry · sidecars · auth"]
-  Lg["Gateway (Lg)\nrouter · firewall · budgets · evals"]
-  L3["L3 Apps\nmeetings · monitors · workflows · skills"]
-  L2["L2 Features\nmemory · spaces · retrieval · tool-exec"]
-  L1["L1 Primitives\nrag · tts · stt · sandbox · mesh"]
-  L0["L0 Primitives\nstorage · crypto · engines · downloads"]
-
-  K --> Lg
-  K --> L3
-  L3 --> L2
-  L2 --> L1
-  L1 --> L0
-  Lg --> L0
-```
-
-See [Capability Layers](/docs/start-here/architecture/capability-layers) for the conceptual map of
-how the runtime is organized.
-
-## The two routing planes
-
-Ryu has two distinct routing mechanisms:
-
-- **Plane A (Model routing)** — Gateway picks *which LLM* one completion uses. Smart routing
-  (classifier/embedding/keyword) rewrites `body["model"]`, then `ModelRouter::route` maps
-  model to provider.
-- **Plane B (Agent routing)** — Core picks *which agent* serves the turn. OpenAI-compat agents
-  feed Plane A (governed); ACP agents self-route (only tool egress governed via MCP bridge).
-
-```mermaid
-flowchart LR
-  subgraph PlaneA["Plane A · Model routing (Gateway)"]
-    direction TB
-    SR["Smart routing\nclassifier picks model"]
-    MR["Model router\nmodel → provider"]
-    SR --> MR
-  end
-
-  subgraph PlaneB["Plane B · Agent routing (Core)"]
-    direction TB
-    AR["Agent route\npick agent"]
-    OAI["OpenAI-compat\n→ feeds Plane A"]
-    ACP["ACP subprocess\nself-routes"]
-    AR --> OAI
-    AR --> ACP
-  end
-
-  PlaneB -->|"OpenAI-compat agents"| PlaneA
-  ACP -->|"tool egress only"| Gateway["Gateway\ngovernance layer"]
-  MR --> Gateway
-```
-
-See [Routing planes](/docs/gateway/routing-planes) for the full walkthrough.
-
-## The Runnable model
-
-Everything Ryu executes is a **Runnable** — one contract with input, run, and output. The
-eight kinds are peers, not a hierarchy.
-
-```mermaid
-flowchart TB
-  R["Runnable\ninput → run → output"]
-  AG["agent\nmulti-turn model loop"]
-  WF["workflow\nDAG of typed nodes"]
-  TL["tool\ncallable function"]
-  SK["skill\nreusable capability block"]
-  CP["companion\nin-desktop overlay"]
-  CH["channel\nmessaging bot adapter"]
-  EN["engine\ninference backend"]
-  PL["policy\nGateway-enforced rule"]
-
-  R --> AG & WF & TL & SK & CP & CH & EN & PL
-
-  AG -->|"invokes as tool"| TL
-  WF -->|"calls as step"| AG
-  Plugin["Plugin\nmanifest.json manifest"] -->|"bundles"| R
-```
-
-See [The Runnable model](/docs/start-here/architecture/runnable-model) for the full vocabulary.
+[How a request flows](/docs/start-here/architecture/core-vs-gateway#how-a-request-flows) traces one
+chat call through Core, Gateway, and the engine. Model routing (Gateway) and agent routing (Core)
+are separate planes; see [Routing Planes](/docs/gateway/routing-planes).
 
 ## Where to go next
 
 <AutoCards url="/docs/start-here/architecture" />
 
 <Callout type="info">
-  The boxes above each open into their own section. [Core](/docs/core) and [Gateway](/docs/gateway) hold
-  the full subsystem reference; [Engines](/docs/surfaces/desktop/engines) covers the swappable runtimes
-  Core manages as sidecars.
+  [Core](/docs/core) and [Gateway](/docs/gateway) hold the full subsystem reference.
+  [Engines](/docs/surfaces/desktop/engines) covers the swappable runtimes Core manages as sidecars.
 </Callout>

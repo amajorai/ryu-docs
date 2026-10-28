@@ -1,15 +1,14 @@
 ---
 title: "Encryption at Rest"
-description: "How Core seals sensitive data on disk with a unified FieldCipher, a keychain-sourced master key, and lazy plaintext migration."
+description: "How Core seals sensitive data on disk with a unified FieldCipher, a keychain-sourced master key, and lazy plaintext migration"
 ---
 
 Core protects sensitive user data on disk so that obtaining the storage (a stolen laptop, a copied
-`~/.ryu` directory, a leaked backup) does not yield plaintext chats or secrets. One crypto path,
-`apps/core/src/crypto/mod.rs`, is the seam everything hangs off: a single `FieldCipher` plus a
-swappable master key resolved from the OS keychain.
+`~/.ryu` directory, a leaked backup) does not yield plaintext chats or secrets. One crypto crate,
+`crates/core/crypto` (`ryu_crypto`), provides a single `FieldCipher` plus a swappable master key
+resolved from the OS keychain.
 
-This is the Core-vs-Gateway split in practice. At-rest encryption of local orchestration data is
-part of *what runs*, so it lives in Core. The Gateway's firewall and DLP govern *what is allowed
+At-rest encryption of local orchestration data is part of *what runs*, so it lives in Core. The Gateway's firewall and DLP govern *what is allowed
 or shared* on egress, a separate layer. [Passport](/docs/standalone/passport) owns encryption and
 storage for standalone identity connections; Core and the Gateway retain scope and audit.
 
@@ -17,9 +16,17 @@ storage for standalone identity connections; Core and the Gateway retain scope a
   Encryption at rest is shipped in slices and is **partial today**. Sealed now: chat message bodies
   and conversation titles (`conversations.db`), long-term memory entries (`memory_entries`), Identity
   Vault credential state (`identities.db`), plugin BYOK secrets (`plugin-secrets.db`), the Core
-  account vault (`accounts.json` and its legacy `~/.ryu/auth.json` token mirror), and the Pi provider /
-  ACP-agent account vault (`pi-accounts.db`). **Not yet sealed:** preferences and the API keys
-  stored in them (`preferences.db`), and Spaces/RAG chunk text plus embeddings (`spaces.db`). The
+  account vault (`secrets/accounts.json` and its legacy `secrets/auth.json` token mirror), the Pi provider /
+  ACP-agent account vault (`pi-accounts.db`), every credential in the Gateway's `gateway.toml`,
+  the Desktop account vault and license key, the API keys and tokens kept in preferences
+  (`preferences.db`), MCP server credentials (`mcp.json`), private marketplace credentials,
+  and the node's fleet enrollment credentials.
+
+  **Not yet sealed:** saved node tokens in
+  `nodes.json` (owner-only, see [What Is Sealed](/docs/core/encryption-what-is-sealed)). User content beyond chat bodies (search indexes, embeddings,
+  Spaces, app records, media) is listed store by store under
+  [Sealed User Content](/docs/core/encryption-user-content) and
+  [Sealed App and Client Data](/docs/core/encryption-app-data). The
   unit tests cover the cipher and every key-resolution
   branch, and the real Windows Credential Manager has been round-tripped on one host, but a full
   live HTTP run (POST a chat, confirm `enc:v1:` on disk, restart, read back) is not yet verified.
@@ -38,23 +45,23 @@ nonce per record. It exposes two storage shapes:
 
 The envelope format is identical to the one described in [Passport](/docs/standalone/passport-api):
 
-```
+```text
 enc:v1:<base64( nonce[12] || ciphertext+tag )>
 ```
 
-The `v1` version prefix lets the scheme evolve without ambiguity. The Cloud control plane mirrors
-this `enc:v1:` style with AES-256-GCM; both are AEAD, and the version prefix lets either side move
-to `enc:v2:` later.
+The `v1` version prefix lets the scheme evolve without ambiguity. The crate also provides a
+`TenantCipher` with an `enc:v2:` envelope for multi-tenant stores: a per-tenant HKDF subkey plus
+associated data naming the record and field, so ciphertext moved between rows or tenants fails to
+open. The Cloud control plane mirrors the `enc:v1:` style with AES-256-GCM.
 
 ### Seal and open, with lazy upgrade
 
-`open(stored)` is what makes migration transparent. If the value carries the `enc:v1:` prefix it is
-decrypted; otherwise it is treated as **legacy plaintext** and returned verbatim. So reads accept
-both forms, and every rewrite upgrades a row to ciphertext. There is no blocking migration and no
-schema churn: a row written before encryption was introduced keeps reading, and the next write to it
-seals it.
+`open(stored)` decrypts a value that carries the `enc:v1:` prefix. Any other value is treated as
+**legacy plaintext** and returned verbatim. Reads accept both forms, and every rewrite upgrades a
+row to ciphertext. There is no blocking migration and no schema change. A row written before
+encryption was introduced keeps reading, and the next write to it seals it.
 
-```
+```text
 seal("hello")  -> "enc:v1:…"        // new writes are always sealed
 open("enc:v1:…") -> "hello"          // sealed values decrypt
 open("legacy row") -> "legacy row"   // pre-encryption rows pass through
@@ -66,33 +73,78 @@ optional one-shot background re-encrypt sweep can use to skip rows that are alre
 ## Master-key resolution
 
 A single 32-byte master key backs the process-wide cipher (`global_cipher`). It is loaded once and
-cached, resolved in strict priority order. Every source must work **headless** (bots, scheduler, and
+cached, resolved in strict priority order. Every source works **headless** (bots, scheduler, and
 channels run with no human present), so no source prompts on the default path.
 
 1. **`RYU_MASTER_KEY`** env, a base64-encoded 32-byte key. Highest priority, for
    servers, containers, CI, or operator-controlled key injection. Never written to disk or the
    keychain by Core.
 2. **OS keychain** (default where reachable) via the `keyring` crate: Windows Credential Manager,
-   macOS Keychain, or Linux Secret Service. Service `ryu`, account `master-key`. The key lives
-   **outside `~/.ryu`**, so a copy of the data directory alone cannot decrypt it. Headless-safe: the
-   OS unlocks it for the logged-in or service account with no prompt.
-3. **File fallback** at `~/.ryu/master.key` (owner-only `0600` on Unix), used only when neither the
+   macOS Keychain, or Linux Secret Service. Service `ryu`, account `master-key` (with a
+   `-<profile>` suffix outside the release profile, so a dev stack and a release stack never share
+   the key slot). Set `RYU_KEYCHAIN=off` to skip the keychain for headless or test runs. The key lives
+   **outside `~/.ryu`**, so a copy of the data directory alone cannot decrypt it, as long as no key
+   file in `secrets/` holds the same key (see below). Headless-safe: the OS unlocks it for the
+   logged-in or service account with no prompt.
+3. **File fallback** at `~/.ryu/secrets/master.key` (owner-only `0600` on Unix), used only when neither the
    env var nor a working keychain is present, for example a headless Linux box with no Secret
-   Service. This is the degraded level, kept so Core never fails to start.
+   Service, or when `RYU_KEYCHAIN=off`. This is the degraded level, kept so Core never fails to
+   start.
 
-On first run, if the chosen source has no key but a legacy `~/.ryu/memory.key` exists, that key is
+On first run, if the chosen source has no key but a legacy `~/.ryu/secrets/memory.key` exists, that key is
 **adopted as the master key** so existing encrypted `memory_entries` still decrypt, and it is
-promoted into the keychain. The master key thus unifies memory, conversations, and identity state
-under one key and one custody path.
+promoted into the keychain. Memory, conversations, and identity state share one key and one
+custody path.
+
+Promotion is checked before the raw file is removed: Core reads the key back from the keychain, and
+only when it matches the legacy file byte for byte does it delete `memory.key`. A later start that
+finds an identical leftover `memory.key` next to a keychain key deletes it then. If the leftover file
+holds a *different* key, Core keeps both, refuses to start, and names the file, rather than guess
+which key protects your data. A key that cannot be read back after it was stored also stops startup
+instead of being reported as keychain custody.
+
+**Copy to another profile** moves the master key only through the keychain, from the source
+profile's slot to the target's, and never copies `master.key` or `memory.key` into the new profile's
+folder. If the key cannot be moved that way, nothing is copied.
 
 **Fail-closed.** If the master key cannot be loaded, the stores refuse to open with an error rather
 than silently using an ephemeral key. A throwaway key would make every existing encrypted row
-unreadable and write new rows that die on the next restart, which is silent corruption. The file
+unreadable and write new rows that become unreadable after the next restart. The file
 fallback generates and persists a key on first use, so this only triggers on a genuine filesystem
 failure.
 
+### Key check and recovery
+
+Ryu records a short fingerprint of the key that seals your data folder (a key check value, derived
+from the key and useless for decrypting anything) the first time it starts with a key that opens
+your existing sealed messages. From then on:
+
+- **No new key over sealed data.** If the keychain entry is missing or the keychain is locked, and
+  the data folder already holds sealed data, Ryu refuses to start its stores instead of generating a
+  new key. A key file left in `secrets/` from a period without a keychain (or a legacy `memory.key`)
+  is adopted into the keychain rather than replaced. Ryu keeps that file as a recovery copy and never
+  deletes it, so while it exists the key still sits beside your data: custody is reported as
+  **file**, not keychain, on the status and transparency surfaces. `ryu-core keys status` points this
+  out; once it shows the keychain holding the same fingerprint, delete the file (after backing up
+  the key if your keychain is not backed up) to get keychain custody.
+- **Wrong key, right data.** If the key Ryu finds does not match the recorded fingerprint, it looks
+  for one that does among the keychain, the key file, the legacy memory key, and up to four
+  *retired* keys it keeps for this purpose. A match is used and the mismatched key is retired, so
+  anything sealed with it stays readable. If nothing matches, Ryu refuses to write rather than seal
+  new data under a key that cannot open the old data. A `RYU_MASTER_KEY` that does not match is
+  refused.
+- **See and fix it.** `ryu-core keys status` lists which keys are available and which stores each one
+  opens, by fingerprint only. With Core stopped, `ryu-core keys adopt --from file|keychain|env`
+  makes one of them the current key (it must open your sealed messages, unless you add
+  `--accept-unreadable` to accept that messages it cannot open stay unreadable) and retires the
+  old one;
+  `ryu-core keys retire <fingerprint>` moves a stray key into the retired set.
+- **Newer data folders.** A data folder used by a newer Ryu that older versions cannot read is
+  marked, and an older Ryu refuses to open it instead of misreading it. Export your data before
+  downgrading.
+
 <Callout type="warn">
-  **Data-loss footgun.** The master key is the only thing that can decrypt local chats. If the OS
+  **Data-loss risk.** The master key is the only thing that can decrypt local chats. If the OS
   keychain entry is lost (re-imaged machine, new OS user, cleared credential store) and
   `RYU_MASTER_KEY` is not set, the encrypted data is permanently unrecoverable. Operators who care
   about durability should set `RYU_MASTER_KEY` (backed up safely) as the source of truth.
@@ -104,39 +156,52 @@ failure.
   confirmation.
 </Callout>
 
-## What is sealed today
-
-Metadata stays plaintext by design so the app keeps functioning (lists, ordering, routing): ids,
-roles, timestamps, model selection, and token counts are never sealed. Only content and secrets are
-encrypted, and only in the stores below.
-
-| Store | Sealed now? | Field(s) | Where |
-|---|---|---|---|
-| `conversations.db` messages | Yes | message `content`, conversation `title` | `server/conversations.rs` (sealed on append, fork, and sync insert; opened on read) |
-| `conversations.db` `memory_entries` | Yes | entry text (`nonce` + `ciphertext` blob columns) | `server/memory.rs` (refit onto the unified master key) |
-| `identities.db` connections (embedded compatibility) | Yes | credential `encrypted_state` | `ryu-vault` store and manual source |
-| Passport tenant stores | Yes | credential `encrypted_state` | `apps/passport` and `ryu-vault` (see [Passport](/docs/standalone/passport)) |
-| `plugin-secrets.db` | Yes | `(plugin_id, key)` secret value (`nonce` + `ciphertext` blob columns) | `plugin_secrets/mod.rs` (BYOK `env:` fallback) |
-| `accounts.json` | Yes | account bearer tokens; profile metadata remains readable for account selection | `auth/mod.rs` (sealed with the Core master key) |
-| `~/.ryu/auth.json` | Yes | legacy active-account token mirror | `auth/mod.rs` (sealed `token` envelope; retained for older clients) |
-| `pi-accounts.db` | Yes | per-account Pi provider / ACP-agent credential (`nonce` + `ciphertext` blob columns) | `pi_config/accounts.rs` (multi-account vault; only the active account is materialized into Pi's `auth.json` / `models.json` for Pi to read) |
-| `message-embeddings.db` | No (pending) | vectors + metadata only, no message text | text is not co-located (snippets are re-read and decrypted from `conversations.db` on hit), but the vectors themselves are unsealed content-derived data |
-| `preferences.db` | No (pending) | secret values (`hf-token`, `composio-api-key`, `openrouter-api-key`, …) | `server/preferences.rs` plaintext today |
-| `spaces.db` (RAG) | No (pending) | chunk `content` + embeddings | plaintext today; embeddings are content-derived and invertible, so they count as content |
-| monitors / agents / teams / traces / plugins / workflows DBs | No | mostly metadata | plaintext |
-
-The Gateway has one separate secret-at-rest gap: `audit.db` persists the raw `api_key` unredacted on
-disk (redaction is applied on read). Gateway chat caches are in-memory only, so no chat content is at
-rest there.
-
 ## Relationship to the Cloud control plane
 
-The same three data classes (content, secrets, metadata) drive the Cloud control plane
-(`packages/db/src/crypto.ts`), which seals synced conversation content and title,
-`IntegrationToken.secret`, and channel bot secrets with a server-held master key (`RYU_DB_MASTER_KEY`)
-under an AES-256-GCM `enc:v1:` envelope. An opt-in zero-access mode (key derived client-side from a
-user passcode, server stores only ciphertext it cannot read) is planned but not yet shipped. This
-page covers Core's local at-rest layer; the Cloud envelope is the server-managed counterpart.
+The same three data classes (content, secrets, metadata) drive the Cloud control plane, which seals
+synced conversation content and title, integration token secrets, and channel bot secrets with a
+server-held master key under an AES-256-GCM `enc:v1:` envelope. A zero-access mode, where the
+server stores only ciphertext it cannot read, is not shipped.
+
+Sign-in credentials and one-time links in the Cloud database are protected too. Values the service
+must use again are sealed; values it only compares are stored as digests, so a copy of the database
+does not hold a working session token, sign-in link, or secret code. The exceptions are listed in the
+table:
+
+| Cloud store | Protection |
+|---|---|
+| OAuth tokens from Google, GitHub, Discord, and SSO sign-in | Sealed (`enc:v1:`) with the server-held key; opened only when the service refreshes or uses them |
+| Session tokens | Stored as a SHA-256 digest; the token itself exists only in your browser cookie or your app's credential store |
+| Device sign-in (the code your app polls with), email-change links, account-merge links, password-reset and sign-in links | Stored as SHA-256 digests |
+| The short device sign-in code shown on screen | Stored as-is; it only works once a signed-in user approves it, and it expires after 30 minutes |
+| The email address and name attached to a pending email sign-in link | Stored as-is until the link is used or expires; the link token itself is a digest |
+| Waitlist pass codes and bot-access claim codes | Stored as a keyed digest for lookup plus a sealed copy, so their owners and admins can still see them |
+| Request logs and analytics events | Share, transfer, relay, invite-pass, password-reset, and similar link tokens in a URL path are replaced with `:redacted` |
+
+Existing rows are converted once, shortly after a new version of the service has taken over from
+the previous one, and older values keep working until then.
+Database backups taken before that conversion still contain the old values until they expire.
+
+## Store coverage
+
+The per-store tables are split across six reference pages:
+
+<Cards>
+  <DocCard href="/docs/core/encryption-what-is-sealed" />
+  <DocCard href="/docs/core/encryption-credential-files" />
+  <DocCard href="/docs/core/encryption-user-content" />
+  <DocCard href="/docs/core/encryption-files-and-gateway" />
+  <DocCard href="/docs/core/encryption-app-data" />
+  <DocCard href="/docs/core/encryption-app-records" />
+</Cards>
+
+## Check a node's status
+
+`GET /api/encryption/status` returns which key-custody path the running process resolved and the
+coverage of each store, with live row counts where they are cheap to measure. It never returns key
+material. The desktop shows it in Gateway settings under **Encryption**. Switching the node or its
+connection credentials loads that connection's status again. If a read fails, use **Retry**;
+**Refresh** reads the current node again.
 
 ## Related
 

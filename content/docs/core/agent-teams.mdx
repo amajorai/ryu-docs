@@ -1,17 +1,20 @@
 ---
 title: "Agent Groups"
-description: "Address a group of agents as one unit with a coordination strategy that merges their replies"
+description: "Reference for agent groups (the @ryu/teams app): the group store, routes, coordination strategies, and how Core dispatches and persists a group turn"
 ---
 
-A group is a persisted, ordered collection of agent ids plus a coordination strategy. It is addressed as one unit (an `@group-name` mention in chat, or the internal `team_id` field on a chat request), so a single user turn fans out to every member and their replies are merged into one attributed answer.
+A group is a persisted, ordered list of agent ids plus a coordination strategy. You address it as
+one unit: an `@group-name` mention in chat, or the `team_id` field on a chat request. One user turn
+fans out to every member, and Core merges their replies into one attributed answer.
 
-A group is not an agent. It is a thin record over a list of agent ids; the orchestration that interprets the strategy lives in Core's chat path. Because Core is the layer that decides what runs, groups live in Core, not the Gateway.
+A group is not an agent. The `@ryu/teams` app stores the group records. Core's chat path interprets
+the strategy and runs the members; the Gateway is not involved in group dispatch.
 
-For the desktop how-to (creating a group, dragging agents in, and group mentions), see [Groups (user guide)](/docs/surfaces/desktop/user-guide/teams). This page is the reference for the store, the strategies, and the dispatch.
+To create a group and mention it in Desktop, see [Groups (user guide)](/docs/surfaces/desktop/user-guide/teams).
 
 ## Group store
 
-The agent-group store is SQLite-backed at `~/.ryu/teams.db`. It owns only persistence and typed records, mirroring the agent store. A `TeamRecord` has these fields.
+The `@ryu/teams` app runs a `ryu-teams` sidecar that owns a SQLite store at `plugin-data/@ryu+teams/teams.db` inside the Ryu data directory (the app's own data folder). The sidecar handles persistence and typed records only. A `TeamRecord` has these fields.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -25,23 +28,28 @@ The agent-group store is SQLite-backed at `~/.ryu/teams.db`. It owns only persis
 
 ## Routes
 
-Groups expose plain CRUD plus two member endpoints for incremental add/remove (the Groups Companion uses these for member management).
+The `ryu-teams` sidecar serves these routes through the app's `public_mount` (`/api/teams`). Besides CRUD, two member endpoints add or remove one agent; the Groups Companion UI uses them.
 
-```
+```text
 GET    /api/teams
 POST   /api/teams
+POST   /api/teams/resolve
 GET    /api/teams/:id
-PUT    /api/teams/:id
+PATCH  /api/teams/:id
 DELETE /api/teams/:id
 POST   /api/teams/:id/members
 DELETE /api/teams/:id/members/:agent_id
 ```
 
-`PUT /api/teams/:id` is a partial patch: absent fields are left unchanged. `lead_agent_id` is tri-state - send a value to set it, `null` to clear it, omit it to leave it unchanged. `members` on the patch replaces the full ordered list; use the member endpoints when you only want to add or remove one agent.
+`POST /api/teams/resolve` takes `{ "id": "<team id>" }` and returns the same shape as `GET /api/teams/:id`, which is `{ "team": TeamRecord }`, or `404` for an unknown id.
+
+The app's manifest `provides` two capabilities - `teams.resolve` (the resolve route) and `teams.create` (`POST /api/teams`). Group chat and the agent builder's `create_agent_team` tool reach groups only through these capabilities, so any enabled app that provides them can serve groups. When no enabled app provides them, a group chat turn ends with an error that says so.
+
+`PATCH /api/teams/:id` is a partial update: absent fields are left unchanged. `lead_agent_id` is tri-state - send a value to set it, `null` to clear it, omit it to leave it unchanged. `members` on the patch replaces the full ordered list; use the member endpoints when you only want to add or remove one agent.
 
 ## Coordination strategies
 
-The strategy is a per-group, swappable enum. A group can be re-configured at any time with no code change. All four are dispatched by the group chat path and its non-streaming channel sibling, which share the same member-run primitive.
+The strategy is a per-group enum that you can change at any time. All four strategies are dispatched by the group chat path and its non-streaming channel sibling, which share the same member-run primitive.
 
 | Strategy | Stored value | What happens |
 |---|---|---|
@@ -50,15 +58,15 @@ The strategy is a per-group, swappable enum. A group can be re-configured at any
 | Debate synthesis | `debate-synthesis` | Every member answers independently (round one), then the lead agent reads all replies and produces one merged answer. |
 | Router | `router` | The lead classifies the user message, picks the single best-suited member by id, and only that member answers. |
 
-The cross-member context (the round-robin transcript, the debate brief, the router instruction) is injected by `messages_with_preamble`, which prepends the context to the last user message. ACP agents only forward the last user message, so folding context into that message reaches every engine, ACP and OpenAI-compat alike, without threading history.
+The cross-member context (the round-robin transcript, the debate brief, the router instruction) is injected by `messages_with_preamble`, which prepends the context to the last user message. ACP agents forward only the last user message, so folding context into that message reaches every engine, ACP and OpenAI-compatible alike, without threading history.
 
-For `router`, the lead is invoked with no `conversation_id` (the routing decision is a side query) and is asked to reply with only the chosen member's id. If the reply does not match any member, dispatch falls back to the first member rather than failing.
+For `router`, the lead is invoked with no `conversation_id` (the routing decision is a side query) and is asked to reply with only the chosen member's id. If the reply does not match any member, dispatch falls back to the first member.
 
 ## Dispatch and persistence
 
 When a chat request carries a non-empty `team_id`, the handler routes to the group chat path instead of the single-agent path.
 
-Each member's reply is produced through the standard chat path with `persist: false`, so members never write to history themselves. The orchestrator then persists exactly two turns: the user message once (attributed to the user), and one combined assistant turn attributed to the group id. A later reload of the conversation renders the same merged content that streamed.
+Each member's reply is produced through the standard chat path with `persist: false`, so members never write to history themselves. Core then persists exactly two turns: the user message once (attributed to the user), and one combined assistant turn attributed to the group id. A later reload of the conversation renders the same merged content that streamed.
 
 ```mermaid
 flowchart TD
@@ -80,7 +88,7 @@ In the merged output, each member block is prefixed with a bold `**Name**` markd
 Group members run with auto-recall off: one user message fanned out to N members would otherwise trigger N redundant retrievals on the same query. See [Search and recall](/docs/surfaces/desktop/user-guide/search-and-recall) for where recall is wired (the single-agent chat handler).
 
 <Callout type="info">
-A group turn invokes each member through the standard chat path, so a member's own engine, tools, skills, and Gateway routing all apply. Full member replies require a running engine or Gateway; CRUD and dispatch are verified headlessly, but the model output of a member is the normal ACP / OpenAI-compat path.
+A group turn invokes each member through the standard chat path, so a member's own engine, tools, skills, and Gateway routing all apply. Member replies need a running engine or Gateway.
 </Callout>
 
 ## Related

@@ -1,22 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import {
   installMermaidWheelZoom,
-  type MermaidWheelEvent,
   type MermaidWheelTarget,
 } from "./mermaid-wheel";
 
+type MermaidWheelBinding = {
+  listener?: Parameters<MermaidWheelTarget["addEventListener"]>[1];
+  options?: Parameters<MermaidWheelTarget["addEventListener"]>[2];
+  removedListener?: Parameters<MermaidWheelTarget["removeEventListener"]>[1];
+};
+
 describe("Mermaid wheel zoom", () => {
   test("uses a non-passive listener and prevents page scrolling", () => {
-    let listener: ((event: MermaidWheelEvent) => void) | null = null;
-    let options: { passive: false } | null = null;
-    let removedListener: ((event: MermaidWheelEvent) => void) | null = null;
+    const binding: MermaidWheelBinding = {};
     const target: MermaidWheelTarget = {
       addEventListener(_type, nextListener, nextOptions) {
-        listener = nextListener;
-        options = nextOptions;
+        binding.listener = nextListener;
+        binding.options = nextOptions;
       },
       removeEventListener(_type, nextListener) {
-        removedListener = nextListener;
+        binding.removedListener = nextListener;
       },
     };
     const zoomFactors: number[] = [];
@@ -25,11 +28,11 @@ describe("Mermaid wheel zoom", () => {
       zoomFactors.push(factor);
     });
 
-    if (!(listener && options)) {
+    if (!(binding.listener && binding.options)) {
       throw new Error("Mermaid wheel listener was not installed");
     }
-    const installedListener = listener as (event: MermaidWheelEvent) => void;
-    const installedOptions = options as { passive: false };
+    const installedListener = binding.listener;
+    const installedOptions = binding.options;
     let prevented = false;
     installedListener({
       deltaY: 120,
@@ -43,12 +46,10 @@ describe("Mermaid wheel zoom", () => {
     expect(zoomFactors).toEqual([0.9]);
 
     cleanup();
-    if (!removedListener) {
+    if (!binding.removedListener) {
       throw new Error("Mermaid wheel listener was not removed");
     }
-    const installedRemovedListener = removedListener as (
-      event: MermaidWheelEvent,
-    ) => void;
+    const installedRemovedListener = binding.removedListener;
     expect(installedRemovedListener).toBe(installedListener);
   });
 });

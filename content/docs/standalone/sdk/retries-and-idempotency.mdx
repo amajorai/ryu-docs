@@ -1,0 +1,255 @@
+---
+title: "Retries and Idempotency"
+description: "When @ryuhq/services retries a request, how it adds and reuses Idempotency-Key, and how to set timeouts, cancel calls, and watch for deprecations"
+tags: ["sdk", "retries", "idempotency", "standalone"]
+---
+
+`@ryuhq/services` retries a failed request only when sending it again cannot
+do the work twice. Writes that a service deduplicates get an
+`Idempotency-Key`, and the same key is sent on every attempt, so a retry
+returns the stored result instead of repeating the write.
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## What is retried
+
+A request is replay-safe when its method is `GET`, `HEAD`, `OPTIONS`, `PUT`,
+or `DELETE`, or it carries an `Idempotency-Key` on one of the routes listed
+below, and its body can be sent again. A streamed body can never be resent.
+A few writes are never replayed although their method is idempotent; a `429`
+that names a wait is the only failure they are retried on:
+
+| Method | Path | Why | Service |
+|---|---|---|---|
+| `PUT` | `/api/messaging/orgs/{orgId}/settings` | The reply that first sets a webhook URL is the only one that carries the new webhook secret. | [Messaging](/docs/standalone/sdk/messaging-errors#idempotency-and-retries) |
+| `PUT` | `/api/sites/projects/{id}/settings` | The write carries `expectedRevision` and moves it, so a resend after a lost reply answers `409 conflict` although the change applied. | [Sites](/docs/standalone/sdk/sites-errors#idempotency-and-retries) |
+| `DELETE` | `/api/sites/projects/{id}` | The write carries `expectedRevision` and moves it before the Site's records are removed, so a resend answers `409 conflict`. | [Sites](/docs/standalone/sdk/sites-errors#idempotency-and-retries) |
+
+| Failure | Retried |
+|---|---|
+| Network error or timeout | When replay-safe. |
+| `408`, `425`, `500`, `502`, `503`, `504` | When replay-safe. |
+| `429` | For any method, because the service refused before doing any work, but only when it said how long to wait: `Retry-After`, a `RateLimit` header with `r=0`, or a wait in the body. |
+| `409 idempotency_in_progress` | Yes: the first request with the same key is still running. |
+| Gateway `502 provider_error` whose provider answered `4xx` (`details.upstreamStatus`) | Never: the provider would refuse the same request again. An upstream `408`, `425`, or `429` is transient and follows the `502` rule above. |
+| Any `402`, any other `4xx`, and the [final codes](/docs/standalone/sdk/errors#retryable-and-final-codes) | Never. |
+| Server-sent event streams | Never by the SDK; the stream readers reconnect on their own. |
+
+Between attempts the SDK waits for the first of these that applies:
+`Retry-After`, the `RateLimit` reset when no requests remain, a wait named in
+the body, or an exponential backoff of 0.5, 1, 2, 4, then 8 seconds at most,
+with random jitter. When a service asks for a longer wait than
+`maxRetryDelayMs` (30 seconds by default), the SDK stops and raises the error
+with `retryAfterSeconds` set.
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+const ryu = new Ryu({
+  maxRetries: 3,
+  maxRetryDelayMs: 10_000,
+  hooks: {
+    onRetry: (event) => {
+      console.warn(event.service, event.code, "retrying in", event.delayMs, "ms");
+    },
+  },
+});
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+ryu = Ryu(
+    max_retries=3,
+    max_retry_delay=10,  # seconds
+    hooks={"on_retry": lambda event: print(event["service"], event["code"], "retrying in", event["delay_ms"], "ms")},
+)
+```
+
+`maxRetries` (`max_retries` in Python) counts retries after the first
+attempt; the default is two. Python's `max_retry_delay` and `timeout` are in
+seconds.
+`meta.attempts` and `error.attempts` report how many requests a call sent.
+
+## Idempotency keys
+
+For each route below, the SDK adds an `Idempotency-Key` (a UUID) when the
+request has none, fixes it before the first attempt, and reuses it on every
+retry. `meta.idempotencyKey` and `meta.replayed` describe the call's
+idempotent write, even when reads followed it: the key it sent, and `true`
+when the service answered with the stored result of an earlier request. The
+SDK reads the `Idempotent-Replayed` header, or the service's body marker:
+Notify's `idempotent` field, and Box's `type: "box.existing"` on a replayed
+create or fork. Set `autoIdempotency: false` to stop adding keys; a key you pass
+yourself is still sent.
+
+Ryu Messaging is the exception on both counts: it
+replays a stored result without marking it, so `meta.replayed` stays `false`,
+and its client always sends a key on sends and number purchases, which the
+server requires, even with `autoIdempotency: false`.
+
+A Messaging send that is refused (`502 provider_refused`, never retried) or fails before AWS is asked
+releases its key, so a later request with the same key is a new send attempt,
+not a replay; [Messaging](/docs/standalone/sdk/messaging-errors#idempotency-and-retries)
+lists what the SDK retries.
+
+| Method | Path | Key | Service |
+|---|---|---|---|
+| `POST` | `/api/v1/managed-agents/agents` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `PATCH` | `/api/v1/managed-agents/agents/{id}` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `POST` | `/api/v1/managed-agents/environments` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `PATCH` | `/api/v1/managed-agents/environments/{id}` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `POST` | `/api/v1/managed-agents/credentials` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `POST` | `/api/v1/managed-agents/sessions` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `POST` | `/api/v1/managed-agents/sessions/{id}/events` | Optional | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| `POST` | `/api/messaging/orgs/{orgId}/numbers` | Required | [Messaging](/docs/standalone/sdk/messaging) |
+| `POST` | `/api/messaging/orgs/{orgId}/sms` | Required | [Messaging](/docs/standalone/sdk/messaging) |
+| `POST` | `/api/messaging/orgs/{orgId}/mms` | Required | [Messaging](/docs/standalone/sdk/messaging) |
+| `POST` | `/api/messaging/orgs/{orgId}/voice` | Required | [Messaging](/docs/standalone/sdk/messaging) |
+| `POST` | `/api/messaging/orgs/{orgId}/whatsapp` | Required | [Messaging](/docs/standalone/sdk/messaging) |
+| `POST` | `/api/mail/inboxes/{id}/send` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/reply` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/reply-all` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/inboxes/{id}/messages/{messageId}/forward` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/inboxes/{id}/drafts/{draftId}/send` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/drafts/{id}/approve` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/agents/{agentId}/send` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/api/mail/agents/{agentId}/messages/{messageId}/reply` | Optional | [Mail](/docs/standalone/sdk/mail) |
+| `POST` | `/v1/events` | Optional | [Notify](/docs/standalone/sdk/notify) |
+| `POST` | `/v1/topics/{topic}` | Optional | [Notify](/docs/standalone/sdk/notify) |
+| `POST` | `/v1/activities` | Required | [Notify](/docs/standalone/sdk/notify) |
+| `POST` | `/v1/boxes` | Required | [Box](/docs/standalone/sdk/box) |
+| `POST` | `/v1/boxes/{id}/fork` | Required | [Box](/docs/standalone/sdk/box) |
+
+Passport deduplicates `POST /v1/connections` only in builds that advertise
+`features.idempotency_keys` in `GET /v1/capabilities`. The SDK reads that
+before a create, remembers the answer per `Ryu` instance and base URL for five
+minutes, and generates a key and retries the create only when the flag is
+`true`; when it is missing, `false`, or the read failed, the SDK adds no key
+of its own and never retries. A key you supply is always sent. After a
+rollback to a build without the flag, keyed retries can continue until the
+remembered answer expires
+([details](/docs/standalone/sdk/passport#idempotency-and-retries)).
+
+Gateway, Connect, Sites, and every other Passport route deduplicate no
+writes, so their `POST` requests are never retried after a network error, a
+timeout, or a `5xx`. A Connect tool execution, or a Passport connection
+created on an older Passport and retried by your own code, can run twice;
+each quickstart says what to check first.
+
+To choose the key, bind it to one call with `.with()`. Use something stable
+from your own data, such as an order or deploy id, so a retry after a crash
+or redeploy sends the same key:
+
+```ts tab="Node"
+await ryu.notify
+  .with({ idempotencyKey: "deploy-4821-production" })
+  .publish({ title: "Deployed" });
+```
+
+```python tab="Python"
+ryu.notify.with_options(idempotency_key="deploy-4821-production").publish({"title": "Deployed"})
+```
+
+A namespace bound with `.with({ idempotencyKey })` spends its key on the
+first write it sends. A later write through the same bound namespace fails
+with `idempotency_key_reused` (a `RyuConfigurationError`) before any request,
+instead of being answered with the first write's stored result. Bind a new
+key for each operation; to retry the same operation, call `.with()` again
+with the same key.
+
+Each service checks the key's format before it runs the write:
+
+| Service | Accepted key |
+|---|---|
+| Managed Agents | 16 to 128 characters of `A-Z`, `a-z`, `0-9`, `_`, or `-`; anything else fails with `400 invalid_idempotency_key`. |
+| Mail, hosted | Up to 255 characters. |
+| Messaging | Up to 255 characters; a missing key fails with `400 idempotency_key_required`. |
+| Notify, Box | Up to 128 characters. |
+
+The SDK's own keys fit every row, so this matters only for a key you choose,
+including one passed to the CLI's `--idempotency-key`.
+
+The key you pass is used for the first write of the call on one of the
+routes above. If a helper makes more writes on those routes in the same
+call, they get fresh keys. Reusing a key with a different body fails with
+`409`, which the SDK raises as `RyuConflictError`.
+
+## Timeouts and cancellation
+
+`timeoutMs` (60 seconds by default) limits each attempt until the response
+headers arrive, so a long stream is not cut off once it has started. When it
+passes, the attempt fails with `RyuTimeoutError` and is retried if that is
+safe. To cancel a call, pass an `AbortSignal`; the call fails with
+`RyuAbortError` and is never retried:
+
+```ts tab="Node"
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 5_000);
+
+const events = await ryu.notify
+  .with({ signal: controller.signal, timeoutMs: 10_000 })
+  .events.list({ limit: 20 });
+```
+
+```python tab="Python"
+# The Python client has no signal option; timeout is in seconds.
+events = ryu.notify.with_options(timeout=10).events.list(limit=20)
+```
+
+`.with()` (`with_options()` in Python) also takes `headers`, which are added
+to every request of that call. It returns the same namespace with those options bound: every
+method, including the resource namespaces such as `events`, takes the same
+arguments as it does on `ryu.notify`.
+
+## Redirects
+
+The SDK never follows a redirect. A `3xx` answer fails with
+`RyuRedirectError`, so a key is never sent to another origin. Each service's
+key is also sent only to that service's configured origin: a signed storage
+URL that a Mail attachment download returns is fetched without it.
+
+## Deprecations
+
+When a response carries `Deprecation`, `Sunset`, or a `Link` with
+`rel="deprecation"` or `rel="successor-version"`, the SDK parses them into
+`meta.deprecation` and `error.deprecation`, and calls `hooks.onDeprecation`
+once per method and route for each `Ryu` instance:
+
+```ts tab="Node"
+const ryu = new Ryu({
+  hooks: {
+    onDeprecation: (event) => {
+      console.warn(event.method, event.url, "sunsets at", event.sunsetAt, event.successorUrl);
+    },
+  },
+});
+```
+
+```python tab="Python"
+ryu = Ryu(
+    hooks={
+        "on_deprecation": lambda event: print(
+            event["method"], event["url"], "sunsets at", event["sunset_at"], event["successor_url"]
+        )
+    }
+)
+```
+
+`deprecatedAt` and `sunsetAt` are `Date` values or `null` (`deprecated_at`
+and `sunset_at` in the Python event); `policyUrl` and
+`successorUrl` are the linked pages, when given. Hooks must not throw; a hook
+that throws is ignored.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/errors" />
+  <DocCard href="/docs/standalone/sdk/pagination" />
+</Cards>

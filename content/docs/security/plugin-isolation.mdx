@@ -1,11 +1,9 @@
 ---
-title: "Plugin isolation"
+title: "Plugin Isolation"
 description: "What a plugin can reach, lane by lane - which parts run in a real sandbox, which run with full host privileges, and how publisher trust is decided."
 ---
 
-A plugin is not one kind of thing. It can contribute a turn hook, a capability adapter, a UI panel, a background sidecar, or an MCP (Model Context Protocol) server - and those run on **different lanes with very different isolation**. The strength of the sandbox around a plugin depends entirely on which lanes it uses, so "is this plugin sandboxed?" has no single answer until you know what it contributes.
-
-This page is the contract. Read it before installing anything you did not write.
+A plugin can contribute a turn hook, a capability adapter, a UI panel, a background sidecar, or an MCP (Model Context Protocol) server. Each contribution runs on a **lane**, and the lanes have very different isolation. Whether a plugin is sandboxed depends on which lanes it uses. Read this page before you install a plugin you did not write.
 
 ## The lanes
 
@@ -14,10 +12,13 @@ This page is the contract. Read it before installing anything you did not write.
 | Turn hooks | A JS fragment run at the turn boundary | **Sandboxed.** Deny-by-default, no ambient access |
 | Capability adapters | A JS body implementing a capability verb | **Sandboxed.** Same lane, same rules |
 | UI bundles | A plugin's panel or companion interface | **Sandboxed.** Browser iframe, no same-origin access |
-| Sidecars | A background process (binary, Python, or JS backend) | **Not isolated.** Full host privileges |
+| Sidecars | A background process (binary, Python, or JS backend) | **Not isolated by default.** Full host privileges unless the node turns on the [optional sidecar OS sandbox](#optional-os-sandbox-for-sidecars) |
 | MCP servers | A spawned MCP server process | **Not isolated.** Full host privileges |
+| Pi extensions | TypeScript loaded by the managed Pi agent process | **Not isolated.** Full host privileges |
+| LSP servers | A spawned language-server process | **Not isolated.** Full host privileges |
+| External runtimes | A Python environment Core provisions on enable, installing the packages the manifest lists | **Not isolated.** Package installs and the runtime run with full host privileges |
 
-The split is the thing to internalize: the **small** contributions are contained, the **large** ones are not.
+The **small** contributions (hooks, adapters, UI bundles) are contained. The **large** ones (sidecars, MCP servers, Pi extensions, LSP servers) are not. Only sidecars can be confined, and only when a node enables the optional sidecar OS sandbox.
 
 ### Sidecar identity is isolated per plugin
 
@@ -34,34 +35,151 @@ Because an unsandboxed native process runs as the same operating-system user, it
 files that user can read. Treat publisher trust and OS isolation as the boundary for a full process
 compromise; the per-plugin credential is the host-API boundary, not a replacement for a sandbox.
 
+### Installed package trust and hook approval
+
+A package does not inherit built-in privileges by copying a catalog identifier. Automatic
+hook trust and access to shared environment credentials require the actual manifest to
+match the reviewed built-in manifest. Modified installed packages require explicit hook
+trust and can read only their own credential namespace or an operator's explicit allowlist.
+This applies to HTTP secret headers, command-tool environment sources, and native
+sidecar environment references and shared credentials injected by Core. Sidecar
+credential access also checks that the process declaration matches the installed
+runtime manifest; a stale process declaration
+cannot inherit privileges from a replacement manifest. The hook inventory shows
+automatic trust only for an exact built-in manifest match.
+
+Hooks use the grants approved for the installed package. A manifest's requested grants do
+not authorize host calls, and revoking a grant takes effect when hooks are collected for the
+next turn or event. Trusting a hook does not approve additional capabilities.
+
+Marketplace verification covers both the manifest and its install descriptor. Installation
+requires a valid signature, including direct MCP launches and plugin runtime contributions.
+Unsigned listings remain browsable, but cannot be installed through the Marketplace.
+Missing signatures, modified signed payloads, and unavailable verification fail closed.
+Executable UI and backend bundles also require matching integrity hashes.
+
+Installing a plugin directly from a manifest URL carries no signature Ryu can verify, so an
+inline backend bundle in that manifest is removed before anything is written to disk. The
+plugin installs without its backend, the same way an unsigned Marketplace item would.
+
+Inline hook and adapter code in that manifest is kept. A URL install writes only the manifest,
+so inline code is the only way such a plugin can ship a hook at all. Keeping it does not widen
+what the plugin can do, because the other protections still apply:
+
+- **Sandbox.** Hook and adapter code runs in the sandbox described below, with no access to
+  your environment, files, or network, and no programs beyond the ones Ryu names for it.
+- **Grants.** Every host call is checked against the grants you approved when you enabled the
+  plugin. A URL-installed plugin is not enabled until you enable it, and it gets community-level
+  authority, never built-in privileges.
+- **Hook trust.** A manifest that does not exactly match a reviewed built-in never receives
+  automatic hook trust, so its hooks need your explicit trust before they run.
+
 ### The sandboxed lanes
 
-Hook and adapter code runs in a sandbox that denies everything unless the plugin was granted it, and an ungranted access **fails** rather than prompting:
+Hook and adapter code runs in a WebAssembly sandbox inside Ryu that denies everything by default. A denied access **fails**; it does not prompt:
 
-- Filesystem reads and writes are limited to the specific paths granted - not "the disk", specific paths.
-- Network access is limited to the specific hosts granted, or absent entirely.
-- Subprocess spawning is limited to a named allowlist of programs.
+- There is no filesystem and no network. A plugin that grants sandboxed JavaScript filesystem or network access is refused, not run. Work that needs disk or network belongs in a sidecar or MCP server, called as a tool.
+- Subprocess spawning is limited to programs Ryu names for a plugin that declares `child_process`. Hooks and adapters get none.
 - The environment is never handed over, so the code cannot read your credentials out of it.
+
+Each hook or adapter invocation runs in a fresh WebAssembly instance, which is discarded when the run ends. Concurrent calls do not share JavaScript state or host bridge authority. Reading the reply-cadence preference requires an approved `preferences:read` grant.
 
 UI bundles render in a browser sandbox with scripting allowed but no same-origin access, so a panel cannot reach into the surrounding app or its storage.
 
-These are mechanically enforced. A plugin cannot opt out of them by asking.
+### Companion UI network policy
+
+The host applies a restrictive default Content Security Policy (CSP) to custom app
+companions. It blocks direct network connections and nested frames while allowing the
+inline code needed to start the bundled interface. The iframe remains sandboxed and
+host APIs still require the app's approved grants.
+
+The desktop **Enforce CSP for custom apps** setting is on by default. Find it under
+**Settings → Gateway → Privacy → Custom app security**. With the setting on, a custom app without
+a trusted CSP declaration gets the same restricted default policy used for production
+companions. Changes apply the next time the app is opened.
+
+This setting belongs to the selected node. Switching nodes loads that node’s saved
+policy; a save still finishing on the previous node does not change the new node’s
+policy or block its controls.
+
+Turning the setting off removes that default policy for custom apps with no CSP claim,
+so their UI can make direct network requests outside Ryu's host API and Gateway grant
+checks. Keep it on unless you need that behavior while developing an app. A custom
+manifest's own CSP claim is not trusted to widen access; only trusted declarations can
+add network or remote-asset origins.
+
+The host enforces these rules. A plugin cannot opt out of them.
 
 ### The native lane
 
 <Callout type="warn">
-**A sidecar or MCP server runs with the same privileges as Ryu itself.** There is no OS-level sandbox around it today. It can read and write your files, open network connections, and spawn processes, regardless of what its manifest declares.
+**A sidecar or MCP server runs with the same privileges as Ryu itself.** By default there is no OS-level sandbox around it. It can read and write your files, open network connections, and spawn processes, regardless of what its manifest declares. A node can opt sidecars (not MCP servers, Pi extensions, or LSP servers) into the [optional OS sandbox](#optional-os-sandbox-for-sidecars), which confines their filesystem access.
 
 A sidecar's manifest-declared `permission_levels` are a separate, user-facing ACL vocabulary for the routes Core proxies on behalf of that app. On an organization-bound node, Core checks the caller's effective app level (including the HTTP method when a path has both read and write operations) before waking or forwarding to the sidecar. A missing route declaration is rejected at manifest load, and an ungranted level returns `403`; this controls who may use an app surface, not what the sidecar process can do once it runs.
 
-The process itself is still unsandboxed. Treat installing a plugin that ships a sidecar as equivalent to running that publisher's program on your machine, because that is what it is.
+Unless you enable the sidecar OS sandbox, the process itself is unsandboxed. Treat installing a plugin that ships a sidecar as equivalent to running that publisher's program on your machine, because that is what it is.
 </Callout>
 
-This is the same posture most extension ecosystems ship with, and the same reason they all lean on publisher review. It is called out here rather than buried because the declared-permissions block makes it easy to assume otherwise.
+### Optional OS sandbox for sidecars
+
+Core can confine each app sidecar process with the operating system's own isolation. It is
+**off by default**. A sidecar that writes outside the paths it is given stops working under `enforce`.
+
+Set the mode in the node config (`settings.sidecar.sandbox`) or with the `RYU_SIDECAR_SANDBOX`
+environment variable, then restart Core:
+
+```json
+{
+  "version": 1,
+  "settings": {
+    "sidecar": { "sandbox": "audit" }
+  }
+}
+```
+
+| Mode | What happens |
+|---|---|
+| `off` (default) | Nothing is computed or applied. Sidecars start exactly as before. |
+| `audit` | Core computes each sidecar's policy and logs it, and reports the would-be status, but applies nothing. Use it to see what an app would be allowed before you enforce. |
+| `enforce` | Core applies the policy with the platform backend below. |
+
+A per-app override, `settings.sidecar.sandboxPlugins` (`RYU_SIDECAR_SANDBOX_PLUGINS`), takes
+comma-separated `<app id>=<mode>` pairs such as `@acme/notes=enforce`. An app's manifest can also
+ask for a mode. Core always uses the **strictest** of the node setting, the per-app override, and
+the manifest, so neither an override nor a manifest can loosen what the node chose.
+
+**What an enforced sidecar can reach.** Read and write: the app's own directory, the app's own
+data directory (`RYU_PLUGIN_DATA_DIR`), the system temp directory, and any extra paths the
+manifest declares for writing. Read and execute: system libraries and runtime directories, the
+directory of the program it runs (and that program's install prefix), the shared models directory
+(`RYU_MODELS_DIR`), and any extra paths the manifest declares for reading. Everything else in your
+home directory and Ryu's data directory is out of reach, including other apps' directories and
+their data directories.
+Network access is not filtered, because sidecars serve HTTP.
+
+| Platform | Backend | Filesystem confined |
+|---|---|---|
+| Linux | Landlock, plus `no_new_privs` | Yes, on kernels with Landlock (5.13 and later, when enabled). On a kernel without it, the sidecar still starts with `no_new_privs` and no filesystem restriction, and its status says so. |
+| macOS | A Seatbelt profile run through `/usr/bin/sandbox-exec` | Yes. Program execution is limited to system locations, the program's install directory, and the app's own directory. |
+| Windows | A Job Object that ends the whole process tree when Core stops the sidecar, with an optional memory cap | No. Windows has no filesystem restriction in this sandbox, and the status says so. |
+
+An app declares the extra paths it needs under `sidecars[].sandbox` in its manifest; see
+[Declare a managed sidecar](/docs/extend/develop/extensions/managed-sidecar).
+Paths start with a placeholder (`$APP_DATA`, `$TMP`, `$RYU_DIR/<entry>`, or `$HOME/<entry>`).
+Core rejects relative and absolute literal paths, `..` and `.` segments, the whole home or data
+directory, and other apps' directories and data directories (`$RYU_DIR/plugins`, `$RYU_DIR/apps`,
+and `$RYU_DIR/plugin-data`), and it re-checks each path after following symlinks when
+the sidecar starts.
+
+The effective status of every app sidecar (mode, backend, and whether the process and its
+filesystem access are actually confined) appears on the sidecar status endpoint and as **OS
+sandbox** in the app's details under Store > Installed. When `enforce` stops a sidecar from
+starting, the error names the sandbox and the setting to change; a sidecar that exits while
+confined gets the same hint in its failure reason.
 
 ## Publisher trust
 
-Because the native lane cannot be contained mechanically, it is governed by **who published the plugin** instead. Every install records where it came from, at the moment it is installed:
+Ryu governs the native lane by **who published the plugin**. Every install records where it came from at the moment it is installed:
 
 | Trust basis | What it means |
 |---|---|
@@ -69,18 +187,20 @@ Because the native lane cannot be contained mechanically, it is governed by **wh
 | Verified publisher | Published as a signed package in the official Ryu marketplace by an organization that passed identity verification |
 | Official marketplace | Published as a signed package in the official Ryu marketplace, publisher not identity-verified |
 | Allowlisted | You explicitly trusted this plugin, and its provenance already vouched for the publisher |
-| Untrusted | Anything else - a third-party catalog, a sideload, or an install that predates provenance capture |
+| Untrusted | Anything else: a third-party catalog, a sideload, or an install that predates provenance capture |
 
-Two properties of this that matter:
+Three rules apply:
 
-**Provenance is captured at install, not checked later.** The trust decision reads what was recorded when you installed, so it never depends on the network being reachable. The trade-off is that verification changes are not retroactive - if a publisher loses its verified status after you installed, your install keeps its recorded status until you next update the plugin. Updating re-records it.
+**Provenance is captured at install, not checked later.** The trust decision reads what was recorded when you installed, so it never depends on the network being reachable. Verification changes are not retroactive. If a publisher loses its verified status after you install, your install keeps its recorded status until you next update the plugin. Updating records it again.
+
+**Trust is bound to the manifest that was installed.** A signed install records a digest of the exact manifest it accepted, and a built-in record vouches only for the manifest shipped inside Ryu. If the manifest Ryu loads later no longer matches, the plugin is reported as **Untrusted** whatever its recorded publisher, and the isolation report marks it with `manifest_drifted`. Updating or reinstalling the plugin through a verified path records a new binding.
 
 **Verification only counts from the official marketplace.** A third-party catalog can put a "verified" flag in its own listing data, because that data is written by whoever runs the catalog. Ryu's verification is a decision made in Ryu's control plane, so a claim carried by any other source is ignored.
 
 <Callout type="info">
-System plugins are described as such, not exempted from anything. They are Core-owned runtime
-components; ordinary official marketplace packages are still packages even when their publisher is
-verified. The label reports ownership/provenance, not a blanket sandbox exemption.
+The System plugin label reports ownership and provenance. It is not a sandbox exemption. System
+plugins are Core-owned runtime components; official marketplace packages are still packages even
+when their publisher is verified.
 </Callout>
 
 ## Seeing what you have installed
@@ -96,26 +216,56 @@ Each plugin reports its lanes, what each lane can enforce, its trust basis, and 
 
 The response separates two things that look similar and are not:
 
-- **Not enforceable** - the lane has no isolation mechanism. This is a statement about Ryu, not about the plugin, and nobody chose it.
-- **Permitted** - the lane uses host access and a trust basis allows it.
+- **Not enforceable**: the lane has no isolation mechanism. This describes Ryu, not the plugin.
+- **Permitted**: the lane uses host access and a trust basis allows it.
 
-Keep them apart when reading the report. A plugin is not doing anything unusual by appearing in the first category; every sidecar does.
+Every sidecar appears in the first category, so appearing there is not a sign of unusual behavior.
 
 ## Choosing what to trust
 
 Two settings govern the native lane:
 
-- **Trusted plugins** - an explicit list of plugins you allow to run host-access lanes.
-- **Require trust for host access** - when on, a plugin whose host-access lane has no trust basis is refused rather than merely reported. **Off by default**, because turning it on can stop an already-installed plugin from running. That is your call to make, not a default that changes under you.
+- **Trusted plugins**: an explicit list of plugins you allow to run host-access lanes.
+- **Require trust for host access**: when on, a plugin whose host-access lane has no trust basis is refused, not only reported. **Off by default**, because turning it on can stop an already-installed plugin from running.
+
+With the requirement on, enabling such a plugin fails with an explanation, and an already-enabled one starts none of its sidecars, external runtimes, MCP servers, Pi extensions, or LSP servers (each skip is logged). Its sandboxed lanes are unaffected. Plugins that declare no host-access lane are never refused for missing trust.
+
+## Revoking an installed plugin
+
+Each node keeps a local revocation list. An entry names a plugin id, or `id@version` to revoke only one installed version. A revoked plugin:
+
+- reads as disabled to everything that runs plugin code (hooks, adapters, sidecars, MCP servers, Pi extensions, panels, and routes), and its running contributions are torn down when you revoke it;
+- cannot be enabled, either directly or as a dependency of another plugin, until the entry is removed;
+- keeps its enabled setting and approved grants, so after you remove the entry you can enable it again without re-approving.
+
+Disabling a plugin drains its already-running MCP calls before teardown completes. New calls require the owning plugin to remain active, and a concurrent enable cannot restore its MCP tools after disable finishes.
+
+A revocation switches a plugin off, so it follows the same rules as disabling one. A plugin that Ryu needs to run cannot be revoked (`403`, code `mandatory`). A plugin that a Core subsystem depends on needs `"force": true` in the request (otherwise `409`, code `load_bearing`).
+
+The list is local to the node and is never fetched from the network. It appears in the isolation report under `revocations`, and each revoked plugin carries the matching entry.
+
+```bash
+# Revoke every version of a plugin
+curl -X POST -H "Authorization: Bearer $RYU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"id":"com.example.app","reason":"publisher compromised"}' \
+  http://127.0.0.1:7980/api/plugins/revocations
+
+# Remove the entry again
+curl -X DELETE -H "Authorization: Bearer $RYU_TOKEN" -H "Content-Type: application/json" \
+  -d '{"entry":"com.example.app"}' \
+  http://127.0.0.1:7980/api/plugins/revocations
+```
+
+On an organization-managed node, revoking requires the app disable permission and removing a revocation requires the app enable permission. Changing a plugin's grants, reloading manifests, and reading or changing a plugin's stored secrets likewise require the matching app lifecycle permission.
 
 <Callout type="warn">
-The trusted list is not a bypass. Naming a plugin there only re-labels one whose provenance already vouches for its publisher - it cannot promote a sideloaded or third-party-catalog plugin to trusted. If it could, the setting would be a universal way around publisher trust for anything that could write it.
+The trusted list is not a bypass. Naming a plugin there only re-labels one whose provenance already vouches for its publisher. It cannot promote a sideloaded or third-party-catalog plugin to trusted.
 </Callout>
 
-## What is NOT a boundary today
+## What is not a boundary
 
 <Callout type="warn">
-Plugin isolation contains hook, adapter, and UI code. It does **not** contain sidecars or MCP servers, and it is not a defense against a publisher you should not have trusted. It is also not multi-tenant isolation - see [Trust model](/docs/security/trust-model) for why everything in one install shares one trust domain.
+Plugin isolation contains hook, adapter, and UI code. It does **not** contain MCP servers, and it contains sidecars only when the optional OS sandbox is enforced, and then only their filesystem access (network access stays open). It is not a defense against a publisher you should not have trusted. It is also not multi-tenant isolation - see [Trust model](/docs/security/trust-model) for why everything in one install shares one trust domain.
 </Callout>
 
 ## Related

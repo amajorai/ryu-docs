@@ -1,6 +1,12 @@
 "use client";
 
-import { createOpenAPIPage } from "fumadocs-openapi/ui";
+import dynamic from "next/dynamic";
 
-/** Client-only OpenAPI renderer; schema data is preloaded by the server adapter. */
-export const OpenAPIPage = createOpenAPIPage();
+/*
+ * The OpenAPI renderer is large and only API-reference pages render it. A
+ * static import would ship it to every docs page (they share one route), so
+ * load it as its own chunk; server rendering is unchanged.
+ */
+export const OpenAPIPage = dynamic(() =>
+  import("./api-page.renderer").then((mod) => mod.OpenAPIPage),
+);

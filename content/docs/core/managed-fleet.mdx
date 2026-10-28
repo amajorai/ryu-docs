@@ -1,31 +1,32 @@
 ---
-title: Managed fleet configuration
-description: Enroll servers, distribute managed apps, plugins, MCP servers, skills, and rules, and share portable Stack Templates.
+title: Managed Fleet Configuration
+description: How organization admins enroll Ryu servers into Fleet, assign apps, plugins, MCP servers, skills, and rules, and share Stack Templates
 ---
 
-Ryu organizations can manage a consistent tool stack across cloud-hosted and local servers without opening an inbound administration port. Each enrolled server makes an authenticated outbound connection, verifies a signed desired-state snapshot, applies it through its normal local installers, and reports its actual state back to the organization dashboard.
+Fleet lets a Ryu organization keep one tool stack on its cloud-hosted and local servers without opening an inbound administration port. Each enrolled server makes an authenticated outbound connection, verifies a signed desired-state snapshot, applies it through its normal local installers, and reports its actual state to the organization dashboard.
 
-Enrollment and MCP access are separate. Enrollment binds the server to an
-organization for fleet configuration and policy. A local or self-hosted direct
-MCP client still needs that server's bearer or a paired token. Desktop's managed
-server selector receives a short-lived user JWT and Core narrows it to the
-organization, team, or personal server scope. An external MCP client should use
-the hosted `/mcp/<node-id>/<agent-id>` URL; the hosted service checks the user's
-Better Auth grant and sends Core a short-lived delegation for that server and agent.
+Enrollment and MCP access are separate:
+
+- Enrollment binds the server to an organization for Fleet configuration and policy.
+- A direct MCP client on a local or self-hosted server still needs that server's bearer or a paired token.
+- Desktop's managed server selector receives a short-lived delegation bound to each selected node.
+  Core narrows it to the organization, team, or personal server scope, and a node cannot reuse it at a peer.
+- An external MCP client uses the hosted `/mcp/<node-id>/<agent-id>` URL. The hosted service checks
+  the user's grant and sends Core a short-lived delegation for that server and agent.
 
 ## Enroll a server
 
 In Desktop, open **Gateway settings → Workspace → Organization binding** while
 the self-hosted server is active. Choose an organization, name the server, and select
-**Bind server**. Desktop creates a one-time enrollment code and sends it straight
-to Core. The code expires after ten minutes; you do not copy an organization ID,
-Fleet URL, or Gateway secret.
+**Bind node**. Desktop asks you to confirm it's you, then creates a one-time
+enrollment code and sends it straight to Core. The code expires after ten minutes. You do not copy an
+organization ID, Fleet URL, or Gateway secret.
 
 Server names are trimmed and must contain 1 to 128 characters.
 
-Enrollment is a two-phase relationship:
+Enrollment creates two kinds of credential:
 
-- Fleet identity, used for desired configuration and status;
+- a Fleet identity, used for desired configuration and status;
 - purpose-separated organization credentials for server control and managed
   inference.
 
@@ -44,8 +45,21 @@ above and does not ask you to paste that secret.
 Creating or redeeming an organization binding requires the live
 `gateway.configure` permission. Organization owners and admins have it by
 default. A custom organization role may grant it to another member. A
-team-scoped grant applies only to enrollment for that team. People without the
-permission can inspect status, but the binding controls stay read-only.
+team-scoped grant applies only to enrollment for that team, and only while you
+are on that team. An organization-wide grant covers every team, so owners and
+admins can enroll, retry, and revoke a team's servers without joining the team.
+People without the permission can inspect status, but the binding controls stay
+read-only.
+
+A server's enrollment scope also limits which organization resources it can load. Team and
+personal servers cannot load organization channel credentials or organization-wide Mail, so saved
+[channel bots](/docs/gateway/channel-setup) run only on organization-scoped servers.
+
+On the Web **Fleet status** page, search filters servers by name or observed
+state, reports when no servers match, and **Refresh** reloads their latest status. A non-revoked server can
+request reconciliation with **Retry**; the page reloads its state after the
+request. That action is separately authorized with `nodes.manage`, so a
+read-only request reports the permission error without changing the server.
 
 <Callout type="warn">
 An enrolled server cannot be moved to another organization by selecting a new one
@@ -61,8 +75,15 @@ budgets, and policy. A binding remains valid when a subscription starts, stops,
 or changes tier; access follows the live entitlement.
 
 Revoking a server stops future desired-state downloads. The dashboard shows desired and observed revisions, last contact, compatibility failures, missing setup, and whether a server is using stale last-known-good state.
+Fleet credentials created when an existing Gateway adopts another server remain tied to the issuing
+Gateway credential and server; revoking either stops the adopted server's Fleet access as well.
 
-Fleet revisions are independent from policy configuration revisions. The config-as-code screen shows both counters, while policy rollback continues to affect only policy layers.
+Fleet revisions are independent from policy configuration revisions. The config-as-code screen shows both counters, while policy rollback continues to affect only policy layers. After a rollback, the Web editor reloads the restored snapshot and clears the old diff preview so it cannot be mistaken for changes against the restored config.
+
+## Cloud computer SSH and updates
+
+SSH key setup, member keys, Shamir recovery, and the nightly self-update sequence for managed cloud
+computers are on [Cloud Computer SSH and Updates](/docs/core/cloud-computer-ssh-and-updates).
 
 ## Managed content
 
@@ -80,6 +101,8 @@ to control where it is available. If at least one agent assignment is present, o
 non-blocked ids are available on that node; with no agent assignment, local availability is unchanged.
 
 The most specific applicable scope wins unless an ancestor assignment is locked. At the same scope, blocked wins over required, and required wins over optional. Local project folders are mapped to organization projects on each server; local paths never leave the server.
+Team-bound servers may map only projects in their own team, and personal servers cannot self-assign
+organization projects. Fleet checks the mapping again before sending project rules or sealed secrets.
 
 Configuration contains setup-slot references rather than credential values. A required integration that is missing a credential remains disabled and reports **Needs secret**.
 
@@ -89,6 +112,17 @@ they are saved. A live member with `nodes.manage` permission must complete a cre
 re-verification step before replacing or removing a binding. Each accepted change advances the
 organization's Fleet revision with the acting member recorded, so enrolled servers can converge on
 the change and administrators can review who made it.
+
+A binding can be scoped to a team: add it under **Organization → Teams → Policies → Team secrets**,
+or save it through the API with a `teamId`. A team binding is sealed only into the snapshots of
+servers bound to that team; an organization binding reaches every server. Listing, saving, or
+removing a team binding needs `nodes.manage` for the organization or through a role scoped to that
+team, and moving a binding between scopes needs authority over both. Values are write-only: the
+page shows names and update times, never the value.
+
+A binding name is unique within its scope, so the organization and each team can each hold their
+own binding with the same name, such as `OPENAI_API_KEY`. Saving a new binding under a name its
+scope already uses returns `409 Conflict`; replace the existing binding instead.
 
 ## Managed rules
 
@@ -100,7 +134,9 @@ Command rules match executable argument prefixes and can allow, prompt, or deny.
 
 An enrolled server caches its last verified snapshot and referenced artifacts. It can use that last-known-good state for up to seven days while offline. After expiry, Ryu retains managed deny and block rules, drops managed allows, and disables managed executable integrations until the server reconnects. User-owned data is not deleted.
 
-Shared nodes also fail closed for destination-sensitive local bridges until the
+## Shared nodes
+
+Shared nodes fail closed for destination-sensitive local bridges until the
 caller carries a verified resource binding: app chat continuation, arbitrary
 channel-agent/team selection, document parser jobs, and application realtime
 rooms cannot use a model-selected cross-user resource. The node-wide Activity feed,
@@ -110,27 +146,30 @@ Personal unbound nodes retain their single-user behavior.
 
 ## Stack Templates
 
-A Stack Template is a portable list of pinned apps, plugins, MCP servers, skills, rules, project aliases, and setup placeholders. It never contains secrets, account or server identifiers, absolute paths, local URLs, caches, or artifact bytes. Organization exports require an administrator; member-facing template lists omit the unlisted-share bearer hash.
+A Stack Template is a portable list of pinned apps, plugins, MCP servers, skills, rules, project aliases, and setup placeholders. It never contains secrets, account or server identifiers, absolute paths, local URLs, caches, or artifact bytes. Organization exports, previews, and applies require `nodes.manage`; owners and admins hold it by default, and custom roles can grant it. Members without that permission can still inspect organization templates. Member-facing template lists omit the unlisted-share bearer hash.
 
-Export a server's current verified stack with:
-
-```bash
-ryu stack export ryu-stack.json
-```
-
-Imports always show a preview before applying changes. Templates fork by default, so later publisher edits do not silently change an imported organization. A template can be private to named organizations, shared through an unlisted link, or published in Marketplace. Importing a template never transfers access to a private artifact; the destination organization's server ACL must authorize it.
-
-Preview a JSON template at organization scope, then apply the same import after reviewing its conflicts, grants, and missing setup:
+Export a server's current verified stack from the terminal client. `ryu-cli stack` reads
+`GET /api/fleet/stack/export` from Core and prints the JSON:
 
 ```bash
-ryu stack import ryu-stack.json --org <organization-id>
-ryu stack import ryu-stack.json --org <organization-id> --apply
+ryu-cli stack --json > ryu-stack.json
 ```
 
-Use `--scope team|project|user --scope-id <id>` for a narrower destination. Marketplace items referenced by a template must first be imported into the destination's managed artifact registry; free and paid items use the same signed-release and organization/server ACL checks. The import copies the verified release into an immutable, organization-signed artifact record without transferring the publisher's credentials or private artifact access.
+Import a template from the organization **Stack Templates** page. Imports always show a preview before applying changes. Templates fork by default, so later publisher edits do not silently change an imported organization. A template can be private to named organizations, shared through an unlisted link, or published in Marketplace. Publishing a template to Marketplace also requires `marketplace.publish` and two-factor authentication (an authenticator app or a passkey). The listing belongs to your organization and stays pending until Marketplace moderation approves it. Importing a template never transfers access to a private artifact; the destination organization's server ACL must authorize it.
+
+Review the preview's conflicts, grants, and missing setup, then apply the same import. The page
+reports the number of changes applied and the resulting Fleet revision. An import can target the
+organization, or narrow the destination to a team, project, or user. Marketplace items referenced by a template must first be imported into the destination's managed artifact registry; free and paid items use the same signed-release and organization/server ACL checks. The import copies the verified release into an immutable, organization-signed artifact record without transferring the publisher's credentials or private artifact access.
 
 An imported stack can optionally subscribe to its publisher. **Manual** subscriptions record a newer release for preview and explicit application. **Auto** subscriptions update only records owned by that template import; they stop and report a conflict if the release needs an unavailable artifact or would replace separately managed content. Removing a template import never removes user-created assignments or local data.
 
 For an **unlisted** template, send the one-time bearer in the `X-Ryu-Stack-Template-Token` header. Do not put it in a query string, bookmark, or referrer. Template reads are no-store responses, and the bearer is never returned by organization list or detail endpoints.
 
-Continue with [Core](/docs/core), [node and presence](/docs/core/node-and-presence), [managed data plane](/docs/gateway/managed-data-plane), [multiple servers](/docs/learn/academy/cloud/multi-node), and [Gateway](/docs/gateway).
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/node-and-presence" />
+  <DocCard href="/docs/gateway/managed-data-plane" />
+  <DocCard href="/docs/security/access-hierarchy" />
+  <DocCard href="/docs/learn/academy/cloud/multi-node" />
+</Cards>

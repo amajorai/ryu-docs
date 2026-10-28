@@ -1,22 +1,17 @@
 ---
 title: "Persistent Boxes"
-description: "Durable, tenant-scoped workspaces for agent work, previews, and long-running tasks"
+description: "Reference for Ryu Box persistent workspaces: local and connected provider modes, Core integration and session Boxes, organization management, and security"
 ---
-
-<Callout type="info">
-  Ryu Box has two deliberate modes. Local mode runs the Docker or filesystem driver. Connected
-  provider mode forwards the Ryu Box API to a configured workspace provider while keeping the
-  provider credential server-side.
-</Callout>
 
 ## What a Box is
 
 A Box is a persistent Linux workspace for agent work, previews, and long-running development
 tasks. Its filesystem survives commands, stop/resume cycles, and forks. Ryu owns the tenant
-boundary and API entry point. The selected driver or connected provider owns the actual machine.
+boundary and API entry point. A local driver or a connected provider owns the actual
+machine, and a provider credential stays server-side.
 
 The Ryu Box API covers lifecycle, prompts, events, commands, files, artifacts, desktop streaming,
-interrupts, SSH access, snapshots, deletion operations, account and limits, environments,
+interrupts, SSH access, snapshots, deletion, account and limits, environments,
 repositories, secrets, and webhooks. Connected provider mode forwards the complete
 API-key-automatable `/v1` surface, including opaque file, artifact, snapshot-download, and token-bearing
 desktop responses.
@@ -25,13 +20,20 @@ desktop responses.
 
 | Mode | Provider | API coverage | Billing |
 | --- | --- | --- | --- |
-| `local` | Docker or explicitly unsafe development filesystem | Ryu's lifecycle, command, event, prompt queue, fork, stop/resume, delete, and TTL subset | Uses Ryu's normal sandbox metering when Core registers the run |
-| `subscription_passthrough` | Configured workspace provider subscription | Complete provider `/v1` API, forwarded without a local resource model | Set `RYU_SANDBOX_BOX_SUBSCRIPTION_PASSTHROUGH=true` for Core; Ryu does not debit the same machine time again |
+| `local` | Docker or explicitly unsafe development filesystem | Lifecycle, setup and repository clone, streaming and background commands, files, previews, terminal, tunnels, SSH, snapshots, fork, secrets, network allowlists, managed agent prompts, usage, and TTL | The service records per-second running time, which pauses while a Box is stopped, and how long each Box exists. A Box that Core creates is charged through Ryu's sandbox metering. A Ryu-hosted dashboard or API Box is settled hourly from that usage report against the organization's credits |
+| `subscription_passthrough` | Configured workspace provider subscription | Complete provider `/v1` API, forwarded without a local resource model | Set `RYU_SANDBOX_BOX_SUBSCRIPTION_PASSTHROUGH=true` for Core; Ryu does not debit that machine time again |
 
-The local mode health response reports its smaller feature list. It does not claim to provide
-provider account, environment, file, desktop, SSH, or webhook semantics. Connected provider mode
-is the parity path because it preserves provider HTTP status, response envelopes, binary bodies,
-safe response headers, and newly added provider routes without requiring a second implementation.
+The local mode health response reports its feature list and the isolation the Docker runtime
+provides (`container`, `gvisor`, or `microvm`; `vm` on Ryu-hosted Box). A Ryu-hosted Box usually has
+its own virtual machine. One placed on a shared overflow host reports `gvisor` in its own
+`placement`, and still has its own container, screen, and gVisor sandbox.
+
+Local mode runs a per-Box virtual desktop and browser for Boxes created with
+`"desktop": true` and streams it through the `desktop` access-token scope (see
+[Box API](/docs/standalone/box-api#desktop)). It does not provide provider account, environment,
+or webhook semantics. Connected provider mode forwards them,
+preserving provider HTTP status, response envelopes, binary bodies, safe response
+headers, and newly added provider routes without a second implementation.
 
 ## Connected provider mode
 
@@ -58,9 +60,18 @@ provider subscription bearer. Cookies, incoming credentials, host headers, and r
 not written to SQLite or logs. File and artifact request/response bodies remain streaming/opaque,
 with a bounded declared request size for the proxy. A shared provider account must not be presented
 as several unrelated tenants because account-wide routes such as `/me`, `/limits`, `/repos`,
-`/secrets`, and API-key management would otherwise cross the tenant boundary. When more than one
-provider tenant key is configured, Ryu verifies each binding through the provider `/me` identity and
-rejects keys that resolve to the same account.
+`/secrets`, and API-key management would otherwise cross the tenant boundary.
+
+When more than one provider tenant key is configured, Ryu verifies every binding together through
+the provider `/me` identity before it forwards anything, and refuses every tenant whose key resolves
+to an account another tenant's key also resolves to, with `409 upstream_account_conflict`. The
+outcome depends on configuration only, not on which tenant calls first. The service refuses to start
+when `RYU_BOX_UPSTREAM_URL` is set without a provider key.
+
+Provider responses must start within 30 seconds, or within 61 minutes for
+`POST /v1/boxes/{id}/commands`, which may wait for a long command. When the provider does not
+answer in time the service returns `504 upstream_timeout`; the request may still be running at the
+provider, so retry only idempotent calls.
 
 The service forwards `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` requests under `/v1` for the
 API-key-automatable Ryu Box contract. Interactive-only operations, such as changing data-retention
@@ -106,17 +117,144 @@ to normal Ryu metering. The flag does not remove the provider's own subscription
 stop timer. Leave it off when Ryu owns the Box capacity and should enforce Ryu budgets through
 Gateway.
 
-Core sends `type`, `ttlSeconds`, `noEnv`, and `timeoutSeconds` using the public contract. It polls
+Core also uses Box for cloud tasks whose environment selects the **Fresh cloud box** backend. It
+creates one disposable Box for each chat, with a finite TTL of the session length plus five
+minutes, and removes it when the task ends. A node without `RYU_SANDBOX_BOX_TOKEN` rejects these tasks with
+`503 cloud_environment_backend_unavailable` instead of using another backend. See
+[Cloud environments](/docs/surfaces/desktop/user-guide/cloud-environments#run-on-a-fresh-ryu-box).
+
+Core sends `type` and `size`, `ttlSeconds`, `noEnv`, `desktop`, `labels`, and `timeoutSeconds`
+using the public contract. It polls
 asynchronous provider creation before the first command and sends the exact Box id as the delete
 confirmation. It does not import provider account, repository, secret, webhook, or desktop types.
+
+Core leaves `ttlSeconds` empty, so a Box it creates on a local Ryu Box service gets the 24-hour
+default and is deleted when that time ends. Core reads the time to live the service reports, stops
+metering the Box at that point, and removes it from its live sandboxes; destroy it sooner when the
+work is done. Core bills each Box at the size it was created with (`small` 2 vCPU / 4 GiB,
+`default` 4 vCPU / 8 GiB, `large` 8 vCPU / 16 GiB). Cloud tasks and session Boxes use `small`
+unless `RYU_SANDBOX_BOX_SIZE` names another size. Core refuses a create request whose `spec`
+names another shape.
+
+On a Ryu-managed node, Core gets its Box service address and credential from Ryu at runtime, so
+`RYU_SANDBOX_BOX_URL` and `RYU_SANDBOX_BOX_TOKEN` are only needed on a self-hosted node.
+
+### Session Boxes
+
+Each conversation can have one **session Box**: a Box with its own virtual desktop and browser,
+created the first time the conversation needs heavy work. That is a cloud task, the first
+`computer.*` or `browser.*` call, or a worker thread that runs in parallel. A conversation that
+already has a cloud task Box uses that Box and never creates a second one. Core keeps the
+conversation's brain on the node: the model, tools, and memory stay there, and the Box does the
+hands-on work (commands, files, the screen, and the browser).
+
+- **Computer use and the browser.** In a conversation, `computer.*` and `browser.*` run on that
+  conversation's Box screen, and that conversation is not offered tools that drive the node's own
+  display (Shadow computer use, Ghost, the local browser); calling one is refused.
+- **Who can start a Box.** A Box is started
+  only for a verified caller: the signed-in person whose chat turn needs it, or a personal node's
+  local owner. A run of a signed-in account's conversation that does not come from its chat (a
+  scheduled or automation run, an agent-to-agent, voice, plugin, or bot run), or a call on an
+  organization's node with no conversation owner, cannot start a Box. On a node that puts computer
+  use on Boxes, its computer and browser calls are refused rather than run on the node's desktop.
+  On a personal node, the local owner's calls without a conversation keep the node's desktop.
+- **Keeping work on the node.** An owner can keep conversations on the node by setting the `session-box-computer-target` preference
+  to `node` (the default is `auto`). The canonical machine-verb schemas refuse any argument that
+  names a Box, URL, or session.
+- **One-time cost notice.** The first time a session Box would start for an owner, and only after
+  the plan cap and credit checks pass, Core holds the call and asks:
+  - The conversation's status carries a `costNotice` with the Box `size`, its hourly rate
+    `ratePerHourMicroUsd` read live from the Gateway, `minimumSecondsPerStart` (300: each start or
+    resume is billed at least 5 minutes), and `waiting` while a call is held. The desktop and web
+    chats show it.
+  - The owner allows it with `POST …/cost-notice`, echoing the rate the notice showed; the held
+    call then starts the Box and the turn continues. A rate that changed since then answers
+    `409 session_box_rate_changed` with the new rate.
+  - A call nobody answers within about 90 seconds is refused with
+    `428 session_box_cost_notice_required`, whose body names the size, rate and minimum, and the
+    agent is told to ask.
+  - Runs nobody watches, such as routines, can never answer in time, so the owner can allow the
+    cost ahead of any conversation with `GET` and `POST /api/session-boxes/cost-notice` (in the
+    desktop app: the node's device settings, under **Computer use in conversations**).
+  - Core remembers the answer per owner, so later Boxes start without asking, and a parked Box
+    always resumes without asking.
+- **Worker threads.** Each worker thread that a coordinator starts with the `threads.*` tools gets
+  a child Box addressed as `<conversationId>#sub:<n>`. Children count against the same plan cap;
+  when the cap is reached, a child shares its parent's Box instead of failing. Parallel
+  `delegate.fanout` tasks are read-only and do not get a Box of their own.
+- **Idle and end.** A session Box with no tool call, no running work, and no viewer for
+  `session-box-idle-secs` (default 600 seconds; `RYU_SESSION_BOX_IDLE_SECS` or `session.boxIdleSecs`
+  in `node-config.json` on the node) is
+  parked; the next call resumes it with its files intact. A session Box parks after four hours of
+  running; `POST …/extend` (the **Extend** action in the Box screen tab) lengthens that. Deleting the conversation deletes its Box and every child
+  Box. A Core restart parks Boxes instead of deleting them.
+- **Admission.** Before creating a Box, Core checks the plan's cap on running Boxes (1 without a
+  paid plan or during a free trial, 2 on Plus and Pro, 4 on Max, 10 on Teams Lite and Teams, 20 on
+  Business), the credit
+  balance (at least the 5-minute minimum every Box start is charged, at the Box's rate as the
+  Gateway prices it), and the Box service's own limits. Refusals are `429 session_box_limit_reached`, `402 session_box_insufficient_credits`,
+  `503 session_box_rate_unavailable` when the Gateway cannot name the rate, and, rarely,
+  `503 session_box_capacity` with `Retry-After`.
+- **Credits.** Core meters a running session Box every 10 seconds through the Gateway. When
+  credits or a budget run out, Core parks the Box within seconds and records why (`balance`,
+  `budget`, or `accounting`). If Core stops metering a Box altogether, the Box service parks it
+  within about two minutes.
+- **AI calls from the Box.** Agents inside the Box reach models through your organization's
+  Gateway with a short-lived key scoped to that conversation and Box. The key is written to a
+  private in-memory file in the Box, refreshed while the Box runs, and expires within 20 minutes
+  of a park.
+
+Core's session Box routes are owner-scoped: another caller's Box answers `403`, and a conversation
+without a Box (and no cost notice waiting) answers `404`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/session-boxes/{conversationId}` | State, placement, screen, running time, cost so far, rate, credit warning, stop reason, children, plan cap, and any waiting `costNotice` |
+| `POST` | `/api/session-boxes/{conversationId}/screen` | A screen grant for `{viewOnly?, origin?}`; asking for a parked Box's screen resumes it |
+| `GET` | `/api/session-boxes/{conversationId}/screen/ws` | The screen relay for self-hosted nodes, opened with a one-use `session-box` WebSocket ticket |
+| `POST` | `/api/session-boxes/{conversationId}/stop` | Park the Box |
+| `POST` | `/api/session-boxes/{conversationId}/resume` | Resume a parked Box |
+| `POST` | `/api/session-boxes/{conversationId}/extend` | Extend a session Box's lifetime by `seconds` (60 to 14400; default 3600) |
+| `POST` | `/api/session-boxes/{conversationId}/cost-notice` | Allow session Boxes once, with `{ratePerHourMicroUsd}` set to the hourly rate the notice showed. A held call goes on |
+| `GET` | `/api/session-boxes/cost-notice` | Whether the caller has allowed session Boxes, with the size, live hourly rate and per-start minimum |
+| `POST` | `/api/session-boxes/cost-notice` | Allow session Boxes ahead of any conversation, with `{ratePerHourMicroUsd}` |
+
+A screen grant has one of two modes. On a Ryu-managed node it is `direct`. The grant holds an absolute `wss://`
+URL on the Ryu Box service and the WebSocket subprotocols that carry a single-use token, so the
+screen never streams through the node. A self-hosted node whose Box service has no public address
+answers `relay`. Take a WebSocket ticket for the route `session-box` and the grant's `path`, then
+open that path on Core with `?ticket=`. A hosted node refuses the relay with
+`409 stream_direct_only`.
+
+`GET /api/cloud-tasks/{conversationId}` also reports a cloud task's Box and the plan cap in its
+optional `box` and `caps` fields, in the same shape.
 
 ## Organization management
 
 For a hosted organization, use the Ryu dashboard's **Products** view to create
 and manage its Box workspaces. The view keeps the resource list, size, network
-choice, expiry, and lifecycle actions under the selected organization. The
-service bearer stays on the server-side control-plane bridge; it is never put in
-the browser or shared between organizations.
+choice, expiry, and lifecycle actions under the selected organization. **New Box**
+offers Small, Default, or Large size; No network or Allow egress; and an expiry of
+1 hour, 24 hours (the default), or 7 days. Cancel discards the unsaved form values.
+
+Organization-wide Box listing and lifecycle management require the
+`nodes.manage` permission. Owners, admins, and delegated node managers have it.
+Ordinary membership and an enabled Box feature do not grant access to peer
+workspaces. The service bearer stays on the server-side control-plane bridge. It
+is never sent to the browser or shared between organizations.
+
+Every Box expires. A Box created through the API without an expiry gets the
+service's 24-hour default, and no Box can live longer than 7 days. Expiry counts
+from creation, keeps counting while the Box is stopped, and deletes the Box and
+its disk.
+
+Ryu-hosted Box is on for every organization by default. Boxes created from the
+dashboard are settled hourly against the organization's credits: compute while a
+Box is running, and storage while it exists. **New Box** and resume are refused
+with `402 insufficient_credits` when the organization has no plan pool left and
+no positive balance, and running Boxes are stopped when credits run out. Rates
+and settlement order are on
+[Ryu Box pricing](/docs/standalone/box#ryu-capacity-pricing).
 
 The standalone Box home is a portal entry point for people: `GET /` redirects to
 the organization dashboard. API calls under `/v1` keep their normal Box service
@@ -125,49 +263,49 @@ behavior, so agents and backends can continue to use the API directly.
 ## Send Box events to Notify
 
 Ryu Box remains the source of truth for its lifecycle and local event history.
-If another product needs a shared event stream, the repository includes a
-[Box to Notify example](/docs/standalone/notify-streams#box-and-agent-mail-examples)
+For a shared event stream, use the
+[Box to Notify example](/docs/standalone/notify-streams#compose-with-box-and-mail)
 that publishes the Box id and status to Ryu Notify with a separate bearer key.
 The example does not send driver references, command output, preview URLs, or
 provider credentials.
 
-## Local driver lifecycle
+## Local mode
 
-The local service keeps a smaller, provider-neutral lifecycle:
-
-| State | Meaning |
-| --- | --- |
-| `provisioning` | The driver is creating the workspace. |
-| `ready` | Commands, prompts, and interactive work may start. |
-| `running` | A command is using the Box. One command is admitted per Box. |
-| `stopped` | The driver stopped the workspace while its disk remains. |
-| `error` | Provisioning or execution failed and needs recovery. |
-| `deleted` | The driver resource was destroyed; the audit row remains. |
-
-Local create and fork requests require an `Idempotency-Key`. TTL deadlines are measured from
-creation, are restored after a service restart, and destroy the local resource at expiry. Commands
-use an argv array internally, keep `cwd` inside the workspace, and bound combined stdout/stderr
-to 1 MiB.
-
-The filesystem driver runs host processes and is disabled unless
-`RYU_BOX_ALLOW_UNSAFE_LOCAL=true`; it is also refused when `NODE_ENV=production`. It is for
-development and contract tests only. The Docker driver requires access to a **rootless Docker
-daemon** and refuses a rootful daemon, because a Docker socket backed by a rootful daemon is
-equivalent to host-root access. Use a rootless daemon with no host socket exposed to an untrusted
-service, or use the connected provider path for untrusted agent work.
+The local driver lifecycle, TTLs, driver safety rules, and every local `/v1/boxes` route are on
+[Local Box Mode](/docs/core/boxes-local-mode).
 
 ## Security and ownership
 
 - Keep the Box service behind TLS and a Ryu-authenticated network boundary.
 - Use one Ryu bearer and one provider subscription binding per tenant.
 - Default network access to off and allowlist local Docker images.
-- Treat desktop, VNC, SSH, artifact, and snapshot URLs as secrets. Do not log or persist them.
+- Each size has a storage allowance: small 40 GiB, default 80 GiB, large 100 GiB. Local Docker mode
+  enforces it only with `RYU_BOX_DOCKER_STORAGE_QUOTA=true`, which needs a storage driver with
+  per-container quotas, such as overlay2 on XFS mounted with `pquota`; Docker refuses to create
+  Boxes otherwise. Without a quota or the disk watchdog below, a Box's disk use is not capped,
+  so keep the Docker data root on its own filesystem, separate from `RYU_BOX_DATA_DIR`.
+- Where quotas are not available, `RYU_BOX_DISK_WATCHDOG=true` checks each Box's disk every five
+  minutes and stops a Box over its allowance. The tenant
+  can resume it to delete files during one cleanup window, one interval from the first resume, and
+  `lastError` shows the reason and the deadline. Stopping and resuming does not extend the window. A
+  Box still over when it ends is stopped at the next check, and resume then answers
+  `429 quota_exceeded`, so delete it to free the space. While it is over, fork and snapshot answer
+  `429 quota_exceeded` too. The watchdog is off by default because each check reads every Box's
+  disk, and a Box can still write past its allowance between checks. On the hosted VM fleet, the watchdog also covers Boxes
+  on shared overflow hosts, where one Box could fill the host's disk. Dedicated VM Boxes are not
+  measured.
+- Treat SSH, artifact, snapshot, private preview, and access-token URLs as secrets. Do not log or
+  persist them. A Box desktop has no VNC port; its stream needs a single-use, origin-bound token.
+- Commands run as an unprivileged user by default. `user: "root"` is root inside the Box only:
+  Boxes drop every capability except the small set package managers need, and set
+  `no-new-privileges`.
 - Keep model and provider credentials in the worker's secret mechanism. Do not put long-lived
   credentials in prompt or command bodies.
 - Stop or delete Boxes according to the retention policy. Stopping is not permanent deletion in
   connected provider mode.
 
 <Cards>
+  <DocCard href="/docs/core/boxes-local-mode" />
   <DocCard href="/docs/core/sandbox" />
   <DocCard href="/docs/billing/metering" />
   <DocCard href="/docs/security/sandboxing-isolation" />

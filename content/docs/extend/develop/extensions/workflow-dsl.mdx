@@ -1,0 +1,253 @@
+---
+title: "Workflow DSL"
+description: "Reference for @ryuhq/sdk/workflow - typed createWorkflow and createStep builders that run in-process with streaming, suspend, and resume, or compile to a durable Core workflow"
+tags: ["sdk", "workflows", "typescript", "human-in-the-loop", "streaming"]
+---
+
+`@ryuhq/sdk/workflow` is a code-first workflow builder. You chain typed steps with `.then`,
+`.parallel`, `.branch`, `.foreach`, and loops, then either:
+
+- **run it in-process** with `workflow.createRun().start(...)`, including `suspend()` / `resume()`
+  for human input and streamed `events`, `updates`, and `values`; or
+- **compile it** with `workflow.toCore()` to the same JSON graph the
+  [Core workflow engine](/docs/core/workflows) runs, deploy it, and run it durably on a node.
+
+If you are porting from Mastra workflows or a LangGraph `StateGraph`, the concepts map directly
+(see [Concept mapping](#concept-mapping)). For the imperative `defineWorkflow` factory, see
+[Build Workflows in Code](/docs/extend/develop/extensions/author-workflows).
+
+## A first workflow
+
+Schemas are any [Standard Schema](https://standardschema.dev) validator; the examples use zod.
+
+```typescript
+import { z } from "zod";
+import { createStep, createWorkflow, when } from "@ryuhq/sdk/workflow";
+
+const classify = createStep({
+  id: "classify",
+  inputSchema: z.object({ text: z.string() }),
+  outputSchema: z.string(),
+  execute: async ({ inputData }) =>
+    inputData.text.toLowerCase().includes("error") ? "bug" : "question",
+});
+
+const fileBug = createStep({
+  id: "fileBug",
+  execute: async ({ getInitData }) => `filed: ${getInitData<{ text: string }>().text}`,
+  localOnly: "calls the issue tracker from this process",
+});
+
+const answer = createStep({
+  id: "answer",
+  execute: async () => "see the FAQ",
+});
+
+export const triage = createWorkflow({
+  id: "triage",
+  inputSchema: z.object({ text: z.string() }),
+  outputSchema: z.string(),
+})
+  .then(classify)
+  .branch([
+    [when.equals("bug"), fileBug],
+    [when.equals("question"), answer],
+  ])
+  .map(async ({ inputData }) => inputData.fileBug ?? inputData.answer ?? "")
+  .commit();
+
+const result = await triage.createRun().start({ inputData: { text: "500 error on save" } });
+if (result.status === "success") {
+  console.info(result.result); // "filed: 500 error on save"
+}
+```
+
+`.then` is type-checked: a step whose input type does not accept the current value is a compile
+error. Schemas also validate at run time, for workflow input and output and for every step's input,
+output, suspend payload, and resume data.
+
+## Steps
+
+| Factory | Runs locally as | Compiles to Core node |
+|---|---|---|
+| `createStep({ id, execute, inputSchema?, outputSchema? })` | `execute(context)` | `script` |
+| `agentStep({ id, agentId, task?, agent? })` | `agent.generate(prompt)` (an SDK `Agent` or Runnable) | `agent` |
+| `toolStep({ id, tool: "server.tool", args?, call? })` | `call(args)` (a function or `defineTool` Runnable) | `tool` |
+| `mcpStep({ id, server, tool, args?, call? })` | `call(args)` | `mcp` |
+| `humanStep({ id, prompt?, resumeSchema? })` | suspends; the resume data is the output | `awakeable` |
+| `nodeStep({ id, node, execute? })` | `execute` when given | any node kind, e.g. `{ type: "skill", skill: "summarize" }` |
+| a committed workflow | its own stages | `sub_workflow` |
+
+`execute` receives `inputData`, `resumeData`, `suspend(payload)`, `getStepResult(stepId)`,
+`getInitData()`, `state` / `setState(patch)`, `emit(data)` (a custom stream event), `signal`,
+`runId`, `workflowId`, and `runtime` (the `RunnableContext` passed to `createRun`).
+
+Every step accepts `retry` (`maxAttempts`, `initialIntervalMs`, `backoffCoefficient`,
+`maxIntervalMs`, `nonRetryableErrors`) and `timeoutMs`, with the same meaning as Core's per-node
+retry policy and timeout.
+
+Agent and tool templates (`task`, string leaves of `args`) understand `{{input}}`,
+`{{nodes.<stepId>}}`, and `{{state.<key>}}` both locally and on Core. On Core, `{{nodes.<stepId>}}`
+resolves for a step that runs once at the top level of the workflow, whose node id is its step id.
+Tool steps add the step input as `args.input` unless `args` sets it.
+
+## Control flow
+
+| Method | Output | Notes |
+|---|---|---|
+| `.then(step)` | the step output | |
+| `.parallel([a, b])` | `{ a: outA, b: outB }` | all steps get the current value |
+| `.branch([[cond, a], [cond, b]])` | `{ a?: outA, b?: outB }` | every arm whose condition holds runs; none matching gives `{}` |
+| `.foreach(step, { concurrency })` | an array, in input order | the current value must be an array |
+| `.dowhile(step, cond, { maxIterations })` | the last output | runs, then repeats while `cond` holds on the output |
+| `.dountil(step, cond, { maxIterations })` | the last output | runs, then repeats until `cond` holds |
+| `.map(fn)` | `fn({ inputData, ... })` | reshape between steps |
+| `.sleep(ms)` | the current value | a durable timer on Core |
+
+Loops run at most `maxIterations` passes (default 100); reaching the cap ends the loop with the
+last output, as Core does.
+
+A condition is a predicate `({ inputData, getStepResult, getInitData, state }) => boolean` or a
+portable `when.*` condition: `equals`, `notEquals`, `contains`, `startsWith`, `endsWith`, `empty`,
+`nonEmpty`, `lt`, `lte`, `gt`, `gte`, or `expr("input == \"yes\"")`. Portable conditions compare
+the value's text (strings as is, other values as JSON) and behave identically locally and on Core.
+Only portable conditions compile to Core.
+
+## Running locally
+
+```typescript
+const run = triage.createRun({ runtime: ctx }); // runtime is optional
+const result = await run.start({ inputData: { text: "hi" }, initialState: {} });
+// result.status: "success" | "suspended" | "failed"
+```
+
+### Streaming
+
+`run.stream({ inputData, streamMode })` returns an async iterable of `{ mode, data }` chunks plus a
+`result` promise. `streamMode` is one mode or an array:
+
+| Mode | `data` | Emitted |
+|---|---|---|
+| `events` (default) | `workflow-start`, `step-start`, `step-result`, `step-suspended`, `step-error`, `step-output`, `state`, `workflow-finish` | every lifecycle event |
+| `updates` | `{ [stepId]: output }` | after each step finishes |
+| `values` | `{ status, input, steps, state, output? }` | after every change |
+
+```typescript
+const stream = triage.createRun().stream({
+  inputData: { text: "hi" },
+  streamMode: ["updates", "values"],
+});
+for await (const chunk of stream) {
+  if (chunk.mode === "updates") console.info(chunk.data);
+}
+const final = await stream.result;
+```
+
+`run.watch(listener)` subscribes to the same events without streaming.
+
+### Suspend and resume
+
+A step pauses for human input with `await suspend(payload)` (or use `humanStep`). The run ends with
+`status: "suspended"` and lists the suspended steps by path. Resume with the reviewer's answer:
+
+```typescript
+const review = createWorkflow({ id: "review" })
+  .then(draft)
+  .then(humanStep({ id: "approve", prompt: "Publish?", resumeSchema: z.boolean() }))
+  .then(publish)
+  .commit();
+
+const run = review.createRun();
+const first = await run.start({ inputData: notes }); // status "suspended"
+
+// Persist the checkpoint anywhere JSON goes, then resume later, in any process:
+const saved = JSON.stringify(run.snapshot());
+const later = review.createRun({ snapshot: JSON.parse(saved) });
+const done = await later.resume({ step: "approve", resumeData: true });
+```
+
+Resuming replays the workflow from the top: finished steps return their recorded output without
+running again, and only the resumed step and what follows execute. Keep conditions and `.map`
+functions deterministic, since they are re-evaluated on replay. When several steps are suspended
+(for example inside `.parallel`), pass `step` (a step id, path, or step object) to choose one.
+
+`run.cancel()` aborts a run; running steps observe `signal.aborted`.
+
+### As a Runnable
+
+A committed workflow is a `kind: "workflow"` Runnable: `await workflow.run(input, ctx)` runs it
+locally and returns the output, so agents and `defineWorkflow` can call it like any other step.
+
+## Compiling to Core
+
+`workflow.toCore()` returns `{ workflow, children, stepNodes }`. These are the Core definition, every
+nested or loop-body workflow it references (deploy these first), and a map from Core node ids to
+step ids.
+A step that runs once at the top level keeps its step id as its node id. Other node ids are derived
+from the stage, such as `parallel_1--a`, `branch_2--if--bug`, `dowhile_3--first`, or `double__2` for
+a step used twice.
+
+| DSL | Core graph |
+|---|---|
+| input / output | an `input` node (key `input`) and an `output` node (key `output`) |
+| `createStep` | a `script` node running the step body |
+| `.parallel` | one path per step from the same source, each tagged, joined by a `script` node that builds the object |
+| `.branch` | per arm: `condition` → (true) `transform` restoring the tested value → step; an always-on path keeps the join alive when no arm matches |
+| `.foreach` | one `script` node that runs the step per item with the given concurrency |
+| `.dowhile` / `.dountil` | a `sub_workflow` first pass, then a `while` node over a one-step body workflow |
+| `.map` / `.sleep` | `script` / `delay` |
+
+Things to know when targeting Core:
+
+- **Code steps are serialized.** A `createStep` body becomes the `execute` function's source, run in
+  Core's sandbox with `{ inputData, agent, parallel, pipeline, log, phase, emit }`, where `emit`
+  writes to the run log. `suspend`, `setState`, `getStepResult`, and `getInitData` throw on Core.
+  The body must be self-contained: no closed-over variables, imports, or Node APIs. Pass `script` to supply the Core
+  body yourself (a function body where `args` is the input), or `localOnly: "reason"` to make
+  compilation fail with that reason. The same applies to `.map`. Script nodes need the sandbox
+  runtime on the node.
+- **Values cross nodes as text.** Script steps receive their input parsed from JSON when it is
+  JSON, and emit strings as is and other values as JSON, so structured values round-trip. Agent
+  and tool nodes emit text.
+- **Suspension on Core is `humanStep`.** `suspend()` inside a code step only works locally.
+- **`.foreach`** compiles for code and agent steps.
+- **`.dountil`** needs a condition Core can negate (`equals`, `notEquals`, `empty`, `nonEmpty`,
+  and the numeric comparisons). Loops compile up to 101 passes.
+- Workflow ids and step ids must be 1-128 characters of `A-Z a-z 0-9 _ -`. Keep step ids short:
+  Core names a nested run after its run id and node id.
+
+## Running on a Core node
+
+```typescript
+import { createCoreWorkflowClient } from "@ryuhq/sdk/workflow";
+
+const core = createCoreWorkflowClient({ baseUrl: nodeUrl, token });
+await core.deploy(review); // children first, then the workflow
+
+const run = core.createRun(review);
+const stream = run.stream({ inputData: notes, streamMode: "events" });
+for await (const chunk of stream) console.info(chunk.data);
+
+const outcome = await stream.result; // "suspended" at the approve gate
+if (outcome.status === "suspended") {
+  await run.resume({ resumeData: true });
+}
+```
+
+The client starts the run with a run id it chooses (`createRun(workflow, { runId })` accepts your
+own, 1-64 characters of `A-Z a-z 0-9 _ -`), and while Core executes the run it polls the
+run record and turns node state changes into the same `events`, `updates`, and `values` the local
+executor emits. A run Core parks on a provider limit keeps being polled until it completes, fails,
+or suspends. Resume data is sent as text (JSON for non-string values). The final output is decoded
+and validated against `outputSchema`.
+
+## Concept mapping
+
+| Mastra | LangGraph | Ryu |
+|---|---|---|
+| `createWorkflow`, `createStep` | `StateGraph`, nodes | `createWorkflow`, `createStep` |
+| `.then`, `.parallel`, `.branch` | edges, fan-out, conditional edges | `.then`, `.parallel`, `.branch` |
+| `.foreach`, `.dowhile`, `.dountil` | `Send`, cycles | `.foreach`, `.dowhile`, `.dountil` |
+| `suspend()` / `run.resume()` | `interrupt()` / `Command(resume=...)` | `suspend()` / `run.resume()`, `humanStep` |
+| `run.stream()` | `stream_mode="updates"/"values"` | `streamMode: "events" / "updates" / "values"` |
+| `.commit()` | `.compile()` | `.commit()`, `.toCore()` |

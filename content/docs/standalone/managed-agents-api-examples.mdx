@@ -1,0 +1,118 @@
+---
+title: "Managed Agents API Examples"
+description: "Create an agent, an environment, and a session with curl, then stream it with the @ryuhq/client TypeScript client"
+tags: ["managed-agents", "api", "standalone"]
+---
+
+These examples call the hosted Managed Agents API. Every path on this page is relative to `/api/v1/managed-agents`. For the route
+table and error codes, see the
+[Ryu Managed Agents API](/docs/standalone/managed-agents-api).
+
+## Examples
+
+These `curl` commands are illustrative. Replace the keys, ids, and model with
+your own values. `RYU_API_URL` is the control-plane origin, and defaults to
+`https://api.ryuhq.com`, Ryu's hosted service. The first two requests use a
+personal API key, because only people can configure environments.
+
+```sh
+MA_URL="${RYU_API_URL:-https://api.ryuhq.com}/api/v1/managed-agents"
+PERSONAL_KEY="<personal-api-key>"
+ORG_ID="<organization-id>"
+
+# Create an agent.
+curl -sS -X POST "$MA_URL/agents" \
+  -H "x-api-key: $PERSONAL_KEY" \
+  -H "X-Ryu-Organization: $ORG_ID" \
+  -H "Idempotency-Key: create-agent-0001" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Support triage","model":"<model-id>","instructions":"You triage support tickets.","tools":[{"type":"builtin","name":"web_search","allowedDomains":["docs.example.com"]}]}'
+
+# Create an environment that uses a stored BYOK credential.
+curl -sS -X POST "$MA_URL/environments" \
+  -H "x-api-key: $PERSONAL_KEY" \
+  -H "X-Ryu-Organization: $ORG_ID" \
+  -H "Idempotency-Key: create-env-0000001" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"claude-prod","backend":"anthropic","credential":{"source":"byok","credentialId":"mcred_<id>"}}'
+```
+
+An organization API key can then start sessions and send messages:
+
+```sh
+ORG_KEY="<organization-api-key>"
+
+# Start a session with a first message.
+curl -sS -X POST "$MA_URL/sessions" \
+  -H "x-api-key: $ORG_KEY" \
+  -H "Idempotency-Key: session-ticket-1234" \
+  -H "Content-Type: application/json" \
+  -d '{"agentId":"magt_<id>","environmentId":"menv_<id>","title":"Ticket 1234","initialEvents":[{"type":"user.message","content":[{"type":"text","text":"Summarize ticket 1234"}]}]}'
+
+# Send a follow-up message.
+curl -sS -X POST "$MA_URL/sessions/msess_<id>/events" \
+  -H "x-api-key: $ORG_KEY" \
+  -H "Idempotency-Key: ticket-1234-message-2" \
+  -H "Content-Type: application/json" \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Draft a reply."}]}]}'
+```
+
+## TypeScript client
+
+The `@ryuhq/client` package exports `createManagedAgentsClient` for the same
+routes. Install the package as shown in [Client SDK](/docs/extend/develop/sdk/client).
+The Managed Agents client is separate from the Core node client. It calls the
+control plane with an API key, not a Core node token.
+
+```ts
+import { createManagedAgentsClient, ManagedAgentsError } from "@ryuhq/client";
+
+const managed = createManagedAgentsClient({
+  baseUrl: "https://api.ryuhq.com", // the control-plane origin
+  apiKey: "<organization-api-key>",
+});
+
+const session = await managed.sessions.create(
+  {
+    agentId: "magt_<id>",
+    environmentId: "menv_<id>",
+    initialEvents: [
+      { type: "user.message", content: [{ type: "text", text: "Summarize ticket 1234" }] },
+    ],
+  },
+  { idempotencyKey: "session-ticket-1234" },
+);
+
+try {
+  for await (const event of managed.sessions.stream(session.id)) {
+    if (event.type === "agent.message") {
+      for (const block of event.content) {
+        if (block.type === "text") process.stdout.write(block.text);
+      }
+    }
+    if (event.type === "session.status" && event.status === "idle") break;
+  }
+} catch (error) {
+  if (!(error instanceof ManagedAgentsError && error.code === "rate_limited")) {
+    throw error;
+  }
+  // Wait error.retryAfterSeconds, then open the stream again.
+}
+```
+
+| Option or method | Behavior |
+|---|---|
+| `baseUrl` | The control-plane origin. The client appends `/api/v1/managed-agents`. |
+| `apiKey` | Sent as `x-api-key`. |
+| `organizationId` | Sent as `X-Ryu-Organization`. Required with a personal API key. |
+| `agents`, `environments`, `sessions` | Create, list, read, change, and archive or close resources. The `create` and `update` methods of agents and environments, `sessions.create`, and `sessions.send` take an optional `idempotencyKey`. |
+| `credentials` | Lists and reads credentials only, because credential writes need a console session. |
+| `sessions.send` | Appends user events. Without an `idempotencyKey`, a retried call can append a duplicate message. |
+| `sessions.events` | Reads one page of the event log. Event types that the client does not know are left out of `data`. |
+| `sessions.stream` | Replays the log and then follows it. It reconnects with `Last-Event-ID`, drops events whose `seq` it already received, and skips event types that it does not know. It ends at the `end` frame, after a terminal `session.status`, or when its `signal` aborts. |
+| `ManagedAgentsError` | Thrown for every non-2xx response. It carries `status`, `code`, `requestId`, `details`, and `retryAfterSeconds`. The client never follows a redirect, so your API key is not sent to another origin. A redirect throws with code `redirect_refused`. |
+
+<Cards>
+  <DocCard href="/docs/standalone/managed-agents-api" />
+  <DocCard href="/docs/standalone/managed-agents-events" />
+</Cards>

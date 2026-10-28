@@ -1,85 +1,98 @@
 ---
 title: "Batteries Included"
-description: "What ships on first install with zero API keys: local chat, embeddings, Voice Recognition, Speech Processing, built-in skills and tools"
+description: "The local models, engines, agents, skills, and tools that a fresh Ryu install prepares without an API key, and what happens when a download fails."
 ---
 
-On install, with no API key and no setup, Ryu works immediately and stays fully local and
-private. One Core routine, `install_local_stack` in `apps/core/src/sidecar/onboarding.rs`, is the
-single owner of every default model download. The engines only ever *serve* these files; they
-never download them.
+Ryu can prepare a local model stack during onboarding without a provider API key. Local
+inference needs the downloads, the runtime installation, enough device capacity, and a successful
+startup. Local inference does not turn off analytics, sync, backups, or connected network tools.
 
-Every default below is a swappable default, never a lock. Each layer routes through one
-registry or config, so you can replace the chat model, the embedder, the Voice Recognition or
-Speech Processing engine, or the agent without touching anything else. See [Why Ryu](/docs/start-here/architecture/why-ryu) for
-the "nothing hardcoded" principle this enforces.
+One Core routine, `install_local_stack` in `apps/core/src/sidecar/onboarding.rs`, owns every
+default model download. The engines only serve these files. They never download them.
+
+Each default below can be replaced. Each layer routes through one registry or config, so you can
+replace the chat model, the embedder, the Voice Recognition or Speech Processing engine, or the
+agent without changing anything else. See [Why Ryu](/docs/start-here/architecture/why-ryu) for
+the "nothing hardcoded" principle.
 
 <Callout type="warn">
-  Each download step is non-fatal and independent. A failure (offline, no prebuilt binary on a
-  given OS) is recorded as a warning and never blocks chat. If `llama.cpp` fails to install, the
-  chat and embedding GGUF downloads are skipped, RAG falls back to a local hashing embedder, and
-  chat falls back to a configured remote route.
+  Each download step is independent, and a failed step does not stop the others. A failure
+  (offline, or no prebuilt binary for the OS) is recorded as a warning. Chat still needs a ready
+  local model or a configured remote model. If `llama.cpp` fails to install, the GGUF downloads
+  that it serves (chat, embedding, reranker, classifier, Speech Processing) are skipped, RAG falls
+  back to a local hashing embedder, and chat falls back to a configured remote route.
 </Callout>
 
 ## What downloads on first run
 
-These are fetched in order by `install_local_stack`. Each is checksum-verified through the shared
-download pipeline and marked installed so the matching sidecar becomes eligible to start.
+`install_local_stack` installs `llama.cpp` first. It then registers the other steps with the
+download center together. The download center decides how many files stream at once and queues the
+rest. The chat model claims the first download slot. The image step runs last so it can size its
+download against the remaining free disk. Each file is checksum-verified and marked installed, so
+the matching sidecar becomes eligible to start.
 
-| Step | What | Sidecar / engine | Purpose |
-|---|---|---|---|
-| 1 | `llama.cpp` (`llama-server` binary) | `llamacpp` | Local chat inference runtime |
-| 1 | Same binary registered for embeddings | `llamacpp-embed` (:8081, auto-started) | Serves the embedding model |
-| 2 | Default chat GGUF (Gemma 4) + matching vision adapter (`mmproj`) | `llamacpp` | The default chat model, multimodal out of the box |
-| 3 | `nomic-embed-text-v1.5` GGUF | `llamacpp-embed` | Semantic embeddings for RAG, memory, search |
-| 4 | `whisper.cpp` server + `ggml-base.en` model | `whispercpp` | Voice Recognition |
-| 5 | S1-mini Q4_K_M GGUF | `llamacpp-speech` (:8088, lazy) | Optional Speech Processing cleanup after Voice Recognition |
-| 6 | parakeet v3 ONNX speech model | `parakeet` | Alternative Voice Recognition engine bundle |
-| 7 | OuteTTS + WavTokenizer GGUFs (`llama-tts` binary) | `outetts` | Audio generation |
+| What | Sidecar or engine | Purpose |
+|---|---|---|
+| `llama.cpp` (`llama-server` binary) | `llamacpp`, and `llamacpp-embed` on port 8081 (auto-started) | Local chat and embedding runtime |
+| Default chat GGUF (`gemma-4-E2B-it-Q4_K_M`) and its matching vision adapter (`mmproj`) | `llamacpp` | The default chat model, with image input |
+| `nomic-embed-text-v1.5.Q4_K_M` GGUF | `llamacpp-embed` | Semantic embeddings for RAG, memory, and search |
+| `bge-reranker-v2-m3.Q4_K_M` GGUF | `llamacpp-rerank` (port 8082, started on first use) | Spaces RAG reranking. A failure keeps the vector order |
+| `gemma-3-270m-it-qat-Q4_0` GGUF | `llamacpp-classify` (port 8083, started when a Gateway config selects the classify tier) | The Gateway classifier tier |
+| `s1-mini-q4_k_m` GGUF | `llamacpp-speech` (port 8088, started on first use) | Optional Speech Processing cleanup after Voice Recognition |
+| `whisper.cpp` server and `ggml-base.en` model | `whispercpp` | Voice Recognition. A prebuilt server downloads on Windows only; on macOS and Linux, build `whisper-server` from source (`apps/core/src/sidecar/providers/whispercpp/downloader.rs`) |
+| parakeet v3 ONNX speech model | `parakeet` | Alternative Voice Recognition engine |
+| Silero VAD ONNX model | Voice mode | Voice activity detection. A failure falls back to the built-in energy detector |
+| OuteTTS and WavTokenizer GGUFs (`llama-tts` binary) | `outetts` | Text-to-speech fallback engine |
+| Kokoro 82M runtime, then its model files | TTS sidecar | The default text-to-speech engine. The model files download only after the runtime is ready |
+| `stable-diffusion.cpp` server and a default image model sized to the device | `sdcpp` (started on first image request) | Text-to-image. The standard tier is about 11 GB and the lite tier about 2.8 GB. A device without enough RAM or free disk downloads nothing and needs a cloud image provider. Prebuilt servers exist for Windows x64, macOS arm64, and Linux x86_64 only |
 
 <Callout type="warn">
-  parakeet *inference* is gated behind the off-by-default `voice-parakeet` build feature. The
-  model download in step 6 is independent, so the bits are present, but transcription returns a
-  "feature not built" error unless Core was compiled with that feature. Whisper.cpp remains the local
-  fallback when the feature is omitted; feature builds use Parakeet by default. See [Voice engines](/docs/surfaces/desktop/engines/voice-engines).
+  parakeet and Silero VAD *inference* are behind the off-by-default `voice-parakeet` and
+  `voice-vad` build features. The model downloads run anyway, so the files are present. Without
+  the `voice-parakeet` feature, parakeet transcription returns a "feature not built" error and
+  whisper.cpp remains the local engine. Builds with the feature use parakeet by default. See
+  [Voice engines](/docs/surfaces/desktop/engines/voice-engines).
 </Callout>
 
-The vision adapter in step 2 is bound to the chat model's stem by the `<stem>.mmproj.gguf`
-convention, so a multimodal default like Gemma accepts image input on a fresh install. A
-text-only default, or a failure to fetch the adapter, leaves the model chatting as text. Engines
-that are not in the startup order (whisper, parakeet, OuteTTS) install ready but stay opt-in to
-*run*: installing only makes them eligible to start.
+The vision adapter is bound to the chat model's stem by the `<stem>.mmproj.gguf` convention, so a
+multimodal default like Gemma can accept image input after its model, adapter, and runtime are
+ready. A text-only default, or a failure to fetch the adapter, leaves the model chatting as text.
+Engines that are not in the startup order (whisper.cpp, parakeet, OuteTTS, the reranker,
+classifier, and Speech Processing servers, and `sdcpp`) are only eligible to start after install.
+They run when you turn them on or when a request needs them.
 
 ## Defaults that work without a download
 
-These ship as config or registry defaults rather than downloaded artifacts. They are active on
-install with no setup.
+These ship as config or registry defaults, not downloaded files. They are active on install with
+no setup.
 
 | Default | What it is | Where to swap |
 |---|---|---|
-| Default agent "Ryu" | Pi with the Gateway on top, the only agent installed by default; `DEFAULT_AGENT_ID` is `"ryu"` | [Agents](/docs/surfaces/desktop/user-guide/agents) |
+| Default agent "Ryu" | Pi with the Gateway on top; `DEFAULT_AGENT_ID` is `"ryu"` | [Agents](/docs/surfaces/desktop/user-guide/agents) |
+| Founder bot "Jay Jr." | An AI twin of Ryu's founder on Ryu's engine, with a seeded Space built from his personal website; installed by default and removable | [Agents](/docs/surfaces/desktop/user-guide/agents#jay-jr-the-founder-bot) |
+| Patrol | A health and security bot on Ryu's managed Pi with an hourly check and a daily report; installed by default and removable | [Agents](/docs/surfaces/desktop/user-guide/agents#patrol-watches-your-setup) |
 | Ryu and pstack skills | Embedded first-party skill instructions and resources available offline | [Skills](/docs/surfaces/desktop/skills) |
-| Reranker | BAAI `bge-reranker`, the default RAG reranker | [Spaces and RAG](/docs/core/spaces-rag) |
 | RAG strategy | Vector retrieval over sqlite-vec by default, with shipped offline GraphRAG as a per-Space choice | [Spaces and RAG](/docs/core/spaces-rag) |
 | `agentbrowser` | Web browsing tool app | [Tools and connections](/docs/surfaces/desktop/user-guide/tools-and-connections) |
 | `spider` | Web scraping tool app | [Tools and connections](/docs/surfaces/desktop/user-guide/tools-and-connections) |
 
-The default agent "Ryu" manages its own Pi binary, so it is self-sufficient. Every other built-in
-agent (Claude Code, Codex, Gemini CLI, bare Pi, OpenClaw) is opt-in via the agents catalog.
-Onboarding detects which agent CLIs you already have on PATH and offers to add the matching agent
-through `GET /api/agents/catalog` and `POST /api/agents/catalog/{install,uninstall}`. The picker
-at `GET /api/agents` only lists the installed set.
+The default agent "Ryu" manages its own Pi binary. Jay Jr. and Patrol run on that same managed
+Pi. Every other built-in agent (Claude Code, Codex, Gemini CLI, bare Pi, OpenClaw) is opt-in
+through the agents catalog. Onboarding detects which agent CLIs are already on PATH and offers to
+add the matching agents. The catalog routes are `GET /api/agents/catalog`,
+`POST /api/agents/catalog/install`, and `POST /api/agents/catalog/uninstall`. The picker at
+`GET /api/agents` lists only the installed set.
 
 ## Modalities and standards
 
-All five modalities are first-class and swappable: chat, image generation, Audio, Voice Recognition,
-and Speech Processing.
-Image generation and Audio playback backends exist but are not yet surfaced in the desktop chat UI,
-where only Voice Recognition voice input is wired today.
+Ryu has a replaceable default for each of five modalities: chat, image generation, audio, Voice
+Recognition, and Speech Processing.
 
-Ryu treats the Agent **Skills** standard, **MCP**, and **ACP** as first-class. A fresh install can
-already read the embedded Ryu/pstack skills and call MCP tools through the unified registry. The
-larger external recommended skill-pack catalog is optional: onboarding shows its descriptions with
-all rows selected by default, and only the selected collections are downloaded for the node.
+Ryu supports the Agent **Skills** standard, **MCP** (Model Context Protocol), and **ACP** (Agent
+Client Protocol). A fresh install can read the embedded Ryu and pstack skills. MCP tools need a
+configured server and explicit agent grants before an agent can call them through the unified
+registry. The larger external recommended skill-pack catalog is optional. Onboarding shows its
+descriptions with all rows selected by default, and downloads only the selected collections.
 
 <Callout type="info">
   The default agent fails to start until the managed Pi engine is installed, which onboarding

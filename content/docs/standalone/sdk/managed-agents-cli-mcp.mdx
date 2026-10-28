@@ -1,0 +1,127 @@
+---
+title: "Managed Agents CLI and MCP"
+description: "Start Managed Agents sessions and answer tool approvals from the ryu-services command line, and give an MCP client the Managed Agents tools"
+tags: ["managed-agents", "cli", "mcp", "standalone"]
+---
+
+<Callout type="warn">
+Preview: off until your organization turns on the Managed Agents feature.
+</Callout>
+
+This page runs the calls from the
+[Managed Agents SDK quickstart](/docs/standalone/sdk/managed-agents) with the
+`ryu-services` command line and its MCP tools. How approvals work is on
+[Managed Agents tool approvals](/docs/standalone/sdk/managed-agents-tool-approvals).
+
+## CLI
+
+The `ryu-services` command line reads the variables from
+[Configure](/docs/standalone/sdk/managed-agents#configure). Add `--json` for
+`{ data, meta }` output, or `--dry-run` to print the equivalent curl command
+with `$RYU_API_KEY` in place of the key.
+
+```sh
+ryu-services managed-agents agents list --limit 20
+ryu-services managed-agents environments list --limit 20
+ryu-services managed-agents sessions create --agent magt_<id> --environment menv_<id> --message "Summarize ticket 1234" --follow
+ryu-services managed-agents sessions get msess_<id>
+ryu-services managed-agents sessions send msess_<id> --text "Draft a reply." --follow
+ryu-services managed-agents sessions stream msess_<id>
+ryu-services managed-agents sessions pending-approvals msess_<id>
+ryu-services managed-agents sessions approve msess_<id> mtool_<id> --follow
+ryu-services managed-agents sessions deny msess_<id> mtool_<id> --message "Not on this branch." --follow
+```
+
+Until `@ryuhq/services-cli` is on npm, run these as
+`ryu-cli services managed-agents ...`, with the same flags; `ryu-cli services`
+arrives in a Ryu release after 0.4.0, and until then neither the CLI nor the
+MCP server can be installed outside the Ryu repository (see
+[ryu-services CLI](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
+
+`agents list` and `environments list` print one JSON line per item and name
+the next page's `--cursor` on stderr (see [list output](/docs/standalone/sdk/cli#list-output)); `--all` reads every page.
+
+With `--follow`, `sessions create` prints the session and then each event as
+one JSON line until the turn ends. `sessions send`, `sessions approve`, and
+`sessions deny` take `--follow` too: they print the events they appended and
+then the rest of the turn. Add `--until terminal` to keep going until the
+session ends. `--until` needs `--follow`. `sessions stream` prints every event
+until the session ends.
+
+When an `agent.tool_approval_request` appears, every follow and
+`sessions stream` print the event like any other and write the exact commands
+that answer it to stderr:
+
+```text
+approval needed: bash waits for your decision until 2026-10-10T12:10:40.000Z (then Ryu denies it).
+  allow: ryu-services managed-agents sessions approve msess_<id> mtool_<id> --follow
+  deny:  ryu-services managed-agents sessions deny msess_<id> mtool_<id> --message "<reason shown to the model>" --follow
+  (--follow keeps printing the turn after the answer; leave it out to answer only.)
+```
+
+A follow stops at a request nobody answered, also with `--until terminal`. If
+other requests in the same turn were opened before the follow started, it
+looks them up and prints their commands too. `sessions pending-approvals`
+lists the open requests with each call's input, one JSON line per request
+(`No pending approvals.` on stderr when there are none); `--json` prints the
+whole result, including the session's status and `complete`.
+
+The CLI never answers a request for you. `sessions approve` and
+`sessions deny` use the same idempotency key as the SDK, so to retry a denial,
+repeat the same `--message`.
+
+## MCP
+
+`ryu-services mcp` serves MCP tools over stdio for the services you have
+configured. Limit it to Managed Agents with `--services managed-agents`. By
+default it exposes only the read tools; add `--allow-writes` to the args to
+also expose the tools that create sessions, send messages, and answer
+approvals.
+
+Until `@ryuhq/services-cli` is on npm, start the server through `ryu-cli`,
+as below (`ryu-cli services` arrives in a Ryu release after 0.4.0; until then
+neither the CLI nor the MCP server can be installed outside the Ryu
+repository); once it is published, use
+`"command": "ryu-services"` and drop `"services"` from `args`.
+
+```json
+{
+  "mcpServers": {
+    "ryu-services": {
+      "command": "ryu-cli",
+      "args": ["services", "mcp", "--services", "managed-agents"],
+      "env": {
+        "RYU_API_KEY": "ryu_...",
+        "RYU_ORGANIZATION_ID": "<organization-id>"
+      }
+    }
+  }
+}
+```
+
+| Tool | What it does | Read-only |
+|---|---|---|
+| `managed_agents_list_agents` | Lists one page of agents. | Yes |
+| `managed_agents_list_environments` | Lists one page of environments, with the `menv_` id `managed_agents_create_session` takes. | Yes |
+| `managed_agents_create_session` | Starts a session, optionally with a first message. | No |
+| `managed_agents_send_message` | Sends a user message to a session. | No |
+| `managed_agents_get_session` | Returns a session's status, stop reason, and usage. | Yes |
+| `managed_agents_list_events` | Reads one page of the event log, or with `wait: true` follows the stream until the turn ends, bounded by `maxEvents` and `timeoutMs`. When the turn stopped on an approval, the result has `requiresAction: true`, the pending `toolUseIds`, and `next: "managed_agents_list_pending_approvals"`. | Yes |
+| `managed_agents_list_pending_approvals` | Lists the tool calls that wait for approval, with each call's input and `expiresAt`. | Yes |
+| `managed_agents_answer_approval` | Allows or denies one waiting tool call (`decision`, optional `message`). Not destructive. Repeating the same answer with the same message is safe. | No |
+
+The answer tool is left out unless you pass `--allow-writes`. Its description tells the
+model to answer only as the user decides. Configure your MCP client to ask
+you before it calls the tool if you want to confirm every answer yourself.
+
+Results carry `{ data, meta }`. Failures are tool errors that carry the
+`RyuError` fields, including `code`, `requestId`, and `hint`, and never the
+key.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/managed-agents" />
+  <DocCard href="/docs/standalone/sdk/cli" />
+  <DocCard href="/docs/standalone/sdk/mcp" />
+</Cards>

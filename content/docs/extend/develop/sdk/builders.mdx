@@ -1,13 +1,13 @@
 ---
-title: "SDK builders and extension surfaces"
-description: "Use manifest builders, the MCP bridge, and the plugin, app, and turn-hook authoring APIs."
+title: "SDK Builders and Extension Surfaces"
+description: "Reference for the SDK manifest builders, the MCP bridge, and the plugin, app, and hook authoring functions."
 ---
 
-Part of the [Ryu SDKs and libraries](/docs/extend/develop/sdk) guide.
+Part of the [Ryu SDKs and Libraries](/docs/extend/develop/sdk) reference.
 
 ## Builders and manifest schemas
 
-For declaring a `manifest.json` in code, the SDK exports a fluent `PluginBuilder` plus per-kind
+To declare a `manifest.json` in code, the SDK exports a fluent `PluginBuilder` plus per-kind
 builders (`agent()`, `workflow()`, `tool()`, `skill()`) and their builder classes
 (`AgentBuilder`, `WorkflowBuilder`, `ToolBuilder`, `SkillBuilder`) from `.`.
 
@@ -26,26 +26,29 @@ The Zod schemas and helpers behind the builders are also exported:
 | Export | Purpose |
 |---|---|
 | `PluginManifestSchema` | full `manifest.json` schema (also at `./manifest`) |
-| `RunnableKindSchema` | enums the four authorable kinds (`agent`, `workflow`, `tool`, `skill`) |
+| `RunnableKindSchema` | enum of the six packable kinds (`agent`, `workflow`, `tool`, `skill`, `companion`, `policy`) |
 | `RunnableMetaSchema` | per-runnable metadata block |
 | `CompanionSurfaceSchema` | optional Companion surface declaration |
 | `coreManifestJsonSchema` | the manifest as a plain JSON Schema |
-| `validateManifestStrict(value)` | strict parse helper |
-| `validatePluginId(id)` | plugin-id format check |
+| `validateManifestStrict(manifestJson)` | validates a manifest string with Core's rules and returns the normalized JSON, or throws |
+| `validatePluginId(id)` | checks Core's reverse-domain plugin-id rules, or throws |
 
-`RunnableKindSchema` enumerates only the four authorable kinds because that is the SDK surface. Core
-validates all eight `RunnableKind` variants. The manifest schema itself is documented on
+`RunnableKindSchema` lists the kinds `ryu pack` accepts (`packages/sdk/src/manifest.ts`). Core
+validates all eight `RunnableKind` variants. `coreManifestJsonSchema`, `validateManifestStrict`, and
+`validatePluginId` call the `@ryuhq/sdk-native` addon. The manifest schema itself is documented on
 [Plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest).
 
 ## MCP bridge
 
 The SDK can expose your Runnables as MCP tools and call other MCP servers
-(`packages/sdk/src/mcp/`). The protocol version is `2024-11-05`, matching Core's
-`apps/core/src/sidecar/mcp/client.rs`.
+(`packages/sdk/src/mcp/`). The wire format is JSON-RPC 2.0 over newline-delimited stdio.
+`MCP_PROTOCOL_VERSION` is `2026-07-28`. The client probes with `server/discover`, then falls back
+to the legacy `initialize` handshake at `MCP_LEGACY_PROTOCOL_VERSION` (`2024-11-05`).
 
-`McpServer` is an stdio JSON-RPC server. `register()` advertises a local executable as a tool;
+`McpServer` is a stdio JSON-RPC server. `register()` advertises a local executable as a tool.
 `passthrough()` forwards `tools/list` and `tools/call` to an upstream MCP stdio server (for example
-Ghost), re-advertising its tools verbatim and degrading gracefully if the upstream is down.
+Ghost) and re-advertises its tools verbatim. If the upstream is down, the server still serves its
+local tools.
 
 ```typescript
 const server = new McpServer()
@@ -63,18 +66,21 @@ function listTools(cmd: McpStdioCommand): Promise<McpTool[]>;
 function callTool(cmd: McpStdioCommand, tool: string, args: unknown): Promise<unknown>;
 ```
 
-`callTool` returns the full `tools/call` result object (`{ content: [{ type, text }], isError? }`);
-extract `.content[0].text` for the plain output.
+`callTool` returns the full `tools/call` result object (`{ content: [{ type, text }], isError? }`).
+Read `.content[0].text` for the plain output, or call `unwrapContent` to decode the first text block
+(it parses the text as JSON when it can).
 
 <Callout type="info">
-  This MCP server intentionally implements no tool-approval or policy. Approval stays in the chat
-  layer and policy stays in the Gateway, per the Core-vs-Gateway rule.
+  The SDK MCP server and client implement no tool approval or policy. Approval stays in the chat
+  layer and policy stays in the Gateway. See
+  [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway).
 </Callout>
 
 ## definePlugin
 
-`definePlugin` assembles a complete `manifest.json` manifest from typed options
-(`packages/sdk/src/runnable/turn-hook.ts`).
+`definePlugin` assembles a complete `manifest.json` from typed options
+(`packages/sdk/src/runnable/turn-hook.ts`). The `./plugin` subpath exports a different
+`definePlugin` for runtime plugin modules (`packages/sdk/src/plugin/ryu-plugin.ts`).
 
 ```typescript
 function definePlugin(options: DefinePluginOptions): PluginManifest;
@@ -88,15 +94,19 @@ function definePlugin(options: DefinePluginOptions): PluginManifest;
 | `grants` | `string[]` | Permission grants the plugin needs |
 | `tools` | `ToolRunnable[]` | Tools to include (auto-adds `tool:execute` grant) |
 | `turnHooks` | `TurnHookContribution[]` | Turn hooks to include |
+| `hookEvents` | `HookEventContribution[]` | App events the plugin emits; each `id` is namespaced to the plugin `id` |
+| `lspServers` | `Record<string, object>` | Language servers, keyed by server name, passed verbatim |
 | `composerControls` | `Record<string, unknown>[]` | Chat composer toggles |
 | `settingsTabs` | `Record<string, unknown>[]` | Settings UI tabs |
-| `slashCommands` | `Record<string, unknown>[]` | Custom `/` commands |
-| `activationEvents` | `string[]` | Lazy wake events |
-| `requires` | `DefineAppRequires` | Dependencies and capabilities |
-| `targets` | `Surface[]` | Target surfaces |
+| `slashCommands` | `SlashCommandContribution[]` | Custom `/` commands |
+| `activationEvents` | `string[]` | Wake events (default `["*"]`) |
+| `requires` | `DefineAppRequires` | Required plugins (enabled first), capability edges, and implied grants |
+| `targets` | `Surface[]` | Target surfaces (empty means every surface) |
 
-Each `ToolRunnable` is converted via `inlineToolRunnable()` into a `kind:"tool"` runnable with
-`backend: "inline_deno"` config for Core's sandbox.
+`inlineToolRunnable()` converts each `ToolRunnable` into a `kind:"tool"` runnable with
+`backend: "inline_js"` config for Core's sandbox. Older manifests declare `backend: "inline_deno"`.
+Core still loads them as `inline_js` and logs a deprecation warning, so new manifests use
+`inline_js`.
 
 ```typescript
 import { definePlugin, defineTool } from "@ryuhq/sdk";
@@ -109,8 +119,8 @@ const searchTool = defineTool({
     properties: { query: { type: "string", description: "Search query" } },
     required: ["query"],
   },
-  run: async ({ query }, ctx) => {
-    const result = await fetch(`https://api.example.com/search?q=${query}`);
+  run: async ({ query }) => {
+    const result = await fetch(`https://api.example.com/search?q=${encodeURIComponent(query)}`);
     return result.json();
   },
 });
@@ -126,8 +136,8 @@ export default definePlugin({
 
 ## defineApp
 
-`defineApp` assembles a manifest for a Ryu App — tools whose results render as interactive widgets
-in chat (`packages/sdk/src/runnable/app.ts`).
+`defineApp` assembles a manifest for a widget app: a plugin whose tool results render as
+interactive widgets in chat (`packages/sdk/src/runnable/app.ts`).
 
 ```typescript
 function defineApp(options: DefineAppOptions): PluginManifest;
@@ -141,15 +151,22 @@ function defineApp(options: DefineAppOptions): PluginManifest;
 | `version` | `string` | Semver version |
 | `uiEntry` | `string` | Source entry for widget UI |
 | `tools` | `AppToolSpec[]` | Render + companion tools |
-| `tools[].runnable` | `ToolRunnable` | Optional executable body, packed as Core `inline_deno` |
+| `tools[].runnable` | `ToolRunnable` | Optional executable body, packed as Core `inline_js` |
 | `grants` | `string[]` | Permission grants |
 | `displayMode` | `string` | `"inline"`, `"fullscreen"`, or `"pip"` |
+| `server` | `string` | MCP server namespace for tool ids (default `slug`) |
+| `mime` | `string` | Widget MIME dialect (default `text/html+skybridge`) |
+| `slashCommands` | `SlashCommandContribution[]` | Custom `/` commands |
+| `activationEvents` | `string[]` | Wake events (default `["*"]`) |
+| `requires` | `DefineAppRequires` | Required plugins, capability edges, and implied grants |
+| `targets` | `Surface[]` | Target surfaces (empty means every surface) |
 
-Each render tool gets a `contributes.widgets[]` entry binding its id to `ui://widget/<slug>.html`.
-Each companion tool gets `widget_accessible: true`.
+A render tool (`accessible` unset or false) gets a `contributes.widgets[]` entry that binds its id
+to `ui://widget/<slug>.html`. A companion tool (`accessible: true`) is a call target for a mounted
+widget. It gets `widget_accessible: true` and no widget template.
 
 When a tool carries `runnable: defineTool(...)`, its body is embedded in the same manifest as an
-`inline_deno` backend and `tool:execute` is added automatically. The body runs in Core's
+`inline_js` backend and `tool:execute` is added automatically. The body runs in Core's
 deny-by-default sandbox; use the injected `host` capabilities for Gateway-routed model work.
 
 ```typescript
@@ -170,8 +187,10 @@ export default defineApp({
 
 ## defineFunctionHook
 
-`defineFunctionHook` opts a hook into Core's middleware chain. The third argument is a
-`next(ctx)` continuation; it is sandbox-mediated and reaches only lower-priority middleware hooks.
+`defineFunctionHook` opts a hook into Core's middleware chain and emits `"mode": "middleware"`.
+The third argument is a `next(ctx)` continuation. The continuation is sandbox-mediated and reaches
+only lower-priority middleware hooks, so a plugin never receives another plugin's host
+capabilities or code.
 
 ```typescript
 function defineFunctionHook(options: DefineFunctionHookOptions): TurnHookContribution;
@@ -204,12 +223,14 @@ export default definePlugin({
 
 Use `defineTurnHook` for independent directives. Use `defineFunctionHook` when a hook needs to
 short-circuit, rewrite the context passed downstream, or inspect and wrap a downstream result.
-Omitting `mode` in a hand-authored manifest keeps the legacy directive behavior; the explicit
-manifest equivalent is `"mode": "middleware"`.
+In a hand-authored manifest, omit `mode` for directive behavior, or set `"mode": "middleware"` for
+the same behavior as `defineFunctionHook`.
 
 ## defineTurnHook
 
-`defineTurnHook` creates a turn hook that runs after assistant turns (`packages/sdk/src/runnable/turn-hook.ts`).
+`defineTurnHook` creates a turn hook. By default it runs after each assistant turn
+(`packages/sdk/src/runnable/turn-hook.ts`). The `run` function is serialized into the sandbox
+`code` string, so it must be self-contained and cannot capture outer variables.
 
 ```typescript
 function defineTurnHook(options: DefineTurnHookOptions): TurnHookContribution;

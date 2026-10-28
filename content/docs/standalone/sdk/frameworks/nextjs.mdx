@@ -1,0 +1,150 @@
+---
+title: "Next.js"
+description: "Call Ryu standalone services from Next.js route handlers and server actions, and verify Mail webhooks, with @ryuhq/services"
+tags: ["sdk", "nextjs", "webhooks", "standalone"]
+---
+
+`@ryuhq/services` runs in Next.js server code: route handlers, server
+actions, and server components. Every code block on this page is taken from a
+test that runs it against a stub service, so the code you copy is the code
+that is tested.
+
+Install the package as shown in the [SDK overview](/docs/standalone/sdk#install).
+
+## Keep keys on the server
+
+Put the service variables in `.env.local` or your host's server
+environment. Never give them a `NEXT_PUBLIC_` prefix: Next.js inlines those
+variables into the JavaScript it sends to browsers, where every visitor can
+read them.
+
+```sh title=".env.local"
+# .env.local: read on the server only. Never prefix these with NEXT_PUBLIC_,
+# which Next.js inlines into the browser bundle.
+# RYU_NOTIFY_URL defaults to https://notify.ryuhq.com; set it only for another URL.
+RYU_NOTIFY_API_KEY=<your tenant key>
+MAIL_WEBHOOK_SECRET=<the whsec_ secret of your Mail webhook>
+```
+
+Import `@ryuhq/services` only from server files. In a browser,
+`new Ryu()` refuses a key passed as an option unless you set
+`dangerouslyAllowBrowser`.
+
+## Publish from a route handler
+
+This route publishes a Notify event. With `result: "object"`, a failed call
+comes back as `error` instead of a thrown exception, so the handler answers
+with the Notify code and request id:
+
+```ts title="app/api/deploys/route.ts"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_NOTIFY_API_KEY (and RYU_NOTIFY_URL, when set) from the server environment.
+const ryu = new Ryu({ result: "object" });
+
+export async function POST(request: Request): Promise<Response> {
+  const { build } = (await request.json()) as { build: string };
+  const { data, error } = await ryu.notify.publish({
+    title: `Deploy ${build} finished`,
+    level: "success",
+    topic: "deployments",
+  });
+  if (error) {
+    return Response.json(
+      { code: error.code, requestId: error.requestId },
+      { status: 502 }
+    );
+  }
+  return Response.json({ id: data.id }, { status: 201 });
+}
+```
+
+The SDK adds an `Idempotency-Key` to the publish and reuses it if it has to
+retry, so a network error does not publish twice. To make a retry from your
+own code safe too, bind a stable key with
+`ryu.notify.with({ idempotencyKey })`.
+
+## Receive Mail webhooks
+
+Mail signs each webhook delivery over the exact bytes it sent. Read the body
+with `await request.text()` and verify that string; never call
+`request.json()` first:
+
+```ts title="app/api/mail-webhook/route.ts"
+import { RyuWebhookVerificationError, verifyMailWebhook } from "@ryuhq/services/webhooks";
+
+export async function POST(request: Request): Promise<Response> {
+  // Verify the raw body: parsing and re-serializing the JSON breaks the signature.
+  const payload = await request.text();
+  try {
+    const event = await verifyMailWebhook({
+      payload,
+      headers: request.headers,
+      secret: process.env.MAIL_WEBHOOK_SECRET ?? "",
+    });
+    if (event.event_type === "message.received") {
+      // Your own code. Deliveries can repeat, so dedupe on event.event_id.
+      await queueInboundMail(event);
+    }
+    return Response.json({ ok: true });
+  } catch (error) {
+    if (error instanceof RyuWebhookVerificationError) {
+      // 422: signed but not a Mail event, so a retry will not help; 401 otherwise.
+      const status = error.code === "webhook_payload_invalid" ? 422 : 401;
+      return Response.json({ code: error.code }, { status });
+    }
+    throw error;
+  }
+}
+```
+
+A failed verification answers `401`, so Mail does not count a forged
+delivery as handled. A signed delivery whose body is not Mail's JSON
+(`webhook_payload_invalid`) answers `422`, as `webhookHandler()` does. Mail retries deliveries that fail, so the same event can
+arrive more than once; deduplicate on `event_id`. `webhookHandler()` from the
+same entry point builds this whole route in one call; see
+[SDK webhooks](/docs/standalone/sdk/webhooks#a-ready-made-endpoint).
+
+## Call from a server action
+
+A server action runs on the server, so it can use the same client as a
+route handler:
+
+```ts title="app/actions.ts"
+"use server";
+
+import { messageWithoutHint, Ryu } from "@ryuhq/services";
+
+const ryu = new Ryu({ result: "object" });
+
+export async function notifyTeam(
+  formData: FormData
+): Promise<{ ok: boolean; message: string }> {
+  const title = String(formData.get("title") ?? "").trim();
+  if (title === "") {
+    return { ok: false, message: "Enter a title." };
+  }
+  const { error } = await ryu.notify.publish({ title, level: "info" });
+  // error.message ends with a setup hint for you; strip it before a visitor sees it.
+  return error
+    ? { ok: false, message: messageWithoutHint(error) }
+    : { ok: true, message: "Sent." };
+}
+```
+
+A form can call `notifyTeam` through its `action` prop. `error.message` ends
+with a hint meant for whoever runs the app, such as `Check RYU_NOTIFY_API_KEY
+(or notify.apiKey).`, so the action returns
+[`messageWithoutHint(error)`](/docs/standalone/sdk/errors) instead: the
+service's own message, which never contains a key. A configuration error's
+message still names the variable to set, so when visitors should never see
+operator text, return a fixed message and log `error.code` and
+`error.requestId` on the server.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/frameworks/hono" />
+  <DocCard href="/docs/standalone/sdk/frameworks/edge" />
+  <DocCard href="/docs/standalone/sdk/webhooks" />
+</Cards>

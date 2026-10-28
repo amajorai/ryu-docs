@@ -1,63 +1,47 @@
 ---
-title: "SDK primitives and project tooling"
-description: "Compose SDK primitives, use the CLI, and scaffold a new project."
+title: "SDK CLI and Project Tooling"
+description: "Reference for the ryu SDK CLI commands (pack, validate, install, dev, build, deploy, and more) and the create-ryu-app project templates."
 ---
 
-Part of the [Ryu SDKs and libraries](/docs/extend/develop/sdk) guide.
+This page covers the tooling that ships with the TypeScript SDK: the `ryu` CLI and the
+`create-ryu-app` scaffolder. It is part of the [Ryu SDKs and Libraries](/docs/extend/develop/sdk)
+guide.
 
 ## Composable primitives
 
-`createPrimitives` builds typed clients for every capability (`packages/sdk/src/runnable/primitives.ts`).
+`createPrimitives(transport)` builds typed clients for RAG, memory, storage, speech, image,
+engines, realtime, durable checkpoints, backups, and background processes. The client methods,
+transports, and required grants are documented once on [SDK Primitives](/docs/extend/develop/sdk/primitives).
 
-```typescript
-function createPrimitives(transport: PrimitiveTransport): RyuPrimitives;
-```
+Core clients in `@ryuhq/sdk` take the node URL as `baseUrl`. They are `httpPrimitiveTransport`,
+`createCoreWorkflowClient`, and the loaders' `core` and `ryuVaultSecret` options. The older name,
+`nodeUrl`, still works; passing both with different values throws.
 
-| Client | Methods | Purpose |
-|---|---|---|
-| `rag` | `retrieve()`, `embed()`, `rerank()` | RAG operations |
-| `memory` | `recall()`, `store()` | Long-term memory |
-| `tts` | `speak()` | Audio |
-| `stt` | `transcribe()` | Voice Recognition |
-| `image` | `generate()` | Image generation |
-| `engines` | `complete()`, `embed()` | Model inference |
-| `realtime` | `broadcast()`, `subscribe()` | Real-time events |
-| `durable` | `checkpoint()`, `resume()` | Durable execution |
-
-```typescript
-import { createPrimitives, httpPrimitiveTransport } from "@ryuhq/sdk";
-
-const transport = httpPrimitiveTransport({
-  nodeUrl: "http://localhost:7980",
-  token: "your-node-token",
-});
-
-const { rag, memory, tts } = createPrimitives(transport);
-
-// Search a space
-const chunks = await rag.retrieve({ query: "How does auth work?", topK: 5 });
-
-// Store a memory
-await memory.store({ content: "User prefers dark mode", level: "user" });
-
-// Speak a response
-const audio = await tts.speak({ text: "Here's what I found..." });
-```
-
-Each primitive routes through the capability broker or direct HTTP, never bypassing the Gateway.
-
-The SDK's stdio MCP client reports an error if its server exits before replying to a request.
+The SDK's stdio MCP client (`packages/sdk/src/mcp/client.ts`) rejects pending requests with
+`MCP server closed the connection` when its server exits before it replies.
 
 ## The CLI
 
-The `ryu` CLI (`packages/sdk/src/cli.ts`) is installed as the `ryu` bin and has four commands:
+The `ryu` CLI (`packages/sdk/src/cli.ts`) ships with `@ryuhq/sdk` as the `ryu` bin, so a scaffolded
+project runs it with `bunx ryu`. It is separate from the Ryu terminal client, which installs as
+`ryu-cli` (see [the CLI reference](/docs/surfaces/cli/reference)); portable-package commands such as
+`ryu-cli package pack` belong to that client, and `bunx ryu package` points you there. The SDK CLI
+has these commands:
 
 | Command | Does |
 |---|---|
 | `bunx ryu pack <dir>` | validate `<dir>/manifest.json`, emit `<dir>/dist/plugin.bundle.json` |
+| `bunx ryu validate <dir>` | check `<dir>/manifest.json` against the SDK schema and the public [JSON Schema](https://ryuhq.com/schemas/plugin.json) without packing |
+| `bunx ryu install <bundle-or-dir> [--update] [--enable]` | side-load a packed bundle into a Ryu node |
 | `bunx ryu github-publish <url>` | submit a seller-owned GitHub repository/package URL to the Marketplace bridge |
 | `bunx ryu agent-plugin <dir>` | emit the Agent Plugins v1 interop pair (`plugin.json` + `mcp.json`) |
-| `bunx ryu dev <entry>` | run a Runnable module locally with an interactive chat loop |
+| `bunx ryu chatgpt-plugin <dir>` | package declared MCP servers and skills for ChatGPT |
+| `bunx ryu dev <entry>` | run a dev-loop module (a `run(messages, model)` generator) locally with an interactive chat loop |
+| `bunx ryu dev --studio [entry]` | serve a project's agents, workflows, and tools with the browser [studio](/docs/extend/develop/sdk/studio) |
+| `bunx ryu build [entry] --target <t>` | bundle a project for `node`, `docker`, `vercel`, `cloudflare`, or `netlify` ([Build and deploy](/docs/extend/develop/sdk/deploy)) |
+| `bunx ryu deploy <target> [entry]` | build, then hand the output to the vendor's own CLI ([Build and deploy](/docs/extend/develop/sdk/deploy)) |
+
+`bunx ryu publish` is deprecated and exits with an error; use `bunx ryu github-publish`.
 
 `ryu pack` validates against `PluginManifestSchema` and exits non-zero with the failing field path
 on any error. Packing preserves declared menu items, views, store tabs, create actions,
@@ -65,13 +49,50 @@ agent editor panels, and hook priorities in the emitted bundle. Host-owned contr
 payloads retain their fields through validation; hooks and adapters still have their
 referenced source files inlined before signing.
 
-`ryu github-publish <url>` submits the GitHub-backed package to the bridge; private
-repositories return the one-time GitHub App installation URL. `ryu agent-plugin <dir>` runs the same validation, then emits only the Agent
-Plugins v1 interop pair — a `plugin.json` and, when the manifest declares MCP servers, an `mcp.json`
-— derived from the manifest, so a Ryu plugin can be surfaced to agents that speak the Agent Plugins
-wire format without shipping the full bundle. `ryu dev` resolves the gateway URL the same way
-`ModelClient` does, imports your module, and starts a terminal REPL; it fails non-zero with a clear
-message if the Gateway is unreachable, never falling back to a provider.
+`ryu validate <dir>` is the authoring-time check. The public JSON Schema is stricter than Core's
+parser, so it flags a misspelled hook phase or settings field type that Core would accept and then
+never use. It exits non-zero and lists every finding, tagged `[sdk]` or `[json-schema]`.
+
+`ryu install <bundle-or-dir>` posts `dist/plugin.bundle.json` (pass the project directory or the
+file) to the node's authenticated `POST /api/plugins/install-bundle`. The plugin installs disabled,
+like a store install; `--enable` then calls `POST /api/plugins/<id>/enable`, which validates its
+grants through the Gateway. `--update` replaces an already-installed copy of the same id. The
+target is `RYU_CORE_URL` (default `http://127.0.0.1:7980`). The bearer is `RYU_CORE_TOKEN`, then
+`RYU_TOKEN`, then, for a loopback URL only, the node's own `node-auth.token` in its data directory
+(`RYU_DIR` relocates it). The local token file is never sent to a remote URL.
+
+`ryu github-publish <url>` submits the GitHub-backed package to the hosted Marketplace
+(`https://api.ryuhq.com`; set `RYU_MARKETPLACE_API_URL`, or `RYU_API_URL`, for a self-hosted
+control plane). It needs your signed-in Ryu account session as `RYU_AUTH_TOKEN`; API keys and third-party OAuth tokens are
+refused on publishing routes. Private repositories return the one-time GitHub App installation
+URL. Install the app, then set `RYU_GITHUB_INSTALLATION_PROOF` to the proof the installation
+callback returns and run the command again. Most authors submit the same URL through
+**Publish from GitHub** instead (the Desktop publisher, or Marketplace → **Sell** on the web). It uses your signed-in
+session and completes the GitHub App step for you.
+
+`ryu agent-plugin <dir>` runs the same validation, then emits only the Agent Plugins v1 interop pair derived from the manifest: a `plugin.json` and, when the manifest declares
+MCP servers, an `mcp.json`. Agents that speak the Agent Plugins wire format can then use a Ryu plugin
+without the full bundle. An MCP `env` or `headers` value that references the
+[Secret Vault](/docs/security/secret-vault) (`secret:NAME`) is left out of `mcp.json`, and the
+command prints a note naming it, because only Ryu can resolve that reference; a host that installs
+the pair must supply that value itself.
+
+`ryu dev` resolves the Gateway URL the same way `ModelClient` does (`RYU_GATEWAY_URL` first),
+imports your module, and starts a terminal REPL. If the Gateway is unreachable, it prints an error
+and exits non-zero. It never falls back to a provider.
+
+The module must export, as `default` or as `runnable`, an object with a `name` and a
+`run(messages, model)` generator. Each turn, `run` receives the chat history and a Gateway-bound
+`ModelClient`, and yields `text`, `tool_call`, `tool_result`, or `error` events
+(`packages/sdk/src/cli/dev.ts`). A `defineAgent` or `defineWorkflow` result has a different
+`run(input, ctx)` contract, so `ryu dev` cannot drive it directly.
+
+`ryu chatgpt-plugin <dir>` writes a portable OpenAI plugin directory to
+`<dir>/dist/chatgpt-plugin/`. It includes plugin metadata, the package's declared MCP connections,
+and selected `skills/<slug>/` resources. Use `--skills <slug,...>` to choose up to five skills;
+use `--force` only to replace an output directory not already managed by this command.
+Credential-like MCP values are omitted. See [ChatGPT plugins and MCP extensions](/docs/extend/develop/sdk/chatgpt)
+for the server SDK, auth boundary, and OpenAI extension support.
 
 Publishing is governed by the Gateway (grant validation and manifest signing). See
 [Marketplace](/docs/extend/develop/extensions/marketplace) for the full publish flow.
@@ -80,11 +101,33 @@ Publishing is governed by the Gateway (grant validation and manifest signing). S
 
 ```bash
 npx create-ryu-app my-extension
+npx create-ryu-app my-extension --template hook-plugin
 ```
 
-`create-ryu-app` (`packages/create-ryu-app/`) generates a starter project: a `manifest.json` validated
-against the manifest schema, a `package.json` with `dev` and `pack` scripts, and a starter agent in
-`src/agent.ts` that streams one turn through the local Gateway.
+`create-ryu-app` (`packages/create-ryu-app/`) copies a template, stamps your project name into it,
+validates the generated `manifest.json` against the manifest schema (the `services` template has
+none), and writes a `package.json` with a `dev` script (plus `pack` for plugin templates).
+`--template <name>` (or `--template=<name>`) picks the starter:
+
+| Template | Shape | What you get |
+|---|---|---|
+| `agent` (default) | Plugin | An `Agent` with one local `defineTool` tool in `src/agent.ts`. It needs only a running node with a routable model: no API key, account connection, or Core agent. |
+| `expense-agent` | Plugin | An `Agent` that calls existing Ryu tools with `ryuTool` (Gmail through Composio). Needs a Composio key on the node, a Core agent whose allowlist includes the Gmail actions, and a Gmail sign-in on first run. |
+| `workflow` | Plugin | A typed workflow in `src/ryu.ts` with a classify step, an agent draft step, a review step that suspends for human approval, and a send step. `bun dev` opens the [studio](/docs/extend/develop/sdk/studio); `bun run build` runs `ryu build --target node`. |
+| `multi-agent` | Plugin | A supervisor (`createSupervisor`) routing between a researcher and a writer in `src/ryu.ts`, with a `needsApproval` publish tool. `bun dev` opens the studio. |
+| `action` | Plugin | A governed business action with input/output contracts (`defineAction`) in `src/action.ts`. |
+| `hook-plugin` | Plugin | A post-assistant-turn hook (`definePlugin` + `defineTurnHook`) in `src/plugin.ts`. |
+| `ryu-app` | Plugin | An interactive in-chat widget (`defineApp` + `src/widget.tsx`) that `ryu pack` bundles into `ui_code`. |
+| `companion-plugin` | Plugin | A widget that calls a companion tool, plus a companion panel surface. |
+| `app` | App | A self-contained app satellite: `manifest.json` plus a loopback HTTP `sidecar/` reached through the generic ext-proxy. Its `package.json` has `build` and `check-types` instead of `pack`. |
+| `services` | Server | Not an extension: a standalone [Hono](https://hono.dev) server on [`@ryuhq/services`](/docs/standalone/sdk) with a Notify publish route, a Mail send route (a `ryu_` key with `mail:send`), and Mail and Notify webhook routes verified with `@ryuhq/services/webhooks`. It has no `manifest.json`; its `package.json` has `dev`, `start`, `test` and `check-types`, and `.env.example` lists the variables it reads. Its `.gitignore` excludes `.env`. `@ryuhq/services` is not yet published to npm, so `bun install` cannot fetch it from the registry yet; inside a Ryu monorepo checkout it resolves only when the project is scaffolded under `examples/` and `bun install` runs at the repository root. |
+
+Plugins and apps are compared in [Plugins vs apps](/docs/extend/develop/extensions/plugins-vs-apps).
+
+`--template adapter` scaffolds a capability adapter: an
+HTTP provider tool, a `provides` binding with a flat `adapters/<verb>.js` body, the `tool:execute`
+and `tool:http-egress:<host>` grants, and golden cases you run with `bun test`. See
+[Shipping a custom adapter](/docs/core/swappable-layers-adapters#shipping-a-custom-adapter).
 
 ## Next
 

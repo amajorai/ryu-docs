@@ -1,24 +1,35 @@
 ---
-title: "Channel access and allowlists"
+title: "Channel Access and Allowlists"
 description: "How DM pairing, group allowlists, and agent routing allowlists gate who can reach a channel bot and what it can do."
 ---
 
-A channel (a chat surface, a bot connection, an inbound route) is an untrusted ingress: anyone who can find the bot can make it spend your model budget. Two independent layers gate it. **Access** decides whose messages are answered at all. **Routing allowlists** decide which agent a channel can address and, through that agent, which tools it can invoke.
-
-Widening one does not widen the other.
+A channel (a chat surface, a bot connection, an inbound route) is an untrusted ingress: anyone who can find the bot can make it spend your model budget. Two independent layers gate it. **Access** decides whose messages are answered. **Routing allowlists** decide which agent a channel can address and, through that agent, which tools it can invoke. Widening one does not widen the other.
 
 ## Access: who may talk to the bot
 
-Every channel carries a DM policy and a group policy. They are separate because the consent that matters differs: a direct message is one person choosing to talk to your bot, while a group is a shared room where one member typing at the bot is not consent from everyone in it.
+Every channel carries a DM policy and a group policy (`DmPolicy` and `GroupPolicy` in `crates/gateway/channels/src/pairing.rs`). They are separate because consent differs: a direct message is one person choosing to talk to your bot, while in a group one member typing at the bot is not consent from everyone in the room.
 
 ### Direct messages
 
 | Policy | Behaviour |
 |---|---|
-| `pairing` (default) | An unrecognised sender is answered with a one-time **pairing code** and nothing else. Their message is not routed to any agent. Once an operator approves the code, that sender is paired and talks to the bot normally. |
+| `pairing` (default) | An unrecognised sender is answered with a one-time **pairing code** and nothing else. Their message is not routed to any agent. Once an operator approves the code (see [Approving a pairing code](#approving-a-pairing-code)), that sender is paired and talks to the bot normally. |
 | `allowlist` | Only pre-listed sender ids are admitted. Everyone else is dropped silently, with no enrolment path. |
-| `open` | Every direct message is answered. Only appropriate when you are happy to pay for completions on behalf of anyone who finds the bot. |
+| `open` | Every direct message is answered. Use it only when you accept paying for completions for anyone who finds the bot. |
 | `disabled` | Direct messages are refused entirely; the bot works only in allowlisted groups. |
+
+### Approving a pairing code
+
+Pairing codes are never written to the Gateway log, so the owner relays the code the sender received. Approve it with an authenticated admin request to the Gateway (the master key, or a loopback caller when the Gateway runs without auth):
+
+```bash
+curl -X POST "$GATEWAY_URL/v1/channels/pairing/approve" \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "ABC234"}'
+```
+
+The response is `{"approved": true, "platform": "telegram"}`. It names the channel and never the sender id or phone number. The code is not case-sensitive and works once. An unknown, expired, or already-used code returns `404`. The sender's next message is answered normally.
 
 ### Groups
 
@@ -28,19 +39,17 @@ Every channel carries a DM policy and a group policy. They are separate because 
 | `open` | Any group the bot has been added to is served. |
 | `disabled` | The bot never answers in groups. |
 
-There is deliberately **no pairing flow for groups**. A pairing code proves one participant wants the bot; it says nothing about the rest of the room.
+Groups have **no pairing flow**. A pairing code proves one participant wants the bot; it says nothing about the rest of the room.
 
 <Callout type="warn">
-  Access is about *who is answered*. It is not a substitute for the routing allowlist below — a paired sender still reaches only the agent the channel is bound to, and only the tools that agent was granted.
+  Access decides *who is answered*. It does not replace the routing allowlist below: a paired sender still reaches only the agent the channel is bound to, and only the tools that agent was granted.
 </Callout>
 
-## Why pairing replaced the bare allowlist
+## Legacy environment variables
 
-A channel with no configuration used to refuse every inbound message and explain itself only in a gateway log line. Enrolling someone meant reading their chat id out of that log and editing `RYU_CHANNEL_ALLOWED_USERS`. In practice that produced two bad outcomes: bots that appeared broken, and operators who set `RYU_CHANNEL_ALLOW_ALL=1` to make the problem go away.
+Pairing enrols senders without editing config: the sender gets a code, an operator approves it as described above, and the allowlist updates itself. Nobody is admitted until a human acts.
 
-Pairing keeps the property that mattered — **nobody is admitted until a human acts** — while moving enrolment out of the config file. The sender gets a code, the operator approves it, and the allowlist maintains itself.
-
-The legacy environment variables still configure this:
+The older environment variables still set the policies:
 
 | Environment | DM policy | Group policy |
 |---|---|---|
@@ -50,15 +59,15 @@ The legacy environment variables still configure this:
 
 The per-platform key overrides the global one.
 
-### Where pairing state lives
+## Where pairing state lives
 
-Paired senders are kept in a per-node file, not in the control-plane database. Two reasons: the same bot token running on another node is a different deployment with its own approvals, and the gateway must be able to gate inbound traffic **while the control plane is unreachable**. A gate that fails open when a dependency is down is not a gate.
+Paired senders are kept in a per-node file, not in the control-plane database. The same bot token running on another node is a different deployment with its own approvals. The Gateway also has to gate inbound traffic **while the control plane is unreachable**, so the gate cannot depend on it.
 
-A pairing code expires after 24 hours. Re-messaging the bot before then returns the *same* code rather than minting a second one, so an operator is never asked to choose between two codes that mean the same thing. A blocked sender never receives another code.
+A pairing code expires after 24 hours (`CODE_TTL`). Messaging the bot again before then returns the *same* code instead of a second one. A blocked sender never receives another code. Expired codes are discarded, and while 1,024 codes are awaiting approval, messages from new unknown senders are ignored without a reply until some codes are approved or expire.
 
 ## Routing allowlists: what the channel can reach
 
-Account-global, not node-scoped — they apply across nodes rather than being scoped to a single node. See [Channels in the Gateway dialog](/docs/gateway/channels) for where these are configured. A channel routes to a specific agent or team, and the allowlist on that route bounds the blast radius of whatever sends into the channel.
+Routing allowlists are account-global: they apply across nodes, not to one node. See [Channels in the Gateway dialog](/docs/gateway/channels) for where to configure them. A channel routes to a specific agent or team, and the allowlist on that route bounds what a sender into the channel can reach.
 
 ```mermaid
 flowchart LR
@@ -67,11 +76,11 @@ flowchart LR
   Agent -->|agent's own tool grants| Tools[Tools and Composio actions]
 ```
 
-The channel cannot pick an arbitrary agent - only one its route permits - and the agent cannot reach a tool it was not granted. The layers compose.
+The channel can address only an agent its route permits, and the agent can reach only the tools it was granted.
 
-## Composio is gateway-route-only
+## Composio actions
 
-Composio actions are reachable only through the gateway route, never via a direct path that bypasses the allowlist. An agent's Composio actions are bound to its record, so a channel can only trigger them through an agent it is actually allowed to reach.
+An agent's Composio actions come from its own per-agent allowlist (`composio_actions`). A channel can trigger them only through an agent its route permits. The Gateway enforces this allowlist on requests it routes. ACP agents do not route through the Gateway, so it does not apply to them.
 
 ## Related
 

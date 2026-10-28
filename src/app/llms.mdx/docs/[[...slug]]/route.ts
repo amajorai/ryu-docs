@@ -1,7 +1,9 @@
 import { notFound } from "next/navigation";
 
+import { hasLocalizedDocsContent } from "@/lib/canonical-docs";
 import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "@/lib/i18n";
-import { getLLMText, getPage } from "@/lib/source";
+import { siteConfig } from "@/lib/metadata";
+import { getCanonicalDocsPage, getLLMText, getPage } from "@/lib/source";
 
 export const revalidate = false;
 
@@ -17,11 +19,16 @@ export async function GET(
   const slug = isDocsLocale(rawSlug[0]) ? rawSlug.slice(1) : rawSlug;
   const page = getPage(slug, locale);
   if (!page) notFound();
+  const canonicalPage = getCanonicalDocsPage(page);
 
   return new Response(await getLLMText(page), {
     headers: {
       "Cache-Control": "public, max-age=86400",
+      "Content-Language": hasLocalizedDocsContent(page)
+        ? locale
+        : DEFAULT_DOCS_LOCALE,
       "Content-Type": "text/markdown; charset=utf-8",
+      Link: `<${siteConfig.url}${canonicalPage.url}>; rel="canonical"`,
     },
   });
 }

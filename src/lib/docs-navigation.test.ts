@@ -1,98 +1,37 @@
 import { describe, expect, test } from "bun:test";
 
-type Meta = {
-  icon?: string;
-  pages?: string[];
-  root?: boolean;
-};
-
-const docsRoot = new URL("../../content/docs/", import.meta.url);
-const docsRootPath = docsRoot.pathname;
-const internalMarkdownLink = /\[[^\]]+\]\((\/docs(?:\/[^)\s]+)?)\)/g;
-const versionSegment = /^\d+\.\d+\.\d+$/;
-
-async function readMeta(path: string): Promise<Meta> {
-  return (await Bun.file(new URL(path, docsRoot)).json()) as Meta;
-}
-
-async function readPage(path: string): Promise<string> {
-  return Bun.file(new URL(path, docsRoot)).text();
-}
-
-function normalizeDocsHref(href: string): string {
-  const pathname = href.split(/[?#]/, 1)[0] ?? href;
-  const segments = pathname.split("/").filter(Boolean);
-
-  if (segments[0] !== "docs") {
-    return pathname;
-  }
-
-  if (versionSegment.test(segments[1] ?? "")) {
-    segments.splice(1, 1);
-  }
-
-  return segments.length === 1 ? "/docs" : `/${segments.join("/")}`;
-}
-
-async function readDocFiles(): Promise<string[]> {
-  const files: string[] = [];
-  const glob = new Bun.Glob("**/*.mdx");
-
-  for await (const file of glob.scan({ cwd: docsRootPath })) {
-    files.push(file);
-  }
-
-  return files.sort();
-}
-
-function pagePathFromFile(file: string): string {
-  const withoutExtension = file.replace(/\.mdx$/, "");
-  const withoutIndex = withoutExtension.replace(/\/index$/, "");
-  return withoutIndex ? `/docs/${withoutIndex}` : "/docs";
-}
-
-function pagesUnderHeader(
-  pages: string[],
-  header: string,
-  nextHeader?: string,
-): string[] {
-  const start = pages.indexOf(header);
-  const end = nextHeader ? pages.indexOf(nextHeader) : pages.length;
-
-  if (start < 0 || end < 0 || end <= start) {
-    throw new Error(`Missing sidebar section: ${header}`);
-  }
-
-  return pages.slice(start + 1, end);
-}
+import { readMeta, readPage } from "./docs-navigation-helpers";
 
 describe("docs navigation", () => {
   test("keeps every top-level realm in the root navigation", async () => {
     const root = await readMeta("meta.json");
+    // Newcomer order: get started, use Ryu, catalogs, platform, build and
+    // extend, reference, account and trust, then what changed and what's next.
     const realms = [
       "start-here",
-      "showcase",
+      "learn",
       "surfaces",
       "mobile",
       "browser-extension",
       "hardware",
+      "apps",
+      "plugins",
+      "providers",
       "core",
       "gateway",
-      "standalone",
-      "providers",
-      "ci",
+      "security",
       "extend",
       "ui",
-      "apps",
-      "programs",
-      "plugins",
-      "security",
-      "legal",
-      "billing",
+      "standalone",
+      "ci",
+      "showcase",
       "reference",
-      "learn",
-      "rsi",
+      "billing",
+      "programs",
+      "legal",
+      "release-notes",
       "roadmap",
+      "rsi",
     ];
 
     expect(root.pages).toEqual(realms);
@@ -138,22 +77,38 @@ describe("docs navigation", () => {
     expect(providers.root).toBe(true);
     expect(providers.pages).toEqual([
       "index",
+      "---Get started---",
+      "manage-providers",
+      "inventory",
       "---Capability layers---",
       "chat-and-models",
       "embeddings-and-reranking",
       "speech",
       "image-and-video",
+      "image-video-provider-guides",
       "document-extraction",
       "toolkits",
       "---Provider families---",
       "cloud",
       "openrouter",
+      "prompt-caching",
+      "upstream-routers",
       "local",
       "custom",
+      "---Subscription accounts---",
+      "chatgpt-plan",
+      "codex-reset-planning",
+      "native-kiro-accounts",
+      "kiro",
+      "qoder",
       "---Accounts and routing---",
       "byok",
       "routing",
+      "account-routing",
+      "provider-pools",
     ]);
+    await readPage("providers/native-kiro-accounts.mdx");
+    await readPage("providers/kiro.mdx");
   });
 
   test("keeps mobile and browser as dedicated grouped roots", async () => {
@@ -165,22 +120,40 @@ describe("docs navigation", () => {
     expect(mobile.root).toBe(true);
     expect(mobile.pages).toEqual([
       "index",
-      "---Account and usage---",
+      "---Get started---",
+      "connect-and-sign-in",
+      "navigation-and-settings",
+      "devices-and-layout",
+      "---Use Ryu Mobile---",
+      "chats-and-spaces",
+      "agents",
       "billing-and-marketplace",
       "---On-device AI---",
       "models",
-      "---Native capabilities---",
       "tools-and-privacy",
+      "---Native surfaces---",
       "native-surfaces",
+      "watch-and-car",
+      "ai-keyboard",
+      "---Ryu Bot---",
+      "bot",
     ]);
 
     const browserExtension = await readMeta("browser-extension/meta.json");
     expect(browserExtension.root).toBe(true);
     expect(browserExtension.pages).toEqual([
       "index",
+      "---Use the extension---",
+      "popup-and-new-tab",
+      "copilot",
+      "search",
+      "notifications",
       "---Local AI---",
       "local-models",
-      "---Browser capabilities---",
+      "---Accounts and connection---",
+      "accounts",
+      "connection-and-updates",
+      "---Reference---",
       "browser-tools",
     ]);
   });
@@ -197,9 +170,31 @@ describe("docs navigation", () => {
       "---Ryu Passport---",
       "passport",
       "passport-api",
+      "passport-fetch-api",
+      "passport-mcp-api",
       "---Ryu Connect---",
       "connect",
+      "connect-configuration",
       "connect-api",
+      "connect-api-mcp",
+      "connect-api-billing",
+      "connect-api-routes",
+      "connect-api-usage",
+      "connect-api-triggers",
+      "connect-api-trigger-events",
+      "connect-api-composio",
+      "connect-api-native-toolkits",
+      "connect-api-relay",
+      "connect-api-tasks",
+      "connect-api-media",
+      "connect-api-routing",
+      "connect-api-composed",
+      "connect-api-reviews",
+      "connect-api-tags",
+      "connect-api-discovery",
+      "connect-api-catalog",
+      "connect-api-access-policy",
+      "connect-cli",
       "---Ryu Box---",
       "box",
       "box-api",
@@ -207,15 +202,45 @@ describe("docs navigation", () => {
       "---Ryu Mail---",
       "mail",
       "mail-api",
+      "mail-api-webhooks",
+      "mail-api-realtime",
       "mail-delivery",
+      "---Ryu Messaging---",
+      "messaging",
+      "messaging-api",
+      "messaging-numbers",
       "---Ryu Notify---",
       "notify",
       "notify-api",
       "notify-streams",
       "notify-parity",
+      "---Ryu Sites---",
+      "sites",
+      "sites-api",
       "---Ryu Hire---",
       "hire",
+      "---Ryu Managed Agents---",
+      "managed-agents",
+      "managed-agents-api",
+      "managed-agents-api-requests",
+      "managed-agents-api-resources",
+      "managed-agents-api-examples",
+      "managed-agents-events",
+      "---SDK, CLI and MCP---",
+      "sdk",
     ]);
+  });
+
+  test("publishes the Video Studio workflow guides beside the app overview", async () => {
+    const apps = await readMeta("apps/meta.json");
+    expect(apps.pages).toEqual(
+      expect.arrayContaining([
+        "video-studio",
+        "video-studio-editing",
+        "video-studio-generation",
+        "video-studio-transcription",
+      ]),
+    );
   });
 
   test("publishes the browser WebMCP guide with the MCP server docs", async () => {
@@ -273,240 +298,16 @@ describe("docs navigation", () => {
     }
   });
 
-  test("keeps long guides split under their existing sidebar sections", async () => {
-    const sections = [
-      {
-        meta: "surfaces/desktop/user-guide/meta.json",
-        header: "---Chat & agents---",
-        nextHeader: "---Knowledge & tools---",
-        pages: [
-          "chat",
-          "chat-basics",
-          "chat-sessions",
-          "chat-messages",
-          "chat-session-controls",
-          "chat-composer-and-media",
-        ],
-      },
-      {
-        meta: "gateway/meta.json",
-        header: "---Configuration & Security---",
-        nextHeader: "---Tools & Channels---",
-        pages: [
-          "configuration",
-          "configuration-settings",
-          "configuration-access",
-          "configuration-operations",
-          "configuration-api",
-        ],
-      },
-      {
-        meta: "gateway/meta.json",
-        header: "---Tools & Channels---",
-        nextHeader: "---Observability & Reliability---",
-        pages: [
-          "channels",
-          "channel-setup",
-          "channel-controls",
-          "channel-routing",
-        ],
-      },
-      {
-        meta: "security/meta.json",
-        header: "---Access Control---",
-        nextHeader: "---Isolation---",
-        pages: [
-          "authentication-and-pairing",
-          "authentication-account",
-          "authentication-devices",
-          "authentication-mcp",
-          "authentication-organizations",
-          "authentication-tokens",
-        ],
-      },
-      {
-        meta: "extend/develop/meta.json",
-        header: "---TypeScript SDK---",
-        nextHeader: "---Rust SDK---",
-        pages: ["sdk/index", "sdk/runnables", "sdk/builders", "sdk/tooling"],
-      },
-    ];
+  test("lists the extension and SDK guides through their own folder lists", async () => {
+    const develop = (await readMeta("extend/develop/meta.json")).pages ?? [];
+    expect(develop).toEqual(expect.arrayContaining(["extensions", "sdk"]));
+    expect(
+      develop.filter(
+        (page) => page.startsWith("extensions/") || page.startsWith("sdk/"),
+      ),
+    ).toEqual([]);
 
-    for (const section of sections) {
-      const navigation = (await readMeta(section.meta)).pages ?? [];
-      expect(
-        pagesUnderHeader(navigation, section.header, section.nextHeader),
-      ).toEqual(expect.arrayContaining(section.pages));
-    }
-
-    const compactGuides = [
-      "surfaces/desktop/user-guide/chat.mdx",
-      "surfaces/desktop/user-guide/chat-basics.mdx",
-      "surfaces/desktop/user-guide/chat-sessions.mdx",
-      "surfaces/desktop/user-guide/chat-messages.mdx",
-      "surfaces/desktop/user-guide/chat-session-controls.mdx",
-      "surfaces/desktop/user-guide/chat-composer-and-media.mdx",
-      "gateway/configuration.mdx",
-      "gateway/configuration-settings.mdx",
-      "gateway/configuration-access.mdx",
-      "gateway/configuration-operations.mdx",
-      "gateway/configuration-api.mdx",
-      "gateway/channels.mdx",
-      "gateway/channel-setup.mdx",
-      "gateway/channel-controls.mdx",
-      "gateway/channel-routing.mdx",
-      "security/authentication-and-pairing.mdx",
-      "security/authentication-account.mdx",
-      "security/authentication-devices.mdx",
-      "security/authentication-mcp.mdx",
-      "security/authentication-organizations.mdx",
-      "security/authentication-tokens.mdx",
-      "extend/develop/sdk/index.mdx",
-      "extend/develop/sdk/runnables.mdx",
-      "extend/develop/sdk/builders.mdx",
-      "extend/develop/sdk/tooling.mdx",
-    ];
-
-    for (const guide of compactGuides) {
-      const content = await readPage(guide);
-      expect(content.split(/\r?\n/).length).toBeLessThan(500);
-    }
-  });
-
-  test("keeps generated API roots as directories of endpoint groups", async () => {
-    const coreIndex = await readPage(
-      "extend/develop/api-reference/core/index.mdx",
-    );
-    const agentsIndex = await readPage(
-      "extend/develop/api-reference/core/agents/index.mdx",
-    );
-
-    expect(coreIndex.split(/\r?\n/).length).toBeLessThan(120);
-    expect(coreIndex).toContain("Browse by endpoint group");
-    expect(agentsIndex).toContain("<Cards>");
-    expect(agentsIndex).toContain("core/agents/list_agents");
-  });
-
-  test("surfaces API reference and RyuBench as dedicated root selectors", async () => {
-    const apiReference = await readMeta(
-      "extend/develop/api-reference/meta.json",
-    );
-    const benchmark = await readMeta("reference/benchmark/meta.json");
-
-    expect(apiReference.root).toBe(true);
-    expect(benchmark.root).toBe(true);
-    expect(apiReference.pages).toEqual(["index", "gateway", "core"]);
-    expect(benchmark.pages).toEqual([
-      "index",
-      "tasks",
-      "scoring",
-      "local-models",
-      "kernel-boundaries",
-    ]);
-  });
-
-  test("keeps current Core operations visible in generated API navigation", async () => {
-    const core = await readMeta("extend/develop/api-reference/core/meta.json");
-    const catalog = await readMeta(
-      "extend/develop/api-reference/core/catalog/meta.json",
-    );
-    const outputStyles = await readMeta(
-      "extend/develop/api-reference/core/output-styles/meta.json",
-    );
-
-    expect(catalog.pages).toContain("catalog_sources_remove");
-    expect(core.pages).toContain("output-styles");
-    expect(outputStyles.pages).toEqual(
-      expect.arrayContaining([
-        "create_style_handler",
-        "delete_style_handler",
-        "list_styles",
-      ]),
-    );
-  });
-
-  test("groups every billing page and includes Teams seats", async () => {
-    const billing = await readMeta("billing/meta.json");
-    const pages = billing.pages ?? [];
-
-    expect(pages).toEqual([
-      "index",
-      "---Plans & access---",
-      "hosted-agents",
-      "limits",
-      "trial-and-access",
-      "plan-changes",
-      "pricing-changelog",
-      "---Credits & usage---",
-      "credits",
-      "gifts",
-      "metering",
-      "notifications",
-      "---Organizations---",
-      "organization-access",
-      "seats",
-      "agent-inboxes",
-      "merging-accounts",
-    ]);
-  });
-
-  test("groups the public programs pages", async () => {
-    const root = await readMeta("meta.json");
-    const programs = await readMeta("programs/meta.json");
-
-    expect(root.pages).toContain("programs");
-    expect(programs.root).toBe(true);
-    expect(programs.pages).toEqual([
-      "index",
-      "---Community & access---",
-      "partner-program",
-      "perks",
-      "startups-and-students",
-      "---Build & earn---",
-      "sell-your-own-agents",
-      "creator-program",
-      "challenges",
-      "referrals",
-    ]);
-  });
-
-  test("keeps every public page connected by valid inline documentation links", async () => {
-    const files = await readDocFiles();
-    const pagePaths = new Set(files.map(pagePathFromFile));
-    const missingInlineLinks: string[] = [];
-    const brokenLinks: string[] = [];
-
-    for (const file of files) {
-      const content = await readPage(file);
-      const links = [...content.matchAll(internalMarkdownLink)].map(
-        (match) => match[1],
-      );
-
-      if (links.length === 0) {
-        missingInlineLinks.push(file);
-      }
-
-      const minimum = [
-        "apps/",
-        "plugins/",
-        "ui/components/",
-        "extend/develop/api-reference/",
-      ].some((prefix) => file.startsWith(prefix))
-        ? 3
-        : 0;
-      expect(
-        links.length,
-        `${file} should expose at least ${minimum} inline documentation links`,
-      ).toBeGreaterThanOrEqual(minimum);
-
-      for (const href of links) {
-        if (!pagePaths.has(normalizeDocsHref(href ?? ""))) {
-          brokenLinks.push(`${file} -> ${href}`);
-        }
-      }
-    }
-
-    expect(missingInlineLinks).toEqual([]);
-    expect(brokenLinks).toEqual([]);
+    const sdk = (await readMeta("extend/develop/sdk/meta.json")).pages ?? [];
+    expect(sdk[0]).toBe("index");
   });
 });

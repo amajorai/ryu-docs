@@ -1,45 +1,112 @@
 ---
-title: "Passport API"
+title: "Ryu Passport API"
 description: "Create and manage encrypted agent identity connections"
 tags: ["passport", "identity", "api", "standalone"]
 ---
 
-The standalone Passport API is a tenant-scoped HTTP contract under `/v1`.
-Management and runtime routes require their respective Passport bearer tokens.
-Health and the state-bound OAuth callback and client metadata routes are public. The
-`encrypted_state` column and decrypted credential value are structurally absent
-from every response.
+This page is the HTTP reference for the standalone Ryu Passport service, which
+stores sealed agent login state per tenant. The API is a tenant-scoped contract
+under `/v1`. Management and runtime routes require their respective Passport bearer tokens.
+Health, the state-bound OAuth callback, and the client metadata routes are
+public. No response contains the `encrypted_state` column or a decrypted
+credential value.
+
+A missing or invalid token returns `401`. A client address that keeps presenting
+unknown tokens is blocked for a while and gets `429` with a `Retry-After`
+header in seconds, even for a valid token. Wait that long before retrying. See
+[Failed authentication backoff](/docs/standalone/passport#failed-authentication-backoff).
+
+## Errors
+
+Every error is JSON with the message in `error` and a stable machine `code`,
+for example `{"error":"connection not found","code":"not_found"}`. Branch on
+`code`. A body that is not valid JSON is `400 invalid_request`, a request
+without a JSON `content-type` is `415 invalid_request`, a JSON body that does
+not match the route is `422 invalid_request`, an unknown route is
+`404 not_found`, and a wrong method is `405 method_not_allowed` with an
+`Allow` header. All of them have a JSON body. Send
+`Accept: application/problem+json` to get the same error as RFC 9457 problem
+details (`type`, `title`, `status`, `detail`, `instance`, `code`, `docs`)
+that keep the `error` member; `type` and `docs` link the code's row below.
+The OAuth callback still answers with a short page for the browser.
+
+| Code | Meaning |
+|---|---|
+| <span id="invalid_request" />`invalid_request` | The body, a parameter or the usage window is not valid (`400`; `415` without a JSON `content-type`, `422` for a body that does not match the route). |
+| <span id="unauthorized" />`unauthorized` | The bearer token is missing or not valid (`401`). |
+| <span id="insufficient_credits" />`insufficient_credits` | Ryu-hosted Passport only: the organization has no credits left (`402`). |
+| <span id="forbidden" />`forbidden` | The credential is not granted this request, such as an HTTP method (`403`). |
+| <span id="not_found" />`not_found` | The connection or route does not exist (`404`). |
+| <span id="method_not_allowed" />`method_not_allowed` | The route does not take this method; read `Allow` (`405`). |
+| <span id="conflict" />`conflict` | The connection is not in a state that allows this request (`409`). |
+| <span id="body_too_large" />`body_too_large` | The request body is larger than Passport reads (`413`). |
+| <span id="rate_limited" />`rate_limited` | Too many failed authentications from this address; wait `Retry-After` (`429`). |
+| <span id="idempotency_key_invalid" />`idempotency_key_invalid` | The `Idempotency-Key` header is not a valid key (`400`). |
+| <span id="idempotency_conflict" />`idempotency_conflict` | The `Idempotency-Key` was used with a different body (`409`). |
+| <span id="idempotency_in_progress" />`idempotency_in_progress` | The first request with this key is still running; wait `Retry-After` (`409`). |
+| <span id="metering_unavailable" />`metering_unavailable` | Ryu-hosted Passport only: usage cannot be recorded right now (`503`). |
+| <span id="internal_error" />`internal_error` | Passport failed to complete the request (`500`). |
+| <span id="bad_gateway" />`bad_gateway` | The upstream request failed (`502`). |
+| <span id="service_unavailable" />`service_unavailable` | Passport cannot serve the request right now (`503`). |
+| <span id="gateway_timeout" />`gateway_timeout` | Reserved for an upstream that did not answer in time (`504`). |
+| <span id="client_error" />`client_error` | Any other `4xx`. |
+| <span id="server_error" />`server_error` | Any other `5xx`. |
 
 ## Create a connection
 
 ```sh
 curl -fsS http://127.0.0.1:8093/v1/connections \
-  -H "Authorization: Bearer ${RYU_PASSPORT_API_TOKEN}" \
+  -H "Authorization: Bearer replace-with-a-passport-management-token" \
   -H 'Content-Type: application/json' \
   -d '{"profile_id":"default","domain":"app.example.com"}'
 ```
 
+To make a retry safe, add an `Idempotency-Key` header with a value of up to
+255 printable ASCII characters (for example `-H 'Idempotency-Key: "c1f3..."'`).
+Passport builds that honour it report `"idempotency_keys": true` under
+`features` in `GET /v1/capabilities`; an older build ignores the header.
+
+Keys are scoped to the tenant and kept for up to 24 hours; each tenant keeps
+at most 10,000 keys and drops the oldest completed ones first. A retry with
+the same key and body returns the first response with
+`Idempotent-Replayed: true` and does not create a second connection. The same
+key with a different body returns `409 idempotency_conflict`, and a retry
+while the first request is still running returns
+`409 idempotency_in_progress` with `Retry-After`.
+
+Only a success or a `400`, `404`, `409` or `422` is replayed. An authentication, credit or metering
+refusal, a `413`, a `429`, a server error, or a response larger than 64 KiB
+frees the key, so a retry with it runs again. Without the header, every
+request creates a connection. The `@ryuhq/services` SDK and the Python
+`ryu_sdk.services` client send a key they generate, and retry the create with
+it after a network error, timeout or `5xx`, only when `GET /v1/capabilities`
+lists `features.idempotency_keys: true`; otherwise they never retry a create.
+A key you supply is always sent (see
+[Idempotency and retries](/docs/standalone/sdk/passport#idempotency-and-retries)).
+
 New connections begin as `NEEDS_AUTH` with `IDLE` flow status. Start the manual
-flow, complete the provider login out of band, then import the resulting state:
+flow, complete the provider login out of band, then import the resulting state.
 
 ```sh
 curl -fsS -X POST http://127.0.0.1:8093/v1/connections/conn_.../login \
-  -H "Authorization: Bearer ${RYU_PASSPORT_API_TOKEN}"
+  -H "Authorization: Bearer replace-with-a-passport-management-token"
 
 curl -fsS -X POST http://127.0.0.1:8093/v1/connections/conn_.../import \
-  -H "Authorization: Bearer ${RYU_PASSPORT_API_TOKEN}" \
+  -H "Authorization: Bearer replace-with-a-passport-management-token" \
   -H 'Content-Type: application/json' \
   -d '{"state":"cookie=session=..."}'
 ```
 
-The import request accepts captured credential state; the OAuth callback accepts
-a one-use authorization code bound to Passport's PKCE verifier.
-Passport seals it before persistence and responds with status metadata only.
+The import request accepts captured credential state. The OAuth callback
+accepts a one-use authorization code bound to Passport's PKCE verifier.
+Passport seals the state before it stores it and responds with status metadata
+only.
 
 ## Routes
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/` | Public; redirects to `RYU_PRODUCT_DASHBOARD_URL` when set (Ryu's hosted deployment sets it), otherwise returns `{"name":"ryu-passport","version":…,"health":"/health"}` |
 | `GET` | `/health` | Public service health and feature report |
 | `GET` | `/v1/capabilities` | Authenticated contract summary |
 | `GET` | `/v1/runtime/connections` | Runtime credential's profile-scoped connection metadata |
@@ -52,289 +119,116 @@ Passport seals it before persistence and responds with status metadata only.
 | `POST` | `/v1/connections/:id/fetch` | Perform an authenticated, method-granted HTTPS request within Passport |
 | `DELETE` | `/v1/connections/:id` | Remove the connection and sealed state |
 | `POST` | `/v1/health/sweep` | Run one authenticated tenant sweep |
+| `GET` | `/v1/usage?from=&to=` | Tenant usage meters for whole hours, up to 31 days |
 
 The manual source checks for stored credential state within the authenticated
-tenant. It does not validate that state against the remote provider.
+tenant. It does not validate that state against the remote provider. The MCP
+OAuth routes are listed in the
+[Passport MCP OAuth API](/docs/standalone/passport-mcp-api#mcp-routes).
 
-## Use an imported connection
+## Out of credits
 
-Send `{ "url": "https://app.example.com/page" }` to the connection's `fetch`
-route. Passport resolves that connection in the bearer token's tenant, opens
-its credential internally, and performs the request. The URL must match the
-stored domain exactly, use HTTPS on port 443, and omit user information and
-fragments. Private addresses are blocked, DNS results are pinned, and redirects
-are not followed.
+On a Ryu-hosted Passport, a tenant whose organization has no Ryu credits left
+gets `402 Payment Required` on the routes that call an upstream or store a new
+credential:
 
-Fetch accepts raw cookie strings or imported JSON containing `cookies` and
-`headers`. Only `Cookie` and `Authorization` header names are supported. The
-response contains `status`, `authenticated`, `content`, and `truncated`;
-upstream response headers are omitted, except that HTTP 402 responses may
-include a `wwwAuthenticate` array for payment-challenge handling. This narrow
-projection permits at most eight challenge values totaling 16 KiB, rejects
-control characters and reflected credential material, and never forwards
-`Set-Cookie`. A rejected challenge returns HTTP 502 rather than a modified
-payment instruction. Response bodies are bounded to 1 MiB
-and returned text to 20,000 characters. Literal echoes of imported header
-values are redacted; provider-generated content remains untrusted.
-
-For raw token imports, `credentialHeaders` can compose the stored value inside
-Passport, for example `{ "Authorization": "Bearer vault:api.example.com" }`.
-Each template must reference the connection's exact domain; other secret sources
-and cross-domain references are rejected. An optional `headers` object carries
-non-credential request headers. Authentication overrides, duplicate credential
-headers, routing/framing headers, and method-override headers are rejected.
-The combined header budget is 32 headers and 16 KiB. No decrypted state is
-returned by this template operation.
-
-Trusted runtimes can instead provide `headerTemplates`, a map from header names
-to ordered parts, for example
-`{ "Authorization": [{ "literal": "Bearer " }, { "vault": "api.example.com" }] }`.
-A `sensitive` part supplies a secret already resolved by the calling runtime;
-Passport never interprets its contents as another template or environment lookup.
-Each header must contain a `vault` or `sensitive` part, with at most 128 parts.
-The same domain, header-name, and size restrictions apply. Sensitive parts and
-composed credential values are included in response redaction. Do not combine
-`headerTemplates` with `credentialHeaders`. An empty `headerTemplates` map
-explicitly suppresses automatic cookie/header injection.
-
-`maxContentChars` optionally adjusts the returned text ceiling from its 20,000
-character default up to 1,048,576 characters; the upstream body remains capped
-at 1 MiB. Both literal and JSON-escaped credential echoes are redacted in one
-pass. Ordinary request-header values are not treated as secret patterns.
-
-Runtime grants optionally include `allowedMethods`, an array drawn from `GET`,
-`HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. Existing grants default
-to `GET` only; an explicit empty array permits metadata reads but no fetches.
-Management credentials retain GET-only fetch access and cannot use write methods.
-To send a JSON request, supply `method` and `body` to `fetch` using a runtime
-credential explicitly granted that method. JSON bodies are capped at 256 KiB;
-GET and HEAD must be bodyless. The same destination and redaction restrictions
-apply. An explicit JSON `null` body is sent as `null`, not treated as an omitted
-body.
-
-When Passport remote mode is configured, Core HTTP tools with `vault:` header
-references delegate execution to Passport only after Core screens the target
-through the shared HTTPS/private-address egress guard. Passport repeats that
-screen, pins the resolved address, and refuses redirects before it opens a
-credential-bearing request.
-
-Core resolves `env:` and `secret:` parts under the owning plugin's
-existing policy and sends structured parts; vault values are resolved only
-inside Passport. The caller must have an installed-agent runtime credential
-and bound profile containing the destination's exact domain. Cross-domain
-vault references are rejected, even when the older embedded consumer permitted
-them. Missing configuration or a remote failure never falls back to local vault
-decryption. Method grants, response limits, and destination restrictions remain
-enforced by Passport. Core retains its HTTP result wrapping, fail-open error
-envelope, audit attribution, and payment-challenge handling.
-
-Core's authenticated `/api/mcp/tools/call` route accepts an exact built-in or
-stored agent ID and uses that agent's saved profile bindings. It does not treat
-an ID prefix as an agent, and a failed agent-store lookup refuses the call
-instead of silently dropping its identity binding. The caller's existing
-permissions, tool allowlist, and approval policy still apply.
-
-Administration bearers have access to all connections in their tenant. A
-separate runtime credential is bound by the operator to one tenant and an
-explicit list of profile IDs. It can list only those profiles' connections
-through `/v1/runtime/connections` and fetch through those connections. It
-cannot create, import, delete, or list unrestricted connection state. A fetch
-for a connection outside its profiles returns `404`.
-
-Core can route `web_fetch.get` calls for agents with bound identity profiles
-to Passport. Core selects the runtime credential by the installed agent ID,
-intersects Passport's visible connections with the agent's bound profiles,
-checks the Gateway identity grant, screens the requested URL before forwarding,
-and records audit attribution. A Passport failure does not fall back to a local
-credential. Other identity consumers and existing local data are not
-automatically migrated by this configuration.
-
-In remote mode, Core's existing identity management UI uses Passport for
-listing, creating, starting login, importing, polling, and deleting connections.
-Core uses a separate operator-configured administration credential for these
-node-authorized management operations. Runtime credentials cannot perform them.
-Management errors do not silently switch to Core's local store.
-
-Profiles are isolated by the bearer token's tenant mapping. A connection id
-from another tenant therefore cannot be read, imported, or deleted.
-
-## MCP OAuth custody
-
-With Passport remote mode configured, Passport performs MCP OAuth discovery,
-PKCE, code exchange, refresh, revocation, and authenticated Streamable HTTP
-requests. Core retains caller ownership, installed-agent selection, tool
-authorization, connection access-level decisions, Gateway identity grants,
-and audit attribution. No provider-token export route exists.
-
-Set `RYU_PASSPORT_PUBLIC_URL` on Passport to its public HTTPS origin before
-starting it. Register the tenant's callback
-`/v1/mcp/callback/{tenant}` with providers that require preregistration.
-Passport also publishes `/v1/mcp/client-metadata/{tenant}`. Callback URLs
-come from service configuration; runtime requests cannot supply a callback.
-Remote connections use hosted callbacks; explicit loopback mode is refused.
-
-Extend each agent's entry in `RYU_PASSPORT_RUNTIME_GRANTS` with explicit MCP
-bindings. The following is an illustrative configuration with a placeholder
-runtime credential:
+- `POST /v1/connections/:id/fetch`
+- `POST /v1/runtime/mcp/transport`
+- `POST /v1/connections`
+- `POST /v1/mcp/connect` and `POST /v1/mcp/callback`, and the public OAuth
+  callback, which shows a short page instead of JSON
 
 ```json
 {
-  "token": "replace-with-a-distinct-runtime-secret",
-  "tenantId": "demo",
-  "profileIds": ["personal"],
-  "allowedMethods": [],
-  "mcpBindings": [{
-    "binding": {
-      "ownerUserId": "local",
-      "profileId": "personal",
-      "pluginId": "com.example.mail",
-      "serverName": "mail",
-      "resourceUrl": "https://mcp.example.com/mcp",
-      "clientId": null
-    },
-    "allowedTools": ["mail.read"],
-    "allowedResourceUris": [],
-    "allowedActions": ["read"],
-    "toolActions": { "mail.read": "read" },
-    "allowRiskApproval": false,
-    "configuration": {
-      "transport": "streamable-http",
-      "staticHeaders": { "X-Workspace": "workspace-example" }
-    }
-  }]
+  "ok": false,
+  "code": "insufficient_credits",
+  "error": "insufficient_credits",
+  "message": "This organization has no Ryu credits left. Add credits to resume upstream calls and new connections; reads, deletes, and the usage report still work."
 }
 ```
 
-Use the verified user's ID instead of `local` on shared nodes. `clientId`
-must exactly match the manifest's declared public client ID, or be null when
-none is declared. The resource is the exact manifest endpoint, including its
-path and query. Wildcard tool and resource grants are not accepted.
+Check `code`, as with the other Ryu services; `error` carries the same value
+for older clients. The check runs right after authentication, for
+administration and runtime tokens alike, so a refused call never reaches an
+upstream and is not counted as usage. Every other route keeps working. A
+self-hosted Passport never returns this response.
 
-`allowedActions` permits `read`, `write`, and `delete`. Every entry in
-`allowedTools` must have exactly one matching `toolActions` entry with one of
-those action classes, also included in `allowedActions`. Missing, extra, or
-invalid classifications refuse startup. Passport derives a tool's action from
-this operator configuration and rejects a caller's mismatched `action` claim;
-a write or delete cannot be relabeled as a read. The connection's current stored
-access level is enforced on every call, including after it is narrowed.
-Classify parameter-dependent tools by their strongest permitted effect, or omit
-them from the grant.
+## Usage cannot be recorded
 
-Protocol discovery, initialization,
-tool/resource listing, and ping require read permission. Missing
-`mcpBindings` grants no MCP access. HTTP `allowedMethods` does not grant MCP.
-Unknown grant fields, duplicate bindings, or bindings outside `profileIds`
-refuse startup.
+If Passport cannot store usage, for example because its disk is full, a call
+that already reached its upstream still returns its result. Passport keeps that
+call's count in memory and refuses the routes listed above with
+`503 Service Unavailable` until the count is stored:
 
-`allowRiskApproval` defaults to false. A runtime that sends
-`riskApproved: true` without this explicit delegation is rejected. Enable
-delegation only for a trusted runtime, such as Core with its existing approval
-and Gateway checks, that is authorized to assert approval for this binding.
-This delegates that assertion to the bearer holder; it does not independently
-verify an approval receipt. Even with delegation, approval cannot override a
-`read_only` ceiling or permit delete under a `write` ceiling. Core sends no
-approval assertion for protocol setup or read calls.
+```json
+{
+  "ok": false,
+  "code": "metering_unavailable",
+  "error": "metering_unavailable",
+  "message": "Passport cannot record usage right now, so upstream calls and new connections are paused until it can. Nothing was sent upstream; retry shortly."
+}
+```
 
-Runtime connection metadata includes the granted `toolActions`,
-`allowedResourceUris`, and `allowRiskApproval` policy, without credentials.
-Core resolves effects from that operator policy using the calling agent's saved
-profile scope and the server-verified conversation owner. It refreshes this
-metadata for gated calls and approved re-dispatch; another account's discovered
-tools, provider annotations, and tool-name heuristics do not classify OAuth
-calls. A requested profile outside the saved agent bindings is refused.
+A refused call never reaches an upstream, so it is safe to retry. Each new call
+tries to store the kept counts first, and calls are accepted again as soon as
+that works. While counts are kept, the usage report answers a window that
+contains them with the same `503` instead of a total that leaves them out.
+Other windows, reads, deletes, and health checks keep working.
 
-Before upgrading an existing grant with callable tools, add explicit
-`toolActions` entries. Older grants do not infer actions from tool names or
-caller-supplied labels, even when `allowedActions` contains only one action.
-Grants without callable tools may retain an empty mapping.
+## Usage report
 
-`configuration` is operator-pinned service configuration, not a runtime frame
-argument. Its `staticHeaders` must match the resolved headers in the trusted
-MCP server configuration on Core. Header names are normalized case-insensitively;
-duplicate names are refused. Core sends only a SHA-256 configuration fingerprint.
-Passport applies the pinned values internally after checking that fingerprint.
-There may be at most 32 static headers totaling 16 KiB. Authentication, cookies,
-host/routing, framing, session, protocol, forwarding, and method-override headers
-are refused; Passport and the transport own those headers. Treat static header
-values as secrets: literal and JSON-escaped echoes cause the response to be
-rejected, and the values never appear in connection metadata.
+`GET /v1/usage?from=2026-10-12T00:00:00Z&to=2026-10-12T02:00:00Z` with the tenant
+administration token returns the tenant's usage for the window from `from`
+(included) to `to` (excluded):
 
-The sealed OAuth bundle also binds the static-header fingerprint. Changing
-static values requires reconnecting the account; a prior import without this
-binding remains usable with empty static headers. Omitted `configuration`
-defaults to Streamable HTTP with no static headers.
+```json
+{
+  "type": "usage.report",
+  "ok": true,
+  "from": "2026-10-12T00:00:00Z",
+  "to": "2026-10-12T02:00:00Z",
+  "meters": { "connectionSeconds": 7200, "fetches": 42 }
+}
+```
 
-On Core, configure `RYU_PASSPORT_URL`, the separate
-`RYU_PASSPORT_ADMIN_TOKEN`, and `RYU_PASSPORT_AGENT_TOKENS`; bind the same
-profile IDs to the installed agent. Runtime calls require an exact agent,
-owner, profile, plugin, server endpoint, and declared client match. A missing
-grant or unavailable Passport fails the call without local token decryption.
+Both bounds must be RFC 3339 UTC timestamps on whole hours, with `from` before
+`to` and at most 31 days between them. Anything else returns `400` with
+`"code": "invalid_request"` (also in `error`). Runtime grants cannot read the report, and the
+failed-authentication backoff applies as on other administration routes.
 
-| Method | Path | Credential and response |
-|---|---|---|
-| `POST` | `/v1/mcp/connect` | Tenant administration; authorization URL and flow metadata |
-| `POST` | `/v1/mcp/flow` | Tenant administration; owner-scoped flow metadata |
-| `POST` | `/v1/mcp/connections` | Tenant administration; owner/plugin-scoped metadata |
-| `POST` | `/v1/mcp/disconnect` | Tenant administration; deletion and revocation booleans |
-| `POST` | `/v1/mcp/disconnect-plugin` | Tenant administration; bindings with unconfirmed revocation |
-| `POST` | `/v1/runtime/mcp/metadata` | Runtime; exact granted binding metadata or null |
-| `POST` | `/v1/runtime/mcp/policy` | Runtime; pinned tool actions and access ceiling, available before login |
-| `POST` | `/v1/runtime/mcp/transport` | Runtime; bounded MCP status, protocol headers, and content |
-| `POST` | `/v1/runtime/mcp/close` | Runtime; cancel and close only that runtime's bound client session |
+`connectionSeconds` adds up the seconds each stored credential existed inside
+the window. A stored credential is a connection or an MCP OAuth credential. It
+counts from creation until it is deleted, whether or not it holds a working
+login at the time. Importing new state into a connection or refreshing an MCP
+token does not start a new count. Credentials created before usage tracking
+count from the first start of a release that tracks them. Time after the
+request is never counted.
 
-Transport is a trusted-runtime operation, not a model-facing tool. It accepts
-one JSON-RPC frame and protocol headers for the granted binding. It cannot
-choose a tenant, credential, alternate destination, or account. Passport
-consumes the provider token internally and returns JSON or request-scoped SSE
-content, with at most 1 MiB of upstream body and a 30-second upstream deadline.
-Provider HTTPS requests are DNS-pinned and never follow redirects. Reflected
-credential values are rejected. Cookies and redirect locations are not returned;
-only content type, MCP session/protocol headers, and authentication challenges
-are retained. Sessions are opaque Passport handles bound to the same runtime
-credential and full MCP binding, expire after 30 minutes, and do not survive a
-restart. Core transport handles expire after five minutes.
+`fetches` counts the authenticated fetches and runtime MCP transport calls that
+got a response from their upstream, in the hours that start inside the window.
+Requests refused before egress are not counted. That includes failed
+authentication, validation errors, `409` responses, the backoff, and
+destinations the egress screen denies. Starting a login does not contact an
+upstream, so it is not counted either.
 
-Discovery replies (`tools/list`, `resources/list`, and catalog collections in
-`server/discover`) expose only granted tool names and exact resource URIs.
-Tools blocked by the current account ceiling are omitted; under RiskBased,
-writes require the runtime's approval delegation to be discoverable.
-Tool annotations are projected from the operator-pinned action. Pagination
-cursors remain available even when a filtered page is empty.
+Passport keeps these meters in each tenant's directory, so they survive
+restarts. A count that Passport could not store yet is reported in the hour it
+was made, once it is stored. A self-hosted Passport is never billed by Ryu.
+Ryu's hosted service reads this report to bill a hosted tenant; see
+[pricing](/docs/standalone/passport#pricing).
 
-JSON and SSE discovery responses retain only the correlated reply and supported
-catalog fields. Unrelated response IDs, notifications, and arbitrary extra
-inventory fields are not forwarded. Malformed or ambiguous discovery responses
-are rejected. Protocol error codes remain intact, with generic error text.
+## Use an imported connection
 
-For a legacy HTTP+SSE server, set `configuration.transport` to `sse` and use
-the corresponding legacy SSE transport in the trusted Core server configuration.
-Passport owns the long-lived authenticated GET and posts frames to the endpoint
-announced on that stream. The announced endpoint must stay on the bound HTTPS
-origin, and every POST receives a fresh DNS-pinned egress check. Cross-origin
-message endpoints and redirects are refused. Core never receives the upstream
-message endpoint or the provider credentials.
+For destination rules, credential composition, and Core runtime access, see
+[Fetch through a Passport connection](/docs/standalone/passport-fetch-api).
 
-The shared incremental SSE parser handles fragmented events, multiline data,
-notifications, and response correlation. Individual exchanges have a 30-second
-deadline and 1 MiB limit; the GET may remain open between exchanges. Normal
-shutdown and cancellation use the idempotent close route. Close, reconnect,
-disconnect, uninstall, and expiry cancel the matching stream and release its
-session state; cancellation can interrupt an in-flight exchange.
+## MCP OAuth custody
 
-Outstanding OAuth flows expire after ten minutes and must restart
-after a Passport restart. Disconnect and uninstall serialize against refresh
-and consumption; a callback racing uninstall cannot restore deleted state.
+For the provider callback, binding, and trusted transport contract, see the
+[Passport MCP OAuth API](/docs/standalone/passport-mcp-api).
 
-Before switching an existing node, stop its OAuth activity and use Passport's
-offline vault import described in [setup](/docs/standalone/passport). The import
-preserves MCP connection IDs, owner/profile bindings, access levels, and sealed
-state while resealing credentials for the destination. It does not copy pending
-browser flows. Older rows without an exact endpoint/client binding require
-reconnection. Remote mode never automatically imports or reads the retained
-local token copy; rollback requires explicitly switching configuration and
-does not include subsequent Passport changes.
-
-<DocCard href="/docs/standalone/passport" />
-
-Continue with [Ryu Passport](/docs/standalone/passport) and
-[Standalone services](/docs/standalone).
+<Cards>
+  <DocCard href="/docs/standalone/passport" />
+  <DocCard href="/docs/standalone/passport-fetch-api" />
+  <DocCard href="/docs/standalone/passport-mcp-api" />
+</Cards>

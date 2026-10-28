@@ -4,6 +4,14 @@ description: "Run Ryu's governed model and tool control plane as an independent 
 tags: ["gateway", "standalone", "routing", "governance"]
 ---
 
+<Callout type="info">
+  Self-hosting Gateway, as this page describes, works today, and every Ryu
+  plan includes managed Gateway. Without a plan you can also fund hosted
+  Gateway with manual prepaid credit top-ups. The standalone Gateway pricing
+  listing and a recurring no-plan credit subscription are in **early access**
+  and not open for new purchases yet.
+</Callout>
+
 Ryu Gateway is the control plane between an agent or application and its
 model providers. It owns request routing, firewall and DLP policy, spend
 budgets, evals, audit records, and governed tool calls.
@@ -14,15 +22,104 @@ authenticated model endpoint.
 
 ## Start a standalone Gateway
 
-From the repository root, run the Gateway binary on its loopback default:
+Each [Ryu release](https://github.com/amajorai/ryu/releases) attaches a
+prebuilt `ryu-gateway` binary: `ryu-gateway-linux-x86_64`,
+`ryu-gateway-linux-aarch64`, `ryu-gateway-macos-aarch64`,
+`ryu-gateway-macos-x86_64` and `ryu-gateway-windows-x86_64.exe`. Run it with `--bind=127.0.0.1:7981`, or build
+it from source as below.
+
+Building needs a Rust toolchain, a C compiler, `pkg-config` and the OpenSSL
+development headers (`build-essential pkg-config libssl-dev` on Debian or
+Ubuntu). From the repository root, run the Gateway binary on its loopback
+default:
 
 ```sh
 cargo run --manifest-path apps/gateway/Cargo.toml -- --bind=127.0.0.1:7981
 ```
 
-The service reads `gateway.toml` from the configured path and listens on
-`127.0.0.1:7981` unless the bind is overridden. Put TLS and an authenticated
-network boundary in front of a non-loopback deployment.
+To build the container image, use the repository root as the build context,
+because the Gateway depends on crates elsewhere in the repository:
+
+```sh
+docker build -f apps/gateway/Dockerfile .
+```
+
+The service listens on `127.0.0.1:7981` unless the bind is overridden. Put TLS
+and an authenticated network boundary in front of a non-loopback deployment.
+
+### First request
+
+1. Give the Gateway a provider key before you start it. It reads provider
+   credentials from the environment, for example `OPENAI_API_KEY` (see
+   [provider keys](/docs/gateway/routing) for the others):
+
+   ```sh
+   export OPENAI_API_KEY=<your OpenAI key>
+   ```
+
+2. Start the Gateway as above. On first start it writes its inference key,
+   `gateway-relay.key`, next to `gateway.toml` (see the table below). Export it
+   for your client; on Linux with the default path:
+
+   ```sh
+   export RYU_GATEWAY_KEY=$(cat ~/.config/ryu/gateway-relay.key)
+   ```
+
+   On macOS the file is `~/Library/Application Support/ryu/gateway-relay.key`,
+   and on Windows `%APPDATA%\ryu\gateway-relay.key`. It follows the
+   `gateway.toml` directory: under `$XDG_CONFIG_HOME/ryu/` when that is set on
+   Linux, in `ryu-<profile>/` for a non-release `RYU_PROFILE` (for example
+   `ryu-dev`), and beside the file `GATEWAY_CONFIG` names when you set it.
+
+   If the Gateway has a sealing key (for example `RYU_MASTER_KEY`), the file is
+   sealed. Read the key with `ryu-gateway print-key relay` instead, run with the
+   same environment as the Gateway (see
+   [client authentication](/docs/standalone/gateway-api#configure-client-authentication)).
+
+3. Send a request:
+
+   ```sh
+   curl -fsS http://127.0.0.1:7981/v1/chat/completions \
+     -H "Authorization: Bearer $RYU_GATEWAY_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
+   ```
+
+## Configuration file and generated keys
+
+The Gateway reads `gateway.toml` from `GATEWAY_CONFIG` when it is set.
+Otherwise it uses the platform configuration directory:
+
+| Platform | Default path |
+|---|---|
+| Linux | `~/.config/ryu/gateway.toml` (or `$XDG_CONFIG_HOME/ryu/gateway.toml`) |
+| macOS | `~/Library/Application Support/ryu/gateway.toml` |
+| Windows | `%APPDATA%\ryu\gateway.toml` |
+
+A non-release `RYU_PROFILE` adds a suffix to the directory, for example
+`ryu-dev`. The startup log names the file it loaded. If no file exists there,
+the Gateway logs a warning and runs on built-in defaults, so check that line
+when your providers or keys seem to be ignored.
+
+Authentication is on by default. When no keys are configured, the Gateway
+writes `gateway-admin.key` (administrator) and `gateway-relay.key` (inference)
+next to `gateway.toml` on first start. See [Configure client
+authentication](/docs/standalone/gateway-api#configure-client-authentication).
+
+The local audit log (`audit.db`) and the budget counters beside it
+(`spend.db`) default to the platform data directory, for example
+`~/.local/share/ryu/audit.db` on Linux, with the same profile suffix. Set
+`RYU_DIR`, `[audit] db_path` or `RYU_AUDIT_DB_PATH` to place them elsewhere.
+
+## Defaults that point at Ryu's hosted service
+
+A self-hosted Gateway keeps three defaults that reference Ryu. You can change each one.
+
+| Default | Behavior | Override |
+|---|---|---|
+| `GET /` | Returns a short JSON description of the Gateway. It redirects only when `RYU_PRODUCT_DASHBOARD_URL` is set. | `RYU_PRODUCT_DASHBOARD_URL` |
+| Browser origin `https://app.ryuhq.com` | Allowed by CORS only when the Gateway holds a Core relay credential or is a hosted Ryu Gateway. Fleet mode alone does not allow it. | `RYU_CORS_ALLOW_HOSTED_WEB=1` or `0`; add your own origins with `RYU_CORS_ORIGINS` (comma-separated) |
+| OpenRouter app attribution | OpenRouter requests identify the app as `Ryu` (`https://ryuhq.com`) for OpenRouter's app rankings. | `site_url` and `site_name` under `[providers.openrouter]`; set both to `""` to send no app identity |
 
 ## What Gateway owns
 
@@ -49,11 +146,27 @@ Gateway](/docs/start-here/architecture/core-vs-gateway) for the ownership rule.
 The standalone process does not become a Core node. It cannot create agents,
 change Core permissions, or replace the control plane's organization policy.
 
+## Pricing
+
+Self-hosting Gateway has **no Ryu service charge**; you provide and pay for the
+model provider and infrastructure you choose. Ryu-managed inference is metered
+at cost with no per-token markup: OpenRouter routes bill the provider-reported
+cost, and other routes bill from the Gateway's per-model price, marked as
+estimated (see [Metering Rates](/docs/billing/metering#models)). It can use a
+plan's included credit pool or prepaid wallet balance. Manual prepaid top-ups are available without
+a managed plan at a **27% deposit fee with a $5 minimum**; the fee is added at checkout and the
+face value is credited. Choose a $100, $250, or $1,000 USD preset, or enter a
+custom amount from $5 to $1,000. These are convenience presets, not discounted
+credit bundles. No monthly pool or separately purchased Ryu node is required.
+
+Requests stop when eligible balance runs out. Active plans include a monthly
+pool and discounted top-up fees. Automatic top-up still requires an active
+managed plan. See [Credits & AI pools](/docs/billing/credits) and
+[Metering Rates](/docs/billing/metering) for current billing rules.
+
 <Cards>
   <DocCard href="/docs/standalone/gateway-api" />
-  <DocCard href="/docs/gateway" title="Gateway reference" description="Detailed routing, configuration, security, governance, tools, channels, evals, and reliability pages." />
+  <DocCard href="/docs/gateway" />
   <DocCard href="/docs/gateway/configuration" />
   <DocCard href="/docs/gateway/security" />
 </Cards>
-
-Continue with [Standalone services](/docs/standalone), [Gateway reference](/docs/gateway), and [standalone Gateway API](/docs/standalone/gateway-api).

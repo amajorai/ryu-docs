@@ -13,6 +13,8 @@ describe("locale-aware documentation projections", () => {
     expect(response.status).toBe(200);
     expect(body).toContain("# Documentación");
     expect(body).toContain("/es/docs/0.4.0/start-here");
+    expect(body).not.toContain("/es/docs/0.4.0/start-here/getting-started");
+    expect(body).toContain("[English index](/llms.txt)");
   });
 
   test("filters localized section projections by the same page URL contract", async () => {
@@ -45,6 +47,33 @@ describe("locale-aware documentation projections", () => {
       "Source: https://docs.ryuhq.com/es/docs/0.4.0/start-here",
     );
     expect(body).toContain("Comienza aquí");
+    expect(response.headers.get("content-language")).toBe("es");
+    expect(response.headers.get("link")).toContain(
+      "https://docs.ryuhq.com/es/docs/0.4.0/start-here",
+    );
+  });
+
+  test("attributes a locale fallback to the English source", async () => {
+    const response = await markdown(
+      new Request(
+        "http://localhost:4010/llms.mdx/docs/es/0.4.0/start-here/getting-started",
+      ),
+      {
+        params: Promise.resolve({
+          slug: ["es", "0.4.0", "start-here", "getting-started"],
+        }),
+      },
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-language")).toBe("en");
+    expect(response.headers.get("link")).toContain(
+      "https://docs.ryuhq.com/docs/0.4.0/start-here/getting-started",
+    );
+    expect(body).toContain(
+      "Source: https://docs.ryuhq.com/docs/0.4.0/start-here/getting-started",
+    );
   });
 
   test("rejects an unsupported endpoint locale", async () => {

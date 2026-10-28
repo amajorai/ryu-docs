@@ -110,9 +110,6 @@ describe("Fumadocs locale contract", () => {
         }
         const title = page.data.title;
         expect(title).toBeString();
-        if (typeof title !== "string") {
-          continue;
-        }
         expect(title.length).toBeGreaterThan(0);
         const isEager = eager.has(`${lang}/${param.slug.join("/")}`);
         const expectedEager =
@@ -123,9 +120,7 @@ describe("Fumadocs locale contract", () => {
       expect(
         deferred.every((param) => {
           const page = getPage(param.slug, param.lang);
-          return (
-            typeof page?.data.title === "string" && page.data.title.length > 0
-          );
+          return page !== undefined && page.data.title.length > 0;
         }),
       ).toBe(true);
       expect(prerendered.some((param) => param.lang === lang)).toBe(true);

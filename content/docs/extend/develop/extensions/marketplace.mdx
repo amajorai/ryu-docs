@@ -1,6 +1,6 @@
 ---
 title: "Publish to the Marketplace"
-description: "Publish, sign, and monetize a plugin on the Ryu Marketplace"
+description: "Publish a package to the Ryu Marketplace from GitHub - the ryu.package.json envelope, immutable .ryupack release, Grade A preflight, Gateway signing, moderation, and release management."
 ---
 
 You have built a package and want others to install it. This page walks the GitHub-backed publish
@@ -34,37 +34,39 @@ For the folder, archive, GitHub, import, export, redaction, and update contract,
 A bundle is a small, signed composition package. Put an ordered `bundle.json` in the package folder;
 each member references an existing Marketplace `kind` and `id`. The desktop orchestrator calls the
 member's normal installer, so an app, plugin, skill, Agent Template, workflow, or MCP server keeps its
-own verification and permission boundary. Mark members `required: false` when a missing integration
-should not make the whole collection incomplete. Do not put credentials in a bundle and do not nest
-another bundle as a member.
+own verification and permission boundary. A `knowledge` member installs through the active knowledge
+catalog source. A `model` member installs only when its `source` names the exact GGUF file to download
+(for example `"source": "model-Q4_K_M.gguf"`); otherwise the bundle finishes the other members and
+lists the model as a manual step to complete from **Models**, where the user picks a file. Mark members
+`required: false` when a missing integration should not make the whole collection incomplete. Do not
+put credentials in a bundle and do not nest another bundle as a member.
 
-Ryu's first-party catalog includes Software Factory, Social Media Marketing, Outreach, and topic
-collections based on the [UI Skills catalog](https://www.ui-skills.com/skills). A bundle listing is
-metadata and composition; it does not auto-enable the members or bypass node lifecycle controls.
+Ryu's first-party catalog includes Software Factory, Social Media Marketing, Outreach, and role
+bundles for Legal, Marketing, Sales, Engineering, Finance, Customer Support, HR, Operations,
+Education, Data, Enterprise Search, Product Management, Real Estate, E-commerce, Security & IT,
+and Small Business, alongside topic collections based on the [UI Skills catalog](https://www.ui-skills.com/skills).
+A bundle listing is metadata and composition; it does not auto-enable the members or bypass node
+lifecycle controls.
+
+Knowledge bundles are listed under the `knowledge` kind and appear as a **Knowledge** category in
+Marketplace browse, alongside models and Agent Templates.
 
 The package/API kind for an Agent Template remains `agent` for compatibility. The Marketplace calls
 it an **Agent Template** because it is a customized definition that can be shared and published,
 not an ACP runtime from the **Agents** catalog.
 
-## Publish a clear support and extension story
+You can also add a custom Agent Template source that points at another registry. The registry must
+serve the Marketplace catalog shape for the `agent` kind (`/api/marketplace/catalog?kind=agent` and
+`/api/marketplace/catalog/detail?kind=agent`) over HTTPS at a public address. Ryu sends no Ryu account
+credentials to a custom registry, and installs a template only when its listing carries a signature
+that verifies against the Marketplace signing key your node trusts; unsigned or altered listings can be
+browsed but not installed.
 
-The Marketplace shows three separate facts from a package:
+## Listings after publish
 
-| Field | Author it with | Meaning |
-| --- | --- | --- |
-| **Support** | `surfaces` (or legacy `targets`) | The hosts where the package can appear, plus the support level for each host. |
-| **Extends** | `provides` and `contributes` | The existing capability or shell slot the package adds to. For example, `browser.control` extends the Browser capability, while `dock_panels` extends the shared Ryu shell. |
-| **Where it lives** | `runnables`, `contributes`, `mcp_servers`, and `sidecars` | The implementation boundary: Core runtime, shared Ryu shell, or the package's sidecar. |
-
-The Web app, Mobile app, and Browser extension reuse the Desktop shell contract. A support row may
-therefore say **inherited from Desktop**. That is shared shell composition, not access to Desktop-only
-native APIs. Keep the package's actual process and capability ownership in its own satellite or
-plugin directory; do not add a bespoke Core route simply to make a contribution visible on another
-wrapper host.
-
-The detail page derives these disclosures from the signed manifest and keeps the raw executable
-bindings out of the public catalog projection. A marketplace description should explain the user
-outcome; the support/extension rows explain where that outcome is hosted.
+How a listing shows support and extension rows, catalog search, version installs, deprecation and
+yanking, remixes, reviews, creator profiles, and share previews are in
+[Manage Marketplace listings](/docs/extend/develop/extensions/marketplace-listings).
 
 ## The GitHub release workflow
 
@@ -73,124 +75,105 @@ flowchart LR
   A[ryu.package.json in your repo] --> B[immutable GitHub Release]
   B --> C[inspect repository URL]
   C --> D[validate manifest and digests]
-  D --> E[Gateway grant validation and signing]
-  E --> F[moderation]
-  F --> G[Ryu signed package proxy]
-  G --> H[Core verifies and installs locally]
+  D --> E[detect package type and UI]
+  E --> F[Grade A preflight]
+  F --> G[Gateway grant validation and signing]
+  G --> H[Ryu master-admin moderation]
+  H --> I[Ryu signed package proxy]
+  I --> J[Core verifies and installs locally]
 ```
+
+Core checks each signature against the Ryu Marketplace verifying key built into release builds,
+never against a key supplied by the listing. A release build that has no Marketplace key refuses
+Marketplace installs rather than trusting a key held on the same machine.
 
 1. Add the package manifest and declared artifact files to your repository.
 2. Create an immutable GitHub Release with the deterministic `.ryupack` asset.
 3. Submit the repository URL through `POST /api/marketplace/github/inspect`, then
    `POST /api/marketplace/github/publish`.
-4. Ryu pins the repository, commit, release, asset digest, and package digest; it validates
-   capabilities through the Gateway and signs the manifest together with that immutable package
-   descriptor before moderation.
-5. Configure `POST /api/marketplace/github/webhook` for release/push notifications, or use
-   `POST /api/marketplace/github/resync` after a release change.
+4. Before writing a listing, Ryu pins the repository, commit, release, asset digest, and package
+   digest, then runs an automatic Grade A preflight. The package kind selects its artifact checks.
+   Ryu detects custom UI source and manifest-declared host-rendered surfaces: custom UI gets the
+   source design-system checks, and host-rendered contributions use Ryu's shared-renderer profile.
+   A package with no UI gets a passing not-applicable UI check. Missing evidence, an invalid
+   artifact, unapproved Gateway grants, or a grade below A prevents submission and returns the
+   failed checks to the publisher.
+5. Only an A-grade package is signed and placed in the Ryu master-admin moderation queue. The report
+   is stored with the exact source commit and package digest so reviewers can see what was checked.
+   Organization-private listings remain private after approval, but also wait for Ryu review.
+6. Configure `POST /api/marketplace/github/webhook` for release/push notifications, or use
+   `POST /api/marketplace/github/resync` after a release change. Each updated package is rechecked;
+   a non-A release is not added to the moderation queue. A listing that is already published stays
+   published on its approved version while the new release waits for review; approval replaces the
+   served version, and rejection leaves the approved version in place. A resync whose version and
+   package digest match the published release does not create a new submission.
 
 On the web, open Marketplace → **Sell** after Stripe Connect onboarding. The **Publish from
 GitHub** panel uses the same repository URL, offer types, private-repository App handoff, and
 moderation flow as the desktop publisher; buyers still install through Ryu without GitHub setup.
 
-Private repositories require a one-time GitHub App installation for the seller. Ryu stores the
-installation binding and uses a short-lived installation token only for validation and proxying.
-Buyers never authenticate with GitHub or install anything there.
+### Publishing from a terminal
 
-## Organization ownership and publishing states
+`bunx ryu github-publish <url>` posts the same repository URL to the hosted Marketplace API
+(`https://api.ryuhq.com`; override with `RYU_MARKETPLACE_API_URL`, or `RYU_API_URL`, for a self-hosted control plane).
+Because the publishing routes accept only a signed-in account session, set `RYU_AUTH_TOKEN` to your
+Ryu session bearer token. For a private repository the command prints the GitHub App installation
+URL; after installing, set `RYU_GITHUB_INSTALLATION_PROOF` to the proof the installation callback
+returns and rerun. If you do not already have a session token at hand, use **Publish from GitHub**
+in the app: it signs you in and handles the installation step for you.
 
-Marketplace listings belong to an **organization**, not to the user who submitted them. The
-publishing user is retained as the actor for audit and attribution, while the organization controls
-the listing, pricing, Connect payout account, republish rights, and transfer decisions. This applies
-to free listings as well as paid listings.
+Private repositories require a one-time GitHub App installation for the seller. During the
+installation GitHub asks you to authorize the Ryu App; Ryu accepts the installation only when that
+GitHub account can see the installation and has write access to the repository. The resulting
+binding belongs to the organization you started the installation from (even if the browser has a
+different organization selected). Finish the installation in a browser signed in to the same Ryu
+account that started it; a signed-out browser is asked to sign in and retry, and a browser signed in
+to a different account is refused.
 
-The listing lifecycle is presented as:
+Inspecting, scanning or publishing from GitHub requires Marketplace publishing permission in that
+organization. Installing the App on a repository does not let a different organization publish from
+it. Ryu uses a short-lived installation token only for validation and proxying. Buyers never authenticate with GitHub or
+install anything there.
 
-| User-facing state | Meaning |
-| --- | --- |
-| **Draft** | The organization is preparing a listing and it is not submitted for review. |
-| **Submitted** | The listing has passed the publisher-side checks and is awaiting moderation. |
-| **Published** | Moderation approved the listing and it is live in the catalog. |
-| **Rejected** | Moderation returned the listing for changes. |
-| **Unlisted** | The listing is not discoverable but its ownership and history remain intact. |
+## Ownership, review, and publisher trust
 
-The storage layer keeps its existing compatibility states (`draft`, `pending`, `live`, `rejected`,
-and `unlisted`). Organization verification and listing moderation remain separate decisions.
+Marketplace listings belong to an organization, not to the user who submitted them. Organization
+ownership, the listing lifecycle states, private collections, publisher trust marks, domain
+verification, payout settings, and listing transfers are documented in
+[Organization marketplaces](/docs/extend/develop/extensions/organization-marketplaces).
 
-## Public and organization-private marketplaces
+Publisher identity, the **Verified by Ryu** code review, and release-signature verification are
+separate signals. One signal does not imply either of the others.
 
-Any authenticated organization publisher with `marketplace.publish` can create a Marketplace
-collection and submit packages. Identity verification is not required to publish. A public
-collection is discoverable on Ryu; each package still passes the normal validation and moderation
-flow before it becomes installable. Free packages do not need Stripe Connect payouts.
+Ryu staff manage app submissions and published app listings in the App Store admin surface.
+Approving a pending app publishes its stable build and marks that reviewed listing **Verified by
+Ryu**. An already-published community app can receive the mark after a separate code review.
+Apps discovered from public GitHub topics remain community listings until Ryu reviews them.
+Promoting a prerelease build only approves that build; it does not mark the stable listing reviewed.
+Each approval or rejection is recorded in the listing's release history.
 
-An organization-private collection is visible only to members of its owning organization. Use it
-for internal plugins, MCP servers, and skills that should be available to the organization without
-appearing in the public catalog. The package remains tied to the publishing organization and is
-not made public by assigning it to nodes.
+## Supply-chain protections
 
-From the organization Marketplace surface, an administrator can assign a private package at
-organization scope. Ryu imports the signed package into the Fleet control plane, records the
-organization's desired assignment, and enrolled nodes reconcile that assignment locally. The
-same package can therefore be installed across different nodes without copying credentials or
-making each node use a separate Marketplace source. Marketplace visibility and node install
-authorization are separate checks: being able to browse a collection does not grant access to an
-organization's nodes.
+**Publishing requires two-factor authentication.** Creating or updating a listing, re-syncing it
+from GitHub, deprecating or yanking a release, uploading listing media, editing collections or the
+creator profile, and creating a share code all require an authenticator app or a passkey on the
+publishing account. Revoking a share code does not, so a code can always be withdrawn. Without
+one, the request answers `403` with `code: "marketplace_mfa_required"`. This applies even where
+account-wide two-factor is not otherwise required, because every install of a listing trusts the
+account that published it.
 
-## Publisher trust marks
+**New releases wait seven days before they install.** Like npm's minimum release age, a stable
+release is not handed to installs or updates until seven days after GitHub published its immutable
+release. GitHub sets that time, so a publisher cannot backdate it. During the window:
 
-Publisher identity is a separate signal from code review and release-signature verification. The
-catalog uses one shared check mark and these meanings:
+- Installing or updating the listing gets the previous approved version instead.
+- A listing with no earlier approved version cannot be installed until the window ends.
+- Requesting the new version explicitly is refused with `409` and `code: "release_cooldown"`. The
+  response's `installableAt` gives the time it becomes available.
 
-| Mark | Meaning |
-| --- | --- |
-| **Gold** | Ryu staff officially verified the publisher. |
-| **Blue** | Stripe Connect verified the organization's identity. This is not a Ryu endorsement. |
-| **Muted** | The publisher is not verified. Publishing is still allowed, but the listing is treated as community-published. |
-
-Stripe identity state is materialized from the organization's Connect account updates. A publisher
-can publish without opening Connect, and a completed Connect identity check automatically produces
-the blue mark. Ryu staff verification is a separate decision and upgrades the mark to gold.
-
-Select a publisher mark to open its verification details. When a date is available, the popover
-shows when the primary publisher mark was established along with the public methods behind it, such
-as **Ryu review**, **Stripe identity**, **Verified email**, or **Verified domain**. Email and domain checks are supporting
-identity signals; they do not turn an unreviewed listing into code-reviewed software.
-
-When a buyer installs a listing with the muted mark, Ryu shows a two-step community disclosure with
-the publisher health score and its observable signals. The buyer must explicitly acknowledge the
-risk before the install begins. The score is a review aid, not a security guarantee; install-time
-signature and permission checks still apply.
-
-Public user profiles use the same disclosure pattern. A plain shield-check means the profile has a
-publicly shareable verification signal, and its popover lists methods such as a verified email or a
-verified organization domain without revealing the email address or domain value.
-
-Visitors can follow a public publisher organization from its Marketplace listings or the publisher
-directory. Following is personal account state: it does not grant access to private collections,
-nodes, package artifacts, or organization controls. Buyers can use the **Following** filter across
-Marketplace catalog tabs to see public listings from the organizations they follow.
-
-## Organization Marketplace settings and transfers
-
-Open **Organization Settings → Marketplace & payouts** to configure the organization’s Stripe
-Connect seller account. The Marketplace page remains the place to browse and manage listings, and its
-organization switcher selects which organization owns the listing you are editing. A personal seller
-settings link redirects to the organization-scoped Marketplace settings tab.
-
-Transferring a listing requires three approvals: the source organization owner, a target organization
-owner or admin, and a Ryu admin. The listing changes ownership only after all three decisions are
-recorded. Rejected, cancelled, or expired requests remain in the audit history and cannot be reused.
-Existing versions, licenses, purchases, and moderation history remain attached to the listing.
-An organization-private listing cannot be transferred by itself because its collection is an
-access boundary; transfer the collection boundary as a separate operation first. A public
-collection listing is detached from the old collection during the atomic hand-off so the new
-owner does not inherit the old organization's publishing scope.
-
-Each request, approval or rejection, completion, cancellation, and expiry also produces a
-transactional organization activity notification. The server sends it to the owner/admin roster
-of both organizations involved and writes a row to each recipient&apos;s Ryu inbox. The organization
-activity email switch controls email delivery; it does not remove the server-side inbox record.
+Prerelease channels are exempt because testers opt into them. If a publisher account or repository
+is compromised, this window lets a bad release be reported and pulled before it reaches anyone's
+machine.
 
 ## How distribution works
 
@@ -212,113 +195,58 @@ flowchart LR
 
 Two rules shape the flow:
 
-- Publishing is **Better Auth authenticated**. The write surface is not anonymous (browse is).
+- Publishing is **Better Auth authenticated**. The write surface is not anonymous (browse is). It
+  accepts only a signed-in Ryu account session; API keys and third-party OAuth tokens are refused.
 - Signing and grant validation are the **Gateway's** job. Core decides what runs; the Gateway
   decides what is allowed and signs what ships. See
   [Gateway governance](/docs/gateway/governance) for the grant + signing ceremony.
 
 ## Legacy server artifacts
 
-The old `POST /api/marketplace/publish` endpoint is now a read-only compatibility boundary. New
+The old `POST /api/marketplace/publish` endpoint is a read-only compatibility boundary. New
 writes receive `410 github_source_required`; existing server-stored records can still be browsed while
 they are verified and migrated. Use the GitHub release workflow above for every new listing and
 release.
 
-Use `ryu package pack <dir> <asset>.ryupack` to create the deterministic release asset locally. The
-older `bunx ryu pack` command remains available for plugin-manifest validation, but neither command
-uploads package contents into Ryu. The package and release asset must live in the seller's repository.
+Use `ryu-cli package pack <dir> <asset>.ryupack` (the Ryu terminal client) to create the
+deterministic release asset locally. The SDK's `bunx ryu pack` command remains available for
+plugin-manifest validation, but neither command uploads package contents into Ryu. The package and
+release asset must live in the seller's repository.
 
-## Step 4 - install-time verification (what buyers get)
+## Install-time verification (what buyers get)
 
 At install time Core verifies the signature against a **pinned** Marketplace key, or the Gateway's
 resident key, never the manifest's self-attested key, so a forged manifest cannot vouch for itself.
-Verification is fail-closed: a present-but-invalid signature is rejected; an absent signature installs
-with a warning. You do not configure any of this as a publisher, but it is why the signing step above
-is mandatory rather than cosmetic.
+Core verifies the complete signed descriptor and manifest together. Missing or invalid signatures,
+changes to either signed field, and unavailable verification all reject installation before executable
+content is installed. Unsigned listings remain available to browse. You do not configure any of this
+as a publisher, but it is why the signing step above is mandatory.
 
-## Monetization (paid items)
+## Paid listings
 
-A paid package needs a seller org with Stripe Connect payouts enabled. Complete seller onboarding
-first (`POST /api/seller/onboard`); a paid publish from an org that has not enabled payouts is
-refused with a clear error. The server resolves the publishing org and applies the platform fee, so
-pricing is set under server policy, not by the manifest. Buyers purchase through hosted Stripe
-Checkout. Offers may be one-time, monthly, yearly, or bounded-update. A bounded-update offer is a
-one-time charge with a seller-defined `maxUpdates` allowance. Recurring invoices refresh the
-commercial record. The access-first GitHub download proxy validates the requested signed release
-without requiring a purchase.
-
-The publish payload uses the stored offer rather than trusting a buyer-supplied price. For example,
-the bounded form is:
-
-```json
-{
-  "pricing": {
-    "model": "bounded_updates",
-    "amountMinor": 2900,
-    "currency": "usd",
-    "maxUpdates": 3,
-    "distribution": "github_release"
-  }
-}
-```
-
-### A Major Pass publisher-pool opt-in
-
-An **app** with a paid offer may opt into the recurring A Major Pass publisher pool with
-`pricing.membershipOptIn: true`. The publisher checkbox is the normal authoring path; the server
-sanitizes the value and accepts it only for live paid apps whose publisher organization has Stripe
-Connect payouts enabled. Free items, plugins, organization-private listings, and community-origin
-listings do not become pool-eligible. This metadata never gates browsing, installation,
-updates, enablement, or runtime use. A one-time or bounded-update item sale remains direct
-commerce; the publisher can still opt that paid app into the recurring pool.
-
-The **A Major Pass** remains a **$20/month or $200/year** catalog and publisher-pool offer for one individual user,
-and eligible listings retain their ticket badge. Both are presentation/commerce
-metadata; they do not gate browsing, installation, updates, enablement, or runtime use.
-
-For each paid A Major Pass recurring period, Ryu freezes a default **70% publisher pool**. First-use signals are
-recorded once per buyer, app, and period. The pool is split by deterministic price-tier weights and
-paid to each publisher's existing Stripe Connect account with an idempotency key stable across
-retries. The publisher report shows eligible apps, pending totals, paid totals, failed transfers,
-and usage-signal counts; no buyer-level usage data is exposed.
-
-<Callout type="info">
-  Stripe Connect owns seller onboarding, Marketplace item checkout, transfers, and payouts. Polar
-  owns Ryu's recurring plans and the publisher-pool settlement. Ryu remains
-  authoritative for the GitHub package binding, signature, digest, and node ACL. A free or paid
-  package uses the same access-first install path; checkout and publisher-pool participation are
-  optional commerce flows.
-</Callout>
-
-## Node-scoped lifecycle permissions
-
-Every package kind uses the same independent permissions:
-
-```text
-app.install   app.update   app.enable   app.disable   app.uninstall
-```
-
-The node must be in the caller's organization, team, or personal ownership scope before ACL
-resolution. Team and member access is explicit, deny entries win at the same scope, and personal
-node ownership is not bypassed by an org administrator. A failed mutation returns a structured
-`403` containing the required permission and node scope. The desktop can read the explanation from
-`GET /api/plugins/lifecycle-capabilities`; ACL management is exposed at
-`GET/PUT /api/acl/resources/node/:nodeId`.
+For the supported paid-item flow, eligibility rules, and seller responsibilities, see [Marketplace monetization](/docs/extend/develop/extensions/marketplace-monetization).
 
 ## Reference
 
 | Surface | Where | Notes |
 |---|---|---|
-| `ryu package pack <dir> <asset>.ryupack` | Portable package CLI | Create the deterministic GitHub Release asset |
+| `ryu-cli package pack <dir> <asset>.ryupack` | Ryu terminal client | Create the deterministic GitHub Release asset |
 | `bunx ryu pack <dir>` | TypeScript SDK | Validate a plugin manifest; does not upload to the Marketplace |
-| `ryu package <command>` | Portable package CLI | Validate, inspect, pack, unpack, import, export, or check a package for publishing |
-| `POST /api/marketplace/github/inspect` | `packages/api/src/routers/marketplace.ts` | Validate a seller repository/package URL |
-| `POST /api/marketplace/github/publish` | `packages/api/src/routers/marketplace.ts` | Pin, sign, and submit a GitHub-backed listing |
-| `POST /api/marketplace/membership/usage` | `packages/api/src/routers/marketplace.ts` | Record one idempotent first-use signal for an eligible listing |
-| `GET /api/marketplace/membership/publisher-report` | `packages/api/src/routers/marketplace.ts` | Read the active publisher organization's A Major Pass totals |
-| `POST /api/marketplace/publish` | `packages/api/src/routers/marketplace.ts` | Deprecated; read-only compatibility boundary (410 for writes) |
+| `bunx ryu github-publish <url>` | TypeScript SDK | Submit a repository/package URL from a terminal (see [Publishing from a terminal](#publishing-from-a-terminal)) |
+| `ryu-cli package <command>` | Ryu terminal client | Validate, inspect, pack, unpack, import, export, or check a package for publishing |
+| `POST /api/marketplace/github/inspect` | Ryu Marketplace API | Validate a seller repository/package URL |
+| `POST /api/marketplace/github/publish` | Ryu Marketplace API | Pin, sign, and submit a GitHub-backed listing |
+| `POST /api/marketplace/membership/usage` | Ryu Marketplace API | Record one idempotent first-use signal for an eligible listing |
+| `GET /api/marketplace/membership/publisher-report` | Ryu Marketplace API | Read the active publisher organization's A Major Pass totals |
+| `POST /api/marketplace/publish` | Ryu Marketplace API | Deprecated; read-only compatibility boundary (410 for writes) |
+| `GET /api/marketplace/catalog` | Ryu Marketplace API | Public search; `kind` (or `kinds`, a comma-separated list where `all` and `template` expand), `query` (every word must match a listing field), `category`, `limit` (max 100), `cursor` from the previous page's `nextCursor`, and `id` to return one exact listing. Exact id and name matches rank first |
+| `POST /api/marketplace/deprecate`, `POST /api/marketplace/yank` | Ryu Marketplace API | Flag a listing or one released version; publisher organization or Ryu moderator |
+| `POST /api/marketplace/updates/check` | Ryu Marketplace API | Compare installed `{ kind, id, version }` entries against published listings |
+| `GET /api/marketplace/creators` | Ryu Marketplace API | Public creator directory; `query` and `sort` (`popular`, `listings`, `rating`, `newest`, `name`) |
+| `GET /api/marketplace/creators/:handle` | Ryu Marketplace API | One creator's profile and live public listings, by organization slug or id |
+| `GET/PUT /api/marketplace/creator-profile` | Ryu Marketplace API | Read or update the active organization's creator bio and links |
 | `POST /v1/grants/validate` | Gateway | Fail-closed grant check before publish |
-| `POST /v1/manifests/sign` | Gateway | Loopback-only ed25519 signing |
+| `POST /v1/manifests/sign` | Gateway | ed25519 signing; requires the Gateway master key (from any peer; a Gateway with no master key cannot sign) |
 | Pinned Marketplace public key | Core configuration | Key Core verifies installs against |
 
 For the full grant catalog and the signing/verification endpoints, see
@@ -326,20 +254,10 @@ For the full grant catalog and the signing/verification endpoints, see
 catalog kinds, see [the unified tool catalog](/docs/core/unified-tool-catalog).
 
 <Cards>
+  <DocCard href="/docs/extend/develop/extensions/marketplace-listings" />
   <DocCard href="/docs/extend/develop/extensions/schemas-and-layouts" />
   <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
   <DocCard href="/docs/extend/develop/extensions/typescript-sdk" />
   <DocCard href="/docs/surfaces/desktop/user-guide/marketplace" />
   <DocCard href="/docs/gateway/governance" />
 </Cards>
-
-## Sharing a listing
-
-Share a listing's web link to preview its name and package type on Ryu's Prism
-background in the Pro badge palette. Link previews use a minimal image without descriptions, borders, or
-listing statistics. The full description stays on the listing page and in link
-metadata. Long names are shortened to fit the preview.
-
-Other public pages and documentation links use the same layout with their own
-page title. The Ryu homepage keeps its logo-and-name image. Social services may
-cache an older preview until they refresh the link.

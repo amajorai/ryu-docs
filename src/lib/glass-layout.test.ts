@@ -23,4 +23,32 @@ test("active Fumadocs routes use the Glass layout contract", async () => {
   expect(globalCss).toContain(
     '@source "../../node_modules/fumadocs-ui/dist/**/*.{js,mjs}";',
   );
+  expect(globalCss).toContain(
+    "#nd-sidebar [data-radix-scroll-area-viewport] > div",
+  );
+  expect(globalCss).toContain("display: flex !important;");
+  expect(globalCss).toContain("@media (width >= 48rem)");
+  expect(globalCss).toContain(
+    '--docs-glass-grid-areas: "left-margin left main right-margin right";',
+  );
+  expect(globalCss).toContain("--docs-glass-grid-columns:");
+  expect(globalCss).toContain("var(--fd-left-width)");
+});
+
+test("docs and home pages share the landing-matched site header", async () => {
+  const [docsLayout, homeLayout, globalCss] = await Promise.all([
+    readAppFile("[lang]/docs/docs-layout.client.tsx"),
+    readAppFile("[lang]/(home)/layout.tsx"),
+    readAppFile("global.css"),
+  ]);
+
+  expect(docsLayout).toContain("<SiteHeader");
+  expect(docsLayout).toContain("header: DocsHeader");
+  expect(homeLayout).toContain("<SiteHeader transparent />");
+  expect(homeLayout).toContain("<SiteFooter />");
+  expect(homeLayout).toContain("enabled: false");
+  expect(globalCss).toContain("--site-header-height:");
+  expect(globalCss).toContain(
+    "#fd-glass-layout > [data-docs-main] > [data-fd-full]",
+  );
 });

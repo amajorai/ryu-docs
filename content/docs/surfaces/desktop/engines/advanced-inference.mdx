@@ -1,136 +1,228 @@
 ---
-title: "Advanced inference"
-description: "Per-request sampling and per-model launch settings, jan.ai and LM Studio parity."
+title: Advanced Engine Configuration
+description: Engine-wide and per-model sampling, presets, native runtime options, embedding, reranker, image, and speech settings.
 ---
 
-Ryu exposes the "advanced model settings" surface you would expect from jan.ai or LM Studio, but
-implemented once and translated per engine (`apps/core/src/inference/mod.rs`). There are two distinct
-layers, with two lifetimes and two homes:
+Advanced settings live on the engine they configure. Open **Library → Engines** or **Store → Engines**,
+select an engine, and edit its configuration in the detail panel. Both surfaces edit the same
+engine defaults, which every agent using that runtime shares. An explicit request override takes
+precedence.
 
-- **Sampling** (`SamplingConfig`): per-request generation knobs (temperature, top_p, penalties,
-  mirostat, DRY, seed, and so on). These ride in the OpenAI-compat chat body on every call and need no
-  engine restart. They live on the agent record (per-agent defaults) and may be overridden per request.
-- **Launch** (`LaunchConfig`): engine-launch flags (context size, GPU layers, MoE offload, chat
-  template, speculative decoding, quantization). These are set when the engine process starts, so
-  changing them requires a respawn. They are keyed per model, since one resident engine serves every
-  agent, and are stored in the preferences KV.
+## Chat sampling defaults
 
-Both layers carry a raw passthrough escape hatch, so a sampler or flag the typed surface does not
-enumerate still works the day the engine build supports it, with no Core code change.
+Sampling values are sent with each chat request, so changing them does not restart an engine. Blank
+fields leave that engine's defaults in place.
 
-## Sampling (per-request)
-
-`SamplingConfig::apply_to_body` merges these into the outbound `/v1/chat/completions` body, translating
-field names for the target engine. Every field is optional, an absent field means "use the engine
-default". The standard fields are safe on every engine, including a real remote OpenAI endpoint. The
-non-standard sampler fields are emitted only for local engines that read them from the body.
-
-| Field | Notes |
+| Setting | Notes |
 |---|---|
-| `temperature`, `top_p`, `max_tokens`, `seed`, `stop` | OpenAI-standard, sent to every engine |
-| `frequency_penalty`, `presence_penalty` | OpenAI-standard penalties |
-| `top_k`, `min_p`, `typical_p`, `top_n_sigma` | Local-engine extensions (llama.cpp, vLLM, SGLang) |
-| `repeat_penalty`, `repeat_last_n` | Canonical repeat penalty, spelled `repetition_penalty` for vLLM, SGLang, and MLX |
-| `mirostat`, `mirostat_tau`, `mirostat_eta` | Entropy-targeting sampler (llama.cpp, Ollama) |
-| `dynatemp_range`, `dynatemp_exponent`, `xtc_probability`, `xtc_threshold` | llama.cpp dynamic-temperature and XTC |
-| `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n` | llama.cpp DRY repetition controls |
-| `samplers` | Sampler chain order, e.g. `penalties;dry;top_k;top_p;min_p;temperature` |
-| `extra` | Raw JSON object merged verbatim, overriding any typed field above |
+| Temperature, Top P, max tokens, seed, stop | Common request controls |
+| Frequency and presence penalties | Standard OpenAI-compatible controls |
+| Top K, Min P, repeat penalty | Sent on requests for llama.cpp, vLLM, and SGLang; MLX accepts repeat penalty; Ollama values are shown in its profile |
+| Mirostat, DRY, dynamic temperature, XTC, sampler order | llama.cpp request extensions; Ollama's supported Mirostat values are shown in its profile |
+| Response format, logit bias, prefill | Output shaping controls |
+| Extra body fields | JSON fields passed to the selected chat engine |
 
-Per-agent sampling defaults live on the agent record's `inference` field, so they are saved with the
-agent (there is no separate sampling endpoint). A per-request override is merged on top of those
-defaults, with the override winning per field.
+Ryu only sends typed sampler controls through a verified request adapter. Ollama's Modelfile-only
+samplers are saved as engine defaults and included in the copyable engine profile; they are not sent
+as unsupported request fields. The JSON
+passthrough remains available for other engine-specific request fields. A server can reject an
+unsupported field, and the chat shows that error.
 
-<Callout type="info">
-  The non-standard samplers (top_k, min_p, mirostat, DRY, and so on) are emitted only for local
-  engines. A remote OpenAI endpoint receives the standard fields only, because it would reject an
-  unknown sampler field. The desktop mirrors this: those fields are gated behind a `localEngine` flag
-  in `AdvancedInferenceSection.tsx`, so they only appear when the agent's Chat runtime is llama.cpp,
-  Ollama, vLLM, or SGLang.
-</Callout>
+## Per-model parameters and presets
 
-## Launch (per-model, engine-start)
+Open **Gateway settings → AI & models → AI providers → Model parameters** to tune one model rather than a whole engine.
+In a chat, the composer's settings menu has the same controls under **Parameters**: pick a preset to
+apply it to the chat's current model, or choose **Edit parameters…** to open the full editor.
+Choose **Local models** to pick a model served by a local engine, or **Cloud models** to pick a
+provider model. Settings are saved on the active node and apply to every chat that uses that model
+there, with no restart.
 
-`LaunchConfig::to_args` builds the per-engine command-line argument vector for the engines Core
-spawns. Changing any field requires the engine process to restart, so these are stored per model and
-applied on the model's next load.
-| Field | Notes |
+The editor shows only the parameters the model accepts:
+
+| Model | Parameters shown |
 |---|---|
-| `ctx_size` | Context window (`--ctx-size` for llama.cpp, `--max-model-len` for vLLM, `--context-length` for SGLang, `num_ctx` for Ollama) |
-| `gpu_layers` | GPU layers to offload (`-ngl` for llama.cpp, `num_gpu` for Ollama) |
-| `batch_size`, `ubatch_size`, `threads` | Batch and thread tuning |
-| `flash_attn`, `cache_type_k`, `cache_type_v` | Flash attention (`on`, `off`, `auto`) and KV cache types |
-| `mlock`, `no_mmap` | Lock the model in RAM, disable memory-mapping |
-| `cpu_moe`, `n_cpu_moe`, `override_tensor` | Mixture-of-experts offload to CPU (llama.cpp) |
-| `jinja`, `chat_template`, `chat_template_file` | Custom Jinja chat template (llama.cpp) |
-| `spec_type`, `draft_model`, `draft_max`, `draft_min`, `draft_p_min` | Speculative decoding: MTP (`draft-mtp`) or an n-gram variant, with an optional draft model |
-| `speculative_algorithm`, `speculative_config` | SGLang algorithm (eagle, ngram) and vLLM raw config |
-| `rope_scaling`, `rope_scale`, `rope_freq_base`, `rope_freq_scale` | RoPE and YaRN context extension (llama.cpp) |
-| `gpu_memory_utilization`, `mem_fraction_static`, `tensor_parallel` | vLLM and SGLang memory and parallelism |
-| `dtype`, `quantization`, `kv_cache_dtype`, `max_num_seqs`, `max_running_requests`, `enable_prefix_caching` | vLLM and SGLang serving knobs |
-| `extra_args` | Raw CLI args appended verbatim to the spawn command |
+| llama.cpp | Every sampler above, plus grammar, response format, and logit bias |
+| vLLM, SGLang | Standard controls plus Top K, Min P, repeat penalty, response format, and logit bias |
+| MLX | Standard controls plus repeat penalty |
+| Other local engines | Standard controls |
+| Anthropic | Temperature, Top P, Top K, max tokens, stop sequences |
+| OpenRouter | Standard controls plus Top K, Min P, repeat penalty, response format, and logit bias |
+| Gemini, Cohere, Vertex | Temperature, Top P, Top K, max tokens, stop sequences |
+| Bedrock | Temperature, Top P, max tokens, stop sequences |
+| OpenAI and other OpenAI-compatible providers | Standard controls plus response format and logit bias |
 
-<Callout type="info">
-  Launch config applies to the local engines Core spawns. llama.cpp has the richest surface, while
-  vLLM, SGLang, Ollama, MLX, and mlx-serve each receive a per-engine subset (Ollama is configured
-  through a Modelfile rather than CLI flags, MLX accepts only the raw `extra_args`, and mlx-serve
-  owns its model-directory/server flags). Remote or hosted
-  OpenAI-compat providers ignore launch config entirely, since Ryu does not start their process.
-</Callout>
+Standard controls are temperature, Top P, max tokens, frequency and presence penalties, seed, and
+stop sequences. Prefill and extra body fields are available for every model. Local models also show
+their launch settings below the sampling editor.
 
-## Auto-unload local model
+Values are layered in this order, with later layers winning field by field: agent defaults, engine
+defaults (local engines only), model parameters, then any override sent with the request. Cloud
+parameters apply when Ryu routes the chat through the Gateway; external agents such as Claude Code
+or Codex use their own settings.
 
-The resident llama.cpp runtime keeps the loaded model in memory until the desktop's **Auto-unload
-local model** setting (Gateway dialog → Defaults) frees it. The value is stored as the
-`engine.llamacpp.sleep-idle-seconds` preference (seconds) and passed to llama-server as
-`--sleep-idle-seconds`, so the model is unloaded after that many idle seconds and auto-reloads on the
-next request:
+**Presets** are named parameter sets saved on the node. Ryu ships read-only **Precise**,
+**Balanced**, and **Creative** presets that set temperature and Top P. To create your own, adjust the
+parameters and choose **Save as preset**; for a local model you can include its saved launch
+settings. **Apply** saves a preset to the selected model and skips any parameter that model does not
+accept, so one preset works for local and cloud models. **Update from current** overwrites a saved
+preset with the editor's values, and **Delete** removes it. Presets are shared by every client
+connected to the same node.
 
-| Setting | Value | Meaning |
-|---|---|---|
-| Never | `0` | Keep the model resident |
-| 1 minute | `60` | Unload after 60 s idle |
-| 5 minutes (default) | `300` | Unload after 5 min idle |
-| 15 minutes | `900` | Unload after 15 min idle |
-| 30 minutes | `1800` | Unload after 30 min idle |
-| 1 hour | `3600` | Unload after 60 min idle |
+## Chat runtime settings
 
-Changing the setting applies live: Core's preference reactor restarts the resident llama.cpp engine
-so the new `--sleep-idle-seconds` takes effect without a Core restart. This setting affects **only
-llama.cpp**, Ryu's on-device engine. Other local engines (Ollama, vLLM, SGLang, MLX, mlx-serve,
-Apple Foundation Models) manage their own memory, so it has no effect on them.
+Runtime settings are passed when Core starts a server. Save them while the engine is stopped or
+restart it after saving to apply them. Options left blank use the runtime's own defaults.
 
-## Endpoints
-
-| Action | Endpoint |
+| Engine | Ryu settings |
 |---|---|
-| Read the stored launch config for a model | `GET /api/models/:id/launch-config` |
-| Persist the launch config for a model | `PUT /api/models/:id/launch-config` |
-| Report the format-to-engine capability map for this node | `GET /api/models/engines` |
+| llama.cpp | Context, GPU layers, batch sizes, threads, attention and cache, idle unloading, continuous batching, MoE offload, chat templates, speculative decoding, RoPE / YaRN, native options, and additional flags |
+| vLLM | Context, GPU memory, tensor parallelism, dtype, quantization, KV cache, sequence limits, prefix caching, speculative config, native options, and additional flags |
+| SGLang | Context, static memory fraction, tensor parallelism, dtype, quantization, KV cache, request limits, speculative decoding, native options, and additional flags |
+| MLX | Native `mlx_lm server` options and additional command-line flags |
+| MLX-VLM | Native `mlx_vlm.server` options and additional command-line flags, per engine or per model |
+| MLX Serve | Context size, native `mlx-serve` options, and additional command-line flags |
+| oMLX | Native `omlx serve` options (mostly server environment) and additional command-line flags |
+| Apple Foundation Models | Native `apfel --serve` options and additional command-line flags |
+| Mesh LLM | Context size, parallel lanes, draft model and draft max, native `mesh-llm serve` options, and additional command-line flags |
+| Ollama | Chat request defaults and a copyable sampler profile; context, GPU layers, batch, threads, and memory settings are applied through a derived model when the engine starts or a model is activated. **Copy Modelfile profile** copies the read-only preview with supported launch and sampler parameters. Native options set the `ollama serve` environment |
+| Lemonade, Magnitude, llama-swap, FreeToken, Docker Model Runner | Chat request defaults and extra request fields; Ryu stores raw launch arguments in a copyable per-engine profile. **Copy runtime args** copies one argument per line for the external runtime to apply |
 
-`GET /api/models/engines` returns, for each model format, the engines that can serve it and a
-per-engine `supported` flag computed on the Core node (so the verdict is authoritative even when Core
-is remote). The desktop uses it to render the format facet and compatibility badges. Per-agent sampling
-is saved as part of the agent record, not through a dedicated endpoint.
+These five runtimes have no native engine options. Ryu connects to a server you start and manage
+in that tool, so configure models and hardware in the tool itself.
 
-## Desktop
+The llama.cpp launch editor includes a Jinja enable flag, an optional template-file path, and
+inline template text. vLLM's speculative-config editor accepts only a JSON
+object. vLLM and SGLang also expose typed speculative-decoding fields
+beside the raw runtime arguments.
 
-The desktop surfaces both layers in the model and agent editors.
+### Native engine options
 
-- **Advanced inference** (`apps/desktop/src/components/inference/AdvancedInferenceSection.tsx`): the
-  collapsible per-agent sampling editor. Standard fields show for every agent, and the non-standard
-  samplers appear only when the agent is bound to a local engine.
-- **Engine / Hardware** (`apps/desktop/src/components/inference/ModelLaunchConfigSection.tsx`): the
-  per-model launch-config editor in the model detail panel. Its header notes that changes apply the
-  next time the model is loaded, not live.
-- Both reuse the shared field widgets in `apps/desktop/src/components/inference/fields.tsx` and the
-  typed client in `apps/desktop/src/lib/api/inference.ts`.
+Below the typed fields, **Native engine options** lists the runtime's own launch options, grouped by
+area. Core publishes each engine's list, so the fields match the engine build Ryu installs.
 
-## Nothing hardcoded
+| Engine | Native options |
+|---|---|
+| llama.cpp (chat, embedding, reranker, classifier, Speech Processing) | Batch and HTTP threads, process priority, polling, NUMA, devices, split mode, tensor split, main GPU, fitting to device memory, KV and projector offload, weight repacking, host buffer, full SWA cache, prompt-cache RAM and idle-slot caching, image token limits, warmup, tensor checks, tokens to keep, prediction limit, context shift, context checkpoints, YaRN parameters, reasoning mode, format, budget and budget message, chat-template kwargs, draft-model GPU layers, threads, devices, cache types and MoE placement, LoRA adapters, server timeout, slot similarity, slot save path, prompt caching, assistant prefill, SSE keep-alive, metrics, and the built-in web UI |
+| vLLM | Pipeline and data parallelism, expert parallelism, CPU weight and KV offload, KV block size, eager mode, optimization level, batched-token limit, turning off chunked prefill, scheduling policy, long-prefill threshold, logprob limit, seed, remote code, model revision, tokenizer mode, generation config and overrides, Hugging Face config overrides, chat template, multimodal limits and processor cache, LoRA limits, reasoning parser, chat-template kwargs, and tool-call parsing |
+| SGLang | Data, pipeline and expert parallelism, attention backend, decode and prefill CUDA graphs and their batch sizes, torch.compile, CPU offload, chunked prefill, prefill, total and queued request limits, page size, schedule policy and priority scheduling, radix and hierarchical cache, mixed chunks, stream interval, deterministic inference, seed, grammar backend, EAGLE draft settings and draft revision, remote code, model revision, chat template, reasoning parser, and tool-call parser |
+| MLX | Remote code, adapter path, chat template and its arguments, draft model and tokens, decode and prompt concurrency, prefill step, prompt-cache entries and size, KV cache quantization, log level, and server default temperature, top-p, top-k, min-p, and max tokens |
+| MLX-VLM | Remote code, adapter path, default max tokens, thinking defaults, KV cache size and quantization, prefill step, expert cache, vision feature cache, concurrent sequences, token queue timeout, speculative drafting, prefix cache, top-logprobs cap, and logging. Prefix-cache, queue-timeout, and drafting-coalesce settings are passed as the server environment |
+| MLX Serve | Vision encoder, GGUF engine, SSD streaming, memory pre-flight, warmup, loaded-model and memory caps, idle unload, KV cache quantization and read path, GGUF KV cache type, exact dense decode, Neural Engine prefill, prefill chunk, embedding input limit, prefix cache (entries, memory, SSD), tokenize cache, SSM checkpoints, concurrency, GGUF sequences, stall timeout, metrics, tool-argument autocorrect, logging, default temperature, top-p, top-k and max tokens, reasoning budget, prompt lookup decoding, drafter, MTP, and DSpark controls. MLX Serve refuses unknown flags, so the list is limited to options present in MLX Serve 26.8.10 and later |
+| oMLX | Concurrency and embedding batch, memory guard and keep-warm, paged SSD and hot RAM prefix cache, hybrid-model state cache, headless mode without the web dashboard, SSE keep-alive, upload and image limits, MCP config, usage history, Hugging Face and ModelScope endpoints and cache discovery, proxy and CA bundle, and log level, directory and retention. Most are passed as `OMLX_*` environment variables and apply only while Ryu runs the server. Memory guard, hot cache size, and SSE keep-alive are flags that oMLX also saves to its own settings |
+| Apple Foundation Models (apfel) | Max concurrent requests, retry on transient errors, CORS headers, allowed browser origins, debug logging, and quiet and no-color output. Sampling and context are set per request because apfel's serve mode rejects them as launch flags |
+| Mesh LLM | Startup model, load-time quantization, local-only serving, config file, llama.cpp backend flavor, device, VRAM cap, tensor split and auto-balance, speculative decoding, disk prompt cache, mesh membership (invite file, auto-join, discovery, publishing, names, region, client limit, QUIC port), privacy and trust (hardware enumeration, trust policy, owner attestation, guardrails, `MESH_LLM_ANALYTICS`), default plugins, and logging. Options were checked against Mesh LLM v0.78.1; an older install may reject newer flags |
+| Ollama | `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_GPU_OVERHEAD`, `OLLAMA_SCHED_SPREAD`, `OLLAMA_VULKAN`, `OLLAMA_IGPU_ENABLE`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_LOAD_TIMEOUT`, `OLLAMA_MAX_TRANSFER_STREAMS`, `OLLAMA_NOPRUNE`, `OLLAMA_NO_CLOUD`, and `OLLAMA_DEBUG`. They apply when Ryu starts `ollama serve` |
+| whisper.cpp | Processors, CPU-only mode, GPU device, flash attention, audio context, word splitting and thresholds, no-speech threshold, carrying the initial prompt, diarization (tinydiarize or stereo, not both), DTW timestamp presets, ffmpeg conversion, and voice activity detection with its timing controls |
+| stable-diffusion.cpp | Threads, automatic fitting and VRAM budget, backend and parameter placement, multi-GPU split, weight offload and prefetch, segmented compute, CPU placement for text encoders, VAE and ControlNet, VAE tiling and tile settings, temporal tiling, flash and SageAttention, direct convolution, weight types, memory mapping, eager loading, prediction type, RNGs, LoRA directory and apply mode, embeddings directory, default steps, CFG scale, sampler and scheduler, and log level |
+| OuteTTS | Threads, GPU layers, devices, flash attention, context and batch size, max audio tokens, top-k, seed, guide tokens, speaker file, and model load mode |
+| audio.cpp | Idle unload, minimum free memory, graph optimizer, voice library folder, and debug logging and log file |
+| Ryu Audio | Kokoro's ONNX execution provider and log level, the eSpeak NG library, the KittenTTS model, and Hugging Face offline mode, telemetry, and download timeouts. All are passed as the sidecar's environment; it has no command-line flags |
 
-Every default here is a swappable default, never a lock. Both layers carry a raw passthrough,
-`SamplingConfig::extra` for arbitrary body fields and `LaunchConfig::extra_args` for raw CLI args, so
-a brand-new llama.cpp knob or a research flag the typed surface does not enumerate works as soon as the
-engine build supports it, with no Core change.
+A blank field keeps the engine default. A per-model launch config can hold native options for
+several engines; choose the engine under **Options for engine**, and each engine applies only its
+own options when it serves the model. Per-model native options are available for llama.cpp, vLLM,
+SGLang, MLX, and MLX-VLM; the other engines read their engine-wide settings only. Engine-wide and
+per-model native options merge option by option, with the model's value winning. **Additional
+flags** are appended after native options, so a raw flag can still override one, except for
+audio.cpp, which reads the first occurrence of a flag, so the native option wins there. Flags Core
+manages, such as the host, port, model path, and output file, cannot be set from these settings.
 
-Continue with [Desktop engines](/docs/surfaces/desktop/engines), [Core model catalog](/docs/core/model-catalog), [Providers](/docs/providers), [classifier tiers](/docs/core/classifier-tier), and [Gateway routing](/docs/gateway/routing).
+Options marked as environment variables apply only when Ryu starts the runtime, and a variable
+already set in Core's environment wins.
+
+A launch setting change affects the next start of that engine, not the model weights. The detail panel offers **Restart** for running runtimes whose process Core owns. If Ryu
+adopts a server already running outside Core, its launch flags remain controlled by that server's
+owner.
+
+### Ollama
+
+Ollama serves many models from one daemon and accepts no per-model launch flags, so Ryu applies
+launch settings by creating a derived Ollama model. When the Ollama engine starts, or when you
+activate a model on it, Ryu reads the launch config for the active Ollama model (falling back to the
+per-engine config) and creates a model equivalent to this Modelfile:
+
+```text
+FROM llama3.2:3b
+PARAMETER num_ctx 8192
+PARAMETER num_gpu 20
+```
+
+Ollama receives these fields: `ctx_size` (`num_ctx`), `gpu_layers` (`num_gpu`), `batch_size`
+(`num_batch`), `threads` (`num_thread`), `mlock` (`use_mlock`), and `no_mmap` (`use_mmap false`).
+The derived model is named `ryu-<model>-<hash>`, where the hash covers the base model and its
+settings, so the same settings reuse one model. Chat requests for the base model name (with or without `:latest`) are then served by the
+derived model, through both the Gateway and Core's OpenAI-compatible endpoint.
+
+If the derived model cannot be created, for example because the base model has not been pulled into
+Ollama, Ryu keeps serving the base model without the settings. The Ollama engine then reports a
+degraded health status explaining why the settings were not applied. Ryu leaves derived models in
+place after you change settings; remove old ones with `ollama rm` if you want the space back.
+
+## Embeddings, reranker, and classifier
+
+The llama.cpp detail panel has a separate **Embedding engine** section for its auto-started
+`llamacpp-embed` server. Context size, GPU layers, batch sizes, threads, idle unloading, cache
+settings, native llama.cpp options, and raw flags are stored separately from Chat, so changing
+embedding settings does not alter chat configuration. Use **Restart embedding server** to apply a
+saved change.
+
+**Reranker and classifier servers** holds the same launch settings for the Spaces search reranker
+(`llamacpp-rerank`) and the routing and inspection classifier (`llamacpp-classify`). Each applies
+the next time its server starts. Blank batch sizes keep the reranker's 8192-token defaults, and a
+blank context size keeps the classifier's 4096-token default.
+
+## Image generation
+
+The stable-diffusion.cpp detail panel has **Engine launch settings** for `sd-server`, with its
+native options and additional flags. Restart the engine to apply them. Ryu keeps the model, companion
+weights, and listen address it selected.
+
+## Speech recognition
+
+Speech recognition settings are grouped with the engine that uses them:
+
+| Engine | Settings |
+|---|---|
+| whisper.cpp | Language, translation, temperature, best-of, beam size, prompt, context controls, extra multipart fields, threads, native server options, and extra server flags |
+| audio.cpp | Language, temperature, prompt, extra request fields, backend, device, threads, and maximum loaded models, plus **Engine launch settings** with native server options and extra server flags. Other Whisper-specific typed options are saved but not sent |
+| Core Parakeet | Runs in-process on the CPU and currently uses the model library's defaults; there is no server process, so it has no launch flags or native options, and request options are not supported |
+| Gateway | Ryu stores a per-node transcription profile, but the current Gateway request adapter does not forward these options to the provider |
+
+See the whisper.cpp [upstream server options](https://github.com/ggml-org/whisper.cpp/blob/master/examples/server/README.md).
+Core controls the server lifecycle; extra flags are for other upstream options.
+
+Request settings apply to transcription calls for their selected engine. The UI marks Core
+Parakeet's missing request options beside its settings.
+
+## Speech Processing
+
+The llama.cpp engine detail page also exposes the node-wide S1-mini Speech Processing defaults:
+engine, style, structure, and context. These preferences are shared with the Speech Processing
+layer on the **Voice & sandbox** page of the expanded node selector and with Dictation settings.
+They control transcript cleanup and stay separate from Chat sampling.
+
+Below them, **Engine launch settings** configures the Speech Processing llama.cpp server. S1-mini
+is served with thinking disabled and greedy decoding by default; setting **Reasoning** or **Chat
+template kwargs** replaces the thinking default, and additional flags such as `--temp` override the
+decoding default.
+
+## Speech generation
+
+**Library → Engines → Ryu Audio**, **Store → Engines → Ryu Audio**, and **Settings → Audio** share
+the desktop speech-generation engine and voice. Ryu also saves speaking speed, language, and reference audio separately for each selected
+engine when its adapter supports those fields. OuteTTS uses its bundled model voice and does not
+accept those request overrides; Gateway language selection remains with its provider. Its detail
+panel has **Engine launch settings** for `llama-tts`, which apply to the next spoken reply.
+
+The Ryu Audio detail panel also has **Engine launch settings** for its sidecar. They are applied as
+the sidecar's environment, so there is no additional-flags field; restart the engine to apply them.
+A Ryu Audio server that Core adopted instead of starting keeps its own environment.
+
+## Per-engine ownership
+
+Ollaya is a local typed-decision provider rather than a chat runtime. Configure its optional API
+credential in its node settings; the model may also be selected on an individual decision call.
+Unsloth training options belong to the Fine-tuning app because they configure training jobs, not a
+resident inference engine.
+
+For voice model selection and the rest of the Speech settings, see [Voice engines](/docs/surfaces/desktop/engines/voice-engines).

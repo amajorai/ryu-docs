@@ -1,0 +1,321 @@
+---
+title: "Connect Relay and Vendor Keys"
+description: "Reference for Ryu Connect relay tools, built-in vendor calls, vendor keys, the credential ladder, Ryu's operator accounts and overflow, and credential checks"
+tags: ["Standalone", "Connect", "relay", "credentials", "BYOK"]
+---
+
+Ryu Connect can call third-party APIs for an agent without the agent ever
+holding the API key. There are two ways in.
+
+- **Relay tools** you register yourself: an upstream base URL plus the
+  credentials Connect adds to every request. Calls always use your secrets and
+  Ryu never meters them.
+- **Built-in vendors** (Exa, Tavily, Brave Search and GitHub): call the
+  vendor's own API through Connect. Connect picks the key with the
+  [credential ladder](#the-credential-ladder): your team's key, then your
+  organization's key, then Ryu's key, metered, only where Ryu publishes a
+  checked per-call price.
+
+Both are faithful relays. Connect passes on your method, path, query, headers
+and body as sent, and passes back the status, headers and body as answered,
+apart from the [rewrites listed below](#what-connect-changes). Connect does not
+reshape vendor APIs into its own tool format.
+
+Answers are buffered by default. A call can instead stream its answer, have it
+spooled behind a download URL, or run as an async task you poll or receive by
+webhook; see [async tasks, streamed and spooled answers](/docs/standalone/connect-api-tasks).
+
+Calls use the runtime bearer. Registering, replacing or deleting a relay tool,
+saving or deleting a vendor key, and re-running a check all need the tenant's
+**management** bearer, the same one that links accounts. A runtime key can
+never change where your secrets go.
+
+## Relay tools
+
+Register a tool with `PUT /v1/relay/tools/:id`. The id is 1 to 64 characters
+from lowercase letters, digits, `_` and `-`. Send the secrets in the same
+request; Connect encrypts them at rest and never returns them.
+
+```sh
+curl -fsS -X PUT https://connect.example/v1/relay/tools/weather \
+  -H 'Authorization: Bearer <management-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "baseUrl": "https://api.weather.example/v2",
+    "methods": ["GET"],
+    "bindings": [
+      { "in": "header", "name": "Authorization", "secret": "API_KEY",
+        "template": "Bearer {{secret:API_KEY}}" },
+      { "in": "query", "name": "sig", "secret": "SIGNING_KEY" }
+    ],
+    "constantHeaders": { "Accept": "application/json" },
+    "probe": { "path": "/ping" },
+    "secrets": { "API_KEY": "…", "SIGNING_KEY": "…" }
+  }'
+```
+
+| Field | Meaning |
+|---|---|
+| `baseUrl` | HTTPS only, on a public host, with no credentials, query or fragment. Calls stay under this path. |
+| `bindings` | 1 to 8. Each puts one secret in one place: a request `header`, a `query` parameter, or a `body` field of a JSON object (a key path of up to four keys, such as `auth.key`). Several bindings may carry several secrets. |
+| `template` | Header bindings only. It must contain `{{secret:NAME}}` exactly once, for the binding's own secret. Without it the header carries the secret as is. |
+| `constantHeaders` | Up to 16 fixed headers. They may not be `Authorization`, `Cookie`, a connection header, or an `x-ryu-` header. |
+| `methods` | Allowed methods; default `GET` and `POST`. |
+| `maxResponseBytes` | The largest answer Connect passes back, from 1 KiB to 2 MiB; default 768 KiB. |
+| `probe` | Optional. A free `GET` or `HEAD` path under the base URL that answers 2xx for a working credential and 401 or 403 for a bad one. Set `expectStatus` to list other success codes. |
+| `secrets` | Exactly the secret names the bindings use. |
+
+When a tool has a `probe`, Connect makes that call with the new secrets before
+saving. A `401` or `403` answer returns `422` with `code: "credential_invalid"`
+and nothing is saved. Any other failure saves the tool with verdict `unknown`.
+A tool without a probe is saved `unchecked`.
+
+Changing `baseUrl` or any binding moves where the secrets go, so that request
+must send `secrets` again; without them it returns `400` with
+`code: "secrets_required"`. Renaming or describing a tool keeps its secrets.
+`GET /v1/relay/tools` and `GET /v1/relay/tools/:id` list and describe your
+tools with secret names but never values. `DELETE /v1/relay/tools/:id` removes
+a tool and its secrets.
+
+Call a tool at `/v1/relay/:id/` plus the upstream path.
+
+```sh
+curl -fsS 'https://connect.example/v1/relay/weather/forecast?city=Oslo' \
+  -H 'Authorization: Bearer <connect-api-token>'
+```
+
+Connect sends `https://api.weather.example/v2/forecast?city=Oslo&sig=…` with
+`Authorization: Bearer …`. If a path uses `..` or an encoded slash to leave the
+base URL, Connect returns `400` with `code: "invalid_path"`. A method the tool
+does not allow returns `405`.
+
+## What Connect changes
+
+Connect makes only these request changes.
+
+1. Removed: connection headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`,
+   `Upgrade`, `TE`, `Trailer`, proxy headers), `Host`, `Content-Length`,
+   your Connect `Authorization` bearer, `Cookie`, `Forwarded`, `Via`,
+   `X-Real-IP`, and every `x-ryu-`, `x-forwarded-` and `cf-` header.
+2. Set: the tool's constant headers, then each binding. A value you sent under
+   the same name is replaced, never merged.
+3. `Accept-Encoding: identity`, so Connect can inspect the answer.
+
+The answer is sandboxed:
+
+- A buffered answer (the default) is passed back only if it is text (JSON,
+  XML, plain text, CSV, HTML, form, NDJSON) and not compressed. Otherwise you
+  get `502 upstream_content_type_refused` or `502 upstream_encoding_refused`.
+  [Streamed and spooled answers](/docs/standalone/connect-api-tasks#answer-modes)
+  carry any content type but are still refused when compressed.
+- A buffered answer larger than the tool's limit is
+  `502 upstream_response_too_large`, and Connect never passes back part of it.
+- Every secret Connect added is replaced with `[REDACTED]` wherever the upstream
+  quotes it, in the body and in header values, as on
+  [every other lane](/docs/standalone/connect-api-mcp#credentials-in-answers).
+- `Set-Cookie`, `Strict-Transport-Security`, `Alt-Svc`, CORS headers and the
+  upstream's own content security policy are dropped. Connect adds
+  `Content-Security-Policy: sandbox; default-src 'none'`,
+  `X-Content-Type-Options: nosniff` and
+  `Cross-Origin-Resource-Policy: same-origin`, so a relayed page can never run
+  as Connect's origin.
+- A redirect is followed only within the tool's base URL on the same origin,
+  at most three times, with the credentials added again. A redirect anywhere
+  else is `502 upstream_redirect_refused` and nothing is sent there.
+
+Every request first resolves the host. If any of its addresses is private,
+loopback, link-local or otherwise reserved, the call is refused with
+`502 upstream_blocked`. The connection then uses only the addresses that
+passed the check, so a DNS answer that changes between the check and the
+connection cannot send it somewhere else. `502 upstream_unreachable` and
+`504 upstream_timeout` (30 seconds) never include upstream detail.
+
+Each answer carries `x-ryu-call-id`, `x-ryu-credential-rung` and
+`x-ryu-metered`. A relay tool always answers `tenant` and `false`.
+
+## Vendor keys
+
+Save your team's or organization's key for a built-in vendor with
+`PUT /v1/credentials/vendors/:vendor`.
+
+```sh
+curl -fsS -X PUT https://connect.example/v1/credentials/vendors/github \
+  -H 'Authorization: Bearer <management-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{ "key": "github_pat_…" }'
+```
+
+Connect checks a pasted key with one cheap call before saving it.
+
+| Vendor | Check | Cost on your key |
+|---|---|---|
+| `github` | `GET /user` | Free |
+| `brave` | One web search with one result | One request at Brave's price |
+| `tavily` | One basic search with one result | One credit |
+| `exa` | One instant search with one result | One search at Exa's price |
+
+A check that costs money runs only when the request sets
+`"allowPaidProbe": true`. Otherwise the key is saved with verdict `unchecked`.
+If the vendor refuses the key (401 or 403), the request returns `422
+credential_invalid` and the key is not saved. Any other failure saves it with
+verdict `unknown`. GitHub reports when a token expires, and Connect records
+that date.
+
+`GET /v1/credentials/vendors` lists the stored keys with a non-secret
+fingerprint, their verdict and expiry, and the built-in vendors with their
+check costs. `POST /v1/credentials/vendors/:vendor/probe` re-checks a stored
+key (body `{"allowPaidProbe": true}` for a paid check), and `DELETE` removes it.
+
+Call a vendor at `/v1/vendors/:vendor/` plus the vendor's own API path, for
+example `GET /v1/vendors/github/user` or
+`POST /v1/vendors/tavily/search`. The upstream host is always the vendor's own
+API host. Connect presents the key the way the vendor documents it, and the
+answer is sandboxed like a relay tool's.
+
+## The credential ladder
+
+For each vendor call, Connect takes the first of these that applies.
+
+1. **Team key.** Your team's own key for the vendor, if your Connect tenant is a
+   team.
+2. **Organization key.** Your organization's key.
+3. **Ryu's key**, only for an endpoint that Ryu's
+   [curated catalog](/docs/standalone/connect-api-discovery#search-and-describe) lists as
+   verified with a per-call price. The call is metered at that price and
+   discloses it. GitHub never has this rung: its answers depend on whose
+   token is used, so every GitHub call needs your own key.
+
+Calls on your own key (rungs 1 and 2) are never metered by Ryu. These rules
+protect you.
+
+- If your stored key is not working (the vendor refused it, it is disabled, or
+  it has expired), the call returns `403 credential_invalid`. Ryu's key is
+  never used in its place, so a broken key cannot turn into a bill.
+- If only Ryu's key could serve the call and the endpoint has no verified
+  per-call price, the call returns `403 operator_price_unverified` and nothing
+  is sent. This includes vendor endpoints whose price depends on more than the
+  call count, such as Exa searches that charge per result.
+- A call on Ryu's key is priced from its body, so the body must be plain
+  JSON that Connect can read: a body that does not parse, or one sent with a
+  `content-encoding`, returns `400 vendor_body_unpriceable` and nothing is
+  sent. Connect forwards the JSON it priced. A Tavily search with
+  `auto_parameters` and no explicit `search_depth` is priced as an advanced
+  search, as Tavily bills it.
+- With neither, the call returns `403 credential_required`.
+- You choose the provider. `x-ryu-provider: ryu` (or no header) uses the
+  ladder. Treg stays available as its own provider through Ryu Gateway's
+  provider API. Connect never fails over to Treg, and `x-ryu-provider: treg`
+  on Connect returns `404 endpoint_not_served`. Moving a call to another Ryu
+  account is also your choice (see
+  [Ryu's accounts and overflow](#ryus-accounts-and-overflow)).
+
+Refusals include `trace`, which lists what each rung found (for example
+`{"rung": "operator", "status": "skipped"}`), but no key values.
+
+A call paid with Ryu's key adds these headers.
+
+| Header | Meaning |
+|---|---|
+| `x-ryu-credential-rung` | `operator` |
+| `x-ryu-metered` | `true` |
+| `x-ryu-endpoint` | The catalog endpoint, such as `brave.web_search` |
+| `x-ryu-cost-micro-usd` | The per-call price at Ryu's catalog rate |
+| `x-ryu-charged-micro-usd` | What Ryu's billing charges, or `none` when this Connect is not billed by Ryu |
+| `x-ryu-price-source` | `ryu_catalog` |
+| `x-ryu-ledger-ref-id` | The charge's ledger reference, when billed |
+| `x-ryu-provider-served` | `ryu` |
+| `x-ryu-operator-account` | The Ryu account that served the call, such as `brave-a` |
+| `x-ryu-overflowed` | `true` when another Ryu account served the call because you allowed overflow, else `false` |
+| `x-ryu-resource-id`, `x-ryu-resource-tracked`, `x-ryu-resource-state` | On a call that creates, uses or deletes a tracked [vendor resource](/docs/standalone/connect-api-media#vendor-resources-on-ryus-key): Ryu's id for it, whether a created one was recorded, and `deleted` after a delete |
+| `x-ryu-overflow-from`, `x-ryu-overflow-reason` | With overflow: the account your call left and why (`rate_limited`, `out_of_credit`, `key_rejected`, `breaker_open`, `breaker_probing`, `quota_exhausted`, `saturated`, or `upstream_rate_limited` when the vendor answered 429 on it) |
+| `x-ryu-smoothing-wait-ms` | How long the call waited for the account's rate limit, when it waited |
+
+It is charged only when the vendor answers 2xx, including when Connect then
+refuses to pass the answer on (too large, compressed, not text, or a content
+type the relay does not carry), because the vendor ran the call. A timeout or
+an unreachable vendor is not charged. Before the call it is checked and held
+against your balance like any other metered Connect call (`402
+insufficient_credits`, or `402 max_cost_exceeded` under
+`x-ryu-max-cost-micro-usd`). It appears in the
+[usage report](/docs/standalone/connect-api-usage) as a line with
+`"source": "vendor"` and its `endpoint`. Ryu bills it as a Connect vendor call
+at the lower of the price you were shown and the catalog price.
+
+## Ryu's accounts and overflow
+
+Ryu can hold several accounts with a vendor. Your tenant is assigned one of
+them and stays on it while it is healthy. Each account has its own rate limit
+and call allowance, and Connect pauses an account when the vendor says it is
+rate limited (429, for the time in the vendor's `Retry-After`), out of credit
+(402) or refuses its key (401), or after several failed calls in a row (5xx,
+timeouts or an unreachable vendor). An HTML error page, such as a firewall
+page, does not pause an account. A short burst of calls is spread out rather
+than refused: a call may wait briefly (a quarter of a second by default) for
+the account's rate limit.
+
+When your account cannot take a call, Connect does not move you to another
+account unless you ask. By default the call is refused before anything is sent
+or held against your balance.
+
+- `429 operator_capacity_exhausted` - the account is rate limited, out of
+  credit, out of its allowance, or busy.
+- `503 operator_unavailable` - the account is paused after failed calls.
+
+Both carry a `Retry-After` header and a body with `retryAfterSeconds`,
+`accounts` (each account's status, with `available` for one that could serve
+now), `overflow` (`requested` and `available`) and `providers`.
+
+To let another Ryu account serve the call, send `x-ryu-overflow: operator`.
+The call then goes to the next account that can take it, including after the
+vendor answers 429 on the first one (at most three accounts per call). Every
+Ryu account charges the same catalog price, the call is charged once whichever
+account served it, and a vendor 429 is never charged. The answer says which
+account served it and which one it left (headers above). `x-ryu-overflow: any`
+would also allow Treg where it serves the endpoint. Connect does not serve
+Treg, so a refusal lists it as `not_served`. `none`, the default, keeps your
+call on your account. Any other value returns `400 invalid_request`.
+
+`GET /v1/credentials/vendors` shows `operatorAccounts`, the number of Ryu
+accounts available for each vendor.
+
+## Credential checks
+
+Connect re-checks stored keys and relay tools that have a probe on a schedule
+every six hours, using only free checks. A paid check never runs on a schedule. A key the vendor now refuses is marked `invalid`, and calls on
+it are refused as described above until you save a working one. A vendor
+outage marks it `unknown` and never disables it. When the deployment is
+connected to Ryu Notify (`RYU_CONNECT_NOTIFY_URL` and
+`RYU_CONNECT_NOTIFY_TOKEN`), its operator is alerted once when a key becomes
+invalid, and once a day while the vendor says a key expires within seven days.
+
+## Routes
+
+| Method | Path | Bearer | Purpose |
+|---|---|---|---|
+| `GET` | `/v1/relay/tools` | Runtime | List your relay tools |
+| `GET` | `/v1/relay/tools/:id` | Runtime | Describe one relay tool |
+| `PUT`, `DELETE` | `/v1/relay/tools/:id` | Management | Register, replace or delete a relay tool |
+| `POST` | `/v1/relay/tools/:id/probe` | Management | Re-run a tool's probe |
+| any allowed | `/v1/relay/:id/*` | Runtime | Call a relay tool |
+| `GET` | `/v1/credentials/vendors` | Runtime | Stored vendor keys and the built-in vendors |
+| `PUT`, `DELETE` | `/v1/credentials/vendors/:vendor` | Management | Save (checked first) or delete a vendor key |
+| `POST` | `/v1/credentials/vendors/:vendor/probe` | Management | Re-check a stored vendor key |
+| any | `/v1/vendors/:vendor/*` | Runtime | Call a built-in vendor through the credential ladder |
+
+To have Connect choose the vendor for a job under a policy you send, use a
+[routed capability call](/docs/standalone/connect-api-routing) instead; vendor
+calls always use the vendor you name.
+
+Add `x-ryu-response: stream` or `spool`, or `Prefer: respond-async`, to any
+call; the routes for tasks and spooled answers are in
+[async tasks, streamed and spooled answers](/docs/standalone/connect-api-tasks#routes).
+Label any call with [builder tags](/docs/standalone/connect-api-tags) in
+`x-ryu-tags`. A file a vendor needs by URL can be
+[hosted by Connect](/docs/standalone/connect-api-media#reference-media), and
+objects you create on Ryu's key stay
+[yours](/docs/standalone/connect-api-media#vendor-resources-on-ryus-key).
+
+<Cards>
+  <DocCard href="/docs/standalone/connect-api" />
+  <DocCard href="/docs/standalone/connect" />
+</Cards>

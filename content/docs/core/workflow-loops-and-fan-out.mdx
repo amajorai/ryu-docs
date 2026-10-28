@@ -1,0 +1,142 @@
+---
+title: "Workflow Loops and Fan-Out"
+description: "Reference for workflow nodes and policies that run work more than once: while loops, for_each maps, parallel fan-out, and the per-step repeat policy"
+tags: ["core", "workflows", "while", "foreach", "parallel", "repeat", "loop"]
+---
+
+[Workflows](/docs/core/workflows) covers node kinds, template variables, execution, and durable
+resume. This guide covers the nodes and policies that run work more than once: bounded `while`
+loops, `for_each` maps, `parallel` fan-out, and the per-step `repeat` policy. Each iteration is
+checkpointed like any other node, so a run resumes mid-loop after a restart.
+
+## While loops
+
+The `while` node has two forms, distinguished by whether `body_workflow_id` is set.
+
+A **bounded loop** (`body_workflow_id` set) re-executes the named body workflow as long as `expr`
+holds, up to 100 iterations. Each iteration runs as a sub-workflow, so the outer DAG stays acyclic
+and graph validation remains intact. The loop variable, called the carry, is seeded with the node's
+incoming value. The condition checks the carry (for example, `input < 10`), and each iteration's
+output replaces it. On exit the node produces the final carry. Progress is checkpointed after every
+iteration, so a loop can resume after a restart.
+
+A **one-shot branch gate** (`body_workflow_id` absent) evaluates `expr` once and activates only the
+matching true or false outgoing edge, behaving like a `condition`.
+
+<Callout type="warn">
+  Loops are at-least-once, not exactly-once: a side-effecting body node (`tool`, `webhook`,
+  `ghost_action`, `prompt`) interrupted mid-call re-runs on resume. An `awakeable` or member
+  acknowledgement gate inside a loop body suspends the enclosing run. Approving the child gate
+  resumes that same iteration and then continues the loop; rejecting it fails the enclosing run.
+  The iteration counter and carry remain unchanged while approval is pending, including after a
+  restart. Resuming an enclosing run forwards the payload to its pending child gate; it cannot
+  bypass a member acknowledgement policy. This behavior also applies to nested `sub_workflow` nodes
+  and workflow runnables contributed by plugins.
+  The on-canvas back-edge form (drawing a body to `while` edge directly) remains unavailable, so
+  authors use a separate body workflow named by `body_workflow_id`.
+</Callout>
+
+## Map over a list (`for_each`)
+
+A `for_each` node runs a body workflow once for every element of a JSON array, with bounded
+concurrency, and emits a JSON array of the results in the same order as the input:
+
+```json
+{
+  "id": "summarize_each",
+  "type": "for_each",
+  "body_workflow_id": "wf_summarize_page",
+  "items": "{{state.urls}}",
+  "max_concurrency": 3
+}
+```
+
+| Field | Default | Behavior |
+|---|---|---|
+| `body_workflow_id` | required | The workflow run once per item. It cannot be the workflow itself |
+| `items` | `{{input}}` | A template that must resolve to a JSON array, for example `{{state.urls}}` or `{{nodes.search}}` |
+| `max_concurrency` | 4 | How many items run at once, clamped between 1 and 16 |
+
+Each item runs as its own durable child run with the run input `input` (a string element as-is, any
+other element as JSON text) and `index` (0-based). The body's output becomes that item's result. A
+result that is a JSON object or array stays structured in the output array; anything else is a
+string. Up to 1000 items are allowed.
+
+Every finished item is saved as soon as it completes. A run that resumes after a restart, an
+approval, or a provider limit skips the finished items and continues only the unfinished ones. A
+human gate inside the body suspends the whole run; approving it resumes that item, and any other
+item still waiting on its own gate suspends the run again until it is approved too. A failed item
+fails the node once the items already running have finished.
+
+## Fan out to several workflows (`parallel`)
+
+A `parallel` node runs several different workflows at the same time and joins their results into one
+JSON object keyed by branch id:
+
+```json
+{
+  "id": "review",
+  "type": "parallel",
+  "max_concurrency": 4,
+  "branches": [
+    { "id": "security", "workflow_id": "wf_security_review" },
+    { "id": "style", "workflow_id": "wf_style_review" },
+    { "id": "tests", "workflow_id": "wf_test_review", "input": "{{state.diff}}" }
+  ]
+}
+```
+
+Every branch receives the node's input, or its own `input` template when set. Branch ids must be
+unique and use only letters, digits, `_`, and `-`. Branches run as durable child runs with the same
+resume, approval, limit, and failure behavior as `for_each` items, so a resumed run skips the
+branches that already finished.
+
+## Repeating a step
+
+Any data or action step can loop on its own output with a `repeat` policy, without a separate body
+workflow or a graph cycle. Use it to refine a draft over several passes, poll a tool
+until a job finishes, or collect several samples from one prompt. The outer graph still sees one
+node that produces one value.
+
+```json
+{
+  "id": "refine",
+  "type": "prompt",
+  "prompt": "Improve this draft. Reply DONE when it needs no changes.\n\n{{input}}",
+  "repeat": { "max_iterations": 5, "until": "input contains \"DONE\"" }
+}
+```
+
+| Field | Default | Behavior |
+|---|---|---|
+| `max_iterations` | 1, or 100 when an exit condition is set | Upper bound on passes. Always capped at 100 |
+| `until` | none | Stop as soon as this condition holds against the latest output |
+| `while` | none | Keep going only while this condition holds against the latest output |
+| `stop_when_unchanged` | `false` | Stop once a pass returns exactly the previous pass's output |
+| `feed_output` | `true` | Feed each pass's output in as the next input. Set `false` to give every pass the original input, which suits polling and sampling |
+| `collect` | `"last"` | `"last"` emits the final pass's output; `"all"` emits a JSON array of every pass's output |
+| `interval_ms` | 0 | Pause between passes, for example while polling. At most 3600000 (1 hour); a larger value is rejected. The pause survives a restart: a resumed run waits only for the time left |
+
+Conditions use the same grammar as a `condition` node, where the `input` keyword is the latest
+output: `==`, `!=`, `contains`, `starts_with`, `ends_with`, `empty`, `nonempty`, and numeric `<`,
+`>`, `<=`, `>=`. After each pass Ryu checks, in order, the iteration cap, `until`, `while`, and
+`stop_when_unchanged`.
+
+Each pass is a full execution of the step, so `retry` and `timeout_ms` apply to every pass, and a
+successful pass resets the retry budget. Progress is checkpointed after every pass, so a run resumes
+mid-loop after a restart. Each pass gets its own idempotency key, agent conversation, and child run,
+so a repeated `tool` or `webhook` call is never deduplicated as a replay of the previous pass.
+
+`repeat` is rejected on `awakeable` gates, `notify_user` nodes that wait for acknowledgements,
+`condition` nodes, and `while` nodes. To loop over several steps at once, use a
+[`while` loop](#while-loops) with a body workflow.
+
+In the desktop workflow editor, open a step and turn on **Repeat step** to set these options.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/workflows" />
+  <DocCard href="/docs/core/workflow-triggers-and-history" />
+  <DocCard href="/docs/core/workflow-code-and-scripts" />
+</Cards>

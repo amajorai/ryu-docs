@@ -1,11 +1,11 @@
 ---
 title: Declare Language Servers
-description: Give the Pi-backed ryu agent real code intelligence by declaring Claude-Code-compatible language servers in your plugin manifest
+description: Declare Claude Code-compatible language servers in a plugin manifest so the Pi-backed ryu agent gets diagnostics and navigation tools.
 ---
 
-A plugin can declare **language servers** in its `manifest.json`, and Core spawns them. The agent
-then gets compiler-grade answers instead of guesses: diagnostics after every edit, go-to-definition
-that resolves imports and overloads, and a reference list that is actually complete.
+A [plugin](/docs/plugins) can declare **language servers** in its `manifest.json`, and Core spawns them. The agent
+then gets answers from the language's own tooling: diagnostics after every edit, go-to-definition
+that resolves imports and overloads, and a full reference list.
 
 The declaration is Claude Code's language-server config field-for-field, camelCase on the wire, so
 the same JSON body loads in either host. The contract lives in
@@ -57,8 +57,8 @@ A Claude Code `.lsp.json` is the **value** of `lsp_servers`, not the whole block
 top-level map in as-is and every entry body works unchanged. Only the container key is Ryu's.
 `lsp_servers` in snake_case, matching every sibling contribution, is the one accepted spelling. An
 `lspServers` alias would parse in Core and then be stripped by the SDK's zod mirror
-(`packages/sdk/src/manifest.ts`) at `ryu pack` time, before the manifest is signed, so the
-alias is deliberately rejected rather than half-supported.
+(`packages/sdk/src/manifest.ts`) at `bunx ryu pack` time, before the manifest is signed, so Core
+rejects the alias instead of supporting it halfway.
 
 ### Fields
 
@@ -79,8 +79,8 @@ alias is deliberately rejected rather than half-supported.
 | `diagnostics` | bool | `true` | Push this server's diagnostics into the model's context after edits |
 
 Extension keys are normalised before lookup (trimmed, lowercased, exactly one leading dot), so
-`go`, `.go` and `.GO` all resolve to the same entry. Unknown keys are dropped rather than rejected,
-so a field from a newer Claude Code release costs your plugin nothing.
+`go`, `.go` and `.GO` all resolve to the same entry. Unknown keys are dropped, not rejected, so a
+field from a newer Claude Code release does not break your plugin.
 
 The three timing defaults (`startupTimeout`, `shutdownTimeout`, `maxRestarts`) are the spawn site's
 own numbers, not values Claude Code documents. They live in
@@ -88,7 +88,7 @@ own numbers, not values Claude Code documents. They live in
 one, and it is honoured verbatim.
 
 <Callout type="warn">
-One default knowingly parts from Claude Code. An unset `shutdownTimeout` means *no timeout* there,
+One default differs from Claude Code. An unset `shutdownTimeout` means *no timeout* there,
 so the host waits on a wedged server forever; Ryu applies a finite 5s, because Pi is spawned per
 session and an unbounded wait would hold every teardown open behind one unresponsive process. An
 explicitly declared value is honoured verbatim, so only the unset case differs.
@@ -113,7 +113,7 @@ failure. The server is marked skipped permanently (so a missing binary cannot tu
 one line is written to stderr, and Core logs the agent subprocess's stderr at WARN under the
 `acp_subprocess` target:
 
-```
+```text
 [ryu-lsp] "gopls" is not on PATH; install it to enable language support for .go
 ```
 
@@ -124,10 +124,14 @@ extension.
 ## Built-in language plugins
 
 Ryu ships one plugin per language, mirroring Anthropic's official Claude Code code-intelligence
-plugins field-for-field — the same config body loads in either host. They are **config-only** and
-**opt-in**: Community-tier, so nothing is enabled on a fresh install; enabling the plugin for a
-language you actually use writes its server into the managed Pi's config on the next spawn. A
-missing binary is a graceful skip, never a hard failure.
+plugins field-for-field, so the same config body loads in either host. They are **config-only** and
+**opt-in**: Community-tier, so nothing is enabled on a fresh install. Enabling the plugin for a
+language writes its server into the managed Pi's config on the next spawn. A missing binary is a
+graceful skip, never a hard failure.
+
+<Callout type="warn">
+  Every built-in language-server plugin is experimental. Each manifest sets `"stability": "experimental"`.
+</Callout>
 
 | Plugin | Language | Server binary |
 |---|---|---|
@@ -149,7 +153,7 @@ install command (`brew install gopls`, `npm install -g typescript-language-serve
 `rustup component add rust-analyzer`, …). Two plugins pin a longer `startupTimeout` because their
 servers are slow to handshake: `jdtls` and `kotlin-lsp` wait 120s, mirroring Claude Code.
 
-`@ryu/clangd-lsp` deliberately omits the uppercase `.C`/`.H` entries from Claude's config: Ryu's
+`@ryu/clangd-lsp` omits the uppercase `.C`/`.H` entries from Claude's config: Ryu's
 extension lookup lowercases file extensions, so `.C` would collide with `.c` and misroute a C file
 to the C++ language id. clangd detects the language itself, so nothing is lost.
 
@@ -173,8 +177,8 @@ Core arbitrates every enabled plugin's declarations into one table before anythi
    drive today, since nothing in the field set carries a host or a port. It is refused *before* it
    claims anything, so a stdio sibling declaring the same extension stays alive.
 
-Registration order is `(plugin id ascending, then server key ascending)`. Sorting by plugin `id` is
-deliberate: installed packages are read from a directory whose order is not stable across machines,
+Registration order is `(plugin id ascending, then server key ascending)`. Core sorts by plugin `id`
+because installed packages are read from a directory whose order is not stable across machines,
 so two nodes with identical plugins would otherwise disagree about who owns `.go`. That makes the
 tie-break deterministic but not byte-identical to Claude Code's,
 whose order falls out of JS object insertion. Two servers fighting over one extension is a
@@ -195,17 +199,16 @@ appended to the tool result the model reads. Errors come first, capped at 20 wit
 because one syntax error can cascade into hundreds and an uncapped block would eat the context the
 model needs to fix it:
 
-```
+```text
 Language server diagnostics (com.example.go-tooling/go):
   cmd/api/main.go:42:9: error: undefined: reqeust [compiler/UndeclaredName]
   cmd/api/main.go:51:2: warning: declared and not used: buf [compiler/UnusedVar]
 ```
 
-A clean file appends nothing at all. That line would ride along on every edit for zero information,
-and the absence of a block already says it.
+A clean file appends nothing.
 
 Set `diagnostics: false` on a server to opt it out of pushing into context. Its navigation tools
-stay fully usable, so this is the right switch for a noisy server you still want to query on demand.
+stay usable, so use this switch for a noisy server you still want to query on demand.
 
 <Callout type="info">
 The first edit to a language spawns its server and reports nothing. Servers start lazily on the
@@ -231,7 +234,7 @@ are 1-based.
 | `lsp_diagnostics` | `path?` | Diagnostics for one file, or for everything analysed so far when `path` is omitted. Capped at 60, since the model asked for these explicitly |
 
 `lsp_symbol_search` is the one workspace-wide tool. Without `path` it asks every *already-running*
-server that supports it, so a cold server is never started to answer it — the model touches (or
+server that supports it, so a cold server is never started to answer it. The model touches (or
 edits) a file in the target language first, which starts the server. Pass `path` to scope the search
 to that file's server and warm it on demand. A match renders as `path:line:col [kind] name`, with the
 server's id prefixed when the query spanned more than one server.
@@ -252,7 +255,7 @@ reason is readable.
 Language servers are wired for the flagship **`ryu`** agent only, which Core runs as a managed Pi
 (`@earendil-works/pi-coding-agent`) over ACP. The binding is a Pi extension Core ships and
 configures (`apps/core/assets/pi-extensions/ryu-lsp.ts`). Other ACP agents are not wired yet: the
-declaration and the arbitration in `apps/core/src/lsp.rs` are agent-neutral by design, so a second
+declaration and the arbitration in `apps/core/src/lsp.rs` are agent-neutral, so a second
 agent adds a second binding rather than a second collector, but no such binding exists today. An
 agent that has its own LSP support (Claude Code) keeps using it and ignores this contribution.
 </Callout>
@@ -262,6 +265,5 @@ agent that has its own LSP support (Claude Code) keeps using it and ignores this
   <DocCard href="/docs/core/app-manifest-lifecycle" />
   <DocCard href="/docs/extend/develop/extensions/mcp-server" />
   <DocCard href="/docs/extend/develop/agent-integration-guide" />
+  <DocCard href="/docs/extend/develop/extensions/plugin-runtime" />
 </Cards>
-
-Continue with [Extensions](/docs/extend/develop/extensions), [Plugins](/docs/plugins), [plugin runtime](/docs/extend/develop/extensions/plugin-runtime), [MCP tools](/docs/extend/mcp/tools), and [TypeScript SDK](/docs/extend/develop/extensions/typescript-sdk).

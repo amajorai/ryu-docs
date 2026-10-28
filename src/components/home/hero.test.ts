@@ -1,12 +1,9 @@
 import { expect, test } from "bun:test";
 
+import { existsSync } from "node:fs";
+
+import { FEATURE_ROWS } from "./feature-rows";
 import { DOCS_HOME_COPY, DOCS_HOME_REALM_PATHS } from "./hero";
-import {
-  DOCS_PLATFORM_COPY,
-  ECOSYSTEM_DIAGRAM,
-  INTEGRATION_DIAGRAM,
-} from "./platform-map";
-import { DOCS_PRODUCT_GROUPS } from "./products";
 
 test("docs home uses the composable integration layer positioning", () => {
   expect(DOCS_HOME_COPY).toEqual({
@@ -16,23 +13,6 @@ test("docs home uses the composable integration layer positioning", () => {
   });
   expect(DOCS_HOME_COPY.title).not.toMatch(/[.!?]$/);
   expect(DOCS_HOME_COPY.description).not.toMatch(/[.!?]$/);
-});
-
-test("docs home uses direct integration framing", () => {
-  expect(DOCS_PLATFORM_COPY).toMatchObject({
-    capabilitiesTitle: "What connects through Ryu",
-    ecosystemTitle: "The Ryu ecosystem at a glance",
-    integrationHeading: "Add Ryu to your product",
-    integrationTitle: "Ways to integrate",
-    showcaseTitle: "Built with Ryu",
-    title: "How the pieces connect",
-  });
-  expect(DOCS_PLATFORM_COPY).not.toHaveProperty("eyebrow");
-  expect(DOCS_PLATFORM_COPY).not.toHaveProperty("integrationEyebrow");
-  expect(ECOSYSTEM_DIAGRAM).toContain("SDKs");
-  expect(ECOSYSTEM_DIAGRAM).toContain("Gateway");
-  expect(INTEGRATION_DIAGRAM).toContain("inbound and outbound channels");
-  expect(INTEGRATION_DIAGRAM).toContain("Embedded or standalone app");
 });
 
 test("docs home exposes every root selector destination", () => {
@@ -64,26 +44,25 @@ test("docs home exposes every root selector destination", () => {
     "reference/benchmark",
     "learn",
     "roadmap",
+    "release-notes",
   ]);
 });
 
-test("docs home gives products a dedicated anchor", () => {
-  const products = DOCS_PRODUCT_GROUPS.flatMap((group) => group.products);
-  const names = products.map((product) => product.name);
-
-  expect(names).toEqual([
-    "SDKs",
-    "Core",
-    "Gateway",
-    "Apps",
-    "Plugins",
-    "Ryu Cloud",
-    "Desktop",
-    "Web",
-    "Browser extension",
-    "Mobile",
-    "Companions",
-    "CLI",
-    "Bots and channels",
+test("docs home rows pair each track with a generated figure", () => {
+  expect(FEATURE_ROWS.map((row) => row.title)).toEqual([
+    "Use Ryu",
+    "Build on Ryu",
+    "Extend Ryu",
   ]);
+  for (const row of FEATURE_ROWS) {
+    expect(row.links.length).toBeGreaterThan(0);
+    expect(row.lead).not.toMatch(/[!?]$/);
+    for (const theme of ["light", "dark"]) {
+      const figure = new URL(
+        `../../../public/figures/${row.figure}-${theme}.svg`,
+        import.meta.url,
+      );
+      expect(existsSync(figure)).toBe(true);
+    }
+  }
 });

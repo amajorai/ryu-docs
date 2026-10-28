@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { type FormEvent, useEffect, useState, useTransition } from "react";
 
 import { cn } from "@/lib/cn";
+import styles from "./feedback.module.css";
 
 import {
   type ActionResponse,
@@ -102,7 +103,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
   return (
     <section
       aria-labelledby="docs-feedback-title"
-      className="not-prose mt-10 rounded-2xl bg-fd-muted/60 p-4 sm:p-5"
+      className={cn(styles.root, "mt-10 rounded-2xl bg-fd-muted/60 p-4 sm:p-5")}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
@@ -222,7 +223,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
             <p
               role="alert"
               aria-live="polite"
-              className="text-sm text-red-600 dark:text-red-300"
+              className="text-sm text-feedback-error"
             >
               {error}
             </p>

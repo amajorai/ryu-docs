@@ -1,84 +1,94 @@
 ---
-title: "Fine-Tuning"
-description: "Train open models locally with LoRA/QLoRA via the Unsloth sidecar, merge to GGUF, and serve as the active chat model."
+title: "Fine-Tuning Reference"
+description: "Reference for the @ryu/finetune app: train open models with LoRA or QLoRA through the Unsloth sidecar, merge to GGUF, and serve the result as the active chat model"
 ---
 
 Fine-tuning changes an open model's behavior with your data. Local training needs no API key or
-cloud service. Ryu runs the Apache-2.0 [Unsloth](https://github.com/unslothai/unsloth) library in a
-Core-managed sidecar, which is a separate process. From Desktop, you can start a job, watch live
-progress over SSE, convert the result to GGUF, and use it as the active chat model.
+cloud service. The `@ryu/finetune` app runs the Apache-2.0
+[Unsloth](https://github.com/unslothai/unsloth) library in a Core-managed Python sidecar. From its
+Companion UI you can start a job, watch live progress over SSE, convert the result to GGUF, and use
+it as the active chat model.
 
 <Callout type="warn">
-  Fine-tuning requires an NVIDIA CUDA GPU. When the local machine can't train, the job can be
-  proxied to a remote Ryu Cloud GPU node.
+  The `@ryu/finetune` app is marked `experimental`. Local training requires an NVIDIA CUDA GPU;
+  Apple Silicon (unified memory) and CPU-only machines cannot train locally. A job can instead be
+  sent to a remote Ryu GPU node, which is external configuration and is not verified locally.
 </Callout>
 
 ## How it works
 
-```
-Desktop (FinetuningPage)
-  └─ ryu-finetune sidecar /api/finetune/*
-        ├─ finetune/store.rs          ~/.ryu/finetune.db
-        ├─ finetune/adapters.rs       ~/.ryu/installed-adapters.json
-        ├─ model_catalog/device.rs    GPU gate
-        └─ unsloth sidecar            python -m ryu_unsloth
+```text
+Companion UI (apps-store/finetune/ui)
+  └─ ryu-finetune sidecar /api/finetune/*      apps-store/finetune/backend/src/
+        ├─ store.rs        <data dir>/plugin-data/@ryu+finetune/finetune.db
+        ├─ adapters.rs     <data dir>/plugin-data/@ryu+finetune/installed-adapters.json
+        ├─ api.rs          GPU gate (local_capability), routes, remote dispatch
+        └─ unsloth sidecar python -m ryu_unsloth   (apps-store/finetune/sidecar/)
               FastLanguageModel → SFTTrainer → GGUF
 ```
 
-Core decides **what runs** (a job on this node's GPU, or a remote node) and owns the durable job
-record. The sidecar is a pure training runtime. The desktop is the UI.
+The `ryu-finetune` sidecar decides **what runs** (a job on this node's GPU, or a remote node) and
+owns the durable job record. The Python `unsloth` sidecar is only a training runtime.
 
-On shared managed nodes, Core and the Fine-tune sidecar bind every job and progress stream to the
-verified caller's owner, organization, and server-derived node. The public mount and Companion
-host bridge use the same scope; a job id alone cannot read, cancel, or merge another caller's job.
+On shared managed nodes, every job and progress stream is bound to the verified caller's owner,
+organization, and server-derived node. The public mount and the Companion UI (which reaches the
+same sidecar routes through the app's own mount) use the same scope. A job id alone cannot read,
+cancel, or merge another caller's job. Viewing needs the `finetune.view` permission level; starting,
+cancelling, and merging need `finetune.run`.
 
 ## Lifecycle
 
-1. **Check capability** — `GET /api/finetune/capability` reports whether local training is
-   possible (GPU present, VRAM sufficient, sidecar running).
-2. **Start a job** — `POST /api/finetune/start` with a base model, dataset, and optional LoRA /
+1. **Check capability.** `GET /api/finetune/capability` reports whether local training is possible
+   (NVIDIA GPU present, sidecar running).
+2. **Start a job.** `POST /api/finetune/start` with a base model, dataset, and optional LoRA and
    training config. The request is limited to 4 MiB, the base model must be a Hugging Face
-   `namespace/model` id, and the worker applies bounded dataset/training settings. Returns a
+   `namespace/model` id, and the worker applies bounded dataset and training settings. It returns a
    `job_id` and initial `state`. An `Idempotency-Key` header (or `idempotency_key` body field)
    makes a retried start replay the original job instead of launching a duplicate. A remote
    target must be an allowed HTTPS origin; private and metadata addresses are refused.
-3. **Stream progress** — `GET /api/finetune/{id}/stream` is an SSE endpoint that proxies the
-   sidecar's live training metrics (loss, epochs, ETA).
-4. **Merge** — `POST /api/finetune/merge` converts the trained LoRA adapter into a standalone GGUF
+3. **Stream progress.** `GET /api/finetune/{id}/stream` is an SSE endpoint that proxies the
+   worker's live training metrics (loss, epochs, ETA).
+4. **Merge.** `POST /api/finetune/merge` converts the trained LoRA adapter into a standalone GGUF
    file ready for local inference.
-5. **Serve** — The merged GGUF appears in the [Model Catalog](/docs/core/model-catalog) and can be
+5. **Serve.** The merged GGUF appears in the [Model Catalog](/docs/core/model-catalog) and can be
    set as the active chat model.
 
 ## Routes
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/finetune/capability` | `{ can_train_local, gpu, vram_bytes, reason, sidecar }` |
+| `GET` | `/api/finetune/capability` | `{ can_train_local, gpu, vram_bytes, vram_human, unified_memory, os, reason, sidecar }` |
 | `POST` | `/api/finetune/start` | Start a fine-tune job. Body: `{ base_model_id, dataset, output_name?, lora?, training? }` |
 | `GET` | `/api/finetune/list` | List all jobs with current state |
 | `GET` | `/api/finetune/{id}` | One job's details (prefers sidecar's live snapshot) |
 | `DELETE` | `/api/finetune/{id}` | Cooperative cancel |
 | `GET` | `/api/finetune/{id}/stream` | SSE progress stream |
-| `POST` | `/api/finetune/merge` | Merge adapter → GGUF |
+| `POST` | `/api/finetune/merge` | Merge adapter to GGUF |
 | `GET` | `/api/finetune/adapters` | List installed trained adapters |
 
 ## Durable job store
 
-Jobs persist in `~/.ryu/finetune.db` (SQLite via rusqlite). The store is the system of record and
-survives restarts. Each job tracks its state machine (`pending → training → completed | failed |
-cancelled`), the base model ID, dataset path, LoRA config, output path, and training metrics.
+Jobs persist in `<data dir>/plugin-data/@ryu+finetune/finetune.db` (SQLite). The store is the
+system of record and survives restarts. Each job tracks its state (`queued`, `running`, then
+`succeeded`, `failed`, or `cancelled`), the base model ID, dataset path, LoRA config, output path,
+and training metrics.
 
 ## Adapter catalog
 
-Merged adapters are tracked in `~/.ryu/installed-adapters.json` with provenance metadata (base
-model, dataset, training config, creation date). The catalog filters by whether the GGUF file is
-still present on disk, so deleting a file automatically removes the adapter from the list.
+Merged adapters are tracked in `<data dir>/plugin-data/@ryu+finetune/installed-adapters.json` with
+provenance metadata (base model, dataset, training config, creation date). The catalog filters by
+whether the GGUF file is still present on disk, so deleting a file removes the adapter from the
+list.
 
-## API reference
+Trained LoRA adapters are written to `<data dir>/models/adapters/` and merged GGUFs to
+`<data dir>/models/chat/`, next to the other chat models. File-backed datasets and per-job
+checkpoints stay in the app's own data folder (`plugin-data/@ryu+finetune/datasets/` and
+`checkpoints/`). The data dir is `~/.ryu` on the release profile.
 
 The `/api/finetune/*` surface is served by the `ryu-finetune` sidecar, not by Core itself, so it is
-not part of the [Core API reference](/docs/extend/develop/api-reference/core). Request and response shapes
-are documented in the [Routes table](#routes) above.
+not part of the [Core API reference](/docs/extend/develop/api-reference/core).
+
+## Remote targets
 
 Remote targets are normalized to an origin before use. Set `RYU_FINETUNE_REMOTE_ALLOWLIST`
 when the node must dispatch only to specific GPU origins; repeated status, cancel, and stream
@@ -86,8 +96,8 @@ requests never follow redirects and pin DNS results after rejecting private addr
 remote bearer cannot be forwarded to a different host. Job snapshots advance monotonically, so
 late poll responses cannot resurrect a terminal job.
 
-## See also
+## Related
 
-- [Model Catalog](/docs/core/model-catalog) — browse, install, and switch active models
-- [Engines](/docs/surfaces/desktop/engines) — the inference runtimes that serve models
-- [Spaces & RAG](/docs/core/spaces-rag) — attach training datasets to a Space
+- [Fine-tuning app](/docs/apps/finetune) - the Store listing for `@ryu/finetune`
+- [Model Catalog](/docs/core/model-catalog) - browse, install, and switch active models
+- [Engines](/docs/surfaces/desktop/engines) - the inference runtimes that serve models

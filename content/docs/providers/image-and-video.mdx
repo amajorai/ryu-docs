@@ -1,7 +1,7 @@
 ---
 title: Image and Video
-description: "Local and cloud image and video generation providers, including job-based video output."
-tags: ["Providers", "Image", "Video", "Media"]
+description: "Reference for Ryu's local and cloud image, video, and generated-audio providers, reference media inputs, job polling, and the desktop image editor engines."
+tags: ["Providers", "Image", "Video", "Audio", "Media"]
 ---
 
 Image and video are independent from the resident Chat runtime. They can use a local media engine,
@@ -12,20 +12,39 @@ an OpenAI-compatible image provider, or a cloud provider with its own queue and 
 | Provider path | Image | Video | Request behavior |
 |---|---:|---:|---|
 | OpenAI | Yes | No generic Gateway video implementation | OpenAI-compatible image generation |
-| OpenRouter | Yes | No generic Gateway video implementation | Image generation through the OpenRouter model/provider route |
-| Fal AI | Yes | Yes | Image can complete inline; video is submitted to a queue and polled |
-| Replicate | Yes | Yes | Predictions can complete inline for image/TTS; video uses create → poll |
+| OpenRouter | Yes | Yes | Images API (or chat image output), and video jobs submitted and polled through OpenRouter; see [OpenRouter](/docs/providers/openrouter) |
+| Gemini (`genai`) | Yes, with a Gemini image model | No generic Gateway video implementation | Native `generateContent` request translated into the OpenAI image response shape |
+| Fal AI | Yes | Yes | Image can complete inline; video and generated audio are submitted to a queue and polled |
+| Replicate | Yes | Yes | Predictions can complete inline for image/TTS; video and generated audio use create → poll |
+| BFL Flux | Yes | Yes | Native image generation and queued Flux video |
+| Stability AI | Yes | No | Native image generation |
+| Recraft | Yes | No | Native image generation |
+| MiniMax | Yes | No | Native image generation |
+| Runway ML | No | Yes | Native video task submission and polling |
+| Topaz Labs | No | Yes, enhancement | Existing video from an S3 presigned URL → Express job → poll |
 | stable-diffusion.cpp | Yes | Yes | Local Core sidecar; image and video models are separate model kinds |
 | Custom OpenAI-compatible endpoint | If its image route is implemented | Provider-specific | Use a configured endpoint only for the operations it documents |
 
-Model support is upstream-defined. A provider being listed here does not mean every model in its
-catalog supports both image and video, or that the output is available immediately.
+The upstream provider defines model support. A listed provider does not mean every model in its
+catalog supports both image and video, or that output is available immediately.
+
+Generated audio (music and sound effects) is available through Fal and Replicate only, because
+their queues accept any model ID with that model's own input fields. Runway, Topaz and BFL Flux
+have fixed video schemas and reject audio jobs.
+
+For Gemini image generation, configure a Gemini API key in the GenAI provider and route the image
+modality to `genai` with an image model such as `gemini-3.1-flash-image`. Ryu sends the prompt to
+Google's native image endpoint and returns base64 image data through
+`POST /v1/images/generations`. One image is supported per request. The standard square,
+landscape, and portrait `size` values map to an aspect ratio; the exact pixels depend on the
+selected Gemini model. Gemini returns `b64_json` image data; a request for a hosted `url` response
+is rejected. Other GenAI chat adapters do not become image providers automatically.
 
 ## Local media
 
-The `sdcpp` engine wraps stable-diffusion.cpp for local text-to-image and text/image-to-video. It
-runs alongside Chat and uses the node's hardware and model cache. The engine keeps the full
-stable-diffusion.cpp request surface available instead of reducing it to a fixed Ryu-only schema.
+The `sdcpp` engine wraps stable-diffusion.cpp for local text-to-image, masked image edits, and
+text/image-to-video. It runs alongside Chat and uses the node's hardware and local model store. The
+engine exposes the full stable-diffusion.cpp request surface, not a reduced Ryu-only schema.
 
 Use the local path when the model and hardware fit the node and you want generation to stay on the
 machine. Use a cloud provider when the selected model or GPU runtime is not local, subject to the
@@ -40,8 +59,152 @@ Cloud video is job-based because generation can take minutes:
 3. Poll the job until it succeeds or fails.
 4. Read the normalized media output and provider-specific raw result when available.
 
-The Gateway keeps the provider reference and maps provider status into one job vocabulary. A
-provider rate limit or queue failure remains visible; it is not turned into a false completed job.
+The Gateway retains the submitting account, endpoint and HTTP client and maps provider status
+into one job vocabulary. Credential rejection, an unavailable proxy, rate limits or an unreadable
+poll response do not establish that the upstream job failed. The job stays nonterminal and
+`poll_blocked.message` explains the polling problem. No new generation is submitted.
+
+Replicate supports explicit outbound proxy-pool assignments. Each prediction inherits the proxy
+used to create it. Queued-job polling keeps the actual selected client while the Gateway is
+running, including after the proxy pool's ordinary affinity entries expire or are evicted.
+An unavailable origin proxy blocks polling; it does not move the accepted job or submit the
+work again through another provider.
+
+Replicate supports multiple API keys through `providers.replicate.api_keys` or Gateway → API keys.
+New predictions rotate among eligible accounts; quota or account-credit rejection can select
+another key before acceptance. Submit and poll stay on the chosen account. Newly created video
+jobs retain an opaque account reference, so reordering configured keys does not switch the job's
+credential. Accepted queued work holds its polling credential until a genuine terminal result
+or idle expiry. This does not revoke an upstream credential or provide recovery after restart.
+
+Fal also supports proxy-pool assignments. Queue submission, status checks, and result fetches share
+one job binding while the Gateway is running. Job references must stay on the configured queue
+origin before Ryu attaches its credential. An accepted request with an unreadable queue response,
+missing reference, timeout, or unavailable result returns an error without resubmitting generation.
+
+Fal supports multiple keys through `providers.fal.api_keys` and the Gateway key editor. New queued
+work rotates accounts; quota or credit rejection can select another key before acceptance. Status
+and result requests keep the captured account, endpoint and client without consulting current
+account selection. Reordering accounts cannot retarget an accepted queued job.
+
+### Topaz video enhancement
+
+The direct `topaz` provider enhances an existing video. Configure its key under
+**Gateway → API keys → Provider keys**, or use `[providers.topaz]` with `api_key`, optional
+`api_keys`, and the default `base_url = "https://api.topazlabs.com"`.
+Gateway discovers enhancement models from Topaz's public system-status endpoint.
+Its catalog may include models such as `apo-8`; the live response determines
+which models Topaz currently accepts. If discovery is unavailable, Gateway does
+not invent a fixed Topaz model list. A model mapping can still name a known
+model explicitly.
+
+Send `POST /v1/videos/generations` with `model: "apo-8"`, a `source` containing
+`container` and `external: { "provider": "s3", "presignedUrl": "https://…" }`, a
+nonempty `filters` array whose first model is `apo-8`, and an `output.resolution`
+with positive width and height. The presigned URL must resolve to a public HTTPS
+address. Topaz fetches the source from that URL; Gateway does not download it.
+Do not place an internal or long-lived source URL there. The API key, selected
+outbound proxy, and polling client remain bound to the accepted job. New jobs
+can rotate keys after a definitive rate-limit or credit rejection.
+
+This route uses Topaz's [Express video request](https://developer.topazlabs.com/reference/video/create-express-request/create-express-video-request)
+with external storage. It does not accept local-file uploads, Topaz upload URLs,
+destination storage, or webhooks. The job is polled at
+`GET /v1/videos/generations/{id}` and returns the enhanced video's signed URL
+when complete. Save the result before Topaz's URL expires. The source and
+enhancement are processed by Topaz and may incur provider charges.
+
+## Video reference inputs
+
+A video request can carry reference media alongside the prompt. Ryu uses the same field names
+for every provider and maps them per target, or refuses the request with a reason. An input
+is never dropped silently, so a request cannot quietly turn into plain text-to-video.
+
+| Field | Meaning |
+|---|---|
+| `input_images` | `[first, last?]`, a start frame and an optional end frame |
+| `input_video` | A source clip, for video-to-video edits and lip-sync |
+| `input_audio` | An audio track, for lip-sync and talking avatars |
+| `provider_input` | A JSON object merged into the provider request (cloud providers only) |
+
+Media values are base64 `data:` URIs (images: PNG, JPEG or WebP; an `image/jpg` URI is sent as
+`image/jpeg`). Cloud providers also accept `https` URLs, which the provider fetches. The local
+engine accepts inline data only. A request body may be up to 64 MiB.
+
+When the Gateway firewall is on, it scans every text field of a media request, not only the
+prompt. Base64 image, video and audio `data:` URIs are skipped as binary media. Any other `data:`
+value, such as `data:text/plain,…`, is scanned as text. For a presigned storage URL (S3, GCS,
+Azure SAS or CloudFront), the firewall scans the host and path but not the signed query string,
+so the provider can still fetch the file. A credential in the path, or in an ordinary query
+string, is still blocked or redacted.
+
+How each target uses them:
+
+- **Runway** sends the first frame as `promptImage`. It has no last-frame, video or audio input,
+  so those are refused.
+- **Fal and Replicate** models each name their own input fields. Put the field names in
+  `provider_input` and point them at the canonical inputs with a reference: `$input_images.0`,
+  `$input_images.1`, `$input_video`, `$input_audio` or `$duration_s`. For example,
+  `"provider_input": { "video_url": "$input_video", "audio_url": "$input_audio" }` sends the
+  clip and the voice track under the model's own names. Each input can be referenced once. Ryu
+  refuses a canonical input that no reference uses, a reference used more than once, and a
+  reference to an input the request does not have. The correct field names come from the
+  model's documentation on the provider's site. Ryu does not check them.
+- **OpenRouter** video jobs go straight to the Gateway's `POST /v1/videos/generations`. Core's
+  video route does not map reference inputs for OpenRouter and refuses a request that names it.
+- **Local stable-diffusion.cpp** sends `input_images` to the engine as its start frame
+  (`init_image`) and end frame (`end_image`), but only when the selected local diffusion model
+  can use them. The default model (Wan2.1 T2V 1.3B) is text-to-video only, so it refuses
+  frames. To use frames locally, install one of these Wan models from the model catalog and
+  select it as the local diffusion model:
+
+  | Model | Frames | Extra files Ryu downloads on first use |
+  | --- | --- | --- |
+  | Wan2.1 I2V 14B (480p or 720p) | first | umt5-xxl encoder, Wan2.1 VAE, CLIP-vision H (~1.3 GB) |
+  | Wan2.1 FLF2V 14B 720p | first and last | umt5-xxl encoder, Wan2.1 VAE, CLIP-vision H |
+  | Wan2.2 TI2V 5B | first | umt5-xxl encoder, Wan2.2 VAE (~1.4 GB) |
+  | Wan2.2 I2V A14B | first and last | umt5-xxl encoder, Wan2.1 VAE |
+
+  Ryu recognizes these models by the names their published GGUF files use (for example
+  `wan2.1-flf2v-14b-720p-Q4_K_M` or `Wan2.2-TI2V-5B-Q4_K_M`). Wan2.2 I2V A14B is two files that
+  the published repository keeps in `LowNoise/` and `HighNoise/` folders: install both with the
+  same quantization (the catalog saves each under its file name). Ryu refuses to select one half
+  as the local diffusion model until the other is installed. Ryu downloads the extra files from
+  a fixed repository revision and checks each one's SHA-256. These models are large and run far
+  faster on a GPU; Ryu starts the engine with CPU offload so they fit in less video memory.
+
+  Ryu waits up to one hour for a video that starts from frames (10 minutes for text-to-video), then
+  cancels the job and returns a timeout error, so a slow CPU-only run can fail. A model set through
+  `RYU_SD_MODEL`, or one Ryu does not recognize, loads without these extra files, so it refuses
+  frames too. Local video also refuses a source video or an audio track, because no local model
+  can use them. Use a cloud provider for those.
+
+`provider_input` can add model-specific fields such as a negative prompt, a strength or a seed.
+It cannot set `model`, `provider`, `prompt`, `request_id`, `n`, `project_id` or the canonical
+input fields, and it cannot replace a field that is already in the request. Ryu refuses a
+request that tries.
+
+Image requests to a cloud provider accept `provider_input` too, with the same reserved keys plus
+`input_mask`. Its fields are added to the provider request as given, without references. The
+local image engine has no model-specific fields, so it refuses an image request with
+`provider_input`.
+Image generation requests are limited to 24 MiB, a smaller limit than video and audio jobs,
+because reference images travel inline in the request.
+
+## Generated audio
+
+Music and sound effects are a separate job-based modality, `audio`. Speech from text stays on the
+speech route. Submit `{ "model", "prompt", ... }` with the model's own input fields to
+`POST /v1/audio/generations`, then poll `GET /v1/audio/generations/{id}` until the job succeeds.
+The finished job returns the generated audio in `data: [{ "url" }]`. Core's audio route also
+accepts `kind` (`music` or `sfx`, kept as a label only), `duration_s` and the reference inputs
+above. They reach the model through `provider_input` references, for example
+`{ "seconds_total": "$duration_s" }`.
+
+There is no local music or sound-effect engine. Audio requests need a cloud provider (`fal` or
+`replicate`) configured in the Gateway, and Ryu refuses them otherwise. Audio jobs are billed from
+the provider's reported compute time when it reports one. Otherwise they are billed at the flat
+video rate and marked as an estimate.
 
 ## Public request surfaces
 
@@ -50,11 +213,55 @@ provider rate limit or queue failure remains visible; it is not turned into a fa
 | Image generation | `POST /v1/images/generations` |
 | Submit video generation | `POST /v1/videos/generations` |
 | Poll video generation | `GET /v1/videos/generations/{id}` |
-| Local image generation | Core image route |
+| Submit audio generation (music, sound effects) | `POST /v1/audio/generations` |
+| Poll audio generation | `GET /v1/audio/generations/{id}` |
+| Local image generation and editing | Core image route |
 | Local video generation | Core video route |
+| Cloud audio generation | Core audio route |
 
-Per-agent image and video slots can override the node's modality mapping. The provider and model
-remain subject to the Gateway's normal authentication, routing, budget, and audit path.
+Per-agent image, video and audio slots (`x-ryu-slot-audio-provider` and
+`x-ryu-slot-audio-model` for audio) can override the node's modality mapping. The provider and
+model remain subject to the Gateway's normal authentication, routing, budget, and audit path.
+Inbound data-loss prevention for image, video and audio scans the prompt and every other text
+field in the request, including fields added through `provider_input`. Inline `data:` media is
+not scanned as text.
 
-See [Engines and sidecars](/docs/surfaces/desktop/engines), [Docker Model Runner](/docs/surfaces/desktop/engines/docker-model-runner),
-and [Gateway inference](/docs/extend/develop/api-reference/gateway/inference/createVideoGeneration).
+## Image editing engines
+
+The desktop chat image editor uses three independent image engines. How to use the editor is on
+[Chat composer and media](/docs/surfaces/desktop/user-guide/chat-composer-and-media#image-generation).
+This section covers the engines, their limits, and where image data goes.
+
+| Operation | Engine | Where pixels go |
+|---|---|---|
+| Segmentation | Browser-local Transformers.js model, default `Xenova/detr-resnet-50-panoptic` | Stay in the browser |
+| Background removal | Browser-local Transformers.js model, default `Xenova/modnet` | Stay in the browser |
+| AI Resize, **On this device** | Ryu's local stable-diffusion.cpp engine and the selected local diffusion model | Stay on the device |
+| AI Resize, **Gateway model** | The image provider and model configured in Gateway routing | Sent to that provider |
+
+Segmentation and background removal model IDs can be changed in the editor's **Models** panel. IDs
+must identify Transformers.js-compatible models for the matching task. Model files download from the
+Hugging Face Hub on first use and are cached by the browser profile. The local runtime uses the
+browser's WebAssembly CPU backend. Segmentation uses labeled segmentation models and does not need a
+separate promptable SAM service.
+
+Ryu provisions stable-diffusion.cpp and the default SDXL model during setup on supported platforms.
+The editor builds the outpaint canvas and mask locally, then runs image-to-image inference on the
+device. Local dimensions align to SDXL's 64-pixel grid; Gateway dimensions follow the image-route
+size hint. With **Gateway model**, upstream image-input support, provider data handling, and possible
+charges depend on the selected provider and model.
+
+| Limit | Value |
+|---|---|
+| Editor image | Up to 32 MB and 40 megapixels, neither side over 16,000 px |
+| Local AI Resize input | 1,536 px on the longest side and 16 MB |
+| Segmentation model input | Scaled to at most 1,024 px on the longest side |
+| Background removal model input | Scaled to at most 2,048 px on the longest side |
+
+Results are applied to the current canvas size. Fine mask edges can be less precise on very large
+images. See [Engines and sidecars](/docs/surfaces/desktop/engines) and
+[Docker Model Runner](/docs/surfaces/desktop/engines/docker-model-runner).
+
+## Provider-specific guides
+
+For API limits and provider-specific behavior, see [Image and Video Provider Guides](/docs/providers/image-video-provider-guides).

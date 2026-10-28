@@ -1,6 +1,6 @@
 import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "./i18n";
 
-export const DOCS_VERSION = "0.4.0" as const;
+export const DOCS_VERSION = "0.5.0" as const;
 
 /**
  * Ryu's public docs intentionally serve one current version.
@@ -28,7 +28,7 @@ const VERSION_SEGMENT_RE = /^\d+\.\d+\.\d+$/;
  * rather than falling through to content resolution and 404ing.
  */
 export function isVersionSegment(slug: string | undefined): boolean {
-  return typeof slug === "string" && VERSION_SEGMENT_RE.test(slug);
+  return slug !== undefined && VERSION_SEGMENT_RE.test(slug);
 }
 
 /**
@@ -52,7 +52,7 @@ export const DOCS_VERSIONS: readonly {
 }[] = [
   {
     slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.4.0", not "v0.4.0".
+    // Bare number, no "v" prefix — the switcher reads "0.5.0", not "v0.5.0".
     title: DOCS_VERSION,
   },
 ];
@@ -80,6 +80,22 @@ export function docsPathForLocale(
 
 export function isDocsVersionSlug(slug: string | undefined): boolean {
   return DOCS_VERSIONS.some((version) => version.slug === slug);
+}
+
+/** Next's default-locale rewrite must select the same tree as its public URL. */
+export function normalizeDocsNavigationPathname(pathname: string): string {
+  const hiddenDocsPrefix = `/${DEFAULT_DOCS_LOCALE}/docs`;
+  const visiblePath =
+    pathname === hiddenDocsPrefix || pathname.startsWith(`${hiddenDocsPrefix}/`)
+      ? pathname.slice(DEFAULT_DOCS_LOCALE.length + 1)
+      : pathname;
+  const parts = visiblePath.split("/").filter(Boolean);
+  const offset = isDocsLocale(parts[0]) ? 1 : 0;
+  // Version-shaped routes have their own redirect contract; don't prepend a
+  // second version while Next is resolving one of those routes.
+  return parts[offset] === "docs" && !isVersionSegment(parts[offset + 1])
+    ? versionedDocsHref(visiblePath)
+    : visiblePath;
 }
 
 export function versionedDocsHref(href: string): string;
@@ -161,4 +177,13 @@ export function docsSegmentsFromPathname(pathname: string): string[] {
   return isDocsVersionSlug(parts[offset + 1])
     ? parts.slice(offset + 2)
     : parts.slice(offset + 1);
+}
+
+/** The page the bare "/docs" route redirects to (next.config.mjs). */
+export const DOCS_ENTRY_PATH = docsPath("start-here");
+
+/** True on any docs route, with or without a visible locale prefix. */
+export function isDocsPathname(pathname: string | null | undefined): boolean {
+  const parts = (pathname ?? "").split("/").filter(Boolean);
+  return parts[isDocsLocale(parts[0]) ? 1 : 0] === "docs";
 }

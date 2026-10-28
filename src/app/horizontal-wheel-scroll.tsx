@@ -4,6 +4,6 @@ import { installHorizontalWheelScrolling } from "@ryu/ui/lib/horizontal-wheel-sc
 import { useEffect } from "react";
 
 export function HorizontalWheelScroll() {
-	useEffect(() => installHorizontalWheelScrolling(), []);
-	return null;
+  useEffect(() => installHorizontalWheelScrolling(), []);
+  return null;
 }

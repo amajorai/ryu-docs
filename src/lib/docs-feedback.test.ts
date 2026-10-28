@@ -1,6 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { z } from "zod";
 
 import { submitDocsBlockFeedback, submitDocsFeedback } from "./docs-feedback";
+import { resetFeedbackBudget } from "./docs-feedback-budget";
+
+beforeEach(() => {
+  resetFeedbackBudget();
+});
 
 const validFeedback = {
   message: "The code sample needs a note about the required scope.",
@@ -34,18 +40,21 @@ describe("docs feedback action", () => {
     const previousToken = process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
     const previousFetch = globalThis.fetch;
     process.env.DOCS_FEEDBACK_GITHUB_TOKEN = "test-token";
-    globalThis.fetch = (async (_input, init) => {
-      expect(init?.method).toBe("POST");
-      expect(new Headers(init?.headers).get("authorization")).toBe(
-        "Bearer test-token",
-      );
-      return new Response(
-        JSON.stringify({
-          html_url: "https://github.com/amajorai/ryu/issues/1",
-        }),
-        { headers: { "Content-Type": "application/json" }, status: 201 },
-      );
-    }) as typeof fetch;
+    globalThis.fetch = Object.assign(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        expect(init?.method).toBe("POST");
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer test-token",
+        );
+        return new Response(
+          JSON.stringify({
+            html_url: "https://github.com/amajorai/ryu/issues/1",
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 201 },
+        );
+      },
+      { preconnect: previousFetch.preconnect },
+    );
 
     try {
       const response = await submitDocsFeedback(validFeedback);
@@ -93,25 +102,27 @@ describe("docs feedback action", () => {
     const previousToken = process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
     const previousFetch = globalThis.fetch;
     process.env.DOCS_FEEDBACK_GITHUB_TOKEN = "test-token";
-    globalThis.fetch = (async (_input, init) => {
-      const payload = JSON.parse(String(init?.body)) as {
-        body: string;
-        title: string;
-      };
+    globalThis.fetch = Object.assign(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const payload = z
+          .object({ body: z.string(), title: z.string() })
+          .parse(JSON.parse(String(init?.body)));
 
-      expect(payload.title).toContain("#setup-1_abc");
-      expect(payload.body).toContain("- Block: #setup-1_abc");
-      expect(payload.body).toContain(
-        "The selected paragraph explains the setup.",
-      );
+        expect(payload.title).toContain("#setup-1_abc");
+        expect(payload.body).toContain("- Block: #setup-1_abc");
+        expect(payload.body).toContain(
+          "The selected paragraph explains the setup.",
+        );
 
-      return new Response(
-        JSON.stringify({
-          html_url: "https://github.com/amajorai/ryu/issues/2",
-        }),
-        { headers: { "Content-Type": "application/json" }, status: 201 },
-      );
-    }) as typeof fetch;
+        return new Response(
+          JSON.stringify({
+            html_url: "https://github.com/amajorai/ryu/issues/2",
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 201 },
+        );
+      },
+      { preconnect: previousFetch.preconnect },
+    );
 
     try {
       const response = await submitDocsBlockFeedback({
@@ -153,5 +164,88 @@ describe("docs feedback action", () => {
     expect(new URL(response.destinationUrl).searchParams.get("body")).toContain(
       "/es/docs/0.4.0/start-here",
     );
+  });
+
+  test.each([
+    { id: "null", payload: null },
+    { id: "missing", payload: {} },
+    { id: "wrong-type", payload: { html_url: 42 } },
+  ])("returns email fallback for malformed GitHub acknowledgement $id", async ({
+    id,
+    payload,
+  }) => {
+    const previousToken = process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
+    const previousFetch = globalThis.fetch;
+    process.env.DOCS_FEEDBACK_GITHUB_TOKEN = "test-token";
+    let requests = 0;
+    globalThis.fetch = Object.assign(
+      async () => {
+        requests++;
+        return Response.json(payload, { status: 201 });
+      },
+      { preconnect: previousFetch.preconnect },
+    );
+    try {
+      const result = await submitDocsFeedback({
+        ...validFeedback,
+        message: `Malformed GitHub acknowledgement ${id}`,
+      });
+      expect(requests).toBe(1);
+      expect(result.submitted).toBe(false);
+      expect(result.destinationUrl.startsWith("mailto:hello@ryuhq.com?")).toBe(
+        true,
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousToken === undefined)
+        delete process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
+      else process.env.DOCS_FEEDBACK_GITHUB_TOKEN = previousToken;
+    }
+  });
+
+  test("bounds concurrent GitHub requests and sends replays to email", async () => {
+    const previousToken = process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
+    const previousFetch = globalThis.fetch;
+    process.env.DOCS_FEEDBACK_GITHUB_TOKEN = "test-token";
+    let requests = 0;
+    globalThis.fetch = Object.assign(
+      async () => {
+        requests++;
+        return Response.json(
+          { html_url: "https://github.com/amajorai/ryu/issues/3" },
+          { status: 201 },
+        );
+      },
+      { preconnect: previousFetch.preconnect },
+    );
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 100 }, () =>
+          submitDocsFeedback({
+            ...validFeedback,
+            message: "Concurrent repeated report",
+          }),
+        ),
+      );
+      expect(requests).toBe(1);
+      expect(results.filter((result) => result.submitted)).toHaveLength(1);
+      expect(
+        results.filter((result) => result.destinationUrl.startsWith("mailto:")),
+      ).toHaveLength(99);
+      await Promise.all(
+        Array.from({ length: 100 }, (_, index) =>
+          submitDocsFeedback({
+            ...validFeedback,
+            message: `Unique bounded report ${index}`,
+          }),
+        ),
+      );
+      expect(requests).toBeLessThanOrEqual(20);
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousToken === undefined)
+        delete process.env.DOCS_FEEDBACK_GITHUB_TOKEN;
+      else process.env.DOCS_FEEDBACK_GITHUB_TOKEN = previousToken;
+    }
   });
 });

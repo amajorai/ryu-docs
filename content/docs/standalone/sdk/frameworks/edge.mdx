@@ -1,0 +1,111 @@
+---
+title: "Edge Runtimes"
+description: "Which @ryuhq/services entry points run on Workers-style edge runtimes, how to pass configuration without process.env, and the WebSocket exceptions"
+tags: ["sdk", "edge", "webhooks", "standalone"]
+---
+
+Workers-style edge runtimes run JavaScript with web APIs such as `fetch` and
+Web Crypto, and often without Node.js modules or a populated `process.env`.
+`@ryuhq/services` is written for that: none of its entry points import a
+Node.js module, and configuration can come from any object you pass.
+
+Install the package as shown in the [SDK overview](/docs/standalone/sdk#install).
+
+## Entry points
+
+| Entry point | On an edge runtime | Needs |
+|---|---|---|
+| `@ryuhq/services/webhooks` | Yes. It contains no client code and no other package. | Web Crypto (`crypto.subtle`). |
+| `@ryuhq/services/errors` | Yes. | Nothing beyond the language. |
+| `@ryuhq/services` | Yes, for every HTTP call. | `fetch`, and `env` passed to `new Ryu()` where `process.env` does not hold your configuration. |
+
+The SDK's tests check these by reading each entry point's import graph: none
+of them reaches a `node:` module, the webhooks entry point reaches no client
+code, and the main entry point depends only on `@ryuhq/client` and `zod`.
+
+## Exceptions
+
+- **Box terminals, tunnels, and SSH** use WebSockets through the Box client's
+  `webSocket` option, not `fetch`. Pass a `WebSocket` constructor that your
+  runtime provides as `new Ryu({ box: { webSocket } })`. Every other Box call
+  is plain HTTP.
+- **Mail `react` bodies** are rendered with the optional
+  `@react-email/render` package, which the SDK loads only when a `react` body
+  is sent. Send `html` or `text` instead if that package does not run on
+  your runtime.
+- **Configuration** is read from `process.env` only when the runtime provides
+  one, as Workers do with Node.js compatibility turned on. Pass your bindings
+  with `new Ryu({ env })`, or each value as a constructor option, so the
+  source is unambiguous: an `env` object replaces `process.env` entirely.
+
+Streams, such as `ryu.notify.events.stream()` and Managed Agents session
+streams, are read through `fetch` and work wherever streaming responses do.
+Your runtime's own limits on request duration, CPU time, and connections
+still apply; check them for long streams and for polling helpers such as
+`ryu.notify.requestApproval()`.
+
+## A Worker
+
+This module receives Notify destination deliveries and publishes a Notify
+event. It is taken from a test that runs it against a stub service.
+
+```ts title="src/worker.ts"
+import { Ryu } from "@ryuhq/services";
+import { webhookHandler } from "@ryuhq/services/webhooks";
+
+interface Env {
+  NOTIFY_DESTINATION_SECRET: string;
+  RYU_NOTIFY_API_KEY: string;
+  RYU_NOTIFY_URL?: string;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (pathname === "/webhooks/notify") {
+      // Verifies the raw body with WebCrypto; answers 401 to a bad signature.
+      const handle = webhookHandler({
+        service: "notify",
+        kind: "destination",
+        secret: env.NOTIFY_DESTINATION_SECRET,
+        // Your own code. Retries reuse a deliveryId: dedupe on it.
+        onEvent: (delivery) => recordDelivery(delivery),
+      });
+      return handle(request);
+    }
+    if (pathname === "/deploys" && request.method === "POST") {
+      // Bindings are not in process.env unless you copy them there: pass them as env.
+      const ryu = new Ryu({ env: { ...env }, result: "object" });
+      const { data, error } = await ryu.notify.publish({
+        title: "Deploy finished",
+        level: "success",
+      });
+      return error
+        ? Response.json({ code: error.code }, { status: 502 })
+        : Response.json({ id: data.id }, { status: 201 });
+    }
+    return new Response("Not found", { status: 404 });
+  },
+};
+```
+
+`webhookHandler()` reads the raw body, verifies it with Web Crypto, and
+answers `401` to a forged delivery without calling `onEvent`. Notify signs
+each destination delivery with Standard Webhooks headers (`webhook-id`,
+`webhook-timestamp`, `webhook-signature`) beside the body-only
+`X-Ryu-Notify-Signature`, and the handler rejects a timestamp more than five
+minutes from your clock and reports `replayProtected: true`. A delivery
+without the `webhook-*` headers gets `401`, because the body-only signature can
+be replayed; pass `allowBodyOnlySignature: true` only if you must accept it.
+A retry still reuses its `deliveryId`, so `recordDelivery`, your own code,
+should store each one and ignore repeats. The publish route passes the
+bindings as `env`; copying them with `{ ...env }` gives the SDK the plain
+string map it reads.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/frameworks/hono" />
+  <DocCard href="/docs/standalone/sdk/webhooks" />
+  <DocCard href="/docs/standalone/sdk/box" />
+</Cards>

@@ -1,0 +1,191 @@
+---
+title: "Connect Access Tokens and Tool Policy"
+description: "How to get short-lived Ryu access tokens for Ryu Connect, and how tool lifecycle, pins, and deny rules control which tools and upstream URLs agents may use"
+tags: ["Standalone", "Connect", "OAuth", "policy", "governance"]
+---
+
+Ryu-hosted Connect accepts two kinds of credentials from Ryu besides its
+console keys, and enforces a tool policy your organization writes in Ryu:
+
+- **Access tokens**: short-lived tokens Ryu issues to a signed-in member, or
+  in exchange for an OAuth grant, for one organization's Connect tenant.
+- **Tool policy**: Ryu's lifecycle state for each tool, plus your
+  organization's pins and deny rules, optionally per team. Connect hides what
+  the policy refuses from search and describe, and refuses it on every call
+  before anything is charged or sent.
+
+Both are available on Ryu-hosted Connect. A self-hosted Connect keeps its own
+keys and has no policy.
+
+## Access tokens
+
+An access token is a signed JWT (`typ: at+jwt`) for Connect alone. Send it
+like any runtime bearer, `Authorization: Bearer <token>`. It calls Connect as
+your organization's tenant, the same tenant as your
+[Connect keys](/docs/standalone/connect#connect-keys), so usage, credit holds
+and charges are the organization's whichever credential made the call.
+
+| Property | Value |
+|---|---|
+| Lifetime | 10 minutes; Connect refuses any token that lives longer than 15 |
+| Audience | The Connect deployment it was issued for; a token for another service is refused |
+| Scopes | `tools:read` (search, describe, list, balance and usage) and `tools:exec` (calls) |
+| Team | Optional: a token issued for one of your teams carries it, and team policy applies |
+
+### Get a token
+
+Signed in to Ryu (any client holding a Ryu session):
+
+```bash
+curl -X POST "$RYU_API/api/control-plane/orgs/<organizationId>/connect-tokens" \
+  -H 'Authorization: Bearer <ryu-session-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"teamId": "<optional team id>", "scopes": ["tools:read", "tools:exec"]}'
+```
+
+With an OAuth access token Ryu issued to your client for the hosted MCP
+resource (Bearer or DPoP), exchange it instead. The OAuth token is checked by
+Ryu and never sent to Connect:
+
+```bash
+curl -X POST "$RYU_API/api/connect-tokens/exchange" \
+  -H 'Authorization: Bearer <oauth-access-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"organizationId": "<organizationId>"}'
+```
+
+Both answer:
+
+```json
+{
+  "access_token": "eyJ…",
+  "token_type": "Bearer",
+  "expires_in": 600,
+  "aud": "https://connect.example",
+  "scope": "tools:read tools:exec",
+  "tenant_id": "org_<organizationId>",
+  "team_id": null
+}
+```
+
+Scopes are the ones your request names (both by default), narrowed to what
+your OAuth grant holds and what your organization role allows. A viewer gets
+no token. Ryu refuses a token for an organization you are not a member of
+(`403`), a team you are not in (`403`), an organization without credit
+(`402`, there is no free starter credit), and an organization whose Connect
+access Ryu set up directly (`409`). A brand-new organization's first token
+works within about a minute, once Connect has learned the tenant.
+
+Ryu publishes the public key that signs tokens at
+`GET $RYU_API/api/connect-tokens/jwks`.
+
+### What Connect answers
+
+| Status | `code` | When |
+|---|---|---|
+| `401` | `invalid_token` | The token is expired, not yet valid, for another audience or issuer, signed by an unknown key, or names a tenant Connect does not know. `reason` says which, and `WWW-Authenticate` carries `error="invalid_token"` |
+| `403` | `insufficient_scope` | A token without `tools:exec` tried anything but a read. Reads are `GET` routes and the read-only MCP surface `/mcp/meta/read`. Vendor calls (`/v1/vendors/...`) and relay tool calls (`/v1/relay/<tool>/...`) are calls with any method, `GET` included |
+| `401` | `unauthorized` | No bearer at all. Connect answers with `WWW-Authenticate: Bearer realm="ryu-connect"` so a client can fetch a token and retry |
+
+Tokens open runtime routes only. Linking accounts, registering relay tools and
+saving vendor keys keep needing the tenant's management bearer.
+
+## Tool policy
+
+Connect applies three kinds of rules to every tool search, describe and call
+on every surface: REST, `/mcp`, and the meta tools on `/mcp/meta`.
+
+### Lifecycle
+
+Ryu sets each tool's lifecycle state:
+
+| State | In search and describe | On a call |
+|---|---|---|
+| `stable` | Listed (the state of every tool Ryu has not marked) | Runs |
+| `preview` | Hidden unless your team or organization pins the tool | `403 tool_preview_not_pinned` without a pin |
+| `deprecated` | Listed with `lifecycle: { state, successor, sunsetAt, note }` | Runs |
+| `retired` | Hidden; describe answers `404 not_found` | `410 tool_retired`, with `successor` when there is one |
+
+### Pins
+
+A pin names a tool and, optionally, a version, for your whole organization or
+one team. A team pin wins over an organization pin for that team's calls.
+
+- A pin opts its team (or organization) into a `preview` tool.
+- A pin with a version refuses the call with `409 tool_version_mismatch`
+  (`pinnedVersion`, `servedVersion`) when Connect serves any other version,
+  including when it cannot name the version it serves. The tool stays listed,
+  with `pin: { version, scope, satisfied: false }`, so you can see why.
+
+Versions are the ones describe reports: `ryu-native-1` for toolkits Connect
+serves itself, and the configured Composio toolkit version for Composio tools.
+
+### Deny rules
+
+A deny rule names either a tool pattern or an upstream URL, for the whole
+organization or one team:
+
+| Rule | Matches | Effect |
+|---|---|---|
+| Tool | An exact tool ID, or a prefix ending in `*`, such as `composio.SLACK_*` | Hidden from search and describe; calls refused with `403 tool_denied_by_policy` before any credit is held |
+| URL | A host (`api.github.com`, or `*.example.com` for its subdomains only), optionally a path glob (`/repos/*`, `*` matches anything including `/`) and methods | The upstream request is refused with `403 url_denied_by_policy` before it leaves Connect |
+
+Each refusal names the rule (`rule: "dny_…"`). A path glob is matched against
+the path as sent and percent-decoded, so an encoded spelling of a denied path
+is denied too. On `api.github.com`, which resolves owner and repository names
+in any letter case, the rule and the request path are compared case-insensitively,
+so `/repos/acme/secret*` also denies `/repos/ACME/Secret/issues`. Elsewhere a
+path glob matches its exact case. Rules match spellings, not resources: a
+vendor alias such as GitHub's `/repositories/<id>/...` needs its own rule.
+URL rules apply wherever Connect builds the upstream request:
+toolkits Connect serves itself (every request an action makes),
+[relay tools and built-in vendors](/docs/standalone/connect-api-relay)
+(checked before the credential ladder, and again on every redirect). Composio
+makes its own upstream requests, so only tool rules apply to Composio tools.
+
+Team rules and team pins apply to calls made with an access token issued for
+that team. Console keys carry no team, so only organization-wide rules apply
+to them.
+
+MCP calls return the same refusal in the result's
+`_meta["com.ryuhq/refusal"]`, with the same `code` and fields.
+
+### Write the policy
+
+Any member can read the organization's policy and Ryu's lifecycle list;
+organization admins replace it. Each change may ask you to confirm your
+identity again and is recorded in the organization's audit log.
+
+```bash
+curl "$RYU_API/api/control-plane/orgs/<organizationId>/connect-policy" \
+  -H 'Authorization: Bearer <ryu-session-token>'
+
+curl -X PUT "$RYU_API/api/control-plane/orgs/<organizationId>/connect-policy" \
+  -H 'Authorization: Bearer <ryu-session-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "revision": 3,
+    "pins": [
+      { "teamId": null, "tool": "composio.GITHUB_CREATE_AN_ISSUE", "version": "ryu-native-1" }
+    ],
+    "deny": [
+      { "teamId": null, "tool": "composio.SLACK_*", "host": null, "path": null, "methods": [], "reason": "No Slack from agents" },
+      { "teamId": "<team id>", "tool": null, "host": "api.github.com", "path": "/repos/*", "methods": ["DELETE"], "reason": null }
+    ]
+  }'
+```
+
+The `PUT` replaces the whole policy. Send the `revision` you read: if someone
+changed the policy since, the write is refused with `409` and nothing changes.
+New rules get an ID (`dny_…`). Up to 200 pins and 200 rules; a rule names a
+tool or a host, not both, and a path or methods only with a host; teams must
+be teams of the organization. Changes reach Connect within about a minute.
+
+If Connect cannot reach Ryu, it keeps applying the last policy it received:
+an outage never lifts a deny rule or a retirement. Until it has received a
+policy once, it answers tool routes with `503 policy_unavailable`.
+
+<Cards>
+  <DocCard href="/docs/standalone/connect-api" />
+  <DocCard href="/docs/standalone/connect" />
+</Cards>

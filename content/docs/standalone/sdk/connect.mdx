@@ -1,0 +1,342 @@
+---
+title: "Connect SDK Quickstart"
+description: "Search and run governed tools, execute Composio actions, and read Connect usage with curl, @ryuhq/services, or the ryu_sdk.services Python client, and point MCP clients at Connect's own /mcp endpoint"
+tags: ["connect", "tools", "composio", "mcp", "sdk", "standalone"]
+---
+
+<Callout type="info">
+Early access: hosted keys are provisioned by Ryu; the self-hosted service is not yet published.
+</Callout>
+
+This page makes a first call to [Ryu Connect](/docs/standalone/connect) with
+curl, the `@ryuhq/services` TypeScript SDK, and the `ryu_sdk.services` Python client,
+and shows how to point an MCP client at Connect. The full route list,
+Composio rules, and usage report format are on
+[the Connect API](/docs/standalone/connect-api).
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+## What you need
+
+- **A Connect base URL and a runtime key.** Hosted Connect is in early
+  access: Ryu provisions both for your organization, and there is no
+  self-serve signup. The runtime key is sent as `Authorization: Bearer`.
+- The Connect service is not distributed for self-hosting yet, so there is
+  nothing to download and run today.
+
+Connect has no default URL in the SDK. A call without one fails before any
+request is sent. The SDK covers Connect's runtime routes only; account linking
+and trigger management, which use a separate management key, are not in this
+version.
+
+Tool search and execution need a Connect whose operator has configured a
+native MCP registration (or Composio bindings) or a compatibility upstream,
+and Composio execution needs a configured Composio lane. On a
+Connect without one, the call fails with `503` and a code such as
+`upstream_unconfigured` or `native_composio_unavailable`; `error.hint` says
+that the operator sets it and that another key, URL, or retry will not help.
+
+## Configure
+
+The SDK reads these environment variables. Options passed to `new Ryu()` win
+over them, and `new Ryu({ env: false })` turns env reads off.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RYU_CONNECT_URL` | none | Connect origin (no default). |
+| `RYU_CONNECT_API_KEY` | none | Connect runtime bearer token. |
+| `RYU_CONNECT_MANAGEMENT_KEY` | none | Connect management bearer token (reserved). |
+
+```sh
+export RYU_CONNECT_URL="<the Connect URL Ryu issued>"
+export RYU_CONNECT_API_KEY="<your runtime key>"
+```
+
+The SDK never sends `RYU_API_KEY` to Connect, and never sends the Connect key
+to another origin.
+
+## First call with curl
+
+Start with the Skill catalog. It needs no native MCP registration or
+compatibility upstream, so it answers on a Connect that has a Skill catalog
+but no tool or Composio lane yet (a Connect without a catalog answers
+`503 skills_unavailable`).
+
+```sh
+curl -sS "$RYU_CONNECT_URL/v1/skills" \
+  -H "Authorization: Bearer $RYU_CONNECT_API_KEY"
+```
+
+The next two calls need a lane the operator configures, as described in
+[What you need](/docs/standalone/sdk/connect#what-you-need); without it they answer `503`. Search the
+tools granted to your tenant, then run one Composio action with Connect's
+native execute body. `operation` is always `execute`, `toolId` is the action
+slug, `body` holds the action's arguments, and the optional
+`expectedAccountId` refuses the call unless your tenant is bound to that
+account.
+
+```sh
+curl -sS "$RYU_CONNECT_URL/v1/tools/search?q=slack" \
+  -H "Authorization: Bearer $RYU_CONNECT_API_KEY"
+
+curl -sS -X POST "$RYU_CONNECT_URL/v1/composio/execute" \
+  -H "Authorization: Bearer $RYU_CONNECT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"operation":"execute","toolId":"SLACK_SEND_MESSAGE","body":{"channel":"#general","text":"Deploy finished"}}'
+```
+
+Any other field, such as an account or credential override, is rejected with
+`400 invalid_request`. Your tenant's binding decides the account, toolkit
+version, and credential.
+
+## First call with the SDK
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors. The sample lists the Skill
+catalog first, which needs no native MCP registration or compatibility
+upstream, then searches tools and runs a Composio action, which answer `503`
+until the operator configures their lane.
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_CONNECT_URL and RYU_CONNECT_API_KEY.
+const ryu = new Ryu({ result: "object" });
+
+const { data: skills, error: skillsError } = await ryu.connect.skills.list();
+if (skillsError) {
+  console.error(skillsError.code, skillsError.message);
+} else {
+  console.log(skills.data.map((skill) => skill.id));
+}
+
+const { data: found, error: searchError } = await ryu.connect.tools.search({ q: "slack", limit: 5 });
+if (searchError) {
+  console.error(searchError.code, searchError.message);
+} else {
+  console.log(found.data.map((tool) => tool.id));
+}
+
+const { data, error } = await ryu.connect.composio.execute({
+  toolId: "SLACK_SEND_MESSAGE",
+  body: { channel: "#general", text: "Deploy finished" },
+});
+
+if (error) {
+  console.error(error.code, error.message, error.requestId);
+} else {
+  console.log(data.successful, data.billingReceipt);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_CONNECT_URL and RYU_CONNECT_API_KEY.
+ryu = Ryu(result="object")
+
+skills, skills_error, _ = ryu.connect.skills.list()
+if skills_error:
+    print(skills_error.code, skills_error.message)
+elif skills:
+    print([skill["id"] for skill in skills["data"]])
+
+found, search_error, _ = ryu.connect.tools.search(q="slack", limit=5)
+if search_error:
+    print(search_error.code, search_error.message)
+elif found:
+    print([tool["id"] for tool in found["data"]])
+
+data, error, meta = ryu.connect.composio.execute(
+    tool_id="SLACK_SEND_MESSAGE",
+    body={"channel": "#general", "text": "Deploy finished"},
+)
+
+if error:
+    print(error.code, error.message, error.request_id)
+elif data:
+    print(data["successful"], data.get("billingReceipt"))
+```
+
+`composio.execute` adds `operation: "execute"` for you. The other methods are listed below.
+
+| Method | Route |
+|---|---|
+| `skills.list()`, `skills.get(skillId)` | `GET /v1/skills`, `GET /v1/skills/{id}` |
+| `tools.search({ q, kind, limit })` | `GET /v1/tools/search` |
+| `tools.describe({ toolId })` | `GET /v1/tools/describe` |
+| `tools.exec({ toolId, arguments })` | `POST /v1/exec/tool` |
+| `usage({ from, to, cursor, limit })` | `GET /v1/usage` |
+| `usage.iterate({ from, to })` | `GET /v1/usage`, every page |
+| `mcp()` | None; returns MCP client settings |
+
+`tools.exec` runs any granted tool by the qualified id that `tools.search`
+returned, including `composio.<SLUG>` actions. Like `tools.search`, it
+answers `503 upstream_unconfigured` until the operator configures a native MCP
+registration or a compatibility upstream.
+
+```ts tab="Node"
+const { data: result } = await ryu.connect.tools.exec({
+  toolId: "composio.SLACK_SEND_MESSAGE",
+  arguments: { channel: "#general", text: "Deploy finished" },
+});
+```
+
+```python tab="Python"
+result = ryu.connect.tools.exec(
+    tool_id="composio.SLACK_SEND_MESSAGE",
+    arguments={"channel": "#general", "text": "Deploy finished"},
+).data
+```
+
+`result.ok` is false when the tool reported an error. On a Connect that
+forwards execution to a Ryu Gateway, the Gateway also answers its own
+refusals and tool failures with HTTP 200, `ok: false`, and an `error`
+message, such as a firewall denial, and leaves out `result`. Check `ok`
+before you read `result`.
+
+On a Connect with native grants, the sample's `composio.<SLUG>` id is
+granted only when the Connect has a Composio binding for your tenant. On a Connect that has a native MCP registration but no Composio binding, `composio.<SLUG>` ids are not granted, so the call answers
+`403 tool_denied` rather than `503`. Run a qualified id that `tools.search`
+returned instead, such as a `<server>.<tool>` id from `found.data[0].id`
+(`found["data"][0]["id"]` in Python) in the search sample above.
+
+To read every Composio billing receipt in a window of whole UTC hours, use
+`usage.iterate()`. It sends each page's `nextCursor` back as `cursor`.
+
+```ts tab="Node"
+// Iterators throw a RyuError on failure, also in object mode.
+for await (const line of ryu.connect.usage.iterate({
+  from: "2026-10-01T00:00:00Z",
+  to: "2026-10-02T00:00:00Z",
+})) {
+  console.log(line.at, line.transactionId);
+}
+```
+
+```python tab="Python"
+for line in ryu.connect.usage.iterate({"from": "2026-10-01T00:00:00Z", "to": "2026-10-02T00:00:00Z"}):
+    print(line["at"], line["transactionId"])
+```
+
+Iterators always throw a `RyuError` on failure, also in object mode. Receipts
+that can never be read are listed under `unresolved` on the first page only;
+read that page with `ryu.connect.usage({ from, to })`.
+
+## Expected response
+
+A native execution returns the action result. Example from the
+[OpenAPI document](https://ryuhq.com/openapi/connect.json):
+
+```json
+{
+  "data": { "ok": true },
+  "successful": true
+}
+```
+
+When Composio returned a billing receipt, the response also carries
+`billingReceipt` with the provider transaction id. Accept that field if you
+decode strictly.
+
+## Errors
+
+Connect errors are `{ "code", "error", "ok": false }`, sometimes only
+`{ "code" }`, and the request id is in `x-request-id`. Each becomes a
+`RyuError` subclass with Connect's own `code`. Quote `error.requestId` when
+you contact support.
+
+| Status and code | SDK error | Notes |
+|---|---|---|
+| `400 invalid_request`, `invalid_limit` | `RyuInvalidRequestError` | Read `error.message`. |
+| `401 unauthorized` | `RyuAuthenticationError` | A missing or unknown runtime key. |
+| `402 insufficient_credits` | `RyuPaymentRequiredError` | Ryu-hosted Connect only, when the organization's credits are exhausted. Never retried. |
+| `402 spend_limit_reached` | `RyuPaymentRequiredError` | A binding's premium spend cap; `error.retryAfterSeconds` says when the period resets. |
+| `403 tool_denied` | `RyuPermissionError` | The tool or account is not granted to your tenant. |
+| `404 not_found` | `RyuNotFoundError` | The Skill or tool does not exist. |
+| `429 rate_limited` | `RyuRateLimitError` | A binding's per-minute call limit; `error.retryAfterSeconds` is set. |
+| `502 request_failed` | `RyuServerError` | Connect could not complete the request. |
+| `503 native_composio_unavailable`, `tool_unavailable`, `skills_unavailable`, `metering_unavailable`, `upstream_unconfigured`, `upstream_invalid` | `RyuUnavailableError` | A lane is not configured or not available right now. |
+
+A missing URL or key gives a `RyuConfigurationError` that names
+`RYU_CONNECT_URL` and `RYU_CONNECT_API_KEY`.
+
+## Idempotency and retries
+
+No Connect route deduplicates writes, so the SDK sends no `Idempotency-Key`.
+Reads (`skills`, `tools.search`, `tools.describe`, `usage`) are retried on
+network errors, timeouts, and `5xx` responses, including
+`503 tool_unavailable`. With the default `maxRetries`, a read that keeps
+getting one is sent three times before the error is returned. The
+configuration errors `503 skills_unavailable`, `upstream_unconfigured`, and
+`upstream_invalid` are never retried, because a retry cannot configure a
+lane. `tools.exec` and `composio.execute` are **not** retried on those
+failures, because the tool may
+already have run, and a second request could run it again. Before you retry
+one yourself, check whether the first call took effect, for example in the
+usage report.
+
+Connect refuses a call over a binding's limit with `429 rate_limited` before
+the tool runs. The SDK retries that refusal after `Retry-After` when the wait
+is at most `maxRetryDelayMs` (30 seconds by default); otherwise it returns the
+error with `retryAfterSeconds` set. The defaults are two retries and a
+60-second timeout until response headers arrive; change them with
+`maxRetries` and `timeoutMs`.
+
+## CLI
+
+Connect has no `ryu-services` commands, because Connect is an MCP server
+itself. Account and trigger management are not in `ryu-services` or the SDK. They
+are HTTP routes that take the tenant's separate management bearer; see
+[Connect API trigger management](/docs/standalone/connect-api-triggers).
+Running the service name prints where Connect's MCP endpoint is, without the
+key:
+
+```sh
+ryu-services connect
+```
+
+Until `@ryuhq/services-cli` is on npm, run it as `ryu-cli services connect`.
+`ryu-cli services` arrives in a Ryu release after 0.4.0, and until then
+neither the CLI nor the MCP server can be installed outside the Ryu repository
+(see [Run it from ryu-cli](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
+
+## MCP
+
+Connect serves its own MCP server at `/mcp`, with the hosted Skills as
+resources and your tenant's granted tools. Point your MCP client there with
+the runtime key; `ryu-services mcp` has no Connect tools. `ryu.connect.mcp()`
+returns the settings, `{ type: "http", url, headers }`, without a network
+call; in Python it is a `ConnectMcpConfig` from `ryu_sdk.services.shapes`
+with every key present. It throws a `RyuConfigurationError` straight away, in
+both result modes, when Connect is not configured.
+
+```json
+{
+  "mcpServers": {
+    "ryu-connect": {
+      "type": "http",
+      "url": "<the Connect URL Ryu issued>/mcp",
+      "headers": { "Authorization": "Bearer <your runtime key>" }
+    }
+  }
+}
+```
+
+The endpoint uses stateless Streamable HTTP. Official MCP SDK clients handle
+its responses; raw HTTP clients should read
+[Hosted MCP](/docs/standalone/connect-api-mcp#hosted-mcp) first.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/connect" />
+  <DocCard href="/docs/standalone/connect-api" />
+  <DocCard href="/docs/standalone/connect-api-composio" />
+</Cards>

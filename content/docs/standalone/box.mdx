@@ -1,8 +1,16 @@
 ---
 title: "Ryu Box"
-description: "Run persistent isolated workspaces as an independent Ryu service"
+description: "What Ryu Box is, how hosted Boxes are placed, priced, and limited per plan, and the settings a Box service reads"
 tags: ["box", "standalone", "workspace", "api"]
 ---
+
+<Callout type="info">
+  Hosted Ryu Box is on by default for every organization. If the Box card,
+  **New Box**, or resume are missing from your organization's Products page,
+  Ryu Box has been turned off for your organization. You can still list, stop,
+  and delete existing Boxes. Self-hosting the Box service, described on this
+  page, does not depend on that switch.
+</Callout>
 
 Ryu Box is a standalone persistent workspace service for agent commands,
 previews, prompts, and long-running work. Its filesystem survives commands,
@@ -12,34 +20,77 @@ The service owns the tenant boundary, bearer authentication, lifecycle store,
 and Box HTTP entry point. A selected driver owns the actual machine. Core can
 use the same service through the persistent workspace contract.
 
-## Start a local Box service
+## Self-hosting
 
-The Docker driver is the safe default:
+<Callout type="warn">
+  The self-hosted Box service is not yet published. There is no public source
+  repository or container image to download and run.
+</Callout>
 
-```sh
-RYU_BOX_API_TOKEN=replace-me \
-RYU_BOX_DRIVER=docker \
-RYU_BOX_DATA_DIR=/var/lib/ryu-box \
-bun run apps/box/src/index.ts
-```
+Use Ryu-hosted Box, which Ryu enables for each organization. See the
+[Box SDK quickstart](/docs/standalone/sdk/box#what-you-need).
 
-For contract tests without Docker, the filesystem driver is explicitly unsafe:
+The rest of this page describes how the service behaves, including the
+settings a self-hosted deployment reads, so the same contract applies once it
+is published. A Box service stores lifecycle state in `boxes.db` below
+`RYU_BOX_DATA_DIR`. The default bind is `127.0.0.1:8090`; `RYU_BOX_HOSTNAME`
+and `RYU_BOX_PORT` change it when the process has an authenticated network
+boundary. Docker (`RYU_BOX_DRIVER=docker`) is the safe default driver. The
+filesystem driver (`RYU_BOX_DRIVER=filesystem` with
+`RYU_BOX_ALLOW_UNSAFE_LOCAL=true`) runs commands on the host without
+isolation, is meant only for contract tests, and refuses to start when
+`NODE_ENV=production`.
 
-```sh
-RYU_BOX_API_TOKEN=replace-me \
-RYU_BOX_DRIVER=filesystem \
-RYU_BOX_ALLOW_UNSAFE_LOCAL=true \
-bun run apps/box/src/index.ts
-```
+## Each Box has its own screen
 
-The service stores lifecycle state in `boxes.db` below `RYU_BOX_DATA_DIR`.
-The default bind is `127.0.0.1:8090`; set `RYU_BOX_HOSTNAME` and
-`RYU_BOX_PORT` when the process has an authenticated network boundary.
+A Box created with `"desktop": true` runs a virtual desktop and a Chromium
+browser inside the Box, next to your files and commands. Nothing outside the
+Box sees that display, and the Box has no public VNC port:
 
-The container image stores this database under the persistent `/data` volume.
-Its entrypoint repairs the mounted volume ownership before dropping to the
-unprivileged Box user, so redeploys keep the lifecycle store writable without
-running the service as root.
+- People watch and control it through an authenticated WebSocket stream on the
+  Box API (`/v1/boxes/:id/desktop/ws`), opened with a short-lived,
+  single-use `desktop` access token. See [Box API](/docs/standalone/box-api#desktop).
+- Agents drive it through `POST /v1/boxes/:id/desktop/actions` (screenshot,
+  click, type, key, scroll, focus an app) and the browser verbs under
+  `/v1/boxes/:id/browser/:verb`.
+- A stream can be view-only: the service then forwards only the screen and
+  drops every keyboard and mouse message.
+- At most four viewers watch one Box at a time. Stopping, parking, or deleting
+  the Box closes every stream.
+
+When Ryu Core runs a conversation's heavy work on a Box (a cloud task,
+computer use, the browser, or a parallel sub-agent), that Box is the
+conversation's [session Box](/docs/surfaces/desktop/user-guide/virtual-desktop#session-box-screens)
+and its screen appears in the desktop and web apps.
+
+## Placement and capacity on Ryu-hosted Box
+
+On Ryu-hosted Box, a Box normally runs in its own virtual machine, created
+when the Box starts or resumes and deleted when it stops. When that capacity is
+short, a Box can instead land on a host Ryu reserves for overflow, which it may
+share with other Boxes. Wherever it lands, each Box keeps its own container,
+its own screen and browser, and its own gVisor sandbox, and no Box sees
+another's files, display, or network. A Box never runs on your organization's
+own Ryu server. Ryu does not queue Boxes: it starts each one on
+the first capacity available, in this order:
+
+1. a machine already running in Ryu's small warm pool, which starts fastest;
+2. a new machine of the Box's size in one of Ryu's EU locations;
+3. a slot on a host Ryu reserves for overflow, shared with other Boxes but
+   with its own container, gVisor sandbox, screen, and workspace;
+4. a machine of the same size at another cloud provider, at the same price to
+   you.
+
+`GET /v1/boxes/:id` reports where a Box landed under `placement`. In the rare
+case that none of these has room, create and resume answer
+`503 capacity_unavailable` with a `Retry-After` header. Retry the same request
+with the same idempotency key.
+
+When you stop a Box, Ryu saves its workspace to Ryu's storage before it
+deletes the machine. Resuming restores it onto a fresh machine, possibly in
+another location. If you resume within the same hour, Ryu may reuse the
+machine it kept for that hour, which makes the resume faster. A Box's own
+memory and running processes do not survive a stop; its files do.
 
 ## Choose the service shape
 
@@ -53,11 +104,107 @@ Connected provider mode is opt-in through `RYU_BOX_UPSTREAM_URL`. It keeps
 the provider credential server-side and preserves the Ryu Box `/v1` contract.
 See [Box API](/docs/standalone/box-api) for the route and credential boundary.
 
+## Ryu capacity pricing
+
+Every Box is a Linux machine in one of three sizes, priced per running hour.
+Box has no GPU or Windows option.
+
+| Size | Price |
+|---|---|
+| `small` (2 vCPU, 4 GiB) | **$0.025** per hour |
+| `default` (4 vCPU, 8 GiB) | **$0.04** per hour |
+| `large` (8 vCPU, 16 GiB) | **$0.07** per hour |
+
+Compute is charged only while the Box runs, in whole minutes, rounded up. Each
+start, whether you create the Box or resume it, is charged for at least five
+minutes (a **5-minute minimum**), so a Box that runs for one minute costs five
+minutes of its size. The minimum applies once per server hour already paid for:
+a stopped Box resumed on the same machine within that hour is charged its
+minutes only, with no new minimum. A resume on a different machine, or after
+that hour, pays the minimum again. A stopped Box costs nothing for compute.
+
+Storage is the measured size of each Box's saved workspace and of its
+snapshots, for as long as they are stored. One allowance covers every Box of the
+organization, whether it was created from the dashboard, the API or a
+conversation.
+
+| Plan | Included storage | Beyond it | Kept |
+|---|---|---|---|
+| Paid plan | **25 GiB** | **$0.05** per GiB-month (30 days) | While the plan is active; if the plan ends, while the organization has credit and for 30 days after it runs out |
+| No paid plan, or a paid plan in its free trial | **10 GiB** | Not available | A stopped Box for 14 days after it stopped |
+
+Without a paid plan, creating, resuming or forking a Box and taking a snapshot
+are refused once the organization stores 10 GiB, until you delete stopped Boxes
+or snapshots. Stopping a Box always saves its work, even at the limit. When
+storage is deleted at the end of its retention, the stopped Box and its saved
+workspace are gone; a running Box is never deleted this way.
+
+Your plan limits how many Boxes run at the same time. A create or resume over
+the limit is refused until another Box stops. A paid plan in its free trial has
+the trial limit until the trial converts.
+
+| Plan | Running Boxes |
+|---|---:|
+| No paid plan, a free trial, A Major Pass, desktop license | 1 |
+| Plus, Pro | 2 |
+| Max | 4 |
+| Teams Lite, Teams | 10 |
+| Business | 20 |
+
+A Box created from the Ryu dashboard or directly through the `/v1` API is
+settled hourly against the organization's Ryu credits from the service's
+`GET /v1/usage` report. Each hour is charged once, shortly after it ends,
+spending the plan's included pool first, then gift balance, then top-up credit.
+A default Box that runs for a full hour costs $0.04.
+
+A Box that Ryu Core creates, for a one-shot sandbox command, a persistent
+sandbox, or a conversation's session Box, is charged through the Gateway sandbox
+heartbeat instead, at the same rates and with the same 5-minute minimum per
+start (and the same free resume within the hour already paid). It is charged
+while it runs: until Core stops or parks it, a budget or balance stop ends it,
+or its time to live runs out. It shows in the
+credit ledger as **Box session compute**. It is never charged through both paths.
+The saved workspace of such a Box counts toward the same storage allowance, and
+storage above it is charged hourly as **Box** in the credit ledger.
+If Core stops reporting a running Box, for example because the node went offline,
+the Box service parks it within about two minutes, so a Box Core no longer meters
+does not keep running.
+
+Creating or resuming a Box from the Ryu dashboard or Ryu's organization API is
+refused with `402 insufficient_credits` while the organization has no plan pool
+left and no positive balance. New work sent directly to the Box service's own
+`/v1` API is refused the same way within about a minute, and Ryu checks every few
+minutes and stops the organization's running Boxes once credits run out. A
+stopped Box keeps its saved workspace. On a paid plan, its storage above the
+included amount keeps accruing until you delete it or it expires. While your
+paid plan is active, running out of credit before the next plan refill does not
+delete anything. Without an active paid plan, 30 days after credit ran out
+stopped Boxes and snapshots are deleted.
+
+Without a plan, a positive credit balance (for example from manual no-plan
+credit checkout) is enough to run one Box at a time with the 10 GiB of
+storage above. In connected-provider mode, the
+provider's subscription is the capacity billing authority and Ryu does not
+debit the same machine time again. A self-hosted Box is never billed by Ryu. See
+[Metering Rates](/docs/billing/metering#sandbox-compute) for spend-cap guidance.
+
 ## Organization entry point
 
 In a hosted organization, open **Products** in the Ryu dashboard to create and
-manage Box workspaces. The standalone `GET /` route redirects people to that
-dashboard. Programmatic callers use the authenticated `/v1` API directly.
+manage Box workspaces. Programmatic callers use the authenticated `/v1` API
+directly.
+
+Deleting a Box from the dashboard permanently removes its disk and stored
+state, so Ryu first asks you to confirm it's you with a fresh second-factor or
+emailed code, the same check as removing a cloud computer. One confirmation
+covers further removals for a few minutes. Stopping and resuming a Box need no
+extra confirmation.
+
+The standalone `GET /` route returns a short JSON description of the service:
+its name, version, API version, and the `/health` path. It redirects people only
+when `RYU_PRODUCT_DASHBOARD_URL` is set to a non-empty URL, such as your own
+console or landing page. Ryu's hosted deployment sets it to the Ryu dashboard,
+so a self-hosted Box never sends visitors to Ryu by default.
 
 The browser never receives a service bearer or a driver reference. A Box
 resource is always resolved under the selected organization or standalone
@@ -68,6 +215,6 @@ tenant binding.
 <Cards>
   <DocCard href="/docs/standalone/box-api" />
   <DocCard href="/docs/standalone/box-lifecycle" />
-  <DocCard href="/docs/core/boxes" title="Persistent Boxes reference" description="Core integration, connected providers, local driver behavior, metering, and security." />
+  <DocCard href="/docs/core/boxes" />
   <DocCard href="/docs/security/sandboxing-isolation" />
 </Cards>

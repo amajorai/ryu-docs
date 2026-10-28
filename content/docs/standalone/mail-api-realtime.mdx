@@ -1,0 +1,116 @@
+---
+title: "Mail API Realtime"
+description: "Stream Mail events over the self-hosted socket or the hosted ticket-authenticated socket, and handle its close codes"
+tags: ["mail", "api", "realtime", "websocket", "standalone"]
+---
+
+This reference covers the realtime Mail sockets. For the route table, bearers,
+and error codes, see the [Ryu Mail API](/docs/standalone/mail-api).
+
+## Realtime events
+
+For realtime consumers, connect to `/api/mail/ws` with the bearer in the
+`Authorization` header, then send
+`{ "event_types": ["message.received"], "inbox_ids": ["…"] }` (the camelCase
+`eventTypes` and `inboxIds` that the SDKs send work too). A browser, which
+cannot set that header on a WebSocket, offers the subprotocols
+`["ryu-mail.v1", "ryu-bearer.<token>"]` in the `Sec-WebSocket-Protocol` header;
+the server selects `ryu-mail.v1`, so the token is never echoed back. Always
+offer both: a client that offers only the bearer protocol gets it echoed, which
+is supported for older clients but deprecated. Clients may send the offered
+subprotocols on one header line or on several.
+
+A subprotocol may only contain
+token characters, so generate `RYU_MAIL_API_TOKEN` as a hex or URL-safe value
+(for example `openssl rand -hex 32`); the SDK refuses a token with `/`, `=`,
+`+`, spaces, or commas without quoting it in the error. The socket is a
+low-latency projection; replay `/api/mail/events` after reconnecting.
+
+Never put the token in the socket URL, where access logs and proxies record it.
+The server never reads a token from the query string: on `/api/mail/ws` and
+every other route, a request that carries the token only in `?token=<token>`
+gets `401`.
+
+### Hosted Mail realtime
+
+Hosted Mail serves its socket at `/api/mail/realtime`, not `/api/mail/ws`, and
+authenticates it with a one-use ticket instead of the credential itself:
+
+1. `POST /api/mail/realtime/tickets` with the usual hosted credential: a node
+   gateway key in `x-gateway-key`, a Ryu API key with `mail:read` in
+   `x-api-key`, or a console session. The `201` reply holds `ticket`,
+   `expiresAt`, `expiresIn`, `path` and `protocols`.
+2. Open `/api/mail/realtime` within 30 seconds, offering the reply's `protocols`
+   (`["ryu-mail.v1", "ryu-ticket.<ticket>"]`) in `Sec-WebSocket-Protocol`. The
+   server selects `ryu-mail.v1`, so the ticket is never echoed back.
+
+A ticket is a random 256-bit value bound to the organization, the credential
+that minted it and `mail:read`. It is spent by the first upgrade attempt,
+whether or not that attempt succeeds, so mint a new ticket for every
+connection. A credential holds at most 16 unredeemed tickets and 16 open
+sockets, and an organization (or personal account) at most 64 of each; past any
+limit the server answers `429`. A missing, used or expired ticket gets `401`,
+and an upgrade that does not also offer `ryu-mail.v1` gets `400`. A plain
+`GET` that is not a WebSocket upgrade gets `426` (`upgrade_required`), and a
+deployment without Mail configured answers `503`. When realtime is briefly
+unavailable, minting a ticket or opening the socket answers `503`
+(`realtime_store_unavailable`) with a `retry-after` header; retry with a new
+ticket after that delay.
+
+The organization's IP allowlist applies to the socket as well as to the ticket:
+the upgrade is checked against the address that opens it, so a ticket used
+from an address outside the allowlist gets `403` (`org_ip_not_allowed`), and
+the ticket is spent. Node gateway keys are not subject to the allowlist, on
+REST or here.
+
+Frames match the self-hosted socket: `connected` on open, a JSON
+`{ "eventTypes": [...], "inboxIds": [...] }` filter (the snake_case
+`event_types` and `inbox_ids` work too) acknowledged with `subscribed`, `ping`
+answered with `pong`, and each event as `{ "type": "event", "event": {...} }`
+in the shape `GET /api/mail/events` returns. A socket opened with a node gateway
+key carries no events from another node's agent inboxes.
+
+An open socket keeps checking the credential that minted its ticket. The
+server closes the socket with code `4001` within about a minute when any of
+these happens:
+
+- the Ryu API key is revoked, disabled or expires, or loses `mail:read`;
+- the node gateway credential is revoked or its enrollment is deactivated;
+- the member (or the key's creator or service account) leaves the organization
+  or loses `mail.read`;
+- Mail is turned off for the organization;
+- for a Ryu API key or a console session, the organization's IP allowlist no
+  longer admits the address the socket was opened from (for example, an
+  allowlist added or tightened after the socket opened).
+
+Every socket is also closed with `4001` after 15 minutes. That limit also
+covers what the minute-by-minute check cannot see, such as a console session
+expiring or a change to the organization's two-factor or session-age rules. On
+`4001`, mint a new ticket, reconnect, and replay any gap from
+`GET /api/mail/events`.
+
+The server can also close a socket for its own reasons:
+
+- `1012` means the server can no longer guarantee the socket's events, or its
+  place under the socket limits, for example after a brief service
+  interruption. Mint a new ticket, reconnect, and replay the gap.
+- `1013` (`slow consumer`) means the client read too slowly and the socket's
+  send buffer filled. Read frames promptly, then mint a new ticket, reconnect,
+  and replay the gap.
+- `1011` before `connected` arrives means the socket could not start. Retry
+  with a new ticket.
+
+Mint the ticket against the same API origin you open the socket on. The socket
+limits count sockets that are still open, so close sockets you no longer need
+instead of abandoning them. A socket that drops without a clean close, or one
+that was open on a server instance that restarted, can count toward the limits
+for up to about a minute and a half, so a reconnect in that window can get
+`429`; wait for the `retry-after` delay and try again. The socket only carries
+events recorded while it is connected, so after any reconnect, replay the gap
+from `GET /api/mail/events`. An event can occasionally arrive twice, on the
+socket or across a socket and a replay, so deduplicate by `eventId`.
+
+<Cards>
+  <DocCard href="/docs/standalone/mail-api" />
+  <DocCard href="/docs/standalone/mail" />
+</Cards>

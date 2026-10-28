@@ -1,10 +1,18 @@
 ---
-title: "Standalone Ryu Mail"
+title: "Ryu Mail"
 description: "Run Agent Inboxes as an independently authenticated Mail service"
 tags: ["mail", "email", "standalone", "api"]
 ---
 
-Ryu Mail is the service behind Agent Inboxes. It stores inboxes, messages,
+<Callout type="warn">
+  Standalone Ryu Mail is in **early access**. Agent Inboxes that come with your
+  account or plan (the free baseline, plan allowances, and the inboxes on your
+  organization's Products page) are available today and are not affected. See
+  [Agent Inboxes](/docs/billing/agent-inboxes).
+</Callout>
+
+Ryu Mail is the service behind Agent Inboxes, and this page is for operators
+who run it as its own process. It stores inboxes, messages,
 threads, drafts, and attachments, accepts signed inbound mail, delivers signed
 event webhooks, and hands outbound mail to the configured transport.
 
@@ -18,17 +26,21 @@ Mail can run inside a Ryu node or as its own process. Both shapes use the same
 | Ryu node app | Core-issued sidecar bearer | Core proxies the node-local `/api/mail/*` contract |
 | Standalone process | `RYU_MAIL_API_TOKEN` | Mail serves `/api/mail/*` directly for one process and data directory |
 
-The standalone process is intentionally one tenant per service instance. Run a
+The standalone process serves one tenant per service instance. Run a
 separate process and data directory when tenants must be isolated. Do not use a
 Core-issued `RYU_EXT_TOKEN` as a public API credential.
 
 ## Start the standalone service
 
+Building from source needs a Rust toolchain, `pkg-config`, and the OpenSSL
+development headers (`libssl-dev` on Debian and Ubuntu, `openssl-devel` on
+Fedora).
+
 ```sh
 git clone --depth 1 https://github.com/amajorai/ryu-mail.git
 cd ryu-mail
+export RYU_MAIL_API_TOKEN="$(openssl rand -hex 32)"
 RYU_MAIL_MODE=standalone \
-RYU_MAIL_API_TOKEN=replace-me \
 RYU_MAIL_HOSTNAME=127.0.0.1 \
 RYU_MAIL_PORT=7996 \
 RYU_DIR=/var/lib/ryu-mail \
@@ -43,17 +55,53 @@ RYU_SMTP_PORT=587
 RYU_SMTP_USERNAME=agent@example.com
 RYU_SMTP_PASSWORD=use-a-secret-store
 RYU_SMTP_FROM=agent@example.com
-RYU_SMTP_STARTTLS=true
+RYU_SMTP_TLS=starttls
 ```
+
+`RYU_SMTP_TLS` is `starttls` (the default), `implicit` for SMTPS (the default on
+port 465), or `none`. With `none`, Mail authenticates only to a relay on the same
+host (`localhost` or a loopback address). For a remote relay it logs an error at
+startup and leaves sending unconfigured instead of sending the password
+unencrypted. The older `RYU_SMTP_STARTTLS=false` is read as `none`, except on
+port 465, which stays implicit TLS.
 
 The process refuses protected API access without its bearer, and refuses an
 outbound webhook destination that is not public HTTPS. The full route,
 signature, WebSocket, attachment, and retry contract is in [Ryu Mail API](/docs/standalone/mail-api).
 
-To expose the process beyond the host, set an explicit standalone token and
+To expose the process beyond the host, set a standalone token and
 put TLS and rate limiting in front of it. A non-loopback bind without
-`RYU_MAIL_API_TOKEN` is refused. The Mail database and attachment blobs remain
-owned by this process.
+`RYU_MAIL_API_TOKEN` is refused, and so is one whose token is shorter than 32
+characters or a documentation placeholder. The Mail database and attachment
+blobs remain owned by this process. They live in `plugin-data/@ryu+mail/` under
+`RYU_DIR` (`mail.db` plus a `blobs/` folder), the same place a Ryu node keeps
+them.
+
+The database holds every message plus the inbound and webhook signing secrets,
+so Mail creates it and the attachment store readable only by the service user
+(files `0600`, directories `0700`) and narrows an existing store when it opens
+it. Run the service under a dedicated account that owns `RYU_DIR`.
+
+### Sealing stored secrets
+
+Mail always stores inbox inbound secrets, webhook signing secrets, and webhook
+custom header values encrypted, with ChaCha20-Poly1305 under a key derived for
+Mail. Run inside Ryu, Mail receives that key when Ryu starts it. Run as a
+standalone service, set `RYU_MASTER_KEY` to a base64-encoded 32-byte key, for
+example from `openssl rand -base64 32`, and Mail derives its key from it. On the
+first start with a key, Mail encrypts the secrets an earlier version stored in
+plaintext, including secrets an earlier standalone Mail encrypted with the
+previous `RYU_MASTER_KEY` scheme. Messages and attachments are not encrypted.
+
+Keep the key outside `RYU_DIR`, in the secret store that starts the service,
+and keep supplying the same value. Mail refuses to start when the key is not
+32 bytes of base64, when it cannot open the stored secrets, or when a store
+with encrypted secrets starts without it. Without any key, Mail starts but
+refuses to create an inbox or webhook rather than store its secret in
+plaintext. The encrypted secrets cannot be recovered without the key, so back
+it up separately from backups of `RYU_DIR`. See
+[encryption at rest](/docs/core/encryption-at-rest) for how Ryu derives
+per-app keys.
 
 ## Organization entry point
 
@@ -61,14 +109,57 @@ Hosted organization members manage Agent Inboxes from the Ryu dashboard's
 **Products** view. The browser uses the authenticated control-plane session; it
 does not receive a Mail service bearer or an inbound HMAC secret.
 
-The standalone Mail home redirects people to the organization dashboard at
-`GET /`. The `/api/mail/*` routes remain the service contract for authenticated
-callers and the inbound webhook.
+A hosted organization has one permanent mailbox, which an admin with
+`mail.manage` claims once, and each agent claims its own permanent address on
+it, from chat with the built-in `agent_inbox` tools or through the hosted API.
+Hosted organizations no longer create separate inboxes.
+
+In the **Products** view, the Ryu Mail card works like this:
+
+1. With no mailbox yet, an admin chooses **Set up organization mailbox**, types a
+   name, and sees both the mailbox address and the host agents' addresses live
+   on (`*@<name>.mail.<domain>`). Because the mailbox can never be changed,
+   released or reused, the admin types the full address to confirm.
+2. An organization that already had shared inboxes chooses **Choose your
+   organization mailbox** instead and picks one of them.
+3. After setup, the mailbox address is shown read-only, with no Delete, along
+   with who may claim agent addresses: agents on their own, agents with admin
+   approval, or admins only.
+4. The **Agent email** card lists agent addresses with their agent, node, status
+   and usage, with Approve, Reject, Revoke, Reinstate and Transfer. It also holds
+   the queue of agent sends waiting for approval and the organization's default
+   send policy.
+
+Older inboxes from before the mailbox keep their Delete action. See
+[Agent Inboxes](/docs/extend/develop/agent-inboxes#organization-mailbox) for the
+mailbox, agent addresses, revocation, and send approval. The self-hosted
+`ryu-mail` service described on this page has no organizations or agent
+addresses and keeps its own inbox API.
+
+The standalone Mail home at `GET /` returns a short JSON description of the
+service: its name, version, and the `/health` path. It redirects people only
+when `RYU_PRODUCT_DASHBOARD_URL` is set to a non-empty URL, such as your own
+console or landing page. Ryu's hosted deployment sets it to the Ryu dashboard,
+so a self-hosted Mail never sends visitors to Ryu by default. The `/api/mail/*`
+routes remain the service contract for authenticated callers and the inbound
+webhook.
+
+## Pricing and hosted limits
+
+Ryu Mail has a free hosted baseline of **1 mailbox, 3 agent addresses, 50
+emails per month, and 1 GiB of stored mail**, granted once per person and shared across every unpaid
+organization they own. Emails are counted per recipient. A Major Pass and the
+desktop license keep this baseline. Eligible paid Ryu plans include larger
+allowances: Pro has 5,000 emails and 10 GiB, Max has 100,000 emails
+and 100 GiB, and Teams and Business have 100,000 emails and 20 GiB.
+Enterprise limits are set by contract. There is no separate public hosted Mail
+subscription price; self-hosting uses your own infrastructure and mail
+transport. See [Agent Inboxes](/docs/billing/agent-inboxes) for full limits and
+enforcement details.
 
 <Cards>
   <DocCard href="/docs/standalone/mail-api" />
   <DocCard href="/docs/standalone/mail-delivery" />
-  <DocCard href="/docs/extend/develop/agent-inboxes" title="Hosted Agent Inboxes" description="Hosted organization inboxes, plan limits, storage, and billing behavior." />
+  <DocCard href="/docs/extend/develop/agent-inboxes" />
+  <DocCard href="/docs/billing/agent-inboxes" />
 </Cards>
-
-Continue with [Standalone services](/docs/standalone), [Mail API](/docs/standalone/mail-api), [Mail delivery](/docs/standalone/mail-delivery), and [agent inboxes](/docs/billing/agent-inboxes).

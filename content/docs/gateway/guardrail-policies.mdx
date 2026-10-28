@@ -1,0 +1,165 @@
+---
+title: "Guardrail Policies"
+description: "Write a guardrail policy once, assign it to an organization, team, member, key or agent, and preview the combined result with where each value comes from."
+tags: ["governance", "organizations", "policy", "guardrails", "firewall", "budgets"]
+---
+
+A **named guardrail policy** bundles the rules you would otherwise set field by field: which models,
+providers and regions a request may use, which tools and MCP servers an agent may call, firewall
+protections and evaluators, a spend cap, and zero data retention. You write it once and assign it
+to one or more scopes. This page is for organization administrators who set gateway rules.
+
+**Unassigned policies enforce nothing.** A policy only changes requests once it is assigned.
+
+## Where to manage them
+
+The same editor appears in three places:
+
+- **Web console:** open your organization, then **Governance > Guardrail policies**.
+- **Desktop app:** open Gateway settings, then **Limits & safety > Guardrail policies**. It edits
+  the organization your session is scoped to.
+- **Traffic map:** select a policy layer on the [traffic map](/docs/gateway/traffic-map) (desktop
+  **Limits & safety > Traffic map**, or **Governance > Safety map** on the web console) to open the
+  same editor beside the map.
+
+Each one needs permission to configure the gateway in that organization. From the list you can create a
+policy, open one to edit its rules, assign it to a scope, preview it at any scope before you assign
+it, and archive it once it is unassigned. **Effective policy** shows what a request gets at one
+scope today, with the layer that set each value. From the keyboard, opening a policy or **Effective
+policy** moves focus to that page's title, and **Policies** takes you back to the row you opened.
+
+In the editor, firewall switches offer **Inherit** or **On** only, because a policy can turn a
+protection on but never off. Rows set by the Ryu platform policy are marked
+**Ryu platform policy (managed by Ryu)** and cannot be changed. The desktop node's own firewall
+baseline stays under **Safety filters**.
+
+## Scopes
+
+A policy can be assigned to an **organization**, a **team**, a **member**, a **key** (a gateway key
+of the organization) or an **agent**. Each scope holds at most one assignment. To change it, replace
+that assignment or delete it first.
+
+A request picks up every assignment that applies to it:
+
+- The organization's assignment, always.
+- The team's, when the key belongs to a team or the node runs for a project in that team.
+- The member's, for keys that member owns. A signed-in member calling a shared node also gets
+  their assignment's model, provider, region and tool rules; its firewall settings and evaluators
+  apply through keys the member owns only.
+- The key's own assignment.
+- The agent's, for requests that name that agent.
+
+The [Ryu platform policy](/docs/gateway/organization-policy#ryu-platform-policy-on-hosted-gateways)
+sits above all of them on the hosted Gateway. It is read-only, and nothing in a tenant policy can
+loosen it.
+
+## What a policy holds
+
+| Rule | Meaning |
+| --- | --- |
+| Approved models | Exact model ids a request may use. The Gateway compares model ids exactly, so wildcards are refused. |
+| Approved providers | Exact provider ids. |
+| Allowed regions | Regions such as `us` or `eu-west-1`. `us` covers every `us-` region. |
+| Zero data retention | Record that the scope requires it (`true`) or inherit (`null`). The preview shows it. Today it is enforced only where the hosted Gateway already requires zero data retention, on every route through OpenRouter; it does not yet filter other provider routes. |
+| Budget | One spend cap with a daily, weekly, monthly or lifetime window. Requests stop when it is reached. The form will not save a window without a dollar amount; enter 0 only if you mean to block all spend. |
+| Firewall | Turn on scanning, redaction or logging, set the detection action (`block`, `sanitize` or `warn_and_continue`), and add custom patterns. Switches can only be turned on. |
+| Evaluators | Evaluators to enable, each with an optional inline action. |
+| Permissions | Ordered `allow`, `ask` or `deny` statements on `tool.call`, `mcp.use` or `model.use`, each with a resource pattern. |
+| Locked | Rule fields the organization marks as managed. Lower scopes can still tighten a locked field, by narrowing a list or adding a deny, but never loosen it, so a lock never drops a team, member or key restriction. Only honoured on an organization assignment. |
+
+Custom patterns may not use lookarounds, backreferences or a repeated group that already repeats
+(such as `(a+)+`), and must compile. A refused pattern returns `422` with the code
+`invalid_regex_pattern`.
+
+### Permissions
+
+Permissions are OpenCode-style statements read in order, and within one policy the last matching
+statement wins. Put the catch-all first, then the exceptions: `deny *` followed by `allow read`
+allows `read` and denies everything else. Only `*` and `?` are wildcards.
+
+- `tool.call` covers tool ids such as `github.get_repo`.
+- `mcp.use` covers external MCP server ids. Deny with `deny *` and list the servers you allow.
+- `model.use` takes exact model ids or `*`. As with MCP servers, deny with `deny *` and list the
+  models you allow.
+- `ask` is enforced as `deny` for now, because API requests have no approval step.
+- An `allow` that would reopen part of an earlier `deny` (`deny shell.*` then `allow shell.git_status`)
+  cannot be enforced exactly, so it is refused with `permission_exception_unsupported`. Write it as
+  `deny *` followed by the tools you allow.
+
+## How scopes combine
+
+Assignments only ever tighten what applies, whichever scope they sit at:
+
+| Rule | Across scopes |
+| --- | --- |
+| Approved models, providers, regions, allowed tools and MCP servers | Intersect. A scope that leaves a list empty adds no restriction. When nothing is left, nothing is allowed. |
+| Denied tools | Add up. A deny anywhere wins over any allow. |
+| Zero data retention | Any scope that requires it marks it required. |
+| Firewall switches | Any scope that turns one on keeps it on. |
+| Detection action | The strictest wins: `block`, then `sanitize`, then `warn_and_continue`. |
+| Custom patterns and evaluators | Add up. For the same evaluator, the stricter action wins. |
+| Budgets | Each scope's cap is checked on its own: the organization's, the team's and the key's, plus a member's cap for the requests the Gateway attributes to that signed-in member. |
+
+Assignments combine with the policy layers you edit directly under **Policies** and with firewall
+overlays in the same way, so neither can loosen the other.
+
+When a scope already has a hand-set budget, the two become one cap: the lower amount on the longer
+window, which keeps both limits. A weekly and a monthly cap become a monthly cap of at most half the
+weekly amount, because a week can span two months.
+
+An agent assignment carries firewall settings and evaluators only. Assigning a policy with models,
+providers, regions, permissions, a budget, zero data retention or locks to an agent is refused with
+`agent_scope_unsupported`.
+
+## Changes that loosen
+
+Writes need permission to configure the gateway. A change that loosens what an assignment enforces
+also asks you to verify your identity again:
+
+- removing an assignment;
+- replacing an assignment with a policy that allows more;
+- editing an assigned policy so it allows more, for example widening a model list, removing a deny,
+  turning a switch off, lowering the detection action, raising or removing a budget, or unlocking a
+  field.
+
+Tightening never asks, and neither does adding a lock, because a lock only tightens. Edits take the policy's current `expectedVersion`; a stale one is refused with
+`409` and the code `version_conflict`, so two administrators cannot overwrite each other. Every
+version is kept. A policy in use cannot be archived until it is unassigned everywhere.
+
+## Preview
+
+The preview shows the combined result for one organization, team, member, key or agent:
+
+- every rule's effective value and each layer that contributed to it, with platform rows marked
+  **Ryu platform policy (managed by Ryu)** and locked;
+- the models and providers left after your policies and the platform policy, with a warning when
+  none are left;
+- the budgets that apply at each scope, and whether zero data retention is required.
+
+You can preview unsaved rules as a candidate before you save or assign them. Firewall switches a
+preview shows as unset follow the node's own settings.
+
+## API
+
+All routes live under `/api/control-plane/orgs/{orgId}` and use your signed-in session.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /guardrail-policies` | List policies with their assignments. |
+| `POST /guardrail-policies` | Create a policy: `{ name, description, rules, locked }`. |
+| `GET /guardrail-policies/{policyId}` | Read a policy with its version history. |
+| `PUT /guardrail-policies/{policyId}` | Update it: `{ rules, locked, name, description, expectedVersion }`. |
+| `POST /guardrail-policies/{policyId}/archive` | Archive an unassigned policy. |
+| `GET /guardrail-assignments` | List assignments. |
+| `PUT /guardrail-assignments` | Assign: `{ policyId, scope: { kind, id } }`. Add `assignmentId` to replace the existing one. |
+| `DELETE /guardrail-assignments/{assignmentId}` | Remove an assignment. |
+| `POST /guardrail-policies/preview` | Preview: `{ scope: { kind, id }, teamId?, candidate? }`. |
+
+A refusal returns `{ "code": "...", "error": "..." }`.
+
+## Related
+
+- [Organization policy on nodes](/docs/gateway/organization-policy): the policy layers and tool
+  policy these assignments combine with.
+- [Managed data plane](/docs/gateway/managed-data-plane): how the hosted Gateway receives an
+  organization's policy.

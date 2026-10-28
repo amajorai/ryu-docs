@@ -1,19 +1,22 @@
 ---
-title: "Chat widget templates"
-description: "Declare visual chat use cases for every Ryu app, connect them to a Library view or tool, and add richer inline widgets over time."
+title: "Chat Widget Templates"
+description: "Declare contributes.chat_widget_templates so an app answers chat prompts with one of its views or tools, plus the MCP Apps widget protocol Ryu hosts in chat."
 tags: ["chat", "widgets", "apps", "views", "manifest"]
 ---
 
-Chat should be able to answer with the app's natural visual surface. A calendar app can show the
-next seven days, a social app can show a queue, a quest app can show a board, and a monitoring app
-can show recent checks. `contributes.chat_widget_templates[]` is the shared discovery contract for
-those prompts.
+`contributes.chat_widget_templates[]` lets an app declare chat prompts that answer with one of its
+visual surfaces. A calendar app can show the next seven days, a social app can show a queue, a
+quest app can show a board, and a monitoring app can show recent checks. MCP Apps can also render
+their own interactive widgets in chat (see [MCP Apps widgets](#mcp-apps-widgets)).
 
-## Contract
+## Native template contract
 
-Each template has an id, title, description, examples, and trigger phrases. An available template
-must bind to exactly one `tool_id` or `view_id`; a coming-soon template may omit the binding while an
-app finishes its renderer:
+Each template has an `id`, `title`, `display_mode`, and `backing`, plus optional `description`,
+`examples`, `triggers`, and `safe_action_ids`. `availability` is `available` (the default),
+`coming-soon`, or `unavailable`. An available template must bind to exactly one `tool_id` or
+`view_id`. A template that is not available may omit the binding while an app finishes its
+renderer. Desktop offers a template in chat only when it is `available`, has a backing, and has at
+least one example or trigger.
 
 ```json
 {
@@ -25,6 +28,7 @@ app finishes its renderer:
         "description": "Show upcoming events in a calendar",
         "examples": ["What is happening next week?"],
         "triggers": ["next week", "upcoming"],
+        "display_mode": "inline",
         "backing": { "view_id": "calendar" }
       }
     ]
@@ -32,11 +36,12 @@ app finishes its renderer:
 }
 ```
 
-The template is not an HTML widget and does not grant a tool. The host validates the backing,
-filters the contribution to the current surface, and applies the app's normal grants and allowlist.
+The template is not an HTML widget and does not grant a tool. `safe_action_ids` are identifiers
+only, never executable payloads. The host validates the backing, filters the contribution to the
+current surface, and applies the app's normal grants and allowlist.
 Use `contributes.widgets[]` plus a render tool when the answer needs a self-contained interactive
 HTML card. Use a view-backed template when the answer should open or project the app's shared Library
-surface. See [contribution surfaces](/docs/extend/develop/extensions/contribution-surfaces) for the
+surface. See [Contribution surfaces](/docs/extend/develop/extensions/contribution-surfaces) for the
 view and widget contracts.
 
 ## Patterns to publish
@@ -59,10 +64,66 @@ unrendered ideas in design notes until a public app surface exists.
 - Start with a question users naturally ask in chat, not with the app's internal route name.
 - Keep examples short enough to become composer suggestions.
 - Choose one backing per template. Split calendar, board, and detail intents into separate templates.
-- Return a bounded, useful first projection; let the user open the full app for deep editing.
+- Return a bounded, useful first projection. Let the user open the full app for deep editing.
 - Make the no-data and unavailable states readable. A missing provider or permission is not an empty
   successful result.
 - Add tests for manifest validation, backing availability, and the host's fallback renderer.
+
+## MCP Apps widgets
+
+MCP Apps can use the standard window JSON-RPC transport in a sandboxed Ryu widget.
+Opening a global app creates an owning conversation and keeps the existing Ryu
+chat composer beside the app. Thread entrypoints reuse their provided conversation.
+If initialization requests input, the conversation and form appear while the app
+is still opening. Activation retries reuse the same operation key and original
+request. Changing the selected agent, file, or account starts a separate activation.
+The app sends `ui/initialize`, then `ui/notifications/initialized`. Ryu replies with
+the granted host capabilities and sends `ui/notifications/tool-input` and
+`ui/notifications/tool-result`. Tool calls and follow-up messages still use the
+widget's approved grants. Unsupported methods return a JSON-RPC error.
+
+With the `assistant:context` grant, `ui/update-model-context` replaces that app
+instance's model context. Text, inline PNG/JPEG/WebP/GIF images, resource links,
+embedded text or base64 binary resources, and `structuredContent` are supported. Binary
+resources become file attachments, and the selected model must support their MIME type. The payload
+is limited to 2,000,000 bytes and 32 content items. Resource links are references, not implicit
+permission to fetch another resource. `_meta` is excluded from model context.
+
+Current context is attached to the owning conversation's next request without
+adding another visible user message. Content items appear as removable composer
+attachments. `annotations.audience: ["assistant"]` keeps background context
+hidden. Text and image labels use `openai/title`; text previews may use an HTTPS
+`openai/thumbnail`. Removing an item updates the app's accepted context. The response and
+`ui/notifications/host-context-changed` include `openai/modelContext.updateId` so
+the app can confirm the state accepted by the host.
+
+`ui/request-display-mode` supports `inline`, `fullscreen`, and `pip`. Picture in
+picture keeps the app in a bounded floating window with Restore and Close
+controls. Restore and Escape return it to the original message. Changing the
+display mode preserves the mounted app frame.
+
+When the host explicitly opens an editable file for an app, the app can use
+`resources/read` and `openai/resources/write` for that resource only. Reads expose
+an etag. Text and base64 blob writes accept `ifMatch` and report saved, conflict,
+or too-large outcomes.
+Subscriptions receive `notifications/resources/updated` after confirmed changes.
+An app cannot choose a different file path or gain filesystem access through this
+resource contract.
+
+Apps can advertise composer mention search through a tool's
+`_meta["openai/extensions"]["mentions/search"]` marker and app visibility in
+`_meta.ui.visibility`. While a user types `@`, Ryu calls that tool with `{ query }`
+using the selected agent's existing permissions. Resource links from
+`structuredContent.items` appear in the existing mention picker. Selecting a
+result preserves its resource URI for the outgoing model request.
+
+A Ryu app deep link uses
+`ryu://plugins/<encoded-server-id>/app/<encoded-tool-name>?path=<encoded-app-relative-url>`.
+It opens the registered app through Ryu's contribution route. It does not install
+the plugin or send a prompt. The app receives its relative path in
+`hostContext["openai/deepLink"].url` on initialization and subsequent context
+notifications. A path defaults to `/`, must be relative to the app, and cannot
+contain a fragment. Remote app deep links work only in the Desktop host.
 
 See [Library views](/docs/extend/develop/extensions/contribution-surfaces#library-views),
 [native bridges](/docs/extend/develop/extensions/native-bridges), and

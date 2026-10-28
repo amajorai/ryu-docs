@@ -1,15 +1,5 @@
 import { createRoot } from "react-dom/client";
-
-const colors = {
-  background: "#09090b",
-  border: "#27272a",
-  card: "#111113",
-  cardRaised: "#18181b",
-  green: "#86efac",
-  muted: "#a1a1aa",
-  text: "#f4f4f5",
-  violet: "#c4b5fd",
-};
+import styles from "./proof.module.css";
 
 const evidence = {
   articleModified: "2026-08-17T04:54:40.000Z",
@@ -62,175 +52,63 @@ function CheckCard({
   value: string;
 }) {
   return (
-    <li
-      style={{
-        background: colors.card,
-        border: `1px solid ${colors.border}`,
-        borderRadius: 14,
-        listStyle: "none",
-        padding: 18,
-      }}
-    >
-      <div
-        style={{
-          alignItems: "center",
-          display: "flex",
-          gap: 10,
-          justifyContent: "space-between",
-        }}
-      >
-        <strong style={{ fontSize: 15 }}>{label}</strong>
-        <span style={{ color: colors.green, fontSize: 12, fontWeight: 700 }}>
-          {value}
-        </span>
+    <li className={styles.role0}>
+      <div className={styles.role1}>
+        <strong className={styles.role2}>{label}</strong>
+        <span className={styles.role3}>{value}</span>
       </div>
-      <p
-        style={{
-          color: colors.muted,
-          fontSize: 13,
-          lineHeight: 1.5,
-          margin: "10px 0 0",
-        }}
-      >
-        {detail}
-      </p>
+      <p className={styles.role4}>{detail}</p>
     </li>
   );
 }
 
 function EvidenceRow({ label, value }: { label: string; value: string }) {
   return (
-    <div
-      style={{
-        alignItems: "baseline",
-        display: "grid",
-        gap: 16,
-        gridTemplateColumns: "150px minmax(0, 1fr)",
-        padding: "11px 0",
-      }}
-    >
-      <span style={{ color: colors.muted, fontSize: 12 }}>{label}</span>
-      <code
-        style={{ color: colors.text, fontSize: 12, overflowWrap: "anywhere" }}
-      >
-        {value}
-      </code>
+    <div className={styles.role5}>
+      <span className={styles.role6}>{label}</span>
+      <code className={styles.role7}>{value}</code>
     </div>
   );
 }
 
 function SeoProof() {
   return (
-    <main
-      style={{
-        boxSizing: "border-box",
-        color: colors.text,
-        fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-        minHeight: "100vh",
-        padding: "34px 24px 52px",
-      }}
-    >
-      <div style={{ margin: "0 auto", maxWidth: 980 }}>
+    <main className={styles.role8}>
+      <div className={styles.role9}>
         <header>
-          <div style={{ alignItems: "center", display: "flex", gap: 12 }}>
-            <div
-              aria-hidden="true"
-              style={{
-                alignItems: "center",
-                background: "#2e1065",
-                border: `1px solid ${colors.violet}`,
-                borderRadius: 12,
-                display: "flex",
-                fontSize: 22,
-                height: 44,
-                justifyContent: "center",
-                width: 44,
-              }}
-            >
+          <div className={styles.role10}>
+            <div aria-hidden="true" className={styles.role11}>
               ✦
             </div>
             <div>
-              <div
-                style={{
-                  color: colors.muted,
-                  fontSize: 12,
-                  letterSpacing: 1.1,
-                }}
-              >
+              <div className={styles.role12}>
                 RYU DOCS · VERIFICATION ARTIFACT
               </div>
-              <h1 style={{ fontSize: 30, margin: "4px 0 0" }}>
-                Fumadocs SEO + Last Modified
-              </h1>
+              <h1 className={styles.role13}>Fumadocs SEO + Last Modified</h1>
             </div>
           </div>
-          <p
-            style={{
-              color: colors.muted,
-              fontSize: 16,
-              lineHeight: 1.6,
-              margin: "20px 0 24px",
-              maxWidth: 760,
-            }}
-          >
+          <p className={styles.role14}>
             Production output is wired end to end: content timestamps flow into
             Fumadocs UI, page metadata, and the sitemap without a moving “now”
             value.
           </p>
         </header>
 
-        <section
-          aria-label="Verification status"
-          style={{
-            background: colors.cardRaised,
-            border: `1px solid ${colors.border}`,
-            borderRadius: 16,
-            marginBottom: 24,
-            padding: 20,
-          }}
-        >
-          <div
-            style={{
-              alignItems: "center",
-              display: "flex",
-              gap: 10,
-              justifyContent: "space-between",
-            }}
-          >
-            <h2 style={{ fontSize: 17, margin: 0 }}>6/6 checks passed</h2>
-            <span
-              style={{
-                background: "#14532d",
-                borderRadius: 999,
-                color: colors.green,
-                fontSize: 12,
-                fontWeight: 700,
-                padding: "6px 10px",
-              }}
-            >
-              BUILD VERIFIED
-            </span>
+        <section aria-label="Verification status" className={styles.role15}>
+          <div className={styles.role16}>
+            <h2 className={styles.role17}>6/6 checks passed</h2>
+            <span className={styles.role18}>BUILD VERIFIED</span>
           </div>
-          <ul
-            style={{ display: "grid", gap: 10, margin: "18px 0 0", padding: 0 }}
-          >
+          <ul className={styles.role19}>
             {checks.map((check) => (
               <CheckCard key={check.label} {...check} />
             ))}
           </ul>
         </section>
 
-        <section
-          aria-label="Live evidence"
-          style={{
-            background: colors.card,
-            border: `1px solid ${colors.border}`,
-            borderRadius: 16,
-            padding: "14px 20px",
-          }}
-        >
-          <h2 style={{ fontSize: 17, margin: "3px 0 5px" }}>Live evidence</h2>
-          <p style={{ color: colors.muted, fontSize: 13, margin: "0 0 8px" }}>
+        <section aria-label="Live evidence" className={styles.role20}>
+          <h2 className={styles.role21}>Live evidence</h2>
+          <p className={styles.role22}>
             Representative production route served by the built standalone
             server.
           </p>
@@ -243,17 +121,9 @@ function SeoProof() {
           />
         </section>
 
-        <footer
-          style={{
-            color: colors.muted,
-            fontSize: 12,
-            lineHeight: 1.6,
-            marginTop: 18,
-          }}
-        >
-          <span style={{ color: colors.violet }}>Passed:</span> fumadocs
-          types:check · focused Biome · Next production build · browser DOM ·
-          browser console
+        <footer className={styles.role23}>
+          <span className={styles.role24}>Passed:</span> fumadocs types:check ·
+          focused Biome · Next production build · browser DOM · browser console
         </footer>
       </div>
     </main>

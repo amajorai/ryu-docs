@@ -2,6 +2,7 @@
 
 import { Skeleton } from "@ryu/ui/components/skeleton";
 import {
+  Image as ImageIcon,
   LayoutPanelTop,
   List,
   Palette,
@@ -12,6 +13,7 @@ import {
 import { useTheme } from "next-themes";
 import type { ComponentType, ReactNode } from "react";
 import { useEffect, useState } from "react";
+import styles from "./contribution-surfaces.module.css";
 
 type PreviewIcon = ComponentType<{
   "aria-hidden"?: boolean;
@@ -90,6 +92,20 @@ const surfaces: SurfaceDefinition[] = [
     icon: Palette,
     render: () => <HostShellSkeleton slot="theme" />,
   },
+  {
+    key: "wallpaper-background",
+    title: "Wallpaper background",
+    manifestKey: "contributes.backgrounds[]",
+    description:
+      "Publish a data-only variant of a host renderer. The picker keeps the source credit beside the selected preview.",
+    controls: [
+      "host preset + bounded params",
+      "HTTPS source credit",
+      "available while enabled",
+    ],
+    icon: ImageIcon,
+    render: () => <HostShellSkeleton slot="wallpaper-background" />,
+  },
 ];
 
 export function ContributionSurfaces() {
@@ -109,12 +125,14 @@ export function ContributionSurfaces() {
   return (
     <section
       aria-label="Contribution surface previews"
-      className="not-prose my-8 rounded-2xl bg-fd-secondary p-2 sm:p-3"
+      className={`my-8 rounded-2xl bg-fd-secondary p-2 sm:p-3 ${styles.root}`}
     >
       <header className="rounded-xl bg-fd-background p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="mb-1 font-medium text-fd-primary text-xs uppercase tracking-[0.14em]">
+            <p
+              className={`mb-1 font-medium text-fd-primary text-xs uppercase ${styles.eyebrow}`}
+            >
               Host-rendered preview
             </p>
             <h3 className="m-0 font-medium text-fd-foreground text-lg">
@@ -130,8 +148,9 @@ export function ContributionSurfaces() {
           </span>
         </div>
         <p className="mt-3 mb-0 max-w-2xl text-fd-muted-foreground text-sm leading-relaxed">
-          These six views share one shell skeleton. The highlighted slot is the
-          part a manifest changes; the host keeps the rest of the UI consistent.
+          These seven views share one shell skeleton. The highlighted slot is
+          the part a manifest changes; the host keeps the rest of the UI
+          consistent.
         </p>
       </header>
 
@@ -158,7 +177,7 @@ function SurfaceCard({ surface }: { surface: SurfaceDefinition }) {
             <h4 className="m-0 font-medium text-fd-foreground text-sm">
               {surface.title}
             </h4>
-            <code className="rounded bg-fd-secondary px-1.5 py-0.5 text-[10px] text-fd-muted-foreground">
+            <code className="rounded bg-fd-secondary px-1.5 py-0.5 text-fd-muted-foreground">
               {surface.manifestKey}
             </code>
           </div>
@@ -175,7 +194,7 @@ function SurfaceCard({ surface }: { surface: SurfaceDefinition }) {
       <div className="mt-3 flex flex-wrap gap-1.5">
         {surface.controls.map((control) => (
           <span
-            className="rounded-full bg-fd-secondary px-2 py-1 text-[10px] text-fd-muted-foreground"
+            className="rounded-full bg-fd-secondary px-2 py-1 text-fd-muted-foreground"
             key={control}
           >
             {control}
@@ -192,19 +211,28 @@ type ContributionSlot =
   | "sidebar-button"
   | "sidebar-section"
   | "theme"
+  | "wallpaper-background"
   | "workspace-tab";
 
 function HostShellSkeleton({ slot }: { slot: ContributionSlot }) {
   return (
     <div className="relative min-h-44 overflow-hidden rounded-md bg-fd-background">
       <div className="flex min-h-44 overflow-hidden">
-        <aside className="w-32 shrink-0 bg-fd-secondary/70 p-2">
+        <div className="w-32 shrink-0 bg-fd-secondary/70 p-2">
           <div className="mb-3 flex items-center gap-1.5">
-            <Skeleton className="size-4 rounded bg-fd-primary/30" />
-            <Skeleton className="h-2 w-10 rounded-full bg-fd-background/70" />
+            <Skeleton className="size-4" radius="block" tone="docsPrimary30" />
+            <Skeleton
+              className="h-2 w-10"
+              radius="pill"
+              tone="docsBackground70"
+            />
           </div>
           <div className="space-y-1">
-            <Skeleton className="h-5 w-full rounded bg-fd-background/70" />
+            <Skeleton
+              className="h-5 w-full"
+              radius="block"
+              tone="docsBackground70"
+            />
             <SlotMarker
               active={slot === "sidebar-section"}
               label="Sidebar section"
@@ -213,44 +241,75 @@ function HostShellSkeleton({ slot }: { slot: ContributionSlot }) {
               active={slot === "sidebar-button"}
               label="Sidebar button"
             />
-            <Skeleton className="h-5 w-4/5 rounded bg-fd-background/70" />
+            <Skeleton
+              className="h-5 w-4/5"
+              radius="block"
+              tone="docsBackground70"
+            />
           </div>
-        </aside>
+        </div>
 
-        <main className="min-w-0 flex-1 p-3">
+        <div className="min-w-0 flex-1 p-3">
           <div className="flex items-center justify-between gap-2">
-            <Skeleton className="h-2.5 w-24 rounded-full bg-fd-secondary" />
-            <Skeleton className="h-5 w-5 rounded bg-fd-secondary" />
+            <Skeleton
+              className="h-2.5 w-24"
+              radius="pill"
+              tone="docsSecondary"
+            />
+            <Skeleton className="h-5 w-5" radius="block" tone="docsSecondary" />
           </div>
           <div className="mt-3 space-y-2">
-            <Skeleton className="h-2 w-4/5 rounded-full bg-fd-secondary" />
-            <Skeleton className="h-2 w-3/5 rounded-full bg-fd-secondary" />
+            <Skeleton
+              className="h-2 w-4/5"
+              radius="pill"
+              tone="docsSecondary"
+            />
+            <Skeleton
+              className="h-2 w-3/5"
+              radius="pill"
+              tone="docsSecondary"
+            />
             {slot === "companion" ? (
               <HighlightedSlot label="Companion surface">
-                <Skeleton className="h-2 w-3/4 rounded-full bg-fd-background" />
-                <Skeleton className="mt-2 h-8 w-full rounded bg-fd-background" />
+                <Skeleton
+                  className="h-2 w-3/4"
+                  radius="pill"
+                  tone="docsBackground"
+                />
+                <Skeleton
+                  className="mt-2 h-8 w-full"
+                  radius="block"
+                  tone="docsBackground"
+                />
               </HighlightedSlot>
             ) : (
-              <Skeleton className="h-16 w-full rounded bg-fd-secondary/70" />
+              <Skeleton
+                className="h-16 w-full"
+                radius="block"
+                tone="docsSecondary70"
+              />
             )}
           </div>
-        </main>
+        </div>
       </div>
 
       {slot === "pinned-summary" ? <PinnedSummarySlot /> : null}
       {slot === "workspace-tab" ? <WorkspaceTabSlot /> : null}
       {slot === "theme" ? <ThemeSlot /> : null}
+      {slot === "wallpaper-background" ? <WallpaperBackgroundSlot /> : null}
     </div>
   );
 }
 
 function SlotMarker({ active, label }: { active: boolean; label: string }) {
   if (!active) {
-    return <Skeleton className="h-5 w-full rounded bg-fd-background/60" />;
+    return (
+      <Skeleton className="h-5 w-full" radius="block" tone="docsBackground60" />
+    );
   }
 
   return (
-    <div className="flex h-5 items-center gap-1.5 rounded bg-fd-accent px-2 text-fd-foreground text-[9px]">
+    <div className="flex h-5 items-center gap-1.5 rounded bg-fd-accent px-2 text-fd-foreground">
       <span className="size-1.5 rounded-full bg-fd-primary" />
       <span className="truncate">{label}</span>
     </div>
@@ -266,7 +325,7 @@ function HighlightedSlot({
 }) {
   return (
     <div className="rounded-md bg-fd-accent/70 p-2">
-      <div className="mb-2 flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+      <div className="mb-2 flex items-center gap-1.5 font-medium text-fd-foreground">
         <Sparkles aria-hidden="true" size={11} />
         {label}
       </div>
@@ -277,26 +336,34 @@ function HighlightedSlot({
 
 function PinnedSummarySlot() {
   return (
-    <aside className="absolute top-8 right-3 w-32 rounded-md bg-fd-accent p-2">
-      <div className="flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+    <div className="absolute top-8 right-3 w-32 rounded-md bg-fd-accent p-2">
+      <div className="flex items-center gap-1.5 font-medium text-fd-foreground">
         <Pin aria-hidden="true" size={11} />
         Live summary
       </div>
-      <Skeleton className="mt-2 h-2 w-4/5 rounded-full bg-fd-background/80" />
-      <Skeleton className="mt-1.5 h-2 w-3/5 rounded-full bg-fd-background/80" />
-    </aside>
+      <Skeleton
+        className="mt-2 h-2 w-4/5"
+        radius="pill"
+        tone="docsBackground80"
+      />
+      <Skeleton
+        className="mt-1.5 h-2 w-3/5"
+        radius="pill"
+        tone="docsBackground80"
+      />
+    </div>
   );
 }
 
 function WorkspaceTabSlot() {
   return (
     <div className="absolute right-2 bottom-2 left-2 flex items-center gap-1 rounded bg-fd-secondary/90 p-1">
-      <Skeleton className="h-5 w-12 rounded bg-fd-background" />
-      <div className="flex h-5 items-center gap-1 rounded bg-fd-accent px-2 text-fd-foreground text-[9px]">
+      <Skeleton className="h-5 w-12" radius="block" tone="docsBackground" />
+      <div className="flex h-5 items-center gap-1 rounded bg-fd-accent px-2 text-fd-foreground">
         <LayoutPanelTop aria-hidden="true" size={10} />
         Dock panel
       </div>
-      <Skeleton className="h-5 w-10 rounded bg-fd-background/60" />
+      <Skeleton className="h-5 w-10" radius="block" tone="docsBackground60" />
     </div>
   );
 }
@@ -304,7 +371,7 @@ function WorkspaceTabSlot() {
 function ThemeSlot() {
   return (
     <div className="absolute right-3 bottom-3 left-3 rounded bg-fd-accent p-2">
-      <div className="flex items-center gap-1.5 font-medium text-fd-foreground text-[9px]">
+      <div className="flex items-center gap-1.5 font-medium text-fd-foreground">
         <Palette aria-hidden="true" size={11} />
         Theme tokens
       </div>
@@ -313,6 +380,23 @@ function ThemeSlot() {
         <span className="h-5 rounded bg-fd-secondary" />
         <span className="h-5 rounded bg-fd-primary" />
         <span className="h-5 rounded bg-fd-foreground" />
+      </div>
+    </div>
+  );
+}
+
+function WallpaperBackgroundSlot() {
+  return (
+    <div
+      aria-hidden={true}
+      className="absolute inset-2 overflow-hidden rounded-md bg-gradient-to-br from-wallpaper-start/70 via-wallpaper-middle/70 to-wallpaper-end"
+    >
+      <div className="absolute top-2 left-2 rounded bg-black/40 px-2 py-1 font-medium text-white">
+        Aurora · Marketplace
+      </div>
+      <div className="absolute right-2 bottom-2 flex items-center gap-1 rounded bg-black/50 px-2 py-1 text-white">
+        <ImageIcon aria-hidden={true} size={10} />
+        Source: PatternCraft
       </div>
     </div>
   );

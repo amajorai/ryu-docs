@@ -1,0 +1,185 @@
+---
+title: Multi-agent
+description: Compose TypeScript SDK agents as tools, hand a conversation from one agent to another, and route work through a supervisor or agent network.
+tags: ["agents", "multi-agent", "handoff", "supervisor", "sdk"]
+---
+
+The TypeScript SDK's `Agent` can work with other agents in three ways. All of them run in your own
+process on the SDK-owned loop (an `Agent` without a `sessionId`); every model call still routes
+through the Gateway, and remote Ryu tools still run through Core.
+
+| Pattern | Who stays in charge | Use it when |
+|---|---|---|
+| `agent.asTool()` | The calling agent | A specialist answers one question and the caller keeps going |
+| `handoff(target)` | The target agent, from the handoff on | The conversation belongs to someone else now (triage, escalation, swarm) |
+| `createSupervisor()` / `AgentNetwork` | A supervisor, or whichever member is active | Several agents collaborate on one task with a bounded number of turns |
+
+## Agents as tools
+
+`asTool()` turns an agent into a tool another agent can call. The calling model sends a task, the
+agent runs to completion, and its answer (or its structured output when it has an
+`outputSchema`) becomes the tool result.
+
+```typescript
+import { Agent } from "@ryuhq/sdk";
+
+const researcher = new Agent({
+  name: "researcher",
+  description: "Finds and cites facts about a topic.",
+  model: "your-model-id",
+  instructions: "Answer with short, sourced facts.",
+});
+
+const writer = new Agent({
+  name: "writer",
+  model: "your-model-id",
+  instructions: "Write clear briefs. Ask the researcher for facts you need.",
+  tools: { research: researcher.asTool() },
+});
+
+const { text } = await writer.generate("Write a brief on solid-state batteries.");
+```
+
+The model sees the tool's `description` (the option, else the agent's `description`). By default
+the tool takes `{ prompt: string }` and passes it through as the agent's task. Pass an
+`inputSchema` to accept structured arguments instead; they are sent to the agent as JSON:
+
+```typescript
+const pricer = pricingAgent.asTool({
+  description: "Price a SKU for a region.",
+  inputSchema: {
+    type: "object",
+    properties: { sku: { type: "string" }, region: { type: "string" } },
+    required: ["sku"],
+  },
+});
+```
+
+If the child agent fails, pauses for an account connection, or pauses for approval, the calling
+model receives a tool error it can react to. `needsApproval: true` asks the calling agent's
+`approvalHandler` before delegating.
+
+## Handoffs
+
+`handoff(target)` creates a tool that transfers the conversation to `target` inside the same run.
+The target continues with the full transcript, including the handoff call, and its own
+`instructions` and `tools` replace the previous agent's.
+
+```typescript
+import { Agent, handoff } from "@ryuhq/sdk";
+
+const billing = new Agent({
+  name: "billing",
+  description: "Invoices, refunds, and payment methods.",
+  model: "your-model-id",
+  instructions: "Resolve billing questions.",
+});
+
+const triage = new Agent({
+  name: "triage",
+  model: "your-model-id",
+  instructions: "Route the user to the right team.",
+  tools: { transfer_to_billing: handoff(billing) },
+});
+
+const { text } = await triage.generate("I was charged twice this month.");
+// `text` is billing's answer.
+```
+
+A handoff costs no extra model call: the transferring agent's turn ends as soon as it calls the
+handoff tool. The model may pass an optional `reason`. Target agents can hold handoff tools of
+their own, so agents can pass a conversation along a chain or back and forth. One run follows at
+most 10 agent turns.
+
+`Agent.stream()` reports the handoff as the handoff tool's `tool_call` and `tool_result` events.
+To see which agent produced each event, run the agents as an `AgentNetwork`.
+
+## Agent networks
+
+An `AgentNetwork` runs a set of agents that hand off to each other. Every streamed event carries
+`agent`, the name of the active agent, and each transfer emits a `handoff` event with `from`,
+`to`, and `reason`.
+
+```typescript
+import { AgentNetwork } from "@ryuhq/sdk";
+
+const network = new AgentNetwork({
+  agents: [triage, billing, support],
+  maxSteps: 6,
+});
+
+for await (const event of network.stream("My refund never arrived.")) {
+  if (event.type === "handoff") console.log(`${event.from} -> ${event.to}`);
+  if (event.type === "text") process.stdout.write(event.content);
+  if (event.type === "result") console.log(`\n[${event.agent}] ${event.text}`);
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `agents` | Members. Names must be unique. A handoff to an agent outside the network is an error. |
+| `entry` | The agent that takes the first turn (default: the first member) |
+| `maxSteps` | Cap on agent turns for one run (default 10) |
+| `returnTo` | After any other member finishes a turn, return control to this agent |
+
+Without `returnTo` the network behaves like a swarm: the run ends when the active agent answers
+without handing off. The final `result` event includes `activations`, the summed model `steps`
+and `usage`, the shared `messages` transcript, and `maxStepsReached`, which is `true` when the
+cap ended the run before an agent answered. `network.generate()` returns the same fields and
+throws when a member reports an error.
+
+## Supervisors
+
+`createSupervisor` builds a supervisor agent that delegates to member agents. The supervisor gets
+one transfer tool per member, named `transfer_to_<name>` and described from the member's
+`description`. After each member turn, control returns to the supervisor, which delegates again
+or writes the final answer. The member's reply stays in the transcript as an assistant message,
+followed by a short user-role note naming the member, so the supervisor's next model call never
+ends on an assistant message.
+
+```typescript
+import { createSupervisor } from "@ryuhq/sdk";
+
+const team = createSupervisor({
+  model: "your-model-id",
+  agents: [researcher, writer],
+  maxSteps: 8,
+});
+
+const result = await team.generate("Write a sourced brief on solid-state batteries.");
+console.log(result.agent, result.text);
+```
+
+`createSupervisor` accepts the usual `Agent` options for the supervisor itself (`model`, `node`,
+`core`, `middleware`, `approvalHandler`, and so on). `instructions` replaces the default
+supervisor prompt; the team roster is always appended. `tools` adds tools beside the transfer
+tools, and `supervisorMaxSteps` bounds the supervisor's own model rounds per turn.
+
+A network or supervisor can itself be a tool of another agent:
+
+```typescript
+const lead = new Agent({
+  name: "lead",
+  model: "your-model-id",
+  tools: { researchTeam: team.asTool({ description: "A research team." }) },
+});
+```
+
+For an agent that runs on another host, wrap it with the [A2A client](/docs/extend/develop/sdk/a2a-client)
+and use it as a tool the same way.
+
+## Behavior notes
+
+- Each agent's `middleware` applies to its own turns. A handoff ends the transferring agent's
+  turn; a follow-up message its `afterTurn` handler adds after the handoff is not carried to the
+  target.
+- Agents with a `sessionId` run inside Core and cannot take part in a handoff or network. Use
+  them through `asTool()` instead.
+- A member that pauses for approval without an `approvalHandler`, or for an account connection,
+  ends the network run after its `approval_requested` or `auth_required` event. To answer
+  approvals for every member that has no handler of its own, pass one for the run:
+  `network.stream(input, signal, { approvalHandler })`. `Agent.stream()` takes the same third
+  argument and passes it on to handoff targets, and `agent.streamMessages(messages, {
+  approvalHandler, followHandoffs: true })` continues a transcript the way `stream()` would.
+  [`createRyuServer`](/docs/extend/develop/sdk/server#tool-approvals) uses this to route approvals
+  to its `/approvals` route.

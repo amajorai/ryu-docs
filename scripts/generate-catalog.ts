@@ -1,8 +1,16 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-
+import { parseArgs } from "node:util";
+import { z } from "zod";
 import type { CatalogAttributes } from "../src/lib/catalog";
+import { escapeMdxProseBraces } from "../src/lib/mdx-prose";
+import {
+  catalogManifestSchema,
+  type CatalogManifest as Manifest,
+  type CatalogProvide as Provide,
+  type CatalogRunnable as Runnable,
+} from "./catalog-manifest";
 
 /**
  * Generate the public Apps and Plugins catalog realms from the store manifests.
@@ -19,10 +27,25 @@ import type { CatalogAttributes } from "../src/lib/catalog";
  * engineering is stripped — no `core:/api/...` routes, ports, `RYU_*` env vars,
  * secret headers, sidecar command/env details, or crate paths. The manifests
  * are the source of truth; the generated prose is a faithful, sanitized mirror.
+ *
+ * Ownership: every file this script writes carries the frontmatter marker
+ * `generated: "generate:catalog"`. A regeneration only overwrites or deletes
+ * files that carry the marker, so hand-written pages that live beside the
+ * catalog (and catalog slots deliberately taken over by a hand-written page)
+ * survive. A marked page whose manifest left the catalog is deleted. `meta.json`
+ * is merged: generated entries are rebuilt, hand-added entries keep their place
+ * after the entry they followed.
+ *
+ * Authored prose belongs in `content-guides/<realm>/<slug>.mdx`, never in the
+ * generated page. See `parseCatalogGuide` for the guide format. Run with
+ * `--check` to fail when the committed output drifts from its sources.
  */
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const CONTENT_ROOT = path.join(REPO_ROOT, "apps/fumadocs/content/docs");
-const AUTHORED_GUIDES_ROOT = path.join(REPO_ROOT, "apps/fumadocs/content-guides");
+const AUTHORED_GUIDES_ROOT = path.join(
+  REPO_ROOT,
+  "apps/fumadocs/content-guides",
+);
 const APPS_STORE = path.join(REPO_ROOT, "apps-store");
 const PLUGIN_STORES = [
   path.join(REPO_ROOT, "plugins-store", "plugins"),
@@ -43,113 +66,20 @@ const PAGE_SLUG_ALIASES = new Map([["reelfarm", "studio"]]);
 const TOOL_BACKEND_LABEL = new Map<string, string>([
   ["http", "HTTP"],
   ["command", "CLI command"],
-  ["deno", "Sandboxed JS"],
+  ["inline_js", "Sandboxed JS"],
 ]);
-
-type ToolConfig = {
-  slug?: string;
-  name?: string;
-  description?: string;
-  backend?: string;
-  method?: string;
-  input_schema?: {
-    type?: string;
-    properties?: Record<
-      string,
-      { type?: string; description?: string; enum?: unknown[] }
-    >;
-    required?: string[];
-  };
-};
-
-type Runnable = {
-  id?: string;
-  name?: string;
-  kind?: string;
-  config?: ToolConfig & {
-    label?: string;
-    ui_format?: string;
-    policy_type?: string;
-    definition?: { note?: string; surface?: string };
-    system_prompt?: string;
-    model?: string;
-    tools?: string[];
-    skill_id?: string;
-  };
-};
-
-type ContributesItem = {
-  id?: string;
-  title?: string;
-  label?: string;
-  command?: string;
-  description?: string;
-  type?: string;
-  on?: string;
-  placement?: string;
-  anchor?: string;
-  capability?: string;
-  fields?: { label?: string; type?: string; description?: string }[];
-};
-
-type Provide = {
-  capability?: string;
-  version?: string;
-  title?: string;
-  grant?: string;
-  target?: string;
-  tools?: Record<string, { tool?: string }>;
-};
-
-type Manifest = {
-  id?: string;
-  name?: string;
-  version?: string;
-  category?: string;
-  description?: string;
-  tagline?: string;
-  keywords?: string[];
-  icon?: string;
-  author?: string | { name?: string };
-  repository?: string;
-  external?: boolean;
-  system?: boolean;
-  mandatory?: boolean;
-  hidden?: boolean;
-  source?: string;
-  stability?: string;
-  surfaces?: Record<string, { support?: string }>;
-  targets?: string[];
-  engines?: Record<string, string>;
-  runnables?: Runnable[];
-  permission_grants?: string[];
-  permission_levels?: {
-    id?: string;
-    label?: string;
-    description?: string;
-    implies?: string[];
-  }[];
-  provides?: Provide[];
-  mcp_servers?: Record<string, { description?: string }>;
-  sidecars?: { name?: string }[];
-  requires?: {
-    apps?: { id?: string; min_version?: string }[];
-    grants?: string[];
-  };
-  activation_events?: string[];
-  contributes?: Record<string, ContributesItem[]>;
-};
 
 type CatalogBase = "apps" | "plugins";
 
-type CatalogEntry = {
+export type CatalogEntry = {
   dir: string;
   manifest: Manifest;
   category?: string;
 };
 
 function pageSlug(entry: { dir: string }): string {
-  return PAGE_SLUG_ALIASES.get(entry.dir) ?? entry.dir;
+  const directory = path.basename(entry.dir.replaceAll("\\", "/"));
+  return PAGE_SLUG_ALIASES.get(directory) ?? directory;
 }
 
 export type CatalogState = {
@@ -177,10 +107,7 @@ const PLUGIN_CATEGORY_ORDER = [
  * per the site style guide.
  */
 function esc(text: string): string {
-  return text
-    .replace(/\s*\u2014\s*/g, " - ")
-    .replace(/\{/g, "&#123;")
-    .replace(/\}/g, "&#125;");
+  return escapeMdxProseBraces(text);
 }
 
 const CATALOG_PROSE_PARAGRAPH_LIMIT = 900;
@@ -211,7 +138,8 @@ function proseParagraphs(text: string): string[] {
     }
 
     const candidate = `${current} ${sentence}`;
-    if (candidate.length > CATALOG_PROSE_PARAGRAPH_LIMIT) {
+    // Measure the escaped form: brace entities lengthen the rendered paragraph.
+    if (esc(candidate).length > CATALOG_PROSE_PARAGRAPH_LIMIT) {
       paragraphs.push(current);
       current = sentence;
     } else {
@@ -225,9 +153,34 @@ function proseParagraphs(text: string): string[] {
   return paragraphs.map((paragraph) => esc(paragraph));
 }
 
+/**
+ * Tool descriptions render as prose under the tool heading. Long manifest
+ * descriptions are split at sentence boundaries like detail descriptions, and
+ * pipes stay escaped so a description never reads as a table row.
+ */
+function toolDescriptionParagraphs(description: string): string {
+  return proseParagraphs(description)
+    .map((paragraph) => paragraph.replace(/\|/g, "&#124;"))
+    .join("\n\n");
+}
+
 /** Collapse whitespace for use inside a table cell (no pipes/newlines). */
 function cell(text: string): string {
   return esc(text).replace(/\s+/g, " ").replace(/\|/g, "&#124;").trim();
+}
+
+/** Frontmatter key/value that marks a file as owned by this generator. */
+export const GENERATED_MARKER = 'generated: "generate:catalog"';
+
+const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u;
+
+/** True when `source` carries this generator's ownership marker. */
+export function isGeneratedCatalogFile(source: string): boolean {
+  const block = FRONTMATTER_PATTERN.exec(source)?.[1];
+  if (block === undefined) {
+    return false;
+  }
+  return block.split(/\r?\n/u).some((line) => line.trim() === GENERATED_MARKER);
 }
 
 function frontmatter(
@@ -245,8 +198,242 @@ function frontmatter(
   if (catalog) {
     lines.push(`catalog: ${JSON.stringify(catalog)}`);
   }
-  lines.push("---");
+  lines.push(GENERATED_MARKER, "---");
   return lines.join("\n");
+}
+
+/**
+ * One authored block from a catalog guide, placed relative to a generated
+ * line. `after`/`before` is a path of line prefixes: the first entry matches
+ * the first generated line that starts with it, every later entry matches the
+ * first line after the previous match. The first entry must match exactly one
+ * generated line so a moved or duplicated anchor fails loudly instead of
+ * silently relocating prose.
+ */
+export type CatalogGuideInsert = {
+  after?: string[];
+  before?: string[];
+  at?: "end";
+  /** No blank line between the block and its anchor line. */
+  tight?: boolean;
+  body: string;
+};
+
+export type CatalogGuide = {
+  /** Authored prose that replaces the generated "What it does" section. */
+  lead?: string;
+  /** Authored replacement for the manifest description paragraphs only. */
+  description?: string;
+  inserts: CatalogGuideInsert[];
+};
+
+const guideDirectiveSchema = z
+  .object({
+    after: z.array(z.string().min(1)).min(1).optional(),
+    before: z.array(z.string().min(1)).min(1).optional(),
+    at: z.literal("end").optional(),
+    tight: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (spec) =>
+      [spec.after, spec.before, spec.at].filter((value) => value !== undefined)
+        .length === 1,
+    { message: "exactly one of after, before, or at is required" },
+  );
+
+const GUIDE_DIRECTIVE_PATTERN =
+  /^\{\/\* catalog:(insert|description)(?: (\{.*\}))? \*\/\}$/u;
+
+function trimBlankLines(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start].trim() === "") {
+    start += 1;
+  }
+  while (end > start && lines[end - 1].trim() === "") {
+    end -= 1;
+  }
+  return lines.slice(start, end);
+}
+
+/**
+ * Parse a catalog guide.
+ *
+ * Text before the first directive is the lead: it replaces the generated
+ * "What it does" section and follows the catalog navigation sentence (which is
+ * omitted when the lead already contains one). Directives are MDX comments on
+ * their own line, each owning the text up to the next directive:
+ *
+ *     {/* catalog:description *\/}            replaces the manifest description
+ *     {/* catalog:insert {"after":["## Permissions"]} *\/}
+ *     {/* catalog:insert {"before":["This page is part of the"]} *\/}
+ *     {/* catalog:insert {"at":"end"} *\/}
+ */
+export function parseCatalogGuide(
+  source: string,
+  label = "guide",
+): CatalogGuide {
+  const lines = source.replace(FRONTMATTER_PATTERN, "").split(/\r?\n/u);
+  const guide: CatalogGuide = { inserts: [] };
+  let current: string[] = [];
+  let directive:
+    | { kind: "lead" }
+    | { kind: "description" }
+    | { kind: "insert"; spec: Omit<CatalogGuideInsert, "body"> } = {
+    kind: "lead",
+  };
+
+  const flush = () => {
+    const body = trimBlankLines(current).join("\n");
+    if (directive.kind === "lead") {
+      if (body) {
+        guide.lead = body;
+      }
+    } else if (directive.kind === "description") {
+      if (!body) {
+        throw new Error(`${label}: empty catalog:description block`);
+      }
+      if (guide.description !== undefined) {
+        throw new Error(`${label}: duplicate catalog:description block`);
+      }
+      guide.description = body;
+    } else {
+      if (!body) {
+        throw new Error(`${label}: empty catalog:insert block`);
+      }
+      guide.inserts.push({ ...directive.spec, body });
+    }
+    current = [];
+  };
+
+  for (const line of lines) {
+    const match = GUIDE_DIRECTIVE_PATTERN.exec(line.trim());
+    if (!match) {
+      current.push(line);
+      continue;
+    }
+    flush();
+    if (match[1] === "description") {
+      if (match[2]) {
+        throw new Error(`${label}: catalog:description takes no options`);
+      }
+      directive = { kind: "description" };
+      continue;
+    }
+    const parsed = guideDirectiveSchema.safeParse(JSON.parse(match[2] ?? "{}"));
+    if (!parsed.success) {
+      throw new Error(
+        `${label}: invalid catalog:insert ${match[2] ?? ""}: ${parsed.error.message}`,
+      );
+    }
+    directive = { kind: "insert", spec: parsed.data };
+  }
+  flush();
+  if (guide.lead !== undefined && guide.description !== undefined) {
+    throw new Error(
+      `${label}: a lead already replaces "What it does"; drop catalog:description`,
+    );
+  }
+  return guide;
+}
+
+function resolveAnchor(
+  lines: string[],
+  anchor: string[],
+  label: string,
+): number {
+  const [first, ...rest] = anchor;
+  const firstMatches = lines.flatMap((line, index) =>
+    line.startsWith(first) ? [index] : [],
+  );
+  if (firstMatches.length !== 1) {
+    throw new Error(
+      `${label}: anchor ${JSON.stringify(first)} matched ${firstMatches.length} generated lines; it must match exactly one`,
+    );
+  }
+  let index = firstMatches[0];
+  for (const prefix of rest) {
+    const next = lines.findIndex(
+      (line, candidate) => candidate > index && line.startsWith(prefix),
+    );
+    if (next < 0) {
+      throw new Error(
+        `${label}: anchor ${JSON.stringify(prefix)} not found after ${JSON.stringify(lines[index])}`,
+      );
+    }
+    index = next;
+  }
+  return index;
+}
+
+/**
+ * Place a guide's insert blocks into generated page text. Anchors resolve
+ * against the generated lines only, so authored blocks never anchor on each
+ * other and their relative order follows the guide file.
+ */
+export function applyGuideInserts(
+  page: string,
+  inserts: CatalogGuideInsert[],
+  label = "guide",
+): string {
+  if (inserts.length === 0) {
+    return page;
+  }
+  const hasTrailingNewline = page.endsWith("\n");
+  const lines = (hasTrailingNewline ? page.slice(0, -1) : page).split("\n");
+  const before = new Map<number, CatalogGuideInsert[]>();
+  const after = new Map<number, CatalogGuideInsert[]>();
+  const atEnd: CatalogGuideInsert[] = [];
+  for (const insert of inserts) {
+    if (insert.at === "end") {
+      atEnd.push(insert);
+      continue;
+    }
+    const target = insert.after ? after : before;
+    const index = resolveAnchor(
+      lines,
+      insert.after ?? insert.before ?? [],
+      label,
+    );
+    target.set(index, [...(target.get(index) ?? []), insert]);
+  }
+
+  const out: string[] = [];
+  let needBlank = false;
+  const pushLine = (line: string) => {
+    if (needBlank && line.trim() !== "") {
+      out.push("");
+    }
+    needBlank = false;
+    out.push(line);
+  };
+  const pushBlock = (
+    block: CatalogGuideInsert,
+    tightBefore: boolean,
+    tightAfter: boolean,
+  ) => {
+    if (!tightBefore && out.length > 0 && out.at(-1)?.trim() !== "") {
+      out.push("");
+    }
+    needBlank = false;
+    out.push(...block.body.split("\n"));
+    needBlank = !tightAfter;
+  };
+
+  lines.forEach((line, index) => {
+    for (const block of before.get(index) ?? []) {
+      pushBlock(block, false, block.tight === true);
+    }
+    pushLine(line);
+    for (const block of after.get(index) ?? []) {
+      pushBlock(block, block.tight === true, false);
+    }
+  });
+  for (const block of atEnd) {
+    pushBlock(block, false, false);
+  }
+  return `${out.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
 }
 
 function withoutRustLineComments(source: string): string {
@@ -287,8 +474,10 @@ function readManifestId(manifestPath: string): string | undefined {
   if (!existsSync(manifestPath)) {
     return undefined;
   }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
-  return typeof manifest.id === "string" ? manifest.id : undefined;
+  const parsed = z
+    .object({ id: z.string().optional() })
+    .safeParse(JSON.parse(readFileSync(manifestPath, "utf8")));
+  return parsed.success ? parsed.data.id : undefined;
 }
 
 /**
@@ -416,11 +605,10 @@ export function catalogAttributes(
     version: manifest.version ?? "0.0.0",
     official: true,
     builtIn:
-      typeof manifest.id === "string" &&
-      catalogState.builtInIds.has(manifest.id),
+      manifest.id !== undefined && catalogState.builtInIds.has(manifest.id),
     system: manifest.system === true,
     preInstalled:
-      typeof manifest.id === "string" &&
+      manifest.id !== undefined &&
       catalogState.preinstalledIds.has(manifest.id),
     stability: stabilityLabel(manifest),
     hidden: manifest.hidden === true,
@@ -502,7 +690,7 @@ function toolSection(runnable: Runnable): string {
     `### \`${cell(slug)}\`${runnable.name ? ` - ${cell(runnable.name)}` : ""}`,
   );
   if (cfg.description) {
-    lines.push("", esc(cell(cfg.description)));
+    lines.push("", toolDescriptionParagraphs(cfg.description));
   }
   const meta = [
     cfg.backend
@@ -579,9 +767,9 @@ function runnablesSection(runnables: Runnable[] | undefined): string {
   for (const other of others) {
     const cfg = other.config ?? {};
     lines.push("", `### ${other.name ?? other.kind ?? other.id}`);
-    if (cfg.system_prompt) {
-      lines.push("", `System prompt: ${esc(cell(cfg.system_prompt))}`);
-    }
+    // Agent system prompts are runtime configuration, not public prose: the
+    // public-product boundary forbids literal prompt bodies in the docs. Use a
+    // catalog guide insert to describe the agent's behavior instead.
     if (cfg.model) {
       lines.push("", `Model: \`${cell(cfg.model)}\``);
     }
@@ -597,19 +785,6 @@ function runnablesSection(runnables: Runnable[] | undefined): string {
   }
   lines.push("");
   return lines.join("\n");
-}
-
-function appearanceSection(m: Manifest, base: CatalogBase): string {
-  if (base !== "apps" || m.id !== "@ryu/browser") {
-    return "";
-  }
-  return [
-    "",
-    "## Appearance bridge",
-    "",
-    "The desktop Browser panel sends the resolved Desktop appearance snapshot to the browser chrome through the authenticated sidecar bridge. The shell follows the selected light or dark palette, contrast colors, interface and heading fonts, locale, and display time zone live. History labels use that display time zone and locale; appearance tokens are never injected into websites opened in browser tabs.",
-    "",
-  ].join("\n");
 }
 
 function providesSection(provides: Provide[] | undefined): string {
@@ -630,9 +805,14 @@ function providesSection(provides: Provide[] | undefined): string {
     const verbs = Object.entries(p.tools ?? {});
     if (verbs.length > 0) {
       lines.push("  - Verbs:");
-      for (const [verb, { tool }] of verbs) {
+      for (const [verb, { tool, adapter }] of verbs) {
+        // A capability adapter may call extra provider tools (for example a
+        // keyless fallback); name them so the verb's full tool set is visible.
+        const extra = (adapter?.tools ?? [])
+          .map((name) => `\`${cell(name)}\``)
+          .join(", ");
         lines.push(
-          `    - \`${cell(verb)}\`${tool ? ` -> \`${cell(tool)}\`` : ""}`,
+          `    - \`${cell(verb)}\`${tool ? ` -> \`${cell(tool)}\`` : ""}${extra ? ` (adapter also calls ${extra})` : ""}`,
         );
       }
     }
@@ -690,7 +870,8 @@ function permissionsSection(m: Manifest): string {
   return lines.join("\n");
 }
 
-const CONTRIBUTE_TITLES: Record<string, string> = {
+const CONTRIBUTE_TITLES = {
+  agent_profile_tabs: "Agent profile tabs",
   composer_controls: "Composer controls",
   settings_tabs: "Settings tabs",
   slash_commands: "Slash commands",
@@ -703,6 +884,7 @@ const CONTRIBUTE_TITLES: Record<string, string> = {
   context_menu_items: "Context menu items",
   create_actions: "Create actions",
   output_styles: "Output styles",
+  backgrounds: "Wallpaper backgrounds",
   policies: "Policies",
   widgets: "Widgets",
   hook_events: "Hook events",
@@ -711,13 +893,21 @@ const CONTRIBUTE_TITLES: Record<string, string> = {
   pi_extensions: "Pi extensions",
 };
 
+function isContributionTitle(
+  key: string,
+): key is keyof typeof CONTRIBUTE_TITLES {
+  return Object.hasOwn(CONTRIBUTE_TITLES, key);
+}
+
 const DESKTOP_SHELL_CONTRIBUTIONS = new Set([
+  "agent_profile_tabs",
   "dock_panels",
   "live_activities",
   "sidebar_buttons",
   "sidebar_sections",
   "store_tabs",
   "views",
+  "backgrounds",
 ]);
 
 function hasCompanionRunnable(m: Manifest): boolean {
@@ -766,10 +956,13 @@ function contributesSection(
     );
   }
   for (const [key, items] of entries) {
-    const title = CONTRIBUTE_TITLES[key] ?? key.replace(/_/g, " ");
+    const title = isContributionTitle(key)
+      ? CONTRIBUTE_TITLES[key]
+      : key.replace(/_/g, " ");
     lines.push("", `### ${title}`, "");
     for (const item of items) {
-      const label = item.command ?? item.title ?? item.label ?? item.id;
+      const label =
+        item.command ?? item.title ?? item.label ?? item.id ?? item.tool_id;
       const desc = item.description ? ` - ${esc(cell(item.description))}` : "";
       const extra: string[] = [];
       if (item.type) {
@@ -859,11 +1052,43 @@ function activationSection(m: Manifest): string {
   ].join("\n");
 }
 
+const NAVIGATION_PREFIX = "This page is part of the ";
+
+/** Path of the authored guide for one catalog page. */
+export function catalogGuidePath(
+  base: CatalogBase,
+  slug: string,
+  guidesRoot: string = AUTHORED_GUIDES_ROOT,
+): string {
+  return path.join(guidesRoot, base, `${slug}.mdx`);
+}
+
+/** Read and parse a guide, or `undefined` when none is authored. */
+export function readCatalogGuide(guidePath: string): CatalogGuide | undefined {
+  if (!existsSync(guidePath)) {
+    return undefined;
+  }
+  return parseCatalogGuide(readFileSync(guidePath, "utf8"), guidePath);
+}
+
+/** Public slug used when a caller has only the manifest (e.g. tests). */
+function slugFromManifestId(m: Manifest): string | undefined {
+  return m.id?.split("/").at(-1);
+}
+
+export type BuildPageOptions = {
+  /** Authored guide; `null` disables the default lookup. */
+  guide?: CatalogGuide | null;
+  /** Page slug used for the default guide lookup. */
+  slug?: string;
+};
+
 export function buildPage(
   m: Manifest,
   base: CatalogBase,
   related: { dir: string; manifest: Manifest }[],
   catalogState: CatalogState,
+  options: BuildPageOptions = {},
 ): string {
   const description = m.tagline ?? m.description?.split(/[.!?]\s/)[0] ?? "";
   const body: string[] = [];
@@ -877,63 +1102,43 @@ export function buildPage(
   );
   body.push("");
 
-  const authoredGuideName =
-    base === "apps"
-      ? {
-          "@ryu/activity": "activity",
-          "@ryu/autopilot": "autopilot",
-          "@ryu/checks": "checks",
-          "@ryu/projects": "projects",
-          "@ryu/security": "security",
-          "@ryu/slides": "slides",
-          "@ryu/video-studio": "video-studio",
-          "@ryu/life-recorder": "life-recorder",
-        }[m.id ?? ""]
-      : {
-          "@ryu/writing-style": "writing-style",
-        }[m.id ?? ""];
-  const authoredGuide = authoredGuideName
-    ? (() => {
-        const guidePath = path.join(
-          AUTHORED_GUIDES_ROOT,
-          authoredGuideName + ".mdx",
-        );
-        if (!existsSync(guidePath)) {
-          return undefined;
-        }
-        return readFileSync(guidePath, "utf8")
-          .replace(/^---[\s\S]*?---\s*/u, "")
-          .trim();
-      })()
-    : undefined;
+  const slug = options.slug ?? slugFromManifestId(m);
+  const guide =
+    options.guide === undefined
+      ? slug
+        ? readCatalogGuide(catalogGuidePath(base, slug))
+        : undefined
+      : (options.guide ?? undefined);
+  const authoredGuide = guide?.lead;
 
   if (m.hidden) {
     body.push(
       '<Callout type="info">',
-      "**Hidden reference example.** Not shown in the store by default; documented for reference.",
+      base === "apps"
+        ? "**Hidden from the store.** This app is not offered in the store; the description below explains why."
+        : "**Hidden from the store.** This plugin is not offered in the store; the description below explains why.",
       "</Callout>",
       "",
     );
   }
 
   if (authoredGuide) {
-    body.push(catalogNavigation(base, related), "", authoredGuide, "");
-  } else if (m.description) {
-    body.push(
-      "## What it does",
-      "",
-      proseParagraphs(m.description).join("\n\n"),
-      "",
-    );
-  }
-
-  if (!authoredGuide) {
+    // A lead that already places the navigation sentence keeps its placement.
+    const leadHasNavigation = authoredGuide
+      .split("\n")
+      .some((line) => line.startsWith(NAVIGATION_PREFIX));
+    if (!leadHasNavigation) {
+      body.push(catalogNavigation(base, related), "");
+    }
+    body.push(authoredGuide, "");
+  } else {
+    const prose =
+      guide?.description ??
+      (m.description ? proseParagraphs(m.description).join("\n\n") : "");
+    if (prose) {
+      body.push("## What it does", "", prose, "");
+    }
     body.push("", catalogNavigation(base, related), "");
-  }
-
-  const appearance = appearanceSection(m, base);
-  if (appearance) {
-    body.push(appearance);
   }
 
   const runnables = runnablesSection(m.runnables);
@@ -975,10 +1180,22 @@ export function buildPage(
     );
   }
 
-  return `${body
+  const page = `${body
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()}\n`;
+  return normalizePage(
+    applyGuideInserts(page, guide?.inserts ?? [], `${base}/${slug ?? "?"}`),
+  );
+}
+
+function normalizePage(page: string): string {
+  return `${page.replace(/\n{3,}/g, "\n\n").trim()}\n`;
+}
+
+/** Locale-pinned ordering so output does not depend on the host's locale. */
+function compareText(a: string, b: string): number {
+  return a.localeCompare(b, "en");
 }
 
 function groupByCategory(
@@ -997,7 +1214,7 @@ function groupByCategory(
   return [...groups.entries()]
     .map(([category, entries]) => ({
       category: CATEGORY_LABELS.get(category) ?? category,
-      entries: entries.sort((a, b) => a.dir.localeCompare(b.dir)),
+      entries: entries.sort((a, b) => compareText(a.dir, b.dir)),
     }))
     .sort((a, b) => {
       const aIndex = categoryOrder.indexOf(a.category);
@@ -1011,8 +1228,66 @@ function groupByCategory(
       if (bIndex >= 0) {
         return 1;
       }
-      return a.category.localeCompare(b.category);
+      return compareText(a.category, b.category);
     });
+}
+
+const META_SEPARATOR_PATTERN = /^---.*---$/u;
+
+/**
+ * Merge freshly generated `meta.json` pages with the committed list.
+ *
+ * Generated entries (`index`, catalog slugs, and their category separators)
+ * are rebuilt in generator order. Every other entry is hand-added and is kept
+ * directly after the entry it followed in the committed list. Entries for
+ * pages the generator just retired are dropped, as is a separator that no
+ * longer heads any hand-added page.
+ */
+export function mergeRealmMetaPages(
+  generated: string[],
+  existing: string[] | undefined,
+  retired: ReadonlySet<string> = new Set(),
+): string[] {
+  if (!existing) {
+    return [...generated];
+  }
+  const generatedSet = new Set(generated);
+  const isHandPage = (entry: string) =>
+    !(
+      generatedSet.has(entry) ||
+      retired.has(entry) ||
+      META_SEPARATOR_PATTERN.test(entry)
+    );
+  const keep = existing.map((entry, index) => {
+    if (generatedSet.has(entry) || retired.has(entry)) {
+      return false;
+    }
+    if (!META_SEPARATOR_PATTERN.test(entry)) {
+      return true;
+    }
+    for (const next of existing.slice(index + 1)) {
+      if (META_SEPARATOR_PATTERN.test(next)) {
+        return false;
+      }
+      if (isHandPage(next)) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  const pages = [...generated];
+  existing.forEach((entry, index) => {
+    if (!keep[index]) {
+      return;
+    }
+    let anchor = -1;
+    for (let previous = index - 1; previous >= 0 && anchor < 0; previous -= 1) {
+      anchor = pages.indexOf(existing[previous]);
+    }
+    pages.splice(anchor + 1, 0, entry);
+  });
+  return pages;
 }
 
 function realmMeta(
@@ -1020,14 +1295,17 @@ function realmMeta(
   description: string,
   icon: string,
   groups: ReturnType<typeof groupByCategory>,
+  existingPages?: string[],
+  retired?: ReadonlySet<string>,
 ): string {
-  const pages: string[] = ["index"];
+  const generated: string[] = ["index"];
   for (const group of groups) {
-    pages.push(`---${group.category}---`);
+    generated.push(`---${group.category}---`);
     for (const entry of group.entries) {
-      pages.push(pageSlug(entry));
+      generated.push(pageSlug(entry));
     }
   }
+  const pages = mergeRealmMetaPages(generated, existingPages, retired);
   return `${JSON.stringify(
     {
       root: true,
@@ -1046,6 +1324,7 @@ function realmIndex(
   description: string,
   groups: ReturnType<typeof groupByCategory>,
   base: CatalogBase,
+  guide?: CatalogGuide,
 ): string {
   const lines: string[] = [];
   lines.push(frontmatter(title, description, [title]));
@@ -1067,7 +1346,16 @@ function realmIndex(
     }
     lines.push("</Cards>", "");
   }
-  return lines.join("\n");
+  if (guide?.lead !== undefined || guide?.description !== undefined) {
+    throw new Error(
+      `${base}/index guide: only catalog:insert blocks are supported on the realm index`,
+    );
+  }
+  return applyGuideInserts(
+    lines.join("\n"),
+    guide?.inserts ?? [],
+    `${base}/index`,
+  );
 }
 
 function readManifests(storeDirs: string | string[]): CatalogEntry[] {
@@ -1085,48 +1373,113 @@ function readManifests(storeDirs: string | string[]): CatalogEntry[] {
       }
       const manifestPath = path.join(storeDir, dir.name, "manifest.json");
       try {
-        const parsedManifest = JSON.parse(
-          readFileSync(manifestPath, "utf8"),
-        ) as Manifest;
+        const parsedManifest = catalogManifestSchema.parse(
+          JSON.parse(readFileSync(manifestPath, "utf8")),
+        );
         const manifest = isExternalPluginStore
           ? { ...parsedManifest, external: true }
           : parsedManifest;
-        entries.push({
-          dir: dir.name,
-          manifest,
-          ...(isLanguageServerStore ? { category: "Language Servers" } : {}),
-        });
+        const entry: CatalogEntry = { dir: dir.name, manifest };
+        if (isLanguageServerStore) {
+          entry.category = "Language Servers";
+        }
+        entries.push(entry);
       } catch {
         // Skip directories without a parseable manifest.json.
       }
     }
   }
-  return entries.sort((a, b) => a.dir.localeCompare(b.dir));
+  return entries.sort((a, b) => compareText(a.dir, b.dir));
 }
 
-async function writeRealm(opts: {
+export type RealmOptions = {
   outDir: string;
+  guidesRoot?: string;
   title: string;
   description: string;
   icon: string;
   base: CatalogBase;
   manifests: CatalogEntry[];
   catalogState: CatalogState;
-}): Promise<void> {
-  await rm(opts.outDir, { recursive: true, force: true });
-  await mkdir(opts.outDir, { recursive: true });
+};
+
+/** Everything one regeneration would change in a realm directory. */
+export type RealmPlan = {
+  /** Absolute path -> full file content for every generator-owned file. */
+  writes: Map<string, string>;
+  /** Generator-owned files whose catalog entry no longer exists. */
+  deletes: string[];
+  /** Catalog slots held by a hand-written page without the marker. */
+  handOwned: string[];
+};
+
+function readExistingMetaPages(metaPath: string): string[] | undefined {
+  if (!existsSync(metaPath)) {
+    return undefined;
+  }
+  const parsed = z
+    .object({ pages: z.array(z.string()).optional() })
+    .safeParse(JSON.parse(readFileSync(metaPath, "utf8")));
+  if (!parsed.success) {
+    throw new Error(`${metaPath}: unreadable meta.json pages`);
+  }
+  return parsed.data.pages;
+}
+
+/**
+ * Compute a realm's regeneration without touching the filesystem.
+ *
+ * Only files carrying {@link GENERATED_MARKER} are overwritten or deleted.
+ * A missing file is created with the marker; an existing unmarked file is a
+ * hand-written page and is left alone even when it occupies a catalog slot.
+ */
+export function planRealm(opts: RealmOptions): RealmPlan {
+  const guidesRoot = opts.guidesRoot ?? AUTHORED_GUIDES_ROOT;
+  const writes = new Map<string, string>();
+  const handOwned: string[] = [];
+  const existingPages = existsSync(opts.outDir)
+    ? readdirSync(opts.outDir)
+        .filter((name) => name.endsWith(".mdx"))
+        .sort(compareText)
+    : [];
+  const isOwned = (file: string) =>
+    !existsSync(file) || isGeneratedCatalogFile(readFileSync(file, "utf8"));
+
+  const slugs = new Set<string>();
+  for (const entry of opts.manifests) {
+    const slug = pageSlug(entry);
+    if (slugs.has(slug) || slug === "index") {
+      throw new Error(`${opts.base}: duplicate catalog page slug "${slug}"`);
+    }
+    slugs.add(slug);
+  }
+
+  const guidesDir = path.join(guidesRoot, opts.base);
+  if (existsSync(guidesDir)) {
+    for (const name of readdirSync(guidesDir).sort(compareText)) {
+      const slug = name.replace(/\.mdx$/u, "");
+      if (!(name.endsWith(".mdx") && (slugs.has(slug) || slug === "index"))) {
+        throw new Error(
+          `${path.join(guidesDir, name)} does not match a catalog page; its prose would never be rendered`,
+        );
+      }
+    }
+  }
 
   const groups = groupByCategory(opts.manifests, opts.base);
-  await writeFile(
-    path.join(opts.outDir, "meta.json"),
-    realmMeta(opts.title, opts.description, opts.icon, groups),
-  );
-  await writeFile(
-    path.join(opts.outDir, "index.mdx"),
-    realmIndex(opts.title, opts.description, groups, opts.base),
-  );
-
   for (const entry of opts.manifests) {
+    const slug = pageSlug(entry);
+    const target = path.join(opts.outDir, `${slug}.mdx`);
+    const guidePath = catalogGuidePath(opts.base, slug, guidesRoot);
+    if (!isOwned(target)) {
+      if (existsSync(guidePath)) {
+        throw new Error(
+          `${guidePath} targets the hand-written page ${target}; add the generated marker to that page or merge the guide into it`,
+        );
+      }
+      handOwned.push(target);
+      continue;
+    }
     const group = groups.find((candidate) =>
       candidate.entries.some(({ dir }) => dir === entry.dir),
     );
@@ -1139,46 +1492,142 @@ async function writeRealm(opts: {
             ...group.entries.slice(Math.max(0, index - 2), index),
             ...group.entries.slice(index + 1, index + 3),
           ];
-    const page = buildPage(
-      entry.manifest,
-      opts.base,
-      related,
-      opts.catalogState,
+    writes.set(
+      target,
+      buildPage(entry.manifest, opts.base, related, opts.catalogState, {
+        slug,
+        guide: readCatalogGuide(guidePath) ?? null,
+      }),
     );
-    await writeFile(path.join(opts.outDir, `${pageSlug(entry)}.mdx`), page);
   }
 
-  console.log(
-    `wrote ${opts.manifests.length} pages + meta.json + index.mdx to ${opts.outDir}`,
+  const indexPath = path.join(opts.outDir, "index.mdx");
+  if (isOwned(indexPath)) {
+    writes.set(
+      indexPath,
+      realmIndex(
+        opts.title,
+        opts.description,
+        groups,
+        opts.base,
+        readCatalogGuide(catalogGuidePath(opts.base, "index", guidesRoot)),
+      ),
+    );
+  } else {
+    handOwned.push(indexPath);
+  }
+
+  const deletes: string[] = [];
+  const retired = new Set<string>();
+  for (const name of existingPages) {
+    const slug = name.replace(/\.mdx$/u, "");
+    const file = path.join(opts.outDir, name);
+    if (
+      slug !== "index" &&
+      !slugs.has(slug) &&
+      isGeneratedCatalogFile(readFileSync(file, "utf8"))
+    ) {
+      deletes.push(file);
+      retired.add(slug);
+    }
+  }
+
+  const metaPath = path.join(opts.outDir, "meta.json");
+  writes.set(
+    metaPath,
+    realmMeta(
+      opts.title,
+      opts.description,
+      opts.icon,
+      groups,
+      readExistingMetaPages(metaPath),
+      retired,
+    ),
   );
+
+  return { writes, deletes, handOwned };
+}
+
+/** Paths whose committed content differs from the plan. */
+export function realmDrift(plan: RealmPlan): string[] {
+  const drift: string[] = [];
+  for (const [file, content] of plan.writes) {
+    if (!existsSync(file) || readFileSync(file, "utf8") !== content) {
+      drift.push(file);
+    }
+  }
+  return [...drift, ...plan.deletes];
+}
+
+/** Apply a plan, touching only files whose content changes. */
+export async function applyRealmPlan(
+  plan: RealmPlan,
+  outDir: string,
+): Promise<string[]> {
+  await mkdir(outDir, { recursive: true });
+  const changed = realmDrift(plan);
+  for (const file of changed) {
+    const content = plan.writes.get(file);
+    if (content === undefined) {
+      await rm(file, { force: true });
+    } else {
+      await writeFile(file, content);
+    }
+  }
+  return changed;
+}
+
+export function catalogRealms(): RealmOptions[] {
+  const catalogState = readCoreCatalogState();
+  return [
+    {
+      outDir: path.join(CONTENT_ROOT, "apps"),
+      title: "Apps",
+      description:
+        "Ryu apps provide focused product behavior through host-owned surfaces, app-owned services, or both. They use the generic ext-proxy, capability broker, and companion seams where their contracts need them.",
+      icon: "AppWindow",
+      base: "apps",
+      manifests: readManifests(APPS_STORE),
+      catalogState,
+    },
+    {
+      outDir: path.join(CONTENT_ROOT, "plugins"),
+      title: "Plugins",
+      description:
+        "The plugins Ryu ships: manifest.json bundles that extend capabilities with net-new logic - tools, agents, workflows, skills, turn hooks, and UI contributions - installed and enabled through the public API.",
+      icon: "Blocks",
+      base: "plugins",
+      manifests: readManifests(PLUGIN_STORES),
+      catalogState,
+    },
+  ];
 }
 
 async function main() {
-  const apps = readManifests(APPS_STORE);
-  const plugins = readManifests(PLUGIN_STORES);
-  const catalogState = readCoreCatalogState();
-
-  await writeRealm({
-    outDir: path.join(CONTENT_ROOT, "apps"),
-    title: "Apps",
-    description:
-      "The apps Ryu ships in the store: each is a self-contained product - an out-of-process sidecar plus a surface - that reaches the platform through the generic ext-proxy, capability broker, and companion seams.",
-    icon: "AppWindow",
-    base: "apps",
-    manifests: apps,
-    catalogState,
+  const { values } = parseArgs({
+    options: { check: { type: "boolean", default: false } },
+    strict: true,
   });
-
-  await writeRealm({
-    outDir: path.join(CONTENT_ROOT, "plugins"),
-    title: "Plugins",
-    description:
-      "The plugins Ryu ships: manifest.json bundles that extend capabilities with net-new logic - tools, agents, workflows, skills, turn hooks, and UI contributions - installed and enabled through the public API.",
-    icon: "Blocks",
-    base: "plugins",
-    manifests: plugins,
-    catalogState,
-  });
+  const drift: string[] = [];
+  for (const realm of catalogRealms()) {
+    const plan = planRealm(realm);
+    if (values.check) {
+      drift.push(...realmDrift(plan));
+      continue;
+    }
+    const changed = await applyRealmPlan(plan, realm.outDir);
+    process.stdout.write(
+      `${realm.base}: ${plan.writes.size} generated files, ${changed.length} changed, ${plan.deletes.length} retired, ${plan.handOwned.length} hand-written catalog pages kept\n`,
+    );
+  }
+  if (values.check && drift.length > 0) {
+    process.stderr.write(
+      `Catalog docs are out of date. Run \`bun run generate:catalog\` in apps/fumadocs and commit:\n${drift
+        .map((file) => `  ${path.relative(REPO_ROOT, file)}`)
+        .join("\n")}\n`,
+    );
+    process.exitCode = 1;
+  }
 }
 
 if (import.meta.main) {

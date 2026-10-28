@@ -1,11 +1,11 @@
 ---
-title: "Agent import and export sync"
-description: "Keep Claude, Codex, and Cursor setup connected to Ryu without copying native conversation files."
+title: "Agent Import and Export"
+description: "How Ryu imports Claude, Codex, Cursor, and chat-export setup, exports Ryu bundles, previews thread imports, and resolves sync conflicts without editing native files."
 tags: ["agents", "sync", "acp", "claude", "codex", "cursor"]
 ---
 
-Ryu can inspect the setup roots used by **Claude**, **Codex**, and **Cursor** from
-Gateway → **Import agents**. Ryu is the canonical store: importing reads the
+Agent sync moves agent setup between Ryu and the **Claude**, **Codex**, and **Cursor** setup
+roots on a node. Open it from **Gateway → Import agents**. Ryu is the canonical store: importing reads the
 external root and writes into Ryu; it never edits the source folder.
 
 ## Import
@@ -19,46 +19,78 @@ portable-bundle-only.
 Save a root to get independent **Import** and **Export** switches. Both default to
 off. A root has one profile, one single-flight operation, and one ledger of source
 hashes, generated hashes, operation ids, and conflicts. Repeating a scan or retrying
-after a crash therefore converges instead of creating duplicate conversations or
+after a crash converges instead of creating duplicate conversations or
 duplicate schedulers.
 
+If profile or root detection data cannot be loaded, the section shows the error and
+offers **Retry**. Changing the selected profile clears the previous scan preview;
+scan the new root before choosing items to import. **Save root + enable import**
+saves the root first and enables automatic import only after that save succeeds.
+
 On an organization-bound node, sync reads and writes are permissioned by the Core node:
-`agent.view` covers scans, status, and exports; `agent.edit` covers profile changes, imports, and
+`agent.view` covers scans and status; `agent.edit` covers profile changes, imports, exports, and
 conflict resolution; and `agent.run` covers ACP session resume. Status only shows ACP bindings
 whose agent is visible to the caller and whose linked conversation is readable. Ledger items tied
 to a recognized provider are filtered by that provider's agent ACL as well. An import or export
 that names a profile must use that profile's configured root, so a profile id cannot be paired with
 a different filesystem destination.
 
+### Watched export folders
+
+A root can also be an unzipped ChatGPT or Claude data export. With **Import** on, Ryu
+imports its chats, projects, and saved context, then checks the folder again about every
+30 seconds. An export whose files have not changed is not scanned again. When the files
+change, for example when a newer export is unzipped over the folder, the next check imports
+it and adds only the messages Ryu does not have yet. Files that arrive while an import is
+running are not counted as imported, so the check after it brings them in.
+
+Only the files Ryu reads count as a change: the conversation, project, and memory files.
+The images and other attachments next to them do not, however many there are. An import
+that fails is not retried until the export changes; import it again from **Import agents**
+to retry at once. On a node bound to an organization, the automatic check cannot import chat
+exports because no signed-in member is acting for it, so it records the item as failed; a
+signed-in member imports the export from **Import agents** instead.
+
 ## Export
 
 Gateway → **Export Ryu** writes a versioned `.ryu-agent-sync.json` bundle to an
-explicit destination. The bundle can contain agent definitions and Ryu
-conversation transcripts. Ryu does not invent undocumented Claude, Codex, or Cursor
-history files, so native conversation export is intentionally reported as
+explicit destination. The bundle can contain agent definitions and, only when you
+tick **Conversation transcripts**, Ryu conversation transcripts. Transcripts are
+off by default: the bundle is written in plain text outside Ryu's encrypted data
+folder, so anyone or any tool that can read that folder can read them. The choice
+is saved per export destination and the automatic export follows it; destinations
+created before this option export no transcripts until you tick it. The bundle is
+written owner-only, and leftover temporary bundle files from an interrupted export
+are removed on the next export. Ryu does not invent undocumented Claude, Codex, or Cursor
+history files, so native conversation export is reported as
 unsupported. Generated output is hash-recorded and suppressed during the next
 import pass to prevent loops.
 
 Bundle contents may include private prompts, tool configuration, and conversation
 text. Choose a destination with the same privacy expectations as the agent's own
 history directory. On an organization-bound node, export requires the caller's
-`agent.view` permission, includes only agent definitions the caller may view, and
+`agent.edit` permission, includes only agent definitions the caller may view, and
 includes only conversations that caller may read. ACP resume metadata is subject to
 the conversation-read check and, when a binding is present, the bound agent's
 resource check. Setup ledger items without a canonical Ryu agent identity remain
 governed by the sync route permission. API keys and credentials are not exported as
 agent secrets.
 
-### Dry-run imports
+## Dry-run previews
 
 Setup imports and bundle exports support read-only previews. Native thread imports
-support the same boundary: send `dryRun: true` to
-`POST /api/agent-sync/threads/import` (or `POST /api/agents/{id}/threads/import`)
-to read and reconcile the source transcript without creating a conversation,
-appending messages, recording an ACP binding, or emitting an import notification.
-The response reports `messagesAdded`, whether the existing conversation would be
-updated, and `wouldCreate` for a new conversation. A preview returns
-`conversationId: null` when a new conversation would be created.
+support the same boundary. A preview reads and reconciles the source transcript without
+creating a conversation, appending messages, recording an ACP binding, or emitting an
+import notification.
+
+| Route | Preview body |
+|---|---|
+| `POST /api/agent-sync/threads/import` | `{ "agentId": "...", "threadId": "...", "dryRun": true }` |
+| `POST /api/agents/{id}/threads/import` | `{ "thread_id": "...", "dry_run": true }` |
+
+The response reports `messages_added`, `already_imported` when an existing conversation
+would be updated, and `would_create` when a new conversation would be created. A preview
+returns `conversation_id: null` when a new conversation would be created.
 
 ## ACP sessions
 
@@ -69,12 +101,15 @@ otherwise Ryu replays the canonical Ryu transcript. Session listing is optional,
 so lack of native session storage is a visible capability state rather than an
 error.
 
+ACP resume checks that the caller can read the linked Ryu conversation before
+using a stored native session binding. A binding alone never grants access to the
+conversation transcript.
+
 ## Conflicts
 
 Ryu pauses a conflicting item and preserves the external content for review. The
 operator explicitly chooses **Keep Ryu** or **Keep external** before projection
-continues. This makes conflict resolution auditable and keeps an external edit
-from being silently overwritten.
+continues, so an external edit is never silently overwritten.
 
 **Keep Ryu** re-projects the selected canonical item immediately. **Keep external**
 adopts the external file as the new baseline; Ryu continues to preserve it while
@@ -82,11 +117,12 @@ the canonical item is unchanged, and raises a new conflict if the canonical item
 changes later. A resolution applies only to the selected conflict, so other paused
 items remain visible until they are resolved too.
 
-ACP resume also checks that the caller can read the linked Ryu conversation before
-using a stored native session binding. A binding alone never grants access to the
-conversation transcript.
-
 Agent sync is an interchange bundle for setup and transcripts, not a portable Marketplace package.
+For a code project's redacted, commit-linked transcript, use
+[portable Git history](/docs/core/conversations-sessions#portable-git-history). Its checkpoints use
+dedicated Git refs and an explicit push/fetch action; they do not write native Claude, Codex, or
+Cursor conversation files.
+
 For a versioned agent, workflow, plugin, theme, or other installable definition, use
 [portable packages](/docs/extend/develop/extensions/portable-packages). For a complete node copy,
 including chats, sessions, and memory, use [Data Folder & Storage](/docs/surfaces/desktop/user-guide/data-and-storage).

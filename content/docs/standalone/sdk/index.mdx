@@ -1,0 +1,384 @@
+---
+title: "SDK, CLI and MCP"
+description: "@ryuhq/services is one TypeScript client for Ryu's standalone services, with the ryu-services command line and MCP server beside it"
+tags: ["sdk", "cli", "mcp", "standalone", "typescript"]
+---
+
+`@ryuhq/services` is one TypeScript client for the standalone services:
+Managed Agents, Messaging, Mail, Notify, Box, Gateway, Connect, Passport, and
+Sites.
+`new Ryu()` reads each service's settings from the environment, adds
+idempotency keys and retries where they are safe, and turns every failure
+into a typed `RyuError`. The `@ryuhq/services-cli` package adds the
+`ryu-services` command line and an MCP server over the same client.
+
+To build agents or workflows rather than call a service, see
+[Choose an SDK](/docs/standalone/sdk/choose-an-sdk), which compares
+`@ryuhq/services` with `@ryuhq/sdk`, `@ryuhq/client`, and the Python SDK.
+
+<Callout type="info">
+@ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
+</Callout>
+
+## Install
+
+```sh
+bun add @ryuhq/services
+npm install @ryuhq/services
+npm install --global @ryuhq/services-cli
+```
+
+The commands above work once the packages are on npm. Until then, the SDK,
+the CLI, and the MCP server cannot be installed outside Ryu, and the curl
+examples on each service page are the way to make a call today.
+
+### Python
+
+The same client exists for Python as `ryu_sdk.services`, in the `ryu-sdk`
+package. Every code sample on these pages has a Python tab beside the Node
+one.
+
+<Callout type="info">
+The `ryu-sdk` Python package is not yet published to PyPI, so the Python client cannot be installed outside Ryu either.
+</Callout>
+
+The Python client reads the same environment variables with the same
+precedence, sends the same headers, keys the same writes, and retries under
+the same rules. It has no WebSocket helpers (Mail's realtime socket, Box
+terminals and tunnels), no `webhookHandler()`, no `react` email bodies, and
+no `toResult()`; otherwise it differs only where Python conventions do:
+
+- names are snake_case: `managed_agents.sessions.run()`,
+  `mail.messages.reply_all()`, and `gateway.openai_compatible()`;
+- `with_options(idempotency_key=...)` replaces `.with({ idempotencyKey })`,
+  because `with` is a Python keyword;
+- options and service settings are keyword arguments, such as
+  `Ryu(result="object", notify={"api_key": "..."})`;
+- `timeout` and `max_retry_delay` are in seconds, not milliseconds;
+- `timeout` is per attempt, until response headers arrive; `None` or `0`
+  turns it off, as `timeoutMs: 0` does;
+- `sessions.run()` returns a dict with the TypeScript keys: `events`,
+  `pendingApprovals`, `session`, and `text`;
+- `notify.request_approval()` returns snake_case keys: `approved`, `status`,
+  `value`, `timed_out`, and `event`, where TypeScript has `timedOut`;
+- `on_tool_approval` gets a `ToolApprovalContext` with `request`,
+  `session_id`, and `tool_use`, and returns `None` to leave a request open;
+- a `Result` unpacks as `data, error, meta = ...`, and `AsyncRyu` has the
+  same methods as coroutines, with `async for` for iterators.
+
+A helper that takes an object-mode client names the mode in its annotation:
+`ObjectRyu` or `AsyncObjectRyu`, which `ryu_sdk.services` exports as short
+names for `Ryu[Literal["object"]]` and `AsyncRyu[Literal["object"]]`. A bare
+`Ryu` or `AsyncRyu` means the default throw mode, so `mypy --strict` refuses
+an object-mode client passed to it, and every call inside reads as the bare
+value instead of a `Result`.
+The aliases are for annotations only: `isinstance(client, ObjectRyu)` raises
+`TypeError`, so check the mode at run time with `client.result == "object"`.
+
+```python title="helpers.py"
+from ryu_sdk.services import ObjectRyu, Ryu
+
+
+def publish_deploy(ryu: ObjectRyu) -> None:
+    data, error, _meta = ryu.notify.publish({"title": "Deploy finished"})
+    if error:
+        print(error.code, error.message)
+    elif data:
+        print(data["id"])
+
+
+def publish_or_raise(ryu: Ryu) -> str:
+    # Throw mode: the call returns the event or raises a RyuError.
+    return ryu.notify.publish({"title": "Deploy finished"})["id"]
+
+
+publish_deploy(Ryu(result="object"))
+publish_or_raise(Ryu())
+```
+
+`AsyncRyu` takes the same arguments. Await each call, and use `async with` so
+the client closes. An `async for` over a stream (`stream()` or `follow()`)
+that you leave early keeps its connection open until the iterator is closed,
+so wrap the stream in `contextlib.aclosing()` (Python 3.10 and later).
+On Python 3.9, which `ryu-sdk` also supports, close it yourself:
+`stream = ryu.notify.events.stream()`, then `try: async for item in stream: ...`
+and `finally: await stream.aclose()`.
+`iterate()` holds nothing open between pages: loop over it with a plain
+`async for`.
+
+```python
+import asyncio
+from contextlib import aclosing
+
+from ryu_sdk.services import AsyncRyu
+
+
+async def main() -> None:
+    async with AsyncRyu(result="object") as ryu:
+
+        async def print_next_live_event() -> None:
+            async with aclosing(ryu.notify.events.stream()) as stream:
+                async for item in stream:
+                    print(item["type"])
+                    return
+
+        data, error, meta = await ryu.notify.publish({"title": "Deploy finished", "topic": "deployments"})
+        if error:
+            print(error.code, error.message, error.request_id)
+            return
+
+        async for event in ryu.notify.events.iterate(topic="deployments"):
+            print(event["id"])
+            break
+
+        try:
+            await asyncio.wait_for(print_next_live_event(), timeout=30)
+        except asyncio.TimeoutError:
+            print("nothing was published in 30 seconds")
+
+
+asyncio.run(main())
+```
+
+`events.stream()` yields only the events published after it connects, and
+otherwise waits, so on a quiet tenant it waits until someone publishes. The
+sample bounds that wait with `asyncio.wait_for`; publish an event from another
+shell while it runs to see one arrive.
+
+## First call
+
+With `result: "object"`, every call resolves to `{ data, error, meta }` and
+never throws for API or configuration errors. Check `error` first:
+
+```ts tab="Node"
+import { Ryu } from "@ryuhq/services";
+
+// Reads RYU_NOTIFY_API_KEY (and RYU_NOTIFY_URL, default https://notify.ryuhq.com).
+const ryu = new Ryu({ result: "object" });
+
+const { data, error, meta } = await ryu.notify.publish({
+  title: "Deploy finished",
+  level: "success",
+});
+
+if (error) {
+  // error.message ends with error.hint, which names the fix for common setup mistakes such as a wrong URL.
+  console.error(error.code, error.status, error.message, error.requestId);
+} else {
+  console.log(data.id, meta.requestId, meta.replayed);
+}
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu
+
+# Reads RYU_NOTIFY_API_KEY (and RYU_NOTIFY_URL, default https://notify.ryuhq.com).
+ryu = Ryu(result="object")
+
+data, error, meta = ryu.notify.publish({"title": "Deploy finished", "level": "success"})
+
+if error:
+    # error.message ends with error.hint, which names the fix for common setup mistakes such as a wrong URL.
+    print(error.code, error.status, error.message, error.request_id)
+elif data and meta:
+    print(data["id"], meta.request_id, meta.replayed)
+```
+
+`meta` describes the last HTTP response of the call: its `status`,
+`requestId`, `rateLimit`, `deprecation`, and how many `attempts` it took.
+`idempotencyKey` and `replayed` describe the call's idempotent write, even
+when reads followed it, as in `box.run()`. `idempotencyKey` is the key it
+sent, and `replayed` says whether the server answered with the stored result
+of an earlier request.
+
+The default `result: "throw"` returns the value and throws `RyuError`. In
+that mode, `ryu.safe` gives the object form for one call, and `toResult()`
+wraps any promise:
+
+```ts tab="Node"
+import { isRyuError, Ryu, toResult } from "@ryuhq/services";
+
+const ryu = new Ryu();
+
+try {
+  const event = await ryu.notify.publish({ title: "Deployed" });
+  console.log(event.id);
+} catch (error) {
+  if (isRyuError(error)) {
+    console.error(error.code, error.requestId);
+  }
+}
+
+const once = await ryu.safe.notify.publish({ title: "Deployed" });
+const wrapped = await toResult(ryu.box.list());
+```
+
+```python tab="Python"
+from ryu_sdk.services import Ryu, RyuError
+
+ryu = Ryu()
+
+try:
+    event = ryu.notify.publish({"title": "Deployed"})
+    print(event["id"])
+except RyuError as error:
+    print(error.code, error.request_id)
+
+once = ryu.safe.notify.publish({"title": "Deployed"})
+boxes = ryu.safe.box.list()
+```
+
+Async iterables, such as `ryu.notify.events.iterate()` and
+`ryu.managedAgents.sessions.stream()`, throw `RyuError` in both modes. See
+[Errors](/docs/standalone/sdk/errors) for the fields and codes.
+
+## Naming
+
+A call that acts on one kind of resource lives under that resource's
+namespace and uses a short verb: `list`, `get`, `create`, `update`, `delete`,
+`iterate` where results are paginated, and the resource's own verbs such as
+`reply` or `retry`. Only service-level calls stay at the top level, such as
+`ryu.notify.publish()`, `ryu.mail.send()` and `ryu.box.create()`.
+
+```ts tab="Node"
+const inboxes = await ryu.mail.inboxes.list();
+const event = await ryu.notify.events.get("<event-id>");
+const files = await ryu.box.files.list("<box-id>", "/workspace");
+```
+
+```python tab="Python"
+inboxes = ryu.mail.inboxes.list()
+event = ryu.notify.events.get("<event-id>")
+files = ryu.box.files.list("<box-id>", "/workspace")
+```
+
+Mail, Notify and Box also keep the flat `@ryuhq/client` method names, such as
+`listInboxes`, `getEvent` and `listFiles`, as deprecated aliases. Each one
+sends the same request as its namespaced form, and your editor marks it as
+deprecated. New code should use the namespaced form.
+
+## One key per service
+
+There is no single key for every service. A `ryu_` key (`RYU_API_KEY`) covers
+the services on the control plane: Managed Agents, Messaging when the key
+carries a `messaging:read` or `messaging:manage` scope, and hosted Mail when the
+key carries Mail scopes (`mail:read`, `mail:send`, `mail:manage`). Hosted Mail
+also accepts a node gateway key minted through Ryu node enrollment, which wins
+when both are set. The SDK never sends the `ryu_` key to another service or
+origin, including a self-hosted Mail URL. Notify, Box, Connect, Passport, and
+Sites each take their own token; Ryu provisions the hosted Notify and Box
+keys during early access. A self-hosted Gateway takes
+its bearer token as `RYU_GATEWAY_TOKEN`, which is required unless the Gateway
+runs with `require_auth = false`; authentication is on by default.
+
+## Configure
+
+Options passed to `new Ryu()` win over environment variables, which win over
+the defaults below. `new Ryu({ env: false })` reads no environment, and
+`new Ryu({ env: c.env })` reads another object, such as a Workers or Hono
+binding set. Settings are resolved on a service's first call, so a missing
+variable fails that call with `RyuConfigurationError`, whose
+`details.missing` names the variables, and never the constructor.
+
+| Service | Variable | Default | Description |
+|---|---|---|---|
+| Managed Agents | `RYU_API_URL` | `https://api.ryuhq.com` | Control-plane origin; the client appends /api/v1/managed-agents. |
+| Managed Agents | `RYU_API_KEY` | none | A ryu_ key, sent as x-api-key to Managed Agents, Messaging and, unless another Mail key takes precedence, hosted Mail. Never sent to another origin. |
+| Managed Agents | `RYU_ORGANIZATION_ID` | none | Sent as X-Ryu-Organization with the ryu_ key; required for personal keys. |
+| Mail | `RYU_MAIL_URL` | none | Mail origin. Required for self-hosted Mail; hosted Mail defaults to the control-plane origin when a gateway key or a ryu_ key selects it. |
+| Mail | `RYU_MAIL_GATEWAY_KEY` | none | Hosted Mail node gateway key, sent as x-gateway-key. Minted only through Ryu node enrollment; wins over a ryu_ key. |
+| Mail | `RYU_MAIL_API_KEY` | none | Self-hosted Mail bearer token. |
+| Notify | `RYU_NOTIFY_URL` | `https://notify.ryuhq.com` | Notify origin; set it only when Ryu issued you another URL. |
+| Notify | `RYU_NOTIFY_API_KEY` | none | Notify tenant bearer token (hosted keys are provisioned by Ryu). |
+| Box | `RYU_BOX_URL` | `https://box.ryuhq.com` | Box origin; set it only when Ryu issued you another URL. |
+| Box | `RYU_BOX_API_KEY` | none | Box tenant bearer token (hosted keys are provisioned by Ryu). |
+| Gateway | `RYU_GATEWAY_URL` | `http://127.0.0.1:7981` | Gateway origin. |
+| Gateway | `RYU_GATEWAY_TOKEN` | none | Gateway bearer token; required unless the Gateway runs with require_auth = false. |
+| Connect | `RYU_CONNECT_URL` | none | Connect origin (no default). |
+| Connect | `RYU_CONNECT_API_KEY` | none | Connect runtime bearer token. |
+| Connect | `RYU_CONNECT_MANAGEMENT_KEY` | none | Connect management bearer token (reserved). |
+| Passport | `RYU_PASSPORT_URL` | none | Passport origin (no default). |
+| Passport | `RYU_PASSPORT_API_KEY` | none | Passport admin bearer token; optional when RYU_PASSPORT_RUNTIME_KEY is set. |
+| Passport | `RYU_PASSPORT_RUNTIME_KEY` | none | Passport runtime bearer token, used on /v1/runtime/* routes and runtime fetches. |
+| Sites | `RYU_SITES_URL` | none | Sites management listener origin (no default). |
+| Sites | `RYU_SITES_API_KEY` | none | Sites management bearer token. |
+| Messaging | `RYU_API_URL` | `https://api.ryuhq.com` | Control-plane origin; the client appends /api/messaging. |
+| Messaging | `RYU_API_KEY` | none | The same ryu_ key, sent as x-api-key; it needs the messaging:read scope to read and messaging:manage to send, buy numbers or change settings. |
+| Messaging | `RYU_ORGANIZATION_ID` | none | Required: the organization every Messaging route names in its path, also sent as X-Ryu-Organization. |
+
+The same table is exported as `ENV_VARS`. Every service has its own
+constructor option for these values, such as `notify: { baseUrl, apiKey }` or
+`mail: { gatewayKey }`. Messaging lists the control-plane variables again
+because it reads the same ones; `messaging: { baseUrl, apiKey, organizationId }`
+overrides them for Messaging only.
+
+To check a service before you call it, use `ryu.isConfigured(service)` in
+Node or `is_configured(service)` in Python, with an SDK name such as
+`"notify"` or `"managedAgents"` (`"managed_agents"` in Python). It resolves
+settings only and sends nothing. It returns `true` only when the service was
+set explicitly, by an environment variable or a constructor option, so a
+service that resolves from a built-in default alone (the Gateway's local URL)
+reads as not configured. The agent-tool adapters use it to choose which
+services' tools to return.
+
+| Option | Default | What it does |
+|---|---|---|
+| `result` | `"throw"` | `"object"` resolves every call to `{ data, error, meta }`. |
+| `maxRetries` | `2` | Retries after the first attempt, where a retry is safe. |
+| `timeoutMs` | `60000` | Per attempt, until the response headers arrive. |
+| `maxRetryDelayMs` | `30000` | The longest server-requested wait the SDK honours before it gives up. |
+| `autoIdempotency` | `true` | Adds an `Idempotency-Key` to writes the service deduplicates. |
+| `fetch` | `globalThis.fetch` | The HTTP implementation. |
+| `hooks` | none | `onRequest`, `onResponse`, `onRetry`, and `onDeprecation` callbacks. |
+| `userAgent` | SDK name and version | Appended on server runtimes; `false` sends none. |
+| `dangerouslyAllowBrowser` | `false` | Allows a key in a browser page, where every visitor can read it. |
+
+## Availability
+
+Each service page opens with the label below. It says how you can reach the
+service today; prices and limits stay on each service's own page.
+
+| Service | Availability | SDK page |
+|---|---|---|
+| Managed Agents | Preview: off until your organization turns on the Managed Agents feature. | [Managed Agents](/docs/standalone/sdk/managed-agents) |
+| Mail | Available: hosted with a Ryu API key that has Mail scopes or a Ryu node gateway key, or self-hosted. | [Mail](/docs/standalone/sdk/mail) |
+| Notify | Early access: hosted at https://notify.ryuhq.com with keys provisioned by Ryu; the self-hosted service is not yet published. | [Notify](/docs/standalone/sdk/notify) |
+| Box | Early access: hosted at https://box.ryuhq.com and enabled per organization by Ryu; the self-hosted service is not yet published. | [Box](/docs/standalone/sdk/box) |
+| Gateway | Self-hosted: run Ryu Gateway with your own provider keys. | [Gateway](/docs/standalone/sdk/gateway) |
+| Connect | Early access: hosted keys are provisioned by Ryu; the self-hosted service is not yet published. | [Connect](/docs/standalone/sdk/connect) |
+| Passport | Early access: hosted keys are provisioned by Ryu; the self-hosted service is not yet published. | [Passport](/docs/standalone/sdk/passport) |
+| Sites | Early access: self-hosted process only, and standalone mode needs a ryu-sites release after 0.4.0, which is not published yet; there is no Ryu-hosted offer. | [Sites](/docs/standalone/sdk/sites) |
+| Messaging | Early access: hosted on the Ryu control plane; Ryu enables it per organization, and the organization must also turn on its Ryu Messaging feature (off by default); there is no self-hosted service. | [Messaging](/docs/standalone/sdk/messaging) |
+
+The Gateway row describes what the SDK's `gateway` namespace calls: a Gateway
+origin you run. Ryu-managed model usage through Gateway, drawn from a plan
+pool or prepaid credits without a plan, is covered with its pricing on
+[Gateway](/docs/standalone/gateway#pricing) and in the overview below.
+
+[Ryu Hire](/docs/standalone/hire) is not yet available and has no API, so the
+SDK, the CLI, and the MCP server have no Hire calls. The
+[standalone services overview](/docs/standalone) has each service's pricing
+and access rules.
+
+## Runtime support
+
+The SDK runs on server runtimes with `fetch` and Web Crypto, such as Node.js,
+Bun, Deno, and Workers-style edge runtimes. It sends a `User-Agent` only on
+those server runtimes. In a browser page, `new Ryu()` refuses a key passed as
+an option unless you set `dangerouslyAllowBrowser`, because every visitor can
+read it. Keep keys on your server and call Ryu from there.
+
+[Edge runtimes](/docs/standalone/sdk/frameworks/edge) lists the entry points
+that are safe there, and the exceptions that need a WebSocket. The framework
+guides for [Next.js](/docs/standalone/sdk/frameworks/nextjs) and
+[Hono](/docs/standalone/sdk/frameworks/hono) show route handlers and webhooks.
+
+## Read next
+
+<Cards>
+  <DocCard href="/docs/standalone/sdk/choose-an-sdk" />
+  <DocCard href="/docs/standalone/sdk/errors" />
+  <DocCard href="/docs/standalone/sdk/retries-and-idempotency" />
+  <DocCard href="/docs/standalone/sdk/cli" />
+  <DocCard href="/docs/standalone/sdk/mcp" />
+</Cards>

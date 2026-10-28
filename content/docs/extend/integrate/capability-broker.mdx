@@ -1,120 +1,93 @@
 ---
-title: "Capability Broker"
-description: "How plugins declare abstract capabilities and how Core resolves them to concrete provider apps — the platform decomposition layer."
+title: "How the Capability Broker Resolves Bindings"
+description: "Explanation of how Core resolves a plugin's abstract capability requirements to concrete provider apps, and why that keeps providers swappable."
 tags: ["capability", "broker", "binding", "plugin", "platform", "decomposition"]
 ---
 
-The capability broker is the platform decomposition layer. A plugin declares an abstract
-`requires.capabilities: [{rag}]` edge; the registry resolves it to a concrete provider app,
-lowers it to a bare app-id edge, and the existing dependency graph handles enable/disable/cycles.
+The capability broker lets a plugin depend on a capability instead of a specific app. A plugin
+declares an abstract edge such as `requires.capabilities: ["rag"]`. The binding registry
+(`apps/core/src/plugins/binding.rs`) resolves it to a concrete provider app and lowers it to a bare
+app-id edge. The existing dependency graph then handles enable order, disable cascades, and cycles.
 
-## How it works
+A provider can change (for example, one `web.search` provider for another) without any change to
+its consumers.
 
-### 1. A plugin declares capabilities
-
-In `manifest.json`, a plugin can declare both what it provides and what it requires:
-
-```json
-{
-  "id": "com.example.my-app",
-  "provides": [
-    {
-      "capability": "rag",
-      "version": "1.0.0",
-      "sidecar": "my-rag-sidecar",
-      "route": "/api/my-rag",
-      "grant": "rag:use"
-    }
-  ],
-  "requires": {
-    "capabilities": ["rag"]
-  }
-}
-```
-
-### 2. Core resolves bindings
-
-When a plugin with `requires.capabilities` is enabled, the `BindingRegistry`
-(`apps/core/src/plugins/binding.rs`) resolves each required capability to a concrete provider:
-
-1. **Override** — if a user-specified override exists for this capability, use it
-2. **Single provider** — if exactly one installed plugin provides this capability, use it
-3. **Ambiguous** — if multiple providers exist, refuse with an error (no silent selection)
-
-The resolution produces a `Binding`:
-
-```rust
-pub struct Binding {
-    pub capability: String,      // e.g. "rag"
-    pub provider_id: String,     // e.g. "@ryu/rag"
-    pub provided_version: String, // e.g. "1.0.0"
-}
-```
-
-### 3. The dependency graph handles the rest
-
-Once resolved, the binding is lowered to a bare app-id edge. The existing plugin dependency graph
-(`apps/core/src/plugins/graph.rs`) handles:
-
-- Topological enable/disable ordering
-- Cycle detection
-- Dependent plugin cascading
+For the manifest fields, the built-in capabilities, and the override API, see the how-to page
+[Capability Broker](/docs/extend/develop/extensions/capability-broker).
 
 ## The resolution ladder
 
-```
-Plugin requires: rag
+For one required capability, the registry looks at every candidate that `provides` it.
+
+```text
+Plugin requires: <capability>
   │
-  ├─ Override exists? → use override provider
+  ├─ No provider? → capability_unprovided error
+  │
+  ├─ Override set? → use the override (it must be a candidate)
   │
   ├─ Exactly one provider? → use that provider
   │
-  ├─ Multiple providers? → Ambiguous error (operator must pick)
-  │
-  └─ No providers? → MissingDependency error
+  └─ Two or more providers, no override:
+       ├─ Strict (default) → capability_ambiguous error (the operator must pick)
+       └─ Selectable → the provider declaring "default", else the lowest id
 ```
 
-## Configuring overrides
+The rung for two or more providers depends on the capability's mode:
 
-Set capability overrides through the binding config:
-
-```json
-{
-  "overrides": {
-    "rag": "com.custom.rag",
-    "tts": "com.custom.tts"
-  }
-}
-```
-
-This tells the binding registry to use `com.custom.rag` instead of the default when any plugin
-requests the `rag` capability.
-
-## Built-in capabilities
-
-| Capability | Default provider | What it does |
+| Mode | Used by | Two or more providers |
 |---|---|---|
-| `rag` | `@ryu/rag` | Embedding, vector storage, and retrieval |
-| `tts` | `com.ryu.tts` | Audio synthesis |
-| `stt` | `com.ryu.stt` | Voice Recognition transcription |
-| `image` | `com.ryu.image` | Image generation |
-| `storage` | `com.ryu.storage` | File and blob storage |
-| `sandbox` | `com.ryu.sandbox` | Code execution sandbox |
+| Strict (default) | `rag`, `engines` | Refused until an override is set. Core never picks silently. |
+| Selectable | Swappable layers such as `web.search`, `web.extract`, `browser.control`, `computer.control`, `memory` | Deterministic pick: the provider declaring `default`, else the lexicographically lowest id |
 
-## How the broker connects to the Gateway
+A capability is selectable only when every provider declares `provides[].selectable`. One
+third-party manifest cannot loosen a strict capability.
 
-The capability broker is a Core-side concern (it decides what runs). When a plugin is enabled
-with a resolved binding, the provider's sidecar is spawned and its routes are mounted. Model
-calls from the provider still flow through the Gateway for governance.
+A selected-only provider (today Ryu Cloud Search, which bills organization credits) binds only
+through an override. When it is the only candidate, binding fails until the user selects it.
+
+Last, the chosen provider's capability `version` must satisfy the consumer's `min_version` floor.
+Core checks the floor against the capability version, not the provider app's version.
+
+## Graph lowering
+
+A resolved binding becomes a bare app dependency (no `min_version`) appended to the consumer's
+`requires.apps`. The plugin graph (`apps/core/src/plugins/graph.rs`) reads it like a hand-written
+app dependency, so these work unchanged:
+
+- Topological enable and disable ordering
+- Cycle detection
+- Cascades to dependent plugins
+
+The edge carries no version because the graph compares app versions, and a capability floor is a
+different number. The registry enforces the floor at bind time instead.
+
+## The enabled-set invariant
+
+Every enabled consumer must bind deterministically over the enabled set: one provider, or an
+override. Two enable-time gates keep this true:
+
+1. A consumer with an ambiguous or unbound capability cannot be enabled.
+2. Enabling a plugin re-validates every consumer in the resulting enabled set. Enabling a second
+   provider that would make an enabled consumer ambiguous is refused, and the error names that
+   consumer.
+
+Both gates use the enabled set, not the installed set, so a disabled second provider adds no
+ambiguity. Because the invariant holds, a bound consumer also blocks its provider from being
+disabled.
+
+## How the broker relates to the Gateway
+
+The broker runs in Core, which decides what runs. When a plugin with a resolved binding is
+enabled, Core spawns the provider's sidecar and mounts its routes. Model calls from the provider
+still go through the Gateway for governance.
 
 ## Related
 
 <Cards>
+  <DocCard href="/docs/extend/develop/extensions/capability-broker" />
+  <DocCard href="/docs/core/swappable-layers" />
   <DocCard href="/docs/core/app-manifest-lifecycle" />
-  <DocCard href="/docs/extend/develop/extensions/plugin-json-manifest" />
-  <DocCard href="/docs/extend/develop/sdk/plugin-api" />
   <DocCard href="/docs/start-here/architecture/platform-decomposition" />
   <DocCard href="/docs/start-here/architecture/capability-layers" />
 </Cards>
-
-Continue with [Integrate with Ryu](/docs/extend/integrate), [Gateway governance](/docs/gateway/governance), [plugin runtime](/docs/extend/develop/extensions/plugin-runtime), [Apps](/docs/apps), and [MCP integration](/docs/extend/integrate/mcp-integration).

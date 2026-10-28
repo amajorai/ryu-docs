@@ -66,9 +66,7 @@ export function LevelBadge({
       title={`Level ${level} · ${tier.label}`}
     >
       <span className="font-semibold tabular-nums">{level}</span>
-      {showLabel ? (
-        <span className="opacity-80">{tier.label}</span>
-      ) : null}
+      {showLabel ? <span className="opacity-80">{tier.label}</span> : null}
     </span>
   );
 }

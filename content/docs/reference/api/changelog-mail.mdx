@@ -1,0 +1,207 @@
+---
+title: "Mail and MCP API Changes"
+description: "Behavior changes to hosted Mail, self-hosted Mail realtime, and hosted MCP, with what existing callers must or may do for each."
+tags: ["api", "changelog", "upgrade", "mail", "mcp"]
+---
+
+This page lists behavior changes that an existing integration can notice
+without changing its code, using the same format as
+[API Changes](/docs/reference/api/changelog): each entry says what changed,
+who is affected, and what to do. **Must** marks a step an existing caller needs
+to keep working as before; **may** marks an optional step that uses the new
+behavior.
+
+The `@ryuhq/services` SDK, the `ryu-services` CLI, and the Python
+`ryu_sdk.services` client already handle every entry below.
+
+## Unreleased
+
+These changes are not yet assigned to a release.
+
+### Hosted Mail
+
+#### Hosted Mail accepts Ryu API keys
+
+**What changed.** The `/api/mail` routes accept a `ryu_` API key in
+`x-api-key` with the `mail:read`, `mail:send`, or `mail:manage` scope. A
+personal key names its organization in `X-Ryu-Organization`; without it the
+request gets `400 organization_required`. A classic token includes at most
+`mail:read` and `mail:send`. An inbox's `webhookUrl` is returned only to a key
+with `mail:manage`, and a service-account key acts as the organization, not as
+the member who created it.
+
+**Who is affected.** Integrations that call hosted Mail with a Ryu API key, and
+anyone who expects a classic token to manage inboxes, domains, or webhooks.
+
+**What to do.** For `mail:manage`, you must create a fine-grained token and
+choose the scope explicitly. Send `X-Ryu-Organization` with a personal key. See
+[Hosted Mail API keys](/docs/standalone/mail-api#hosted-mail-api-keys).
+
+#### Hosted Mail realtime uses one-use tickets
+
+**What changed.** Hosted Mail serves a realtime socket at
+`/api/mail/realtime`. The socket never takes the credential itself: a client
+mints a ticket with `POST /api/mail/realtime/tickets` (a gateway key, a Ryu
+API key with `mail:read`, or a console session), then offers
+`ryu-mail.v1` and `ryu-ticket.<ticket>` in `Sec-WebSocket-Protocol` within 30
+seconds. A ticket is spent by its first upgrade attempt. The server closes a
+socket with `4001` when its credential loses access and after 15 minutes,
+with `1012` when it can no longer guarantee the socket's events, and with
+`1013` when the client reads too slowly.
+
+A credential holds at most 16
+unredeemed tickets and 16 open sockets, and an organization at most 64 of each.
+The upgrade re-checks the organization's IP allowlist against the address that
+opens the socket, so a ticket minted on a server and redeemed from a browser on
+another address can be refused with `403`.
+
+**Who is affected.** Clients that want live hosted Mail events.
+
+**What to do.** You may open the socket with a new ticket for every connection.
+On `4001`, `1012`, or `1013`, mint a new ticket, reconnect, replay the gap from
+`GET /api/mail/events`, and deduplicate by `eventId`. Ticket issue and the
+upgrade can answer `503 realtime_store_unavailable`; retry after `Retry-After`
+with a new ticket. Mint the ticket from the address that will open the socket
+when the organization uses an IP allowlist. See
+[Hosted Mail realtime](/docs/standalone/mail-api-realtime#hosted-mail-realtime).
+
+#### Hosted Mail search pages with before and after
+
+**What changed.** `GET /api/mail/inboxes/{id}/messages/search` now applies
+`before` and `after` the way the message list does: it returns matches created
+before `before` and after `after`, newest first, up to `limit`. Hosted Mail
+used to ignore both and always return the newest `limit` matches. A value that
+cannot be parsed as a date is refused with `400`, on search and on the list.
+Send ISO 8601 date-times.
+
+**Who is affected.** Clients that pass `before` or `after` to hosted message
+search.
+
+**What to do.** Drop `before` and `after` if you want the newest matches. To
+page back, pass the `createdAt` of the oldest match you have as `before`.
+See [Route surface](/docs/standalone/mail-api#route-surface).
+
+#### Hosted Mail refuses a list limit that is not a whole number
+
+**What changed.** Hosted Mail list routes that take `limit` (messages, search,
+drafts, events and webhook deliveries) answer `400` when `limit` is not a
+whole number, such as `-1`, `2.5`, `NaN` or an empty value, as self-hosted Mail
+does. Before, hosted Mail read such a value as the route's default, or cut
+`2.5` down to `2`. Whole numbers still clamp to 1-200, so `0` reads as `1`.
+
+**Who is affected.** Clients that build the `limit` query parameter themselves.
+The Ryu SDKs already refuse these values before sending.
+
+**What to do.** Send a positive whole number, or leave `limit` out for the
+default. See [Route surface](/docs/standalone/mail-api#route-surface).
+
+#### Hosted Mail keeps one inbox per clientId
+
+**What changed.** `POST /api/mail/inboxes` with a `clientId` keeps one inbox
+per `clientId` in each organization, or for each user without an
+organization. The exception is an agent inbox (one created with `agentId`)
+through a Core node's gateway key: it is keyed per node, so that node's agent
+inbox, other nodes' agent inboxes and an organization inbox can share a
+`clientId`.
+
+A create that repeats a `clientId` with the same key returns the
+inbox already made, also when two creates overlap: the later one answers `200`
+with the first one's inbox instead of making a second inbox, including a create
+that sends `localPart` and finds that address taken by the first call. When the
+`clientId` is held by an inbox that the caller cannot see, such as an agent
+inbox a user or API key created, which a gateway key's create of an inbox
+without `agentId` cannot see, the create gets `409 client_id_taken` instead of
+a second inbox.
+
+**Who is affected.** Clients that create hosted inboxes with a `clientId`,
+especially ones that retry after a timeout or run several creates at once.
+
+**What to do.** Retry a timed-out create with the same `clientId`. On `409
+client_id_taken`, choose a `clientId` that no other inbox in the organization
+uses, apart from agent inboxes that other nodes created through their gateway
+keys. See [Errors](/docs/standalone/mail-api#errors).
+
+#### Hosted Mail records which credential created an inbox
+
+**What changed.** A new hosted inbox stores which credential created it.
+Every inbox reply (reads, lists, creates, agent-inbox replays, updates and
+address changes) carries a `createdWith` object (`via` is
+`session`, `api_key`, `oauth` or `gateway_key`, with the matching key,
+service-account, OAuth client or node credential ID) for callers who may
+manage Mail: a Ryu API key with `mail:manage` whose principal holds
+`mail.manage`, a member with `mail.manage`, or a personal account's owner.
+`mail:read` keys, read-only members, hosted MCP apps and node gateway keys do
+not get the field. Inboxes created before this
+change have `createdWith: null`. A create through a Ryu API key or a hosted
+MCP app also adds a `mail.inbox.create` entry to the organization's audit log.
+
+**Who is affected.** Organization admins who review which key or app made an
+inbox, and clients that validate inbox objects against a closed schema.
+
+**What to do.** Nothing is required: the field is added, and no existing
+field changes. If you validate inbox objects strictly, you must allow
+`createdWith`. See [Hosted Mail API keys](/docs/standalone/mail-api#hosted-mail-api-keys).
+
+#### Self-hosted Mail realtime takes the token in a header
+
+**What changed.** The self-hosted socket at `/api/mail/ws` takes the bearer in
+`Authorization`, or, from a browser, as the subprotocols `ryu-mail.v1` and
+`ryu-bearer.<token>`, now on one header line or several. The server does not
+accept the token in the URL: a request that carries it only in `?token=<token>`
+answers `401` on `/api/mail/ws` and every other route, because access logs and
+proxies record query strings.
+The Ryu SDKs never send it.
+
+**Who is affected.** Clients that open the self-hosted socket, and operators who
+keep access logs in front of Mail.
+
+**What to do.** Send the token in the `Authorization` header or the
+subprotocols. A client that puts it in `?token=` gets `401`; move it to a
+header, and check logs and proxies that record query strings for Mail tokens. Generate
+`RYU_MAIL_API_TOKEN` as a hex or URL-safe value so it fits in a subprotocol.
+See [Realtime events](/docs/standalone/mail-api-realtime#realtime-events).
+
+### Hosted MCP
+
+#### Hosted MCP serves Mail tools without a node
+
+**What changed.** The hosted MCP endpoint at `https://api.ryuhq.com/mcp`, with
+no node id in the URL, serves four Mail tools for the signed-in user, plus
+`mail_list_organizations`, which lists the organizations where the user is a
+member and that have allowed the app (id, name, and slug only). The client
+signs in with OAuth (PKCE) and asks for `mail:read`, `mail:send`, or both, and
+an organization owner or admin must allow the app's client id first.
+
+**Who is affected.** MCP clients that connect to `/mcp` without a node id.
+
+**What to do.** You must ask an organization admin to add your app's client
+id, and name the `organizationId` on every Mail call; you may call
+`mail_list_organizations` to find it. See
+[Hosted Mail tools](/docs/standalone/sdk/mcp#hosted-mail-tools).
+
+#### Hosted MCP can create Mail inboxes with mail:manage
+
+**What changed.** Hosted MCP serves `mail_create_inbox` to a grant that holds
+`mail:manage`. It creates an inbox in the named organization through the same
+checks as a Ryu API key with `mail:manage`. Those checks are the user's
+`mail.manage` permission there, the organization's list of allowed apps, and its access
+rules. `clientId` is required, and a retry with the same one returns the inbox
+already made, also while the first call is still in progress. The reply never shows the inbox's `webhookUrl`, even with
+`mail:manage`.
+
+**Who is affected.** MCP clients that connect to `/mcp` without a node id and
+want an agent to make its own inbox.
+
+**What to do.** You may request `mail:manage` by name; the user must also
+choose it on the consent screen. A grant without it does not list the tool,
+and a call to it is refused with HTTP 403 and
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="mail:manage"`.
+See [Hosted Mail tools](/docs/standalone/sdk/mcp#hosted-mail-tools).
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/reference/api/changelog" />
+  <DocCard href="/docs/reference/api/changelog-services" />
+  <DocCard href="/docs/standalone/mail-api" />
+</Cards>

@@ -1,12 +1,12 @@
 ---
 title: Spaces and RAG
-description: Ground agents in your documents with vector and graph retrieval.
+description: Reference for Core Spaces, the local document collections that ground agents through vector, graph, hybrid, and unified retrieval.
 ---
 
 A **Space** is a document collection used for retrieval-augmented generation (RAG). Attach a Space to
 an agent and it can pull relevant passages from your documents to ground its answers, instead of
-relying on the model's training alone. Core stores Spaces locally and uses sqlite-vec for their
-vector indexes.
+relying on the model's training alone. Core stores Spaces locally and keeps their text, embedding
+vectors, and uploaded files encrypted at rest (see [Encryption and search](#encryption-and-search)).
 
 ## Retrieval modes
 
@@ -21,8 +21,8 @@ use the node default. The default on a new installation is `vector`.
 Graph extraction is deterministic and works offline. The only supported extractor ID is
 `local-cooccurrence`. Its edges mean "these terms occurred in the same chunk." They are not
 semantic relations inferred by an LLM, such as "works for" or "located in." Setting
-`graph_extraction_model` to any other value makes Core reject the configuration at startup. This
-is deliberate: Ryu will not accept a model ID and then silently run a different extractor.
+`graph_extraction_model` (or `RYU_GRAPH_EXTRACTION_MODEL`) to any other value makes Core reject the
+configuration at startup, so a model ID is never accepted while a different extractor runs.
 
 Both modes obey the requested result limit and return document-backed chunks. Graph traversal also
 bounds each next-hop frontier, so a dense graph cannot grow without limit. The same query over the
@@ -60,26 +60,22 @@ then submit the change again if it is still needed.
 
 ## Space home
 
-The desktop Space home is a shared-context workspace for both people and agents. Open a Space to
-see its name, a Word-like left navigation rail, quick templates for creating a page or database,
-and a small set of the most recently updated Markdown pages. Each recent row includes a paper-like
-preview of the source without opening the editor; selecting one opens the full page.
+The desktop Space home is a shared-context workspace for people and agents. Open a Space to see its
+name, a left navigation rail, quick templates for a new page or database, and the most recently
+updated Markdown pages. Each recent row shows a preview of the page; select it to open the full page.
 
-The recent-page area includes **Recent**, **Pinned**, and **Shared with Me** tabs. Search filters the
-recent rows and the file index together, so one query can take you from a page preview to the
-underlying document record.
+The recent-page area has **Recent**, **Pinned**, and **Shared with Me** tabs. Search filters the
+recent rows and the file index together.
 
-Below the previews, **All files** keeps every item in the Space in one searchable table. Pages,
+Below the previews, the **Files** table keeps every item in the Space in one searchable table. Pages,
 databases, whiteboards, uploaded files, and documents owned by installed Ryu apps remain in this
 same index, with their type, size when available, last modified date, and search reach. The table's
 search filters the visible rows locally; the separate Space search still runs retrieval across the
 stored document text. File rows that only have a name and type indexed keep that status visible in
 the table without changing the fact that the stored file can still be opened.
 
-The file drop zone, retrieval-mode, import/export, backup, and semantic-search controls are
-available from the shared-context home. Dropped files go through the node's configured extraction
-and embedding path, while creating or selecting a document continues to use the same Space
-document routes and permissions described by the API reference.
+The file drop zone, retrieval-mode, import/export, backup, and semantic-search controls are on the
+Space home. Dropped files go through the node's configured extraction and embedding path.
 
 ## Embeddings
 
@@ -93,11 +89,18 @@ Embeddings are a swappable default. Core can embed in two ways:
 
 RAG defaults to the local embedding engine, so it works without an API key.
 
-Changing the embedding model is an index migration, not a display preference. Core tags every
+Changing the embedding model is an index migration. Core tags every
 vector with its model and dimensionality, installs the new provider only after it has a valid
 configuration, and re-embeds stale rows in Spaces, unified retrieval, and encrypted message
 search. The migration is resumable and also resumes after a restart; until a row is re-embedded,
 it is excluded from search rather than compared across vector spaces.
+
+Core sends the OpenAI `dimensions` parameter only to models that can shorten their output, such
+as `text-embedding-3-small` and `text-embedding-3-large`. Models with a fixed width, such as
+`text-embedding-ada-002`, are called without it. If an endpoint still rejects `dimensions`, Core
+retries the request once without it. Either way, every returned vector must match the configured
+dimensions, and a vector of the wrong width fails with an error naming both sizes instead of being
+stored.
 
 For cloud embeddings, set the model's provider to `gateway`. Core then calls the local or managed
 Gateway at `POST /v1/embeddings`; Gateway authenticates the request, routes the model through its
@@ -117,10 +120,13 @@ provider map, and keeps the upstream key server-side. Reranking follows the same
 | List import history | `GET /api/spaces/:id/imports` |
 | Import a file as pages or databases | `POST /api/spaces/:id/imports/files` |
 | Import connected-app data | `POST /api/spaces/:id/imports/composio` |
+| Import from Notion, Google Drive, Confluence, GitHub, or web URLs | `POST /api/spaces/:id/imports/connector` |
 | Start a retrieval-mode change | `POST /api/spaces/:id/retrieval-mode` |
 | Read mode-change progress | `GET /api/spaces/:id/retrieval-mode/status?job_id=...` |
 | Cancel a mode change | `POST /api/spaces/:id/retrieval-mode/cancel` |
 | Search within a Space | `POST /api/spaces/:id/search` |
+| Read a Space's chunking strategy | `GET /api/spaces/:id/chunking` |
+| Set a Space's chunking strategy | `PUT /api/spaces/:id/chunking` |
 | Change embedding provider/model | `POST /api/embeddings/model` |
 | Re-embed stale vectors | `POST /api/embeddings/reindex` |
 | Re-embed progress | `GET /api/embeddings/reindex/status` |
@@ -128,6 +134,8 @@ provider map, and keeps the upstream key server-side. Reranking follows the same
 Ingesting a document splits it into chunks, embeds each chunk, and stores both the text and the
 vector. In Graph mode, ingestion also writes the chunk's term nodes and co-occurrence edges. A
 Space search returns grounded chunks with `chunk_id`, `document_id`, `content`, and `distance`.
+A non-finite distance is returned as `null`; the mobile app displays “distance unavailable”
+while keeping the result visible. Use the returned result order rather than distance to rank hits.
 
 File and connected-app imports use the same document lifecycle after conversion. Document-like
 files become editable pages, while delimited and spreadsheet data becomes a database whose cell
@@ -139,7 +147,7 @@ flowchart LR
   subgraph Ingest
     Doc[Document] --> Chunk[Split into chunks]
     Chunk --> Emb[Embed each chunk]
-    Emb --> Store[(vec0 table:<br/>text + vector)]
+    Emb --> Store[(Encrypted rows:<br/>text + vector)]
     Chunk --> Terms[Extract normalized terms]
     Terms --> Graph[(Term co-occurrence graph)]
   end
@@ -157,11 +165,96 @@ flowchart LR
   Walk --> Res
 ```
 
+## Encryption and search
+
+Document titles and bodies, chunk text, Space names and descriptions, link targets, page history,
+import records, embedding vectors, and uploaded files are encrypted on disk with keys derived from
+your data folder's master key. This changes how some searches match:
+
+- **Titles, Space names, and descriptions** still match any part of a word, ignoring case, in the
+  global Spaces search.
+- **Page bodies and extracted file text** match **whole words only** in the global Spaces search.
+  Each word is stored as a keyed token instead of the word itself, so a partial word, a phrase in
+  quotes, or a search made only of very common words (such as "the") does not match a body.
+- **Wiki links** still resolve `[[Title]]` to a page whose title matches ignoring case.
+- **Vector search** decrypts a Space's vectors into memory, within a shared memory budget, and
+  ranks chunks by cosine distance. While a large Space's vectors are still loading (or were set
+  aside to make room), its search uses the keyword index instead and loads the vectors in the
+  background.
+- **Graph search** is unchanged in behavior. The stored graph keeps a keyed token for each term
+  rather than the term itself, so the order in which a capped hop keeps neighbours is fixed but not
+  alphabetical.
+
+Spaces created by older builds that stored plaintext are encrypted in the background after an
+upgrade. Those older builds cannot read the encrypted values, so export your data before downgrading. See
+[Sealed User Content](/docs/core/encryption-user-content#spaces-documents-versions-links-graph-vectors-search-files) for exactly what is encrypted and what the
+keyed tokens reveal.
+
+## Chunking and imports
+
+Chunking strategies and connector imports are on [Spaces Ingestion](/docs/core/spaces-ingestion).
+
+## Search options
+
+`POST /api/spaces/:id/search` takes the query and `limit` plus these optional fields:
+
+| Field | Meaning |
+|---|---|
+| `hybrid` | `{ "alpha": 0.5 }` fuses a BM25 keyword ranking with the Space's own vector or graph ranking. `alpha` (0 to 1) weights the semantic side: `1` is the native ranking alone, `0` keyword ranking alone. |
+| `filter` | A metadata predicate every result must satisfy (see below). |
+| `parent` | Small-to-big expansion. `{ "mode": "window", "window": 1 }` adds the neighbouring chunks of each hit; `{ "mode": "document", "max_chars": 8000 }` returns the hit's whole document, once per document. |
+| `rerank` | `false` returns the fused order without the reranker pass. Defaults to `true`. |
+| `multi_query` | Number of alternative phrasings (0 to 5) a model writes for the query. Each is searched and the rankings are fused. |
+| `hyde` | `true` asks a model for a short passage that would answer the query and searches with it too. |
+| `expansion_model` | The model for `multi_query` and `hyde`. Without it, Core uses the model selected for the `retrieval-expansion-model` feature, then the node default. On an organization node, only organization owners and admins can choose a model here; for other members the field is ignored. |
+
+Keyword search ranks chunks with BM25 over the same keyed word index that global Spaces search
+uses, so it matches whole words only and ignores very common words, and Core keeps it in step with
+every chunk change. Both rankings are merged by weighted reciprocal rank, because a BM25 score and
+a vector distance are not on comparable scales. When fusion is used, each result carries a `score`
+(higher is better, comparable only within one response).
+
+Query expansion calls the model through Gateway, so the usual routing, policy, and budget apply.
+It fails open: if the model is unavailable or returns nothing usable, the original query is still
+searched and the response includes a `warning`. When expansion ran, the response lists the
+`queries` that were searched and any `hypothetical_document`.
+
+Each result includes `metadata` (the splitter metadata plus the chunk's `ordinal`) and, when
+`parent` was requested, `parent_content`.
+
+### Metadata filters
+
+Filters are JSON objects in the operator style most vector stores use:
+
+```json
+{
+  "kind": "page",
+  "ordinal": { "$lt": 3 },
+  "$or": [{ "header_path": "Install" }, { "title": { "$in": ["Setup", "Quickstart"] } }]
+}
+```
+
+- A field maps to a value (equality) or to operators: `$eq`, `$ne`, `$in`, `$nin`, `$gt`, `$gte`,
+  `$lt`, `$lte`, `$exists`. Keys at the same level must all match.
+- `$and` and `$or` take a non-empty list of filters; `$not` takes one filter.
+- A dotted key such as `source.lang` reads nested objects.
+- When the stored value is a list, `$eq` and `$in` match if any element matches, and `$ne` and
+  `$nin` match only if no element does.
+- Comparisons are numeric for numbers and alphabetical for strings. Values of different types never
+  match, and a missing field fails every operator except `$ne`, `$nin`, and `$exists: false`.
+- Filters are limited to 16 levels of nesting, 256 predicates, and 1,024 values per list. An
+  invalid filter is rejected with `400`.
+
+In a Space search a chunk's metadata is its splitter metadata plus `source` (always `space`),
+`space_id`, `document_id`, `title`, `kind`, `mime`, `ordinal`, `created_at`, and `updated_at`. The
+filter is applied before ranking and inside the caller's visibility rules, so a filtered search
+still returns up to `limit` matching chunks.
+
 ## Portable source and local retrieval
 
 Portable Space packages exchange the source layer, not the retrieval layer. A package contains
 Markdown pages, YAML frontmatter, database schema files, and Markdown row files. It does not carry
-embedding vectors, sqlite-vec tables, provider identifiers, or model-specific dimensions.
+embedding vectors, vector tables, provider identifiers, or model-specific dimensions.
 
 Importing a package creates a new private Space without vectors. Run the manual embedding re-index
 when you want RAG; the target node's current embedding and retrieval configuration is used then.
@@ -172,10 +265,10 @@ node's embedding model remains a normal local re-index operation.
 ## Source history and realtime collaboration
 
 Space page and database source saves are checkpointed in the node-local Git repository under
-`~/.ryu/source-history/spaces/`. The existing generic `VersionHistory` control and version endpoints
+`files/source-history/spaces/` under the data directory. The existing generic `VersionHistory` control and version endpoints
 remain the UI/API contract, so diffs and restores continue to work without exposing Git details to
-the editor. Git commit ids are the source version ids for documents created after this migration;
-older SQLite snapshots remain readable as a compatibility fallback. A successful SQLite document
+the editor. Git commit ids are the source version ids for documents with Git checkpoints; older SQLite
+snapshots remain readable as a compatibility fallback. A successful SQLite document
 mutation is not rolled back if the local Git projection is temporarily unavailable; Core logs the
 degraded checkpoint and keeps the document write available for repair.
 
@@ -192,14 +285,30 @@ Beyond per-Space search, Core exposes one retrieval endpoint that spans both Spa
 - `POST /api/retrieval/index` adds a stable-id chunk to retrieval. Its default
   `memory` source is encrypted and replaces the same-id user-level memory on a
   repeat request; use `POST /api/memory` when you need explicit scope, category,
-  importance, or tags. Pass `source: "space"` and a `space_id` for a Space chunk.
+  importance, or tags. Pass `source: "space"` and a `space_id` for a Space chunk; a `space_id`
+  that names a Space needs write access to it. A Space chunk may carry a `metadata` JSON object (up
+  to 16 KiB) for filtering. A Space chunk can replace only a Space chunk you
+  indexed yourself: an id already used by memory, an imported knowledge bundle, or another
+  member's chunk returns `409`.
 - `POST /api/retrieval/search` searches across memory and selected Spaces, with options for
-  `top_k`, `space_ids`, `include_memory`, and a `min_score` threshold.
+  `top_k`, `space_ids`, `include_memory`, and a `min_score` threshold. It also accepts `filter`,
+  `hybrid`, `multi_query`, `hyde`, and `expansion_model` with the meanings described in
+  [Search options](#search-options). A filter matches an indexed chunk's `metadata` plus the
+  built-in fields `source`, `space_id`, `scope`, `agent_id`, and `importance`; inside each
+  selected Space it matches the Space fields listed above. `hybrid` applies inside the selected
+  Spaces.
 
 This is also the path used for chat recall. When an agent has Space IDs in its memory settings,
 Core searches those Spaces under each Space's stored mode, then merges their results with eligible
 long-term memory. A Graph Space therefore uses the same bounded graph traversal in chat that it
 uses in the Space search screen.
+
+### External vector stores
+
+A node can also attach one collection in Qdrant, Chroma, Pinecone, Weaviate, Milvus, pgvector, or a
+separate local sqlite-vec file. That collection answers as the `vector-store` source: include
+`"vector-store"` in `space_ids` (or in an agent's Space list) to search it, and its hits are merged
+by rank with memory and Spaces. See [Vector store configuration](/docs/start-here/configuration#vector-store).
 
 ## GraphRAG and the wiki graph are different
 
@@ -207,3 +316,18 @@ GraphRAG stores chunk-level term co-occurrence. The wiki graph stores explicit p
 created with `[[wikilinks]]`, mentions, and page hierarchy. Wiki links power backlinks and the
 Knowledge Graph view. They can also expand retrieval to linked pages, but they do not create or
 replace the GraphRAG term graph. A Space can use both during one search.
+
+## Database query limits
+
+Database queries (`POST /api/spaces/:id/databases/:doc_id/query`) enforce SQLite value and
+SQL-length limits before they execute caller SQL. Large computed values and oversized result rows
+are rejected before they are copied into the response. Stored grid input is projected separately,
+so long column labels do not consume the caller's SQL allowance.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/core/spaces-ingestion" />
+  <DocCard href="/docs/core/memory" />
+  <DocCard href="/docs/core/encryption-user-content" />
+</Cards>

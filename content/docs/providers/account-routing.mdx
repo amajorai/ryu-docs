@@ -1,0 +1,223 @@
+---
+title: Account Routing
+description: "Reference for how Ryu chooses among several saved accounts for one provider, covering Gateway API-key pools, Core's Claude and ChatGPT login pools, and managed Pi account bindings, retries, and strategies."
+tags: ["Providers", "Accounts", "Routing"]
+---
+
+Account routing decides which saved account serves a request when one provider has more than one
+account. It runs after the provider is chosen. This page is the single reference for account
+binding, retries, cooldowns, and selection strategies. For how the provider itself is chosen, see
+[Provider Routing](/docs/providers/routing). For where each kind of credential is stored, see
+[BYOK and Provider Accounts](/docs/providers/byok).
+
+## Which pool applies
+
+Ryu has three separate account pools. A setting in one pool does not change another.
+
+| Pool | Providers | Configure in | Strategies |
+|---|---|---|---|
+| Gateway API-key pools | OpenAI, Anthropic, OpenRouter, Mistral, Hugging Face, NVIDIA NIM, Together, Fireworks, Qwen, Modal, Gemini | **Gateway → API keys → Account routing**, or `[providers.accountStrategies]` in `gateway.toml` | Round robin, quota first, fill first, reset first (Gemini - round robin and fill first only) |
+| Core login pools | Claude (Pro/Max), native ChatGPT (`chatgpt`), self-hosted ChatGPT plan (`chatgpt-plan`) | **Gateway → AI providers → OAuth accounts → Account routing** | Manual, round robin, quota first, fill first, reset first (`chatgpt-plan` - manual and round robin only) |
+| Managed Pi accounts | OAuth for GitHub Copilot, Kimi Code, OpenAI Codex, Radius, OpenRouter, and xAI; saved API-key accounts, including custom OpenAI-compatible endpoints | **Gateway → AI providers → Account routing** on the provider row | Manual, round robin, fill first; Codex OAuth and GitHub Copilot OAuth also offer quota first and reset first |
+
+Rules shared by every pool:
+
+- A strategy chooses the account for **new** conversations only.
+- A healthy conversation keeps its account, so the provider-side prompt cache stays useful.
+- Lower priority numbers are tried first. A disabled account keeps its login but gets no new work.
+- An unknown quota reading is never treated as zero usage. Quota strategies fall back to rotation
+  until evidence arrives.
+- Accounts tied on the best reading rotate for new conversations.
+
+## Gateway API-key pools
+
+Gateway keeps multiple keys for one direct provider as separate accounts. Opening
+**Gateway → API keys** loads the selected node's saved accounts. A local operator can add a key,
+see the redacted account count, remove one account, or clear the provider. Removing the first key
+promotes the next key in the rotation set. Key values are never returned on later reads.
+
+### Session binding and retries
+
+New chat sessions select an account with the configured strategy, round robin by default. A session
+that carries `x-ryu-session-id`, `prompt_cache_key`, `conversation_id`, or `sessionId` stays on its
+selected account. Requests with no stable session identifier rotate per request.
+
+| Upstream response | Effect |
+|---|---|
+| 429 (rate limited) | The account cools down and the next available account is tried. The session then follows the account that succeeded. |
+| 402 (out of credit) | Only that key leaves rotation, and the next available account is tried. The rest of the pool is not rate-limited. |
+| 401 or 403 (revoked or invalid key) | Only that key leaves rotation for a few minutes, and the next key is tried. |
+
+The last account that can still serve is not taken out of rotation for a 401, 403, or 402. Its own error keeps being returned, and a refilled key serves again at
+once. When every key of an OpenAI-compatible provider fails, the out-of-credit error is returned in
+preference to a rate limit.
+
+When upstream responses identify a shared organization quota, a 429 cools every key known to share
+that quota, and the same request skips them. Keys without a known shared quota identity keep
+independent cooldowns.
+
+For OpenAI-compatible direct providers, embeddings, reranking, images, TTS, and STT also rotate
+across configured keys when an upstream account is rate limited or out of credit. Media requests
+have no chat-session prompt cache.
+
+### Strategies
+
+```toml
+[providers.accountStrategies]
+openai = "quota_first" # round_robin | quota_first | fill_first | reset_first
+
+[providers.accountDrainThresholds]
+openai = 65 # 1-100; default 80
+```
+
+| Strategy | New sessions go to |
+|---|---|
+| `round_robin` | The next account in rotation. This is the default. |
+| `quota_first` | The lowest observed usage fraction within the highest available priority. |
+| `reset_first` | The nearest future reset among accounts with reported headroom. |
+| `fill_first` | One account until it cools down or fresh readings reach its used-quota threshold (80% by default). Then an account with observed headroom and a known quota identity. |
+
+These strategies read the rate-limit headers returned for each Gateway API key. They do not read
+Claude or Codex subscription usage windows.
+
+- Quota first and reset first use recent remaining/limit headers only after every enabled account
+  has a known upstream organization quota identity. Until then they use round robin.
+- Readings expire after five minutes or when their reported quota window resets, whichever comes
+  first. A changed organization identity invalidates that account's previous reading.
+- Accounts known to share a quota identity rank as one capacity source.
+- A provider that omits usable quota or organization headers keeps rotating by round robin, even
+  with a quota strategy configured.
+- Under fill first, a fully observed drained priority tier yields new work to an available tier with
+  demonstrated headroom. If none exists, or quota headers are missing, the account is kept until a
+  rate limit. Unknown or stale quota does not make a tier drained.
+
+Each account can override its provider's drain threshold. In the account editor, leave
+**Drain override** blank to inherit, set a percentage from 1-100, or set `0` to disable proactive
+draining. Hard exhaustion, cooldown, and disabled-account rules still apply.
+
+```toml
+[providers.accountPolicies.openai."account-id"]
+drain_threshold_percent = 70
+```
+
+### Gemini keys
+
+Native Gemini API-key accounts support **Round robin** and **Fill first**. The native SDK does not
+expose account-qualified quota observations, so the configuration API rejects quota first, reset
+first, and a drain threshold for Gemini. Chat sessions stay on one key. A 429, an account payment
+rejection, or a refused key (401 or 403) cools that key and tries the next. Image requests rotate per
+request. Other GenAI adapter kinds use one configured key each.
+
+```toml
+[providers.genai]
+gemini_api_keys = ["<second-gemini-key>"]
+
+[providers.genai.keys]
+gemini = "<first-gemini-key>"
+```
+
+Keep the Gateway configuration private. The desktop account controls save this shape and restart
+Gateway without returning the key values.
+
+### Caches and saved edits
+
+Gateway exact and semantic response caches are bypassed for multi-key providers, because their
+entries do not carry an account identity. For single-account routes, semantic cache entries are
+scoped to tenant, selected provider, and model. A fallback response is not stored under the failed
+primary route.
+
+Account-routing edits belong to the selected node and connection credentials. Switching nodes or
+credentials loads that connection's policy and discards unsaved edits. A save already in progress
+finishes against its original node. A refused save keeps your edits for retry.
+
+## Core login pools for Claude and ChatGPT
+
+Core proxies Claude (Pro/Max) and native ChatGPT requests from the managed Pi engine. Pi sends the
+request to local Core with a proxy credential, and Core selects and refreshes the real sealed
+account. Manual selection is the default: new conversations use the account selected in the account
+list.
+
+### Binding
+
+- A conversation with a stable session ID stays on its account after you switch the active login.
+- Removing the bound account, or a 401, 403, or 429, releases the binding.
+- Bindings expire after one hour of inactivity or a Core restart.
+- Requests without a session ID use the current selection on each request.
+- A conversation that changes accounts may need to warm its upstream prompt cache again.
+
+### Retries
+
+After a definitive 401, 403, or 429, Core retries the request with another connected account, up to
+four accounts in total (`MAX_POOL_ATTEMPTS` in `apps/core/src/server/claude_api.rs` and
+`chatgpt_api.rs`). The proxy does not replay other upstream failures.
+
+| Event | Effect on the account |
+|---|---|
+| 401 or 403 | Excluded until its saved credential changes |
+| 429 | Cooled for `Retry-After`, or the latest reported request or token reset, or a short fallback |
+| Credential cannot be prepared before sending | Briefly skipped; another connected login is tried for the same request |
+
+### Strategies and drain
+
+Claude and native ChatGPT offer manual, round robin, quota first, fill first, and reset first, with
+enable controls and priorities. Fill first has a used-quota threshold (80% by default). Accounts with
+subscription observations expose a drain override: blank inherits the provider setting, and `0`
+disables proactive draining. New work can move past a fully observed exhausted tier to a
+lower-priority account with measured headroom.
+
+Quota strategies use recent, account-wide subscription usage windows tied to the exact sealed
+credential revision. Core refreshes these readings in the background, so a first conversation does
+not wait for a vendor usage endpoint. Per-model windows do not rank a whole account.
+
+The `chatgpt-plan` connection offers manual selection and round robin only, because its public flow
+provides no quota readings. See [ChatGPT Plan on Self-Hosted Core](/docs/providers/chatgpt-plan).
+
+## Managed Pi accounts
+
+Direct conversations in Ryu's managed Pi engine keep the account selected when the conversation
+starts. This covers SDK OAuth logins (GitHub Copilot, Kimi Code, OpenAI Codex, Radius, OpenRouter,
+and xAI) and saved API-key accounts, including custom OpenAI-compatible endpoints. These controls
+are available even when the provider has only one saved account.
+
+### Binding
+
+- Each conversation uses an isolated credential projection, and its binding persists across
+  restarts.
+- Picker and priority changes affect new conversations only.
+- If the bound account is disabled, removed, or unavailable, the conversation reports an account
+  error. Enable the account again or start a new conversation. Ryu does not substitute another
+  account or replay a whole agent turn.
+- For API-key accounts, provider settings, model overrides, and cached model catalogs cannot replace
+  the captured account's authentication. Ryu keeps the configured base URL, model settings, and
+  client headers.
+
+### Refresh
+
+Ryu refreshes the captured account before each turn. Pi receives the access credential with its real
+expiration time; renewable credentials stay in the account store. A long turn that outlives the
+access credential can fail with an authentication error, and a retry refreshes the same account.
+
+Automatic renewal before dispatch uses the same refresh protection. If delivery is uncertain or the
+provider revokes the login, Ryu stops using that credential generation and asks you to sign in again.
+A restart does not retry the same refresh token. A newer saved login remains eligible.
+
+### Strategies
+
+| Strategy | Behavior |
+|---|---|
+| Manual | Uses the selected account |
+| Round robin | Rotates among usable, enabled accounts in the lowest-numbered priority group |
+| Fill first | Keeps the first eligible account in that group until its availability or priority changes, or, with quota readings, until it reaches its drain threshold |
+| Quota first | Codex OAuth and GitHub Copilot OAuth only. Favors lower observed use |
+| Reset first | Codex OAuth and GitHub Copilot OAuth only. Favors a known future reset |
+
+Codex OAuth and GitHub Copilot OAuth have account-specific usage readers
+(`quota_observations_supported` in `apps/core/src/pi_config/sdk_account_routing.rs`). Use
+**Refresh quota** to read each enabled account. Readings match the saved credential generation and
+expire after five minutes. Missing, failed, stale, or model-specific readings stay unknown, and a
+newer login cannot inherit an older credential's quota. Priority groups are considered before
+ranking.
+
+Empty keys and access-only OAuth credentials that need refresh are excluded from automatic
+selection. Ryu captures the configured model for dispatch and usage attribution. Usage records mark
+missing input or output token counts as missing; Ryu does not infer the split from context usage.

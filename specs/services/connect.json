@@ -1,0 +1,4752 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ryu Connect API",
+    "version": "v1",
+    "summary": "Hosted Skills, governed tools, Composio execution and usage.",
+    "description": "Ryu Connect is a tenant-scoped integration edge: a shared SKILL.md catalog, governed tool search and execution over registered MCP servers and Composio, native Composio execution, a Composio usage report, its own MCP servers at /mcp and /mcp/meta, the tenant's balance, async tasks, call reviews, vendor resources and reference media.\n\nEvery `/v1` and `/mcp` request carries one tenant's runtime bearer. Hosted Connect is in early access: Ryu provisions the base URL and key; there is no self-serve signup, and the service is not distributed for self-hosting yet.\n\nErrors are `{ code, error, ok: false }`, with the request id in `x-request-id`. Call-limit refusals add `retryAfterSeconds`. A request whose Accept names `application/problem+json` gets RFC 9457 problem details instead (the first `ConnectError` form): `type`, `title`, `status`, `detail`, `instance`, `code` and `docs`, plus every legacy member. A 401 carries `WWW-Authenticate: Bearer realm=\"ryu-connect\"`. Responses forwarded from an upstream in compatibility mode (`/v1/exec/tool`, `/v1/composio` and `/v1/tools/*` without native bindings, and `/mcp`) keep the upstream's body, are not normalized and are not negotiated; JSON-RPC errors from the MCP endpoints keep the JSON-RPC format. No route deduplicates writes by Idempotency-Key, so tool and action execution must not be retried blindly.\n\nWhen the tenant's Composio binding sets `maxCallsPerMinute`, native Composio executions (`/v1/composio/execute`, and `/v1/exec/tool` for `composio.*` tools) carry `RateLimit` and `RateLimit-Policy` (draft-ietf-httpapi-ratelimit-headers-11, policy `composio-calls`, a rolling 60-second window), as does their `429 rate_limited`."
+  },
+  "externalDocs": {
+    "description": "Ryu Connect SDK quickstart",
+    "url": "https://docs.ryuhq.com/docs/standalone/sdk/connect"
+  },
+  "servers": [
+    {
+      "url": "{baseUrl}",
+      "description": "The URL Ryu issues with an early-access key.",
+      "variables": {
+        "baseUrl": {
+          "default": "http://127.0.0.1:8094",
+          "description": "Your Connect base URL. There is no default hosted URL."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "RuntimeBearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Service",
+      "description": "Liveness and lane configuration."
+    },
+    {
+      "name": "Skills",
+      "description": "The shared SKILL.md catalog."
+    },
+    {
+      "name": "Tools",
+      "description": "Governed tool discovery and execution."
+    },
+    {
+      "name": "Composio",
+      "description": "Native Composio execution for operator-bound accounts."
+    },
+    {
+      "name": "Usage",
+      "description": "Composio billing receipts."
+    },
+    {
+      "name": "Money",
+      "description": "What a tenant can spend now."
+    },
+    {
+      "name": "Tasks",
+      "description": "Durable async tasks for relay and vendor calls."
+    },
+    {
+      "name": "Reviews",
+      "description": "Agent usefulness reviews of the tenant's own calls."
+    },
+    {
+      "name": "Resources",
+      "description": "Vendor objects created on Ryu's operator accounts."
+    },
+    {
+      "name": "Media",
+      "description": "Reference files hosted behind expiring URLs."
+    },
+    {
+      "name": "MCP",
+      "description": "Connect's own MCP server."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": ["Service"],
+        "summary": "Read lane configuration, readiness and the service version",
+        "description": "Public. `configured` and `ready` never prove that a provider or upstream is reachable.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Healthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectHealth"
+                },
+                "example": {
+                  "apiVersion": "v1",
+                  "capabilities": {
+                    "composio": {
+                      "configured": false,
+                      "description": "Tenant-bound Composio connections and actions",
+                      "ready": false
+                    },
+                    "mcpForwarding": {
+                      "configured": false,
+                      "description": "Authenticated MCP protocol forwarding"
+                    },
+                    "mcpHosting": {
+                      "configured": true,
+                      "description": "Connect-owned MCP server with hosted Skill resources"
+                    },
+                    "skills": {
+                      "configured": true,
+                      "description": "SKILL.md catalog and hosting"
+                    },
+                    "toolGateway": {
+                      "configured": true,
+                      "description": "Governed tool search and execution"
+                    },
+                    "triggerDelivery": {
+                      "configured": false,
+                      "description": "Signed Composio webhook ingress and durable tenant event leases",
+                      "ready": false
+                    }
+                  },
+                  "ok": true,
+                  "service": "ryu-connect",
+                  "version": "0.4.0"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/skills": {
+      "get": {
+        "operationId": "listSkills",
+        "tags": ["Skills"],
+        "summary": "List the hosted Skill catalog",
+        "description": "The catalog is shared: every tenant of a deployment sees every Skill. Answers 503 skills_unavailable when no catalog is configured.",
+        "responses": {
+          "200": {
+            "description": "The catalog.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectSkillList"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "description": "Review identity boundaries",
+                      "id": "passport-review",
+                      "name": "passport-review"
+                    }
+                  ],
+                  "object": "list"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/skills/{skillId}": {
+      "get": {
+        "operationId": "getSkill",
+        "tags": ["Skills"],
+        "summary": "Read one hosted Skill",
+        "description": "Reads one Skill of the shared catalog with its SKILL.md content. An unknown id answers 404.",
+        "parameters": [
+          {
+            "name": "skillId",
+            "in": "path",
+            "required": true,
+            "description": "The Skill's id, as `GET /v1/skills` lists it.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Skill.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectSkill"
+                },
+                "example": {
+                  "description": "Review identity boundaries",
+                  "id": "passport-review",
+                  "instructions": "---\nname: passport-review\ndescription: Review identity boundaries\n---\n# Passport review\n",
+                  "name": "passport-review"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tools/search": {
+      "get": {
+        "operationId": "searchTools",
+        "tags": ["Tools"],
+        "summary": "Search the tenant's granted tools",
+        "description": "Native registrations and Composio grants; Core's catalog in compatibility mode. Answers 503 tool_unavailable when every requested lane is down.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive text matched against name and description.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "One lane only. Default `any`.",
+            "schema": {
+              "type": "string",
+              "enum": ["any", "mcp", "composio"]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "1-25. Default 8.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 25,
+              "default": 8
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching tools.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectToolSearchResult"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "description": "Echo input",
+                      "id": "workspace.echo",
+                      "kind": "mcp",
+                      "name": "workspace.echo"
+                    }
+                  ],
+                  "object": "list"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tools/describe": {
+      "get": {
+        "operationId": "describeTool",
+        "tags": ["Tools"],
+        "summary": "Describe one granted tool",
+        "description": "Reads a granted tool's description and JSON Schema input before calling it. A tool that is not granted to the tenant answers 403 tool_denied.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "The qualified tool id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tool and its parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectToolDescription"
+                },
+                "example": {
+                  "description": "Echo input",
+                  "id": "workspace.echo",
+                  "kind": "mcp",
+                  "name": "workspace.echo",
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "403": {
+            "$ref": "#/components/responses/ConnectError403"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/exec/tool": {
+      "post": {
+        "operationId": "execTool",
+        "tags": ["Tools"],
+        "summary": "Execute one granted tool",
+        "description": "Not idempotent: a repeat can run the tool twice, so the SDK never retries it on a network error or 5xx. A refusal (402, 429, 503 metering_unavailable) happens before the tool runs. In compatibility mode the Gateway reports its own refusals and tool errors as HTTP 200 with `ok: false` and `error`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectExecToolInput"
+              },
+              "example": {
+                "arguments": {
+                  "message": "hello"
+                },
+                "kind": "tool",
+                "tool_id": "workspace.echo"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tool result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectExecToolResult"
+                },
+                "example": {
+                  "ok": true,
+                  "result": {
+                    "content": [
+                      {
+                        "text": "{\"message\":\"hello\"}",
+                        "type": "text"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimitPolicy"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "402": {
+            "$ref": "#/components/responses/ConnectError402"
+          },
+          "403": {
+            "$ref": "#/components/responses/ConnectError403"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConnectError429"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/composio/execute": {
+      "post": {
+        "operationId": "executeComposio",
+        "tags": ["Composio"],
+        "summary": "Execute one granted Composio action (native)",
+        "description": "The tenant's binding decides the account, user, toolkit version and credential. Not idempotent; the SDK never retries it on a network error or 5xx. Answers 503 native_composio_unavailable without native bindings.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectComposioExecuteInput"
+              },
+              "example": {
+                "body": {
+                  "channel": "#ops",
+                  "text": "Deploy finished"
+                },
+                "operation": "execute",
+                "toolId": "SLACK_SEND_MESSAGE"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The action result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectComposioExecuteResult"
+                },
+                "example": {
+                  "data": {
+                    "ok": true
+                  },
+                  "successful": true
+                }
+              }
+            },
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimitPolicy"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "402": {
+            "$ref": "#/components/responses/ConnectError402"
+          },
+          "403": {
+            "$ref": "#/components/responses/ConnectError403"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConnectError429"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "operationId": "getUsage",
+        "tags": ["Usage"],
+        "summary": "List the tenant's Composio billing receipts for a window",
+        "description": "`from` and `to` fall on whole UTC hours, `[from, to)`, at most 31 days. Unknown or repeated parameters answer 400 invalid_request.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "description": "Window start, an ISO 8601 time with a zone on a whole UTC hour.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "description": "Window end (exclusive), on a whole UTC hour.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The `nextCursor` of the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Lines per page, 1-1000. Default 1000.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectUsageReport"
+                },
+                "example": {
+                  "from": "2026-10-01T00:00:00.000Z",
+                  "lines": [
+                    {
+                      "at": "2026-10-01T09:14:03.120Z",
+                      "transactionId": "log_abc123",
+                      "usage": {
+                        "authSource": "managedApp",
+                        "directExecution": true,
+                        "kind": "toolCall",
+                        "premiumChargeMicroUsd": null
+                      }
+                    }
+                  ],
+                  "nextCursor": null,
+                  "ok": true,
+                  "to": "2026-10-02T00:00:00.000Z",
+                  "type": "usage.report",
+                  "unresolved": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "operationId": "postMcp",
+        "tags": ["MCP"],
+        "summary": "Connect's own MCP server (stateless Streamable HTTP)",
+        "description": "Skill resources and granted tools. Send `Accept: application/json, text/event-stream`; a 2025-era request is answered as one `event: message` SSE frame. Point an MCP client here instead of calling it by hand.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectMcpRequest"
+              },
+              "example": {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "params": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A JSON-RPC response, as JSON or as one server-sent `message` event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "id": 1,
+                  "jsonrpc": "2.0",
+                  "result": {
+                    "tools": [
+                      {
+                        "description": "Echo input",
+                        "inputSchema": {
+                          "type": "object"
+                        },
+                        "name": "workspace.echo"
+                      }
+                    ]
+                  }
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "406": {
+            "$ref": "#/components/responses/ConnectError406"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/balance": {
+      "get": {
+        "operationId": "getBalance",
+        "tags": ["Money"],
+        "summary": "Read what the tenant can spend now",
+        "description": "Read-only; holds nothing. Amounts are micro-USD at Ryu's rates. The MCP `balance` tool answers the same.",
+        "responses": {
+          "200": {
+            "description": "The tenant's balance.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectBalance"
+                },
+                "example": {
+                  "object": "balance",
+                  "availableMicroUsd": 4250000,
+                  "billed": true,
+                  "heldMicroUsd": 0,
+                  "headroomMicroUsd": 5000000,
+                  "tagBudgets": [
+                    {
+                      "action": "block",
+                      "id": "tbg_0123456789abcdef",
+                      "limitMicroUsd": 2000000,
+                      "reached": false,
+                      "resetsAt": "2026-11-01T00:00:00.000Z",
+                      "tag": "research",
+                      "usedMicroUsd": 350000,
+                      "window": "monthly"
+                    }
+                  ],
+                  "suspended": false,
+                  "topUpUrl": null,
+                  "unsettledMicroUsd": 750000,
+                  "unsettledSince": "2026-10-21T11:00:00.000Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tools/requests": {
+      "post": {
+        "operationId": "requestMissingTool",
+        "tags": ["Tools"],
+        "summary": "Ask for a tool Connect does not serve yet",
+        "description": "Files a request for a missing tool. A tenant may file 5 per hour and 20 per day; past that the call is refused with 429 `rate_limited` and `retryAfterSeconds`. The MCP tool `request_missing_tool` shares this intake.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectToolRequestInput"
+              },
+              "example": {
+                "description": "Create an issue in Linear from a bug report.",
+                "query": "create issue",
+                "toolkit": "linear"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The request was filed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectToolRequestReceipt"
+                },
+                "example": {
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "id": "treq_0123456789abcdef0123456789abcdef",
+                  "ok": true,
+                  "status": "received"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConnectError429"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tasks": {
+      "get": {
+        "operationId": "listTasks",
+        "tags": ["Tasks"],
+        "summary": "List the tenant's recent async tasks",
+        "description": "Tasks are created by sending `Prefer: respond-async` on a relay or vendor call. Finished tasks and their answers are kept for a day.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only tasks in this state.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "running",
+                "completed",
+                "failed",
+                "canceled",
+                "expired"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "1-200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tasks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectTaskList"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "createdAt": "2026-10-21T12:00:00.000Z",
+                      "error": null,
+                      "expiresAt": "2026-10-21T13:00:00.000Z",
+                      "finishedAt": "2026-10-21T12:00:07.000Z",
+                      "id": "task_0123456789abcdef0123456789abcdef",
+                      "money": {
+                        "chargedMicroUsd": 20000,
+                        "costMicroUsd": 20000,
+                        "endpoint": "exa.search.auto",
+                        "ledgerRefId": "composio:rvx_0123456789abcdef0123456789abcdef",
+                        "metered": true,
+                        "operatorAccount": "operator-a",
+                        "perCallMicroUsd": 20000,
+                        "reservedMicroUsd": 0
+                      },
+                      "object": "task",
+                      "pollUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef",
+                      "request": {
+                        "method": "POST",
+                        "path": "/v1/vendors/exa/search"
+                      },
+                      "result": {
+                        "bytes": 2048,
+                        "contentType": "application/json",
+                        "outcome": "upstream",
+                        "status": 200
+                      },
+                      "resultExpiresAt": "2026-10-22T12:00:07.000Z",
+                      "resultUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef/result",
+                      "rung": "operator",
+                      "ryuCallId": "call_0123456789abcdef0123456789abcdef",
+                      "startedAt": "2026-10-21T12:00:01.000Z",
+                      "status": "completed",
+                      "webhook": null
+                    }
+                  ],
+                  "object": "tasks",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tasks/{taskId}": {
+      "get": {
+        "operationId": "getTask",
+        "tags": ["Tasks"],
+        "summary": "Read one async task",
+        "description": "Polling is free; only the tenant's own tasks are visible.",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "description": "The task's id (`task_` and 32 hex characters).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectTask"
+                },
+                "example": {
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "error": null,
+                  "expiresAt": "2026-10-21T13:00:00.000Z",
+                  "finishedAt": "2026-10-21T12:00:07.000Z",
+                  "id": "task_0123456789abcdef0123456789abcdef",
+                  "money": {
+                    "chargedMicroUsd": 20000,
+                    "costMicroUsd": 20000,
+                    "endpoint": "exa.search.auto",
+                    "ledgerRefId": "composio:rvx_0123456789abcdef0123456789abcdef",
+                    "metered": true,
+                    "operatorAccount": "operator-a",
+                    "perCallMicroUsd": 20000,
+                    "reservedMicroUsd": 0
+                  },
+                  "object": "task",
+                  "pollUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef",
+                  "request": {
+                    "method": "POST",
+                    "path": "/v1/vendors/exa/search"
+                  },
+                  "result": {
+                    "bytes": 2048,
+                    "contentType": "application/json",
+                    "outcome": "upstream",
+                    "status": 200
+                  },
+                  "resultExpiresAt": "2026-10-22T12:00:07.000Z",
+                  "resultUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef/result",
+                  "rung": "operator",
+                  "ryuCallId": "call_0123456789abcdef0123456789abcdef",
+                  "startedAt": "2026-10-21T12:00:01.000Z",
+                  "status": "completed",
+                  "webhook": null,
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tasks/{taskId}/result": {
+      "get": {
+        "operationId": "getTaskResult",
+        "tags": ["Tasks"],
+        "summary": "Read a finished task's answer",
+        "description": "Answers exactly what the call would have answered: the upstream's status, headers and body, plus `x-ryu-task-id` and `x-ryu-task-status`. A task that is still queued or running answers 409 `task_pending` with Retry-After; one that was canceled or expired, or has no answer, answers 409 `task_canceled`, `task_expired` or the code of its state.",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "description": "The task's id (`task_` and 32 hex characters).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The task's answer, in the status, headers and body the call produced.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "409": {
+            "$ref": "#/components/responses/ConnectError409"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/tasks/{taskId}/cancel": {
+      "post": {
+        "operationId": "cancelTask",
+        "tags": ["Tasks"],
+        "summary": "Cancel an async task",
+        "description": "A queued task is canceled at once. A running call on the tenant's own credentials is aborted. A running call on Ryu's key cannot be canceled (409 `task_running_metered`), and a finished task answers 409 `task_finished`.",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "description": "The task's id (`task_` and 32 hex characters).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The canceled task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectTask"
+                },
+                "example": {
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "error": {
+                    "code": "task_canceled",
+                    "message": null
+                  },
+                  "expiresAt": "2026-10-21T13:00:00.000Z",
+                  "finishedAt": "2026-10-21T12:00:02.000Z",
+                  "id": "task_0123456789abcdef0123456789abcdef",
+                  "money": {
+                    "chargedMicroUsd": null,
+                    "costMicroUsd": null,
+                    "endpoint": "exa.search.auto",
+                    "ledgerRefId": null,
+                    "metered": true,
+                    "operatorAccount": null,
+                    "perCallMicroUsd": 20000,
+                    "reservedMicroUsd": 0
+                  },
+                  "object": "task",
+                  "pollUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef",
+                  "request": {
+                    "method": "POST",
+                    "path": "/v1/vendors/exa/search"
+                  },
+                  "result": null,
+                  "resultExpiresAt": "2026-10-22T12:00:02.000Z",
+                  "resultUrl": "/v1/tasks/task_0123456789abcdef0123456789abcdef/result",
+                  "rung": "operator",
+                  "ryuCallId": "call_0123456789abcdef0123456789abcdef",
+                  "startedAt": null,
+                  "status": "canceled",
+                  "webhook": null,
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "409": {
+            "$ref": "#/components/responses/ConnectError409"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/mcp/meta": {
+      "post": {
+        "operationId": "postMcpMeta",
+        "tags": ["MCP"],
+        "summary": "Connect's constant-size MCP server",
+        "description": "However many tools a tenant is granted, an agent sees five: `search`, `describe`, `call`, `balance` and `request_missing_tool`. Each runs the same handler as its REST route. Same transport and headers as `POST /mcp`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectMcpRequest"
+              },
+              "example": {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                  "arguments": {
+                    "description": "Create an issue in Linear from a bug report.",
+                    "query": "create issue",
+                    "toolkit": "linear"
+                  },
+                  "name": "request_missing_tool"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A JSON-RPC response, as JSON or as one server-sent `message` event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "id": 1,
+                  "jsonrpc": "2.0",
+                  "result": {
+                    "content": [
+                      {
+                        "text": "{\"createdAt\":\"2026-10-21T12:00:00.000Z\",\"id\":\"treq_0123456789abcdef0123456789abcdef\",\"ok\":true,\"status\":\"received\"}",
+                        "type": "text"
+                      }
+                    ],
+                    "structuredContent": {
+                      "createdAt": "2026-10-21T12:00:00.000Z",
+                      "id": "treq_0123456789abcdef0123456789abcdef",
+                      "ok": true,
+                      "status": "received"
+                    }
+                  }
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "406": {
+            "$ref": "#/components/responses/ConnectError406"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/mcp/meta/read": {
+      "post": {
+        "operationId": "postMcpMetaRead",
+        "tags": ["MCP"],
+        "summary": "Connect's directory-safe constant-size MCP server",
+        "description": "The read-only variant of `POST /mcp/meta`: `search`, `describe` and `balance` only, for listing in MCP directories that must not offer a tool that acts on a third-party system.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectMcpRequest"
+              },
+              "example": {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                  "arguments": {},
+                  "name": "balance"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A JSON-RPC response, as JSON or as one server-sent `message` event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "example": {
+                  "id": 1,
+                  "jsonrpc": "2.0",
+                  "result": {
+                    "content": [
+                      {
+                        "text": "{\"availableMicroUsd\":4250000,\"billed\":true,\"heldMicroUsd\":0,\"headroomMicroUsd\":5000000,\"tagBudgets\":[{\"action\":\"block\",\"id\":\"tbg_0123456789abcdef\",\"limitMicroUsd\":2000000,\"reached\":false,\"resetsAt\":\"2026-11-01T00:00:00.000Z\",\"tag\":\"research\",\"usedMicroUsd\":350000,\"window\":\"monthly\"}],\"suspended\":false,\"topUpUrl\":null,\"unsettledMicroUsd\":750000,\"unsettledSince\":\"2026-10-21T11:00:00.000Z\"}",
+                        "type": "text"
+                      }
+                    ],
+                    "structuredContent": {
+                      "availableMicroUsd": 4250000,
+                      "billed": true,
+                      "heldMicroUsd": 0,
+                      "headroomMicroUsd": 5000000,
+                      "tagBudgets": [
+                        {
+                          "action": "block",
+                          "id": "tbg_0123456789abcdef",
+                          "limitMicroUsd": 2000000,
+                          "reached": false,
+                          "resetsAt": "2026-11-01T00:00:00.000Z",
+                          "tag": "research",
+                          "usedMicroUsd": 350000,
+                          "window": "monthly"
+                        }
+                      ],
+                      "suspended": false,
+                      "topUpUrl": null,
+                      "unsettledMicroUsd": 750000,
+                      "unsettledSince": "2026-10-21T11:00:00.000Z"
+                    }
+                  }
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "406": {
+            "$ref": "#/components/responses/ConnectError406"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/reviews": {
+      "post": {
+        "operationId": "submitReview",
+        "tags": ["Reviews"],
+        "summary": "Review one of the tenant's own recent calls",
+        "description": "Connect accepts a review only for a call it journaled for this tenant, within 30 days of the call. A resubmission replaces the earlier review (200); a first review answers 201. Reviews are free: nothing is held or charged. At most 1000 reviews per tenant per UTC day. Answers 404 `reviews_unavailable` when the deployment keeps no review store.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectReviewInput"
+              },
+              "example": {
+                "callId": "call_0123456789abcdef0123456789abcdef",
+                "comment": "Results were relevant but two links were dead.",
+                "issues": ["stale"],
+                "outcome": "partial",
+                "rating": 4
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The review was replaced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectReviewSubmitted"
+                },
+                "example": {
+                  "callId": "call_0123456789abcdef0123456789abcdef",
+                  "comment": "Results were relevant but two links were dead.",
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "endpoint": "exa.search.auto",
+                  "issues": ["stale"],
+                  "object": "review",
+                  "outcome": "partial",
+                  "rating": 4,
+                  "reviewId": "rvw_0123456789abcdef0123456789abcdef",
+                  "revision": 2,
+                  "updatedAt": "2026-10-21T12:30:00.000Z",
+                  "withdrawn": false,
+                  "created": false,
+                  "ok": true,
+                  "summary": {
+                    "issues": null,
+                    "lastReviewAt": null,
+                    "minReviewers": 5,
+                    "outcomes": null,
+                    "rating": null,
+                    "reviewers": 1,
+                    "reviews": 1,
+                    "shown": false
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The review was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectReviewSubmitted"
+                },
+                "example": {
+                  "callId": "call_0123456789abcdef0123456789abcdef",
+                  "comment": "Results were relevant but two links were dead.",
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "endpoint": "exa.search.auto",
+                  "issues": ["stale"],
+                  "object": "review",
+                  "outcome": "partial",
+                  "rating": 4,
+                  "reviewId": "rvw_0123456789abcdef0123456789abcdef",
+                  "revision": 1,
+                  "updatedAt": "2026-10-21T12:00:00.000Z",
+                  "withdrawn": false,
+                  "created": true,
+                  "ok": true,
+                  "summary": {
+                    "issues": null,
+                    "lastReviewAt": null,
+                    "minReviewers": 5,
+                    "outcomes": null,
+                    "rating": null,
+                    "reviewers": 1,
+                    "reviews": 1,
+                    "shown": false
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "409": {
+            "$ref": "#/components/responses/ConnectError409"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConnectError429"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listReviews",
+        "tags": ["Reviews"],
+        "summary": "List the tenant's own reviews",
+        "description": "Lists the reviews this tenant wrote of its own calls, newest first, optionally only those of one catalog `endpoint`. Answers 404 when the deployment keeps no reviews.",
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "query",
+            "required": false,
+            "description": "Only reviews of this catalog endpoint.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reviews.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectReviewList"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "callId": "call_0123456789abcdef0123456789abcdef",
+                      "comment": "Results were relevant but two links were dead.",
+                      "createdAt": "2026-10-21T12:00:00.000Z",
+                      "endpoint": "exa.search.auto",
+                      "issues": ["stale"],
+                      "object": "review",
+                      "outcome": "partial",
+                      "rating": 4,
+                      "reviewId": "rvw_0123456789abcdef0123456789abcdef",
+                      "revision": 1,
+                      "updatedAt": "2026-10-21T12:00:00.000Z",
+                      "withdrawn": false
+                    }
+                  ],
+                  "object": "list",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/reviews/{callId}": {
+      "delete": {
+        "operationId": "withdrawReview",
+        "tags": ["Reviews"],
+        "summary": "Withdraw the tenant's review of a call",
+        "description": "Withdraws the tenant's review of the call named by `callId`. The review stays on record as withdrawn and no longer counts toward the endpoint's review summary. Answers 404 when the call has no review.",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "description": "The `ryuCallId` of one of the tenant's own recent calls.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The withdrawn review.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectReviewWithdrawn"
+                },
+                "example": {
+                  "callId": "call_0123456789abcdef0123456789abcdef",
+                  "comment": "Results were relevant but two links were dead.",
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "endpoint": "exa.search.auto",
+                  "issues": ["stale"],
+                  "object": "review",
+                  "outcome": "partial",
+                  "rating": 4,
+                  "reviewId": "rvw_0123456789abcdef0123456789abcdef",
+                  "revision": 1,
+                  "updatedAt": "2026-10-21T12:30:00.000Z",
+                  "withdrawn": true,
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/reviews/summary/{endpoint}": {
+      "get": {
+        "operationId": "getReviewSummary",
+        "tags": ["Reviews"],
+        "summary": "Read the review summary of a catalog endpoint",
+        "description": "Ratings are shown only once enough distinct organizations reviewed (`minReviewers`); before that only counts are.",
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "path",
+            "required": true,
+            "description": "The catalog endpoint (evidence key) the review summary is for.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectReviewSummaryAnswer"
+                },
+                "example": {
+                  "endpoint": "exa.search.auto",
+                  "object": "review_summary",
+                  "ok": true,
+                  "summary": {
+                    "issues": [
+                      {
+                        "issue": "stale",
+                        "share": 0.4
+                      },
+                      {
+                        "issue": "slow",
+                        "share": 0.2
+                      }
+                    ],
+                    "lastReviewAt": "2026-10-20T16:45:00.000Z",
+                    "minReviewers": 5,
+                    "outcomes": {
+                      "not_useful": 0.1,
+                      "partial": 0.3,
+                      "useful": 0.6
+                    },
+                    "rating": 4.2,
+                    "reviewers": 10,
+                    "reviews": 14,
+                    "shown": true
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/resources": {
+      "get": {
+        "operationId": "listProviderResources",
+        "tags": ["Resources"],
+        "summary": "List the vendor objects the tenant created on Ryu's accounts",
+        "description": "Objects such as a vendor project or index that a call on a Ryu operator account created for this tenant. Answers 404 when the deployment does not record them.",
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "query",
+            "required": false,
+            "description": "Only this vendor's objects.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "Only objects in this state.",
+            "schema": {
+              "type": "string",
+              "enum": ["active", "deleted"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resources.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectProviderResourceList"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "createdAt": "2026-10-21T12:00:00.000Z",
+                      "deletedAt": null,
+                      "id": "rsc_0123456789abcdef01234567",
+                      "kind": "project",
+                      "lastUsedAt": "2026-10-21T12:10:00.000Z",
+                      "object": "provider_resource",
+                      "operatorAccount": "operator-a",
+                      "state": "active",
+                      "vendor": "example-vendor",
+                      "vendorResourceId": "proj_8f3a2c"
+                    }
+                  ],
+                  "object": "list",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/resources/{resourceId}": {
+      "get": {
+        "operationId": "getProviderResource",
+        "tags": ["Resources"],
+        "summary": "Read one recorded vendor object",
+        "description": "Reads one vendor object Connect created on Ryu's operator account for this tenant: its kind, state and the operator account that holds it. Answers 404 for a resource the tenant does not own.",
+        "parameters": [
+          {
+            "name": "resourceId",
+            "in": "path",
+            "required": true,
+            "description": "The provider resource's id (`rsc_` and 24 hex characters).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectProviderResourceAnswer"
+                },
+                "example": {
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "deletedAt": null,
+                  "id": "rsc_0123456789abcdef01234567",
+                  "kind": "project",
+                  "lastUsedAt": "2026-10-21T12:10:00.000Z",
+                  "object": "provider_resource",
+                  "operatorAccount": "operator-a",
+                  "state": "active",
+                  "vendor": "example-vendor",
+                  "vendorResourceId": "proj_8f3a2c",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/media": {
+      "post": {
+        "operationId": "uploadMedia",
+        "tags": ["Media"],
+        "summary": "Upload a reference file behind an expiring public URL",
+        "description": "The body is the raw file and `Content-Type` names its type; Connect checks the bytes against it. The answer carries the download URL once. Quotas on file size, live files per tenant and total storage apply. Answers 404 when the deployment hosts no reference media.",
+        "parameters": [
+          {
+            "name": "x-ryu-media-ttl",
+            "in": "header",
+            "required": false,
+            "description": "How long the file stays up, in whole seconds from 60 up to the deployment's maximum.",
+            "schema": {
+              "type": "integer",
+              "minimum": 60
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The file's bytes.",
+          "content": {
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/gif": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/webp": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "audio/mpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "audio/wav": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "audio/ogg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "audio/flac": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "video/mp4": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/pdf": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The stored file.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectMediaUploaded"
+                },
+                "example": {
+                  "bytes": 16,
+                  "contentType": "image/png",
+                  "createdAt": "2026-10-21T12:00:00.000Z",
+                  "expiresAt": "2026-10-21T13:00:00.000Z",
+                  "id": "med_0123456789abcdef01234567",
+                  "object": "reference_media",
+                  "sha256": "ae2bae5ce7c520411ac137cf9772bc07eef7251e3fe7377fc68db059abd05aa7",
+                  "ok": true,
+                  "url": "https://connect.example.com/v1/media/files/mda_3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConnectError400"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "408": {
+            "$ref": "#/components/responses/ConnectError408"
+          },
+          "413": {
+            "$ref": "#/components/responses/ConnectError413"
+          },
+          "415": {
+            "$ref": "#/components/responses/ConnectError415"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConnectError429"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listMedia",
+        "tags": ["Media"],
+        "summary": "List the tenant's live reference media",
+        "description": "Lists the tenant's live reference files with their type, size and expiry. The public download URL is returned only by the upload. Answers 404 when the deployment hosts no reference media.",
+        "responses": {
+          "200": {
+            "description": "Files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectMediaList"
+                },
+                "example": {
+                  "data": [
+                    {
+                      "bytes": 16,
+                      "contentType": "image/png",
+                      "createdAt": "2026-10-21T12:00:00.000Z",
+                      "expiresAt": "2026-10-21T13:00:00.000Z",
+                      "id": "med_0123456789abcdef01234567",
+                      "object": "reference_media",
+                      "sha256": "ae2bae5ce7c520411ac137cf9772bc07eef7251e3fe7377fc68db059abd05aa7"
+                    }
+                  ],
+                  "object": "list",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    },
+    "/v1/media/files/{token}": {
+      "get": {
+        "operationId": "downloadMedia",
+        "tags": ["Media"],
+        "summary": "Download a reference file",
+        "description": "Public: no bearer. The unguessable, expiring token in the URL the upload returned is the capability. Serves the file as an attachment with its stored type, under sandbox headers, and supports one `Range` per request. `HEAD` answers the headers only.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "description": "The unguessable download token in the URL the upload returned; the file is public until it expires.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/ogg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/flac": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range of the file."
+          },
+          "404": {
+            "description": "`media_not_found`: no reference media at this URL; it may have expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectError"
+                },
+                "example": {
+                  "code": "media_not_found",
+                  "error": "No reference media at this URL; it may have expired",
+                  "ok": false
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The requested range cannot be satisfied. The answer carries `content-range: bytes */<size>`; Connect sends no body with this status today, so the error object below is the generic `ConnectError` form every error here is documented with, not something to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectError"
+                },
+                "example": {
+                  "code": "client_error",
+                  "error": "Client Error",
+                  "ok": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/{mediaId}": {
+      "delete": {
+        "operationId": "deleteMedia",
+        "tags": ["Media"],
+        "summary": "Delete a reference file",
+        "description": "Deletes one reference file before it expires, so its public download URL stops working. Answers 404 for a file the tenant does not own.",
+        "parameters": [
+          {
+            "name": "mediaId",
+            "in": "path",
+            "required": true,
+            "description": "The reference file's id (`med_` and 24 hex characters).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectMediaDeleted"
+                },
+                "example": {
+                  "deleted": true,
+                  "id": "med_0123456789abcdef01234567",
+                  "ok": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConnectError401"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectError404"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConnectError502"
+          },
+          "503": {
+            "$ref": "#/components/responses/ConnectError503"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "RuntimeBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "One tenant's runtime key, sent as Authorization: Bearer. Every operation in this document uses it."
+      },
+      "ManagementBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A tenant's management key for account linking and trigger administration. Those routes are not in this document yet."
+      }
+    },
+    "parameters": {
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "The `next_cursor` of the previous page.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Page size. Defaults to 100; values above the route's cap are clamped to it.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Makes a retried write safe (https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/). A Structured Field String (`\"<key>\"`) of 1 to 255 printable ASCII characters; a bare token is also accepted. Keys are scoped to the presented credential (the `Authorization` header, or `x-api-key` when no `Authorization` is sent), method and path, and expire after 24 hours. A request is the same when its query string, `Content-Type` and body match. A repeat of the same request replays the stored response with `Idempotent-Replayed: true`; a different request answers 422; a repeat while the first request is in flight answers 409. Only 2xx, 400, 404, 409 and 422 outcomes are stored.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "example": "\"2f1c1f0e-6a4b-4a8e-9f5d-1d2b3c4d5e6f\""
+      },
+      "IdempotencyKeyRequired": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Makes a retried write safe (https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/). A Structured Field String (`\"<key>\"`) of 1 to 255 printable ASCII characters; a bare token is also accepted. Keys are scoped to the presented credential (the `Authorization` header, or `x-api-key` when no `Authorization` is sent), method and path, and expire after 24 hours. A request is the same when its query string, `Content-Type` and body match. A repeat of the same request replays the stored response with `Idempotent-Replayed: true`; a different request answers 422; a repeat while the first request is in flight answers 409. Only 2xx, 400, 404, 409 and 422 outcomes are stored.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "example": "\"2f1c1f0e-6a4b-4a8e-9f5d-1d2b3c4d5e6f\""
+      }
+    },
+    "headers": {
+      "RateLimit": {
+        "description": "Remaining quota for the policy in effect, per draft-ietf-httpapi-ratelimit-headers-11 (a Structured Field List, e.g. `\"default\";r=0;t=30`). Sent by the limiters that expose a remaining count; the per-key API limiter does not yet, so a 429 here may carry no rate-limit fields.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "RateLimitPolicy": {
+        "description": "The quota policy, per draft-ietf-httpapi-ratelimit-headers-11 (a Structured Field List, e.g. `\"default\";q=100;w=60`).",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying (RFC 9110 §10.2.3), when the server knows it.",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "Deprecation": {
+        "description": "Present only on a deprecated route: when it was or will be deprecated, as an RFC 9745 Structured Field Date (`@<unix seconds>`). No route is deprecated today.",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "example": "@1798761600"
+        }
+      },
+      "Sunset": {
+        "description": "Present only on a deprecated route with a removal date: the HTTP-date after which it may stop responding (RFC 8594).",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "example": "Fri, 01 Jan 2027 00:00:00 GMT"
+        }
+      },
+      "Link": {
+        "description": "On a deprecated route, `rel=\"deprecation\"` links the versioning and deprecation policy (RFC 9745 §3) and `rel=\"successor-version\"` the replacement.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IdempotentReplayed": {
+        "description": "`true` when the response is a replay stored for the request's `Idempotency-Key`.",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": ["true"]
+        }
+      },
+      "WWWAuthenticate": {
+        "description": "Bearer challenge (RFC 6750) naming the protected resource metadata (RFC 9728 `resource_metadata`).",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "ConnectError400": {
+        "description": "The request is malformed or fails validation.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "invalid_request",
+              "error": "Invalid request",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#invalid_request",
+              "title": "Bad Request",
+              "status": 400,
+              "detail": "Invalid request",
+              "code": "invalid_request",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#invalid_request",
+              "error": "Invalid request",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError401": {
+        "description": "`unauthorized`: no bearer, or not a runtime key of this deployment. `WWW-Authenticate: Bearer realm=\"ryu-connect\"`, with `error=\"invalid_token\"` when a bearer was sent.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "unauthorized",
+              "error": "Connect API token is invalid",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#unauthorized",
+              "title": "Unauthorized",
+              "status": 401,
+              "detail": "Connect API token is invalid",
+              "code": "unauthorized",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#unauthorized",
+              "error": "Connect API token is invalid",
+              "ok": false
+            }
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WWWAuthenticate"
+          }
+        }
+      },
+      "ConnectError402": {
+        "description": "`insufficient_credits` (Ryu-hosted, credits exhausted) or `spend_limit_reached` (a binding's premium cap, with `retryAfterSeconds`). Not retryable.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "insufficient_credits",
+              "error": "This organization has no credits left for Connect tool execution. Add credits to run tools again.",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#insufficient_credits",
+              "title": "Payment Required",
+              "status": 402,
+              "detail": "This organization has no credits left for Connect tool execution. Add credits to run tools again.",
+              "code": "insufficient_credits",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#insufficient_credits",
+              "error": "This organization has no credits left for Connect tool execution. Add credits to run tools again.",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError403": {
+        "description": "`tool_denied`: the tool or account is not granted to this tenant.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "tool_denied",
+              "error": "The tool or account is not granted to this tenant",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#tool_denied",
+              "title": "Forbidden",
+              "status": 403,
+              "detail": "The tool or account is not granted to this tenant",
+              "code": "tool_denied",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#tool_denied",
+              "error": "The tool or account is not granted to this tenant",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError404": {
+        "description": "The resource does not exist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "not_found",
+              "error": "Connect route not found",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#not_found",
+              "title": "Not Found",
+              "status": 404,
+              "detail": "Connect route not found",
+              "code": "not_found",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#not_found",
+              "error": "Connect route not found",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError406": {
+        "description": "A client error.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "not_acceptable",
+              "error": "Not Acceptable",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#not_acceptable",
+              "title": "Not Acceptable",
+              "status": 406,
+              "detail": "Not Acceptable",
+              "code": "not_acceptable",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#not_acceptable",
+              "error": "Not Acceptable",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError408": {
+        "description": "The server timed out waiting for the request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "media_upload_timeout",
+              "error": "An upload must arrive within 60 seconds",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#media_upload_timeout",
+              "title": "Client Error",
+              "status": 408,
+              "detail": "An upload must arrive within 60 seconds",
+              "code": "media_upload_timeout",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#media_upload_timeout",
+              "error": "An upload must arrive within 60 seconds",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError409": {
+        "description": "The write conflicts with current state, or a request with the same Idempotency-Key is still in progress.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "idempotency_conflict",
+              "error": "Idempotency-Key was used with a different request body.",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#idempotency_conflict",
+              "title": "Conflict",
+              "status": 409,
+              "detail": "Idempotency-Key was used with a different request body.",
+              "code": "idempotency_conflict",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#idempotency_conflict",
+              "error": "Idempotency-Key was used with a different request body.",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError413": {
+        "description": "The request body is too large.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "body_too_large",
+              "error": "Request body is too large",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#body_too_large",
+              "title": "Content Too Large",
+              "status": 413,
+              "detail": "Request body is too large",
+              "code": "body_too_large",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#body_too_large",
+              "error": "Request body is too large",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError415": {
+        "description": "The request body's media type is not supported.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "unsupported_media_type",
+              "error": "Reference media must be one of image/png, image/jpeg, image/gif, image/webp, audio/mpeg, audio/wav, audio/ogg, audio/flac, video/mp4, application/pdf",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#unsupported_media_type",
+              "title": "Unsupported Media Type",
+              "status": 415,
+              "detail": "Reference media must be one of image/png, image/jpeg, image/gif, image/webp, audio/mpeg, audio/wav, audio/ogg, audio/flac, video/mp4, application/pdf",
+              "code": "unsupported_media_type",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#unsupported_media_type",
+              "error": "Reference media must be one of image/png, image/jpeg, image/gif, image/webp, audio/mpeg, audio/wav, audio/ogg, audio/flac, video/mp4, application/pdf",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError429": {
+        "description": "`rate_limited`: a binding's per-minute call limit; `retryAfterSeconds` and Retry-After say when a call is admitted. `RateLimit-Policy` is `\"composio-calls\";q=<maxCallsPerMinute>;w=60` and `RateLimit` reports `r=0`.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "rate_limited",
+              "error": "Composio call rate limit reached; retry in 60 seconds",
+              "ok": false,
+              "retryAfterSeconds": 60
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#rate_limited",
+              "title": "Too Many Requests",
+              "status": 429,
+              "detail": "Composio call rate limit reached; retry in 60 seconds",
+              "code": "rate_limited",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#rate_limited",
+              "error": "Composio call rate limit reached; retry in 60 seconds",
+              "ok": false,
+              "retryAfterSeconds": 60
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimitPolicy"
+          }
+        }
+      },
+      "ConnectError502": {
+        "description": "`request_failed`: Connect could not complete the request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "request_failed",
+              "error": "Connect request failed",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#request_failed",
+              "title": "Bad Gateway",
+              "status": 502,
+              "detail": "Connect request failed",
+              "code": "request_failed",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#request_failed",
+              "error": "Connect request failed",
+              "ok": false
+            }
+          }
+        }
+      },
+      "ConnectError503": {
+        "description": "A lane is not configured or unavailable (`skills_unavailable`, `tool_unavailable`, `native_composio_unavailable`, `upstream_unconfigured`, `metering_unavailable`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "code": "tool_unavailable",
+              "error": "The tool is unavailable",
+              "ok": false
+            }
+          },
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConnectError"
+            },
+            "example": {
+              "type": "https://docs.ryuhq.com/docs/standalone/connect-api#tool_unavailable",
+              "title": "Service Unavailable",
+              "status": 503,
+              "detail": "The tool is unavailable",
+              "code": "tool_unavailable",
+              "docs": "https://docs.ryuhq.com/docs/standalone/connect-api#tool_unavailable",
+              "error": "The tool is unavailable",
+              "ok": false
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem details (https://www.rfc-editor.org/rfc/rfc9457). Every member is optional in the RFC; this API's `application/problem+json` bodies always carry `type`, `title`, `status`, `detail`, `code`, `docs` and `error`, and legacy `application/json` error bodies carry `error` (and sometimes `code`).",
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri-reference",
+            "description": "The problem type: this API's error documentation for `code`. Absent means `about:blank`.",
+            "default": "about:blank"
+          },
+          "title": {
+            "type": "string",
+            "description": "Short summary of the problem type."
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599,
+            "description": "The HTTP status code."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Explanation specific to this occurrence."
+          },
+          "instance": {
+            "type": "string",
+            "format": "uri-reference",
+            "description": "The request path this occurrence relates to."
+          },
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable error code (e.g. `not_found`, `rate_limited`, `idempotency_key_reused`).",
+            "examples": ["not_found"]
+          },
+          "hint": {
+            "type": "string",
+            "description": "What the caller can do next."
+          },
+          "docs": {
+            "type": "string",
+            "format": "uri",
+            "description": "Documentation for `code` (https://docs.ryuhq.com/docs/reference/api/errors#<code>)."
+          },
+          "error": {
+            "type": "string",
+            "description": "The same text as `detail`, kept for clients that read `{ error }`."
+          }
+        },
+        "additionalProperties": true,
+        "example": {
+          "type": "https://docs.ryuhq.com/docs/reference/api/errors#not_found",
+          "title": "Not Found",
+          "status": 404,
+          "detail": "project not found",
+          "instance": "/api/v1/organizations/org_123/projects/prj_456",
+          "code": "not_found",
+          "hint": "Check the path. The API catalog is published at https://ryuhq.com/.well-known/api-catalog.",
+          "docs": "https://docs.ryuhq.com/docs/reference/api/errors#not_found",
+          "error": "project not found"
+        }
+      },
+      "ConnectBalance": {
+        "type": "object",
+        "properties": {
+          "availableMicroUsd": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the next calls may hold: the headroom less recorded unsettled usage and running calls, never below zero. Null when the billing feed sent no credit position for this tenant (Connect then holds nothing)."
+          },
+          "billed": {
+            "type": "boolean",
+            "description": "Whether Ryu bills this tenant's calls: the billing status feed is on and does not list the tenant as exempt."
+          },
+          "headroomMicroUsd": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The organization's headroom when the feed was generated."
+          },
+          "heldMicroUsd": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Estimates of this tenant's calls still running."
+          },
+          "object": {
+            "type": "string",
+            "const": "balance",
+            "description": "Always `balance`."
+          },
+          "suspended": {
+            "type": "boolean",
+            "description": "True when the feed lists the tenant as out of credit."
+          },
+          "tagBudgets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["block", "alert"],
+                  "description": "`block` refuses a tagged call that would reach the limit; `alert` never refuses one."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The budget's id."
+                },
+                "limitMicroUsd": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "The most tagged spend the window allows, in micro-USD."
+                },
+                "reached": {
+                  "type": "boolean",
+                  "description": "True when `usedMicroUsd` is at or past `limitMicroUsd`."
+                },
+                "resetsAt": {
+                  "type": "string",
+                  "description": "When the current window ends and its spend counts from zero again (ISO 8601)."
+                },
+                "tag": {
+                  "type": "string",
+                  "description": "The spend tag the budget applies to, as a call names it in `x-ryu-tags`."
+                },
+                "usedMicroUsd": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "Tagged spend counted in the window now, running calls' estimates included, in micro-USD."
+                },
+                "window": {
+                  "type": "string",
+                  "enum": ["daily", "monthly"],
+                  "description": "The UTC period the limit covers."
+                }
+              },
+              "required": [
+                "action",
+                "id",
+                "limitMicroUsd",
+                "reached",
+                "resetsAt",
+                "tag",
+                "usedMicroUsd",
+                "window"
+              ]
+            },
+            "description": "The organization's builder tag budgets with the tagged spend Connect counts now; empty when it has none."
+          },
+          "topUpUrl": {
+            "description": "Where to add credit, when the operator configured a link.",
+            "type": ["string", "null"]
+          },
+          "unsettledMicroUsd": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Recorded usage settlement has not debited yet."
+          },
+          "unsettledSince": {
+            "description": "Usage recorded at or after this time is not in the headroom yet.",
+            "type": ["string", "null"]
+          }
+        },
+        "required": [
+          "availableMicroUsd",
+          "billed",
+          "headroomMicroUsd",
+          "heldMicroUsd",
+          "object",
+          "suspended",
+          "tagBudgets",
+          "topUpUrl",
+          "unsettledMicroUsd",
+          "unsettledSince"
+        ]
+      },
+      "ConnectComposioExecuteInput": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "execute",
+            "description": "Always `execute`."
+          },
+          "toolId": {
+            "type": "string",
+            "description": "The Composio action slug, e.g. SLACK_SEND_MESSAGE."
+          },
+          "body": {
+            "type": "object",
+            "description": "Action arguments; Composio validates them for the bound toolkit version."
+          },
+          "expectedAccountId": {
+            "type": "string",
+            "description": "Refuse unless the tenant's bound account is this one."
+          },
+          "agentId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+            "description": "Act for one agent of the tenant instead of the tenant's own account: an ASCII letter or digit followed by up to 127 letters, digits, `_` or `-`. Connect derives the agent's Composio user itself, so the id always names an agent inside the caller's tenant. Refused with `400 subject_unsupported` unless the tenant's binding sets `agentSubjects`, or for a natively served toolkit."
+          }
+        },
+        "required": ["operation", "toolId"],
+        "additionalProperties": false,
+        "description": "Native Composio execution. Account and authentication overrides are rejected."
+      },
+      "ConnectComposioExecuteResult": {
+        "type": "object",
+        "properties": {
+          "billingReceipt": {
+            "description": "Provider transaction id and billing metadata, when returned.",
+            "anyOf": [
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "data": {
+            "description": "The action's output."
+          },
+          "successful": {
+            "type": "boolean",
+            "description": "Whether Composio reports that the action succeeded."
+          }
+        },
+        "required": ["data", "successful"]
+      },
+      "ConnectError": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable code; branch on this."
+              },
+              "error": {
+                "description": "Human-readable message. Always present on errors Connect builds; an upstream body passed through in compatibility mode may omit it.",
+                "type": "string"
+              },
+              "ok": {
+                "description": "Always present on errors Connect builds; an upstream body passed through in compatibility mode may omit it.",
+                "type": "boolean",
+                "const": false
+              },
+              "retryAfterSeconds": {
+                "description": "Seconds until a refused call is admitted (call limits).",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "detail": {
+                "type": "string",
+                "description": "The same text as `error`."
+              },
+              "docs": {
+                "type": "string",
+                "description": "The documentation for `code`; equals `type`."
+              },
+              "instance": {
+                "description": "The request path.",
+                "type": "string"
+              },
+              "status": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "The HTTP status."
+              },
+              "title": {
+                "type": "string",
+                "description": "The HTTP status's reason phrase."
+              },
+              "type": {
+                "type": "string",
+                "description": "The problem type: `https://docs.ryuhq.com/docs/standalone/connect-api#<code>`, the docs row for `code`."
+              }
+            },
+            "required": ["code", "detail", "docs", "status", "title", "type"],
+            "additionalProperties": {}
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable code; branch on this."
+              },
+              "error": {
+                "description": "Human-readable message. Always present on errors Connect builds; an upstream body passed through in compatibility mode may omit it.",
+                "type": "string"
+              },
+              "ok": {
+                "description": "Always present on errors Connect builds; an upstream body passed through in compatibility mode may omit it.",
+                "type": "boolean",
+                "const": false
+              },
+              "retryAfterSeconds": {
+                "description": "Seconds until a refused call is admitted (call limits).",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": ["code"],
+            "additionalProperties": {}
+          }
+        ]
+      },
+      "ConnectExecToolInput": {
+        "type": "object",
+        "properties": {
+          "tool_id": {
+            "type": "string",
+            "description": "The qualified tool id from /v1/tools/search."
+          },
+          "kind": {
+            "type": "string",
+            "const": "tool",
+            "description": "What to execute; native execution supports only `tool`."
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Tool arguments; the tool validates them."
+          }
+        },
+        "required": ["tool_id"],
+        "additionalProperties": {},
+        "description": "Execute one granted tool. Native execution supports `kind: \"tool\"` only."
+      },
+      "ConnectExecToolResult": {
+        "type": "object",
+        "properties": {
+          "billingReceipt": {
+            "description": "The Composio billing receipt, for `composio.*` tools.",
+            "anyOf": [
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "description": "Compatibility mode only: why the Gateway refused or failed the call (firewall denial, exec budget, tool error). Sent with HTTP 200 and `ok: false`, without `result`.",
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "False when the tool reported an error or, in compatibility mode, when the Gateway refused or failed the call."
+          },
+          "result": {
+            "description": "The tool result: natively an MCP result (`content`, `isError`, …). Absent when `error` is set."
+          }
+        },
+        "required": ["ok"]
+      },
+      "ConnectHealth": {
+        "type": "object",
+        "properties": {
+          "apiVersion": {
+            "type": "string",
+            "description": "The Connect API version, such as `v1`."
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "composio": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "Tenant-bound Composio connections and actions."
+              },
+              "mcpForwarding": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "Authenticated forwarding of the MCP protocol to configured upstream servers."
+              },
+              "mcpHosting": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "The Connect-owned MCP server with hosted Skill resources."
+              },
+              "skills": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "The SKILL.md catalog and hosting."
+              },
+              "toolGateway": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "Governed tool search and execution."
+              },
+              "triggerDelivery": {
+                "type": "object",
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "description": "Whether this lane is set up on the deployment. It does not prove that an upstream or provider is reachable."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the lane does, for a person."
+                  },
+                  "ready": {
+                    "description": "Composio and trigger delivery only: false while a required provider key or webhook secret is missing.",
+                    "type": "boolean"
+                  }
+                },
+                "required": ["configured", "description"],
+                "description": "Signed Composio webhook ingress and durable tenant event leases."
+              }
+            },
+            "required": [
+              "composio",
+              "mcpForwarding",
+              "mcpHosting",
+              "skills",
+              "toolGateway",
+              "triggerDelivery"
+            ],
+            "description": "Each feature lane: whether it is `configured`, a `description`, and for Composio and trigger delivery whether it is `ready`."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "service": {
+            "type": "string",
+            "const": "ryu-connect",
+            "description": "Always `ryu-connect`."
+          },
+          "version": {
+            "type": "string",
+            "description": "The running Connect build's version."
+          }
+        },
+        "required": ["apiVersion", "capabilities", "ok", "service", "version"]
+      },
+      "ConnectMcpRequest": {
+        "type": "object",
+        "description": "One JSON-RPC 2.0 message (initialize, resources/*, tools/*).",
+        "properties": {
+          "id": {
+            "type": ["string", "integer"],
+            "description": "The request id the response echoes; omit it for a notification."
+          },
+          "jsonrpc": {
+            "type": "string",
+            "const": "2.0",
+            "description": "Always `2.0`."
+          },
+          "method": {
+            "type": "string",
+            "description": "The MCP method, such as `tools/list` or `tools/call`."
+          },
+          "params": {
+            "type": "object",
+            "description": "The method's parameters."
+          }
+        },
+        "required": ["jsonrpc", "method"]
+      },
+      "ConnectMediaDeleted": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "id": {
+            "type": "string",
+            "description": "The id of the deleted file."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          }
+        },
+        "required": ["deleted", "id", "ok"]
+      },
+      "ConnectMediaFile": {
+        "type": "object",
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "The file's size in bytes."
+          },
+          "contentType": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "audio/mpeg",
+              "audio/wav",
+              "audio/ogg",
+              "audio/flac",
+              "video/mp4",
+              "application/pdf"
+            ],
+            "description": "The file's type, checked against its bytes at upload."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the file was uploaded (ISO 8601)."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "When the file and its public URL stop working (ISO 8601)."
+          },
+          "id": {
+            "type": "string",
+            "description": "`med_` and 24 hex characters."
+          },
+          "object": {
+            "type": "string",
+            "const": "reference_media",
+            "description": "Always `reference_media`."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The SHA-256 of the file's bytes, in hex."
+          }
+        },
+        "required": [
+          "bytes",
+          "contentType",
+          "createdAt",
+          "expiresAt",
+          "id",
+          "object",
+          "sha256"
+        ]
+      },
+      "ConnectMediaList": {
+        "type": "object",
+        "description": "The tenant's live reference media, without download URLs.",
+        "required": ["data", "object", "ok"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectMediaFile"
+            },
+            "description": "The tenant's live reference files, newest first, at most 1000."
+          },
+          "object": {
+            "const": "list",
+            "description": "Always `list`."
+          },
+          "ok": {
+            "const": true,
+            "description": "Always `true`."
+          }
+        }
+      },
+      "ConnectMediaUploaded": {
+        "type": "object",
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "The file's size in bytes."
+          },
+          "contentType": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "audio/mpeg",
+              "audio/wav",
+              "audio/ogg",
+              "audio/flac",
+              "video/mp4",
+              "application/pdf"
+            ],
+            "description": "The file's type, checked against its bytes at upload."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the file was uploaded (ISO 8601)."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "When the file and its public URL stop working (ISO 8601)."
+          },
+          "id": {
+            "type": "string",
+            "description": "`med_` and 24 hex characters."
+          },
+          "object": {
+            "type": "string",
+            "const": "reference_media",
+            "description": "Always `reference_media`."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The SHA-256 of the file's bytes, in hex."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The public download URL, returned only by the upload. Anyone holding it can fetch the file until it expires."
+          }
+        },
+        "required": [
+          "bytes",
+          "contentType",
+          "createdAt",
+          "expiresAt",
+          "id",
+          "object",
+          "sha256",
+          "ok",
+          "url"
+        ]
+      },
+      "ConnectProviderResource": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When Connect recorded the object as the tenant's (ISO 8601)."
+          },
+          "deletedAt": {
+            "description": "When a delete call removed it; null while it is active.",
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "string",
+            "description": "`rsc_` and 24 hex characters."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of vendor object, as Connect's vendor table names it."
+          },
+          "lastUsedAt": {
+            "description": "When a call last named it; null if none has.",
+            "type": ["string", "null"]
+          },
+          "object": {
+            "type": "string",
+            "const": "provider_resource",
+            "description": "Always `provider_resource`."
+          },
+          "operatorAccount": {
+            "type": "string",
+            "description": "The label of the Ryu operator account that holds it."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["active", "deleted"],
+            "description": "`active`, or `deleted` once a delete call succeeded."
+          },
+          "vendor": {
+            "type": "string",
+            "description": "The vendor the object lives at."
+          },
+          "vendorResourceId": {
+            "type": "string",
+            "description": "The vendor's own id for the object."
+          }
+        },
+        "required": [
+          "createdAt",
+          "deletedAt",
+          "id",
+          "kind",
+          "lastUsedAt",
+          "object",
+          "operatorAccount",
+          "state",
+          "vendor",
+          "vendorResourceId"
+        ]
+      },
+      "ConnectProviderResourceAnswer": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When Connect recorded the object as the tenant's (ISO 8601)."
+          },
+          "deletedAt": {
+            "description": "When a delete call removed it; null while it is active.",
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "string",
+            "description": "`rsc_` and 24 hex characters."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of vendor object, as Connect's vendor table names it."
+          },
+          "lastUsedAt": {
+            "description": "When a call last named it; null if none has.",
+            "type": ["string", "null"]
+          },
+          "object": {
+            "type": "string",
+            "const": "provider_resource",
+            "description": "Always `provider_resource`."
+          },
+          "operatorAccount": {
+            "type": "string",
+            "description": "The label of the Ryu operator account that holds it."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["active", "deleted"],
+            "description": "`active`, or `deleted` once a delete call succeeded."
+          },
+          "vendor": {
+            "type": "string",
+            "description": "The vendor the object lives at."
+          },
+          "vendorResourceId": {
+            "type": "string",
+            "description": "The vendor's own id for the object."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          }
+        },
+        "required": [
+          "createdAt",
+          "deletedAt",
+          "id",
+          "kind",
+          "lastUsedAt",
+          "object",
+          "operatorAccount",
+          "state",
+          "vendor",
+          "vendorResourceId",
+          "ok"
+        ]
+      },
+      "ConnectProviderResourceList": {
+        "type": "object",
+        "description": "The tenant's recorded vendor objects.",
+        "required": ["data", "object", "ok"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectProviderResource"
+            },
+            "description": "The tenant's recorded vendor objects, newest first, at most 1000."
+          },
+          "object": {
+            "const": "list",
+            "description": "Always `list`."
+          },
+          "ok": {
+            "const": true,
+            "description": "Always `true`."
+          }
+        }
+      },
+      "ConnectReview": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "description": "The `ryuCallId` of the reviewed call."
+          },
+          "comment": {
+            "description": "The comment, shown only to its author; null when none.",
+            "type": ["string", "null"]
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the call was first reviewed (ISO 8601)."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The catalog endpoint (evidence key) the call ran on."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bad_format",
+                "error",
+                "incomplete",
+                "overpriced",
+                "slow",
+                "stale",
+                "wrong_results"
+              ]
+            },
+            "description": "The distinct problems flagged, in alphabetical order."
+          },
+          "object": {
+            "type": "string",
+            "const": "review",
+            "description": "Always `review`."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["useful", "partial", "not_useful"],
+            "description": "What the call did for the reviewer."
+          },
+          "rating": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "The call's star rating, a whole number from 1 to 5."
+          },
+          "reviewId": {
+            "type": "string",
+            "description": "`rvw_` and 32 hex characters."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "1 on the first write; each resubmission adds one."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the review was last written (ISO 8601)."
+          },
+          "withdrawn": {
+            "type": "boolean",
+            "description": "True once the review was withdrawn: it stays on record but no longer counts toward the endpoint's summary."
+          }
+        },
+        "required": [
+          "callId",
+          "comment",
+          "createdAt",
+          "endpoint",
+          "issues",
+          "object",
+          "outcome",
+          "rating",
+          "reviewId",
+          "revision",
+          "updatedAt",
+          "withdrawn"
+        ]
+      },
+      "ConnectReviewInput": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "pattern": "^call_[0-9a-f]{32}$",
+            "description": "The `ryuCallId` of one of the tenant's own recent calls through this Connect."
+          },
+          "comment": {
+            "description": "Shown only to its author.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "issues": {
+            "description": "Up to four distinct problems.",
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bad_format",
+                "error",
+                "incomplete",
+                "overpriced",
+                "slow",
+                "stale",
+                "wrong_results"
+              ]
+            }
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["useful", "partial", "not_useful"],
+            "description": "What the call did for the reviewer."
+          },
+          "rating": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "The call's star rating, a whole number from 1 to 5."
+          }
+        },
+        "required": ["callId", "outcome", "rating"]
+      },
+      "ConnectReviewList": {
+        "type": "object",
+        "description": "The tenant's own reviews, comments included.",
+        "required": ["data", "object", "ok"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectReview"
+            },
+            "description": "The tenant's own reviews, most recently written first, at most 500."
+          },
+          "object": {
+            "const": "list",
+            "description": "Always `list`."
+          },
+          "ok": {
+            "const": true,
+            "description": "Always `true`."
+          }
+        }
+      },
+      "ConnectReviewSubmitted": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "description": "The `ryuCallId` of the reviewed call."
+          },
+          "comment": {
+            "description": "The comment, shown only to its author; null when none.",
+            "type": ["string", "null"]
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the call was first reviewed (ISO 8601)."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The catalog endpoint (evidence key) the call ran on."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bad_format",
+                "error",
+                "incomplete",
+                "overpriced",
+                "slow",
+                "stale",
+                "wrong_results"
+              ]
+            },
+            "description": "The distinct problems flagged, in alphabetical order."
+          },
+          "object": {
+            "type": "string",
+            "const": "review",
+            "description": "Always `review`."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["useful", "partial", "not_useful"],
+            "description": "What the call did for the reviewer."
+          },
+          "rating": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "The call's star rating, a whole number from 1 to 5."
+          },
+          "reviewId": {
+            "type": "string",
+            "description": "`rvw_` and 32 hex characters."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "1 on the first write; each resubmission adds one."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the review was last written (ISO 8601)."
+          },
+          "withdrawn": {
+            "type": "boolean",
+            "description": "True once the review was withdrawn: it stays on record but no longer counts toward the endpoint's summary."
+          },
+          "created": {
+            "type": "boolean",
+            "description": "True for a first review of the call, false for a resubmission."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "issues": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "issue": {
+                          "type": "string",
+                          "enum": [
+                            "bad_format",
+                            "error",
+                            "incomplete",
+                            "overpriced",
+                            "slow",
+                            "stale",
+                            "wrong_results"
+                          ],
+                          "description": "The problem reviewers flagged."
+                        },
+                        "share": {
+                          "type": "number",
+                          "description": "The share of reviewing organizations that flagged it, from 0 to 1, to two decimals."
+                        }
+                      },
+                      "required": ["issue", "share"]
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The most flagged issues (up to three), once shown; else null."
+              },
+              "lastReviewAt": {
+                "description": "When the latest counted review was written; null until the summary is shown.",
+                "type": ["string", "null"]
+              },
+              "minReviewers": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Below this many distinct reviewing organizations only counts are shown."
+              },
+              "outcomes": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "not_useful": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `not_useful`, from 0 to 1."
+                      },
+                      "partial": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `partial`, from 0 to 1."
+                      },
+                      "useful": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `useful`, from 0 to 1."
+                      }
+                    },
+                    "required": ["not_useful", "partial", "useful"]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How reviews split across the three outcomes, each organization weighted equally, once shown; else null."
+              },
+              "rating": {
+                "description": "The mean rating from 1 to 5, to one decimal, each organization weighted equally, once shown; else null.",
+                "type": ["number", "null"]
+              },
+              "reviewers": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Distinct reviewing organizations counted (reviews of the last 90 days, withdrawn ones excluded)."
+              },
+              "reviews": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Reviews counted (of the last 90 days, withdrawn ones excluded)."
+              },
+              "shown": {
+                "type": "boolean",
+                "description": "True once `minReviewers` organizations reviewed; until then `rating`, `outcomes` and `issues` are null."
+              }
+            },
+            "required": [
+              "issues",
+              "lastReviewAt",
+              "minReviewers",
+              "outcomes",
+              "rating",
+              "reviewers",
+              "reviews",
+              "shown"
+            ],
+            "description": "The endpoint's review summary."
+          }
+        },
+        "required": [
+          "callId",
+          "comment",
+          "createdAt",
+          "endpoint",
+          "issues",
+          "object",
+          "outcome",
+          "rating",
+          "reviewId",
+          "revision",
+          "updatedAt",
+          "withdrawn",
+          "created",
+          "ok",
+          "summary"
+        ]
+      },
+      "ConnectReviewSummary": {
+        "type": "object",
+        "properties": {
+          "issues": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "issue": {
+                      "type": "string",
+                      "enum": [
+                        "bad_format",
+                        "error",
+                        "incomplete",
+                        "overpriced",
+                        "slow",
+                        "stale",
+                        "wrong_results"
+                      ],
+                      "description": "The problem reviewers flagged."
+                    },
+                    "share": {
+                      "type": "number",
+                      "description": "The share of reviewing organizations that flagged it, from 0 to 1, to two decimals."
+                    }
+                  },
+                  "required": ["issue", "share"]
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The most flagged issues (up to three), once shown; else null."
+          },
+          "lastReviewAt": {
+            "description": "When the latest counted review was written; null until the summary is shown.",
+            "type": ["string", "null"]
+          },
+          "minReviewers": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Below this many distinct reviewing organizations only counts are shown."
+          },
+          "outcomes": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "not_useful": {
+                    "type": "number",
+                    "description": "The share of reviewing organizations whose calls were `not_useful`, from 0 to 1."
+                  },
+                  "partial": {
+                    "type": "number",
+                    "description": "The share of reviewing organizations whose calls were `partial`, from 0 to 1."
+                  },
+                  "useful": {
+                    "type": "number",
+                    "description": "The share of reviewing organizations whose calls were `useful`, from 0 to 1."
+                  }
+                },
+                "required": ["not_useful", "partial", "useful"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How reviews split across the three outcomes, each organization weighted equally, once shown; else null."
+          },
+          "rating": {
+            "description": "The mean rating from 1 to 5, to one decimal, each organization weighted equally, once shown; else null.",
+            "type": ["number", "null"]
+          },
+          "reviewers": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Distinct reviewing organizations counted (reviews of the last 90 days, withdrawn ones excluded)."
+          },
+          "reviews": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Reviews counted (of the last 90 days, withdrawn ones excluded)."
+          },
+          "shown": {
+            "type": "boolean",
+            "description": "True once `minReviewers` organizations reviewed; until then `rating`, `outcomes` and `issues` are null."
+          }
+        },
+        "required": [
+          "issues",
+          "lastReviewAt",
+          "minReviewers",
+          "outcomes",
+          "rating",
+          "reviewers",
+          "reviews",
+          "shown"
+        ]
+      },
+      "ConnectReviewSummaryAnswer": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "The catalog endpoint the summary is for, from the path."
+          },
+          "object": {
+            "type": "string",
+            "const": "review_summary",
+            "description": "Always `review_summary`."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "issues": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "issue": {
+                          "type": "string",
+                          "enum": [
+                            "bad_format",
+                            "error",
+                            "incomplete",
+                            "overpriced",
+                            "slow",
+                            "stale",
+                            "wrong_results"
+                          ],
+                          "description": "The problem reviewers flagged."
+                        },
+                        "share": {
+                          "type": "number",
+                          "description": "The share of reviewing organizations that flagged it, from 0 to 1, to two decimals."
+                        }
+                      },
+                      "required": ["issue", "share"]
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The most flagged issues (up to three), once shown; else null."
+              },
+              "lastReviewAt": {
+                "description": "When the latest counted review was written; null until the summary is shown.",
+                "type": ["string", "null"]
+              },
+              "minReviewers": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Below this many distinct reviewing organizations only counts are shown."
+              },
+              "outcomes": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "not_useful": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `not_useful`, from 0 to 1."
+                      },
+                      "partial": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `partial`, from 0 to 1."
+                      },
+                      "useful": {
+                        "type": "number",
+                        "description": "The share of reviewing organizations whose calls were `useful`, from 0 to 1."
+                      }
+                    },
+                    "required": ["not_useful", "partial", "useful"]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How reviews split across the three outcomes, each organization weighted equally, once shown; else null."
+              },
+              "rating": {
+                "description": "The mean rating from 1 to 5, to one decimal, each organization weighted equally, once shown; else null.",
+                "type": ["number", "null"]
+              },
+              "reviewers": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Distinct reviewing organizations counted (reviews of the last 90 days, withdrawn ones excluded)."
+              },
+              "reviews": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Reviews counted (of the last 90 days, withdrawn ones excluded)."
+              },
+              "shown": {
+                "type": "boolean",
+                "description": "True once `minReviewers` organizations reviewed; until then `rating`, `outcomes` and `issues` are null."
+              }
+            },
+            "required": [
+              "issues",
+              "lastReviewAt",
+              "minReviewers",
+              "outcomes",
+              "rating",
+              "reviewers",
+              "reviews",
+              "shown"
+            ],
+            "description": "The endpoint's review summary."
+          }
+        },
+        "required": ["endpoint", "object", "ok", "summary"]
+      },
+      "ConnectReviewWithdrawn": {
+        "type": "object",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "description": "The `ryuCallId` of the reviewed call."
+          },
+          "comment": {
+            "description": "The comment, shown only to its author; null when none.",
+            "type": ["string", "null"]
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the call was first reviewed (ISO 8601)."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The catalog endpoint (evidence key) the call ran on."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bad_format",
+                "error",
+                "incomplete",
+                "overpriced",
+                "slow",
+                "stale",
+                "wrong_results"
+              ]
+            },
+            "description": "The distinct problems flagged, in alphabetical order."
+          },
+          "object": {
+            "type": "string",
+            "const": "review",
+            "description": "Always `review`."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["useful", "partial", "not_useful"],
+            "description": "What the call did for the reviewer."
+          },
+          "rating": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "The call's star rating, a whole number from 1 to 5."
+          },
+          "reviewId": {
+            "type": "string",
+            "description": "`rvw_` and 32 hex characters."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "1 on the first write; each resubmission adds one."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the review was last written (ISO 8601)."
+          },
+          "withdrawn": {
+            "type": "boolean",
+            "description": "True once the review was withdrawn: it stays on record but no longer counts toward the endpoint's summary."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          }
+        },
+        "required": [
+          "callId",
+          "comment",
+          "createdAt",
+          "endpoint",
+          "issues",
+          "object",
+          "outcome",
+          "rating",
+          "reviewId",
+          "revision",
+          "updatedAt",
+          "withdrawn",
+          "ok"
+        ]
+      },
+      "ConnectSkill": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the Skill is for, from its front matter."
+          },
+          "id": {
+            "type": "string",
+            "description": "The Skill id; pass it to `GET /v1/skills/{skillId}`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The Skill's display name."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "The SKILL.md file, front matter included."
+          }
+        },
+        "required": ["description", "id", "name", "instructions"]
+      },
+      "ConnectSkillList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "What the Skill is for, from its front matter."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The Skill id; pass it to `GET /v1/skills/{skillId}`."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The Skill's display name."
+                }
+              },
+              "required": ["description", "id", "name"]
+            },
+            "description": "Every Skill in the catalog."
+          },
+          "object": {
+            "type": "string",
+            "const": "list",
+            "description": "Always `list`."
+          }
+        },
+        "required": ["data", "object"]
+      },
+      "ConnectTask": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When the task was accepted (ISO 8601)."
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "A stable code for the failure, such as `outcome_unknown` for a task that was running when Connect stopped."
+                  },
+                  "message": {
+                    "description": "What went wrong, for a person; null when none was kept.",
+                    "type": ["string", "null"]
+                  }
+                },
+                "required": ["code", "message"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why a `failed`, `canceled` or `expired` task did not finish."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "The deadline by which a queued task must start."
+          },
+          "finishedAt": {
+            "description": "When the task reached its final state; null while it is `queued` or `running`.",
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "string",
+            "description": "`task_` and 32 hex characters."
+          },
+          "money": {
+            "type": "object",
+            "properties": {
+              "chargedMicroUsd": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "What Ryu's settlement debited for the call, in micro-USD; null until the call answers, or when Ryu does not bill it."
+              },
+              "costMicroUsd": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The call's price at Ryu's rates, in micro-USD, as the call disclosed it; null until the call answers."
+              },
+              "endpoint": {
+                "description": "The catalog endpoint (evidence key) the call runs on; null when it has none.",
+                "type": ["string", "null"]
+              },
+              "ledgerRefId": {
+                "description": "The settlement ledger reference of the call; null until the call answers, or when Ryu does not bill it.",
+                "type": ["string", "null"]
+              },
+              "metered": {
+                "type": "boolean",
+                "description": "True for a call on Ryu's key at a published price."
+              },
+              "operatorAccount": {
+                "description": "The label of the Ryu operator account that served the call; null when none did.",
+                "type": ["string", "null"]
+              },
+              "perCallMicroUsd": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The per-call price the task was accepted at."
+              },
+              "reservedMicroUsd": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991,
+                "description": "Held against the balance while the task is queued or running."
+              }
+            },
+            "required": [
+              "chargedMicroUsd",
+              "costMicroUsd",
+              "endpoint",
+              "ledgerRefId",
+              "metered",
+              "operatorAccount",
+              "perCallMicroUsd",
+              "reservedMicroUsd"
+            ],
+            "description": "What the task's call is priced at, holds and charges."
+          },
+          "object": {
+            "type": "string",
+            "const": "task",
+            "description": "Always `task`."
+          },
+          "ok": {
+            "description": "Present on a single task, absent on list items.",
+            "type": "boolean",
+            "const": true
+          },
+          "pollUrl": {
+            "type": "string",
+            "description": "The path that reads this task: `/v1/tasks/<id>`."
+          },
+          "request": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "description": "The HTTP method of the submitted call."
+              },
+              "path": {
+                "type": "string",
+                "description": "The Connect call path of the submitted call, with its query."
+              }
+            },
+            "required": ["method", "path"],
+            "description": "The call the task runs."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991,
+                    "description": "The size of the kept answer's body, in bytes."
+                  },
+                  "contentType": {
+                    "description": "The answer's `content-type`; null when it sent none.",
+                    "type": ["string", "null"]
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": ["connect", "upstream"]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "`upstream` when the upstream answered, `connect` for Connect's own refusal."
+                  },
+                  "status": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991,
+                    "description": "The HTTP status of the answer."
+                  }
+                },
+                "required": ["bytes", "contentType", "outcome", "status"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A summary of the kept answer; null until the task has one. Read the answer itself at `resultUrl`."
+          },
+          "resultExpiresAt": {
+            "description": "When the kept answer is deleted, a day after the task ended; null while the task is open.",
+            "type": ["string", "null"]
+          },
+          "resultUrl": {
+            "type": "string",
+            "description": "The path that reads the answer: `/v1/tasks/<id>/result`."
+          },
+          "rung": {
+            "description": "The credential ladder rung the call ran on.",
+            "type": ["string", "null"]
+          },
+          "ryuCallId": {
+            "type": "string",
+            "description": "The call id (`call_` and 32 hex characters) the task's call settles under; pass it to `POST /v1/reviews`."
+          },
+          "startedAt": {
+            "description": "When the call started; null while the task is `queued`.",
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "canceled",
+              "expired"
+            ],
+            "description": "`queued` until it starts, `running`, then `completed`, `failed`, `canceled` or `expired` (still queued at its deadline)."
+          },
+          "webhook": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "attempts": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991,
+                    "description": "Delivery attempts made so far, the first included."
+                  },
+                  "lastStatus": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The HTTP status of the latest delivery attempt; null before any."
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": ["pending", "delivered", "failed"]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "`pending` until a delivery is answered 2xx (`delivered`) or the retries run out (`failed`); null before the task finishes."
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "The URL the task's completion is delivered to."
+                  }
+                },
+                "required": ["attempts", "lastStatus", "status", "url"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The task's webhook delivery; null when it named no webhook."
+          }
+        },
+        "required": [
+          "createdAt",
+          "error",
+          "expiresAt",
+          "finishedAt",
+          "id",
+          "money",
+          "object",
+          "pollUrl",
+          "request",
+          "result",
+          "resultExpiresAt",
+          "resultUrl",
+          "rung",
+          "ryuCallId",
+          "startedAt",
+          "status",
+          "webhook"
+        ]
+      },
+      "ConnectTaskList": {
+        "type": "object",
+        "required": ["data", "object", "ok"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectTask"
+            },
+            "description": "The tenant's tasks, newest first, at most `limit` of them."
+          },
+          "object": {
+            "const": "tasks",
+            "description": "Always `tasks`."
+          },
+          "ok": {
+            "const": true,
+            "description": "Always `true`."
+          }
+        }
+      },
+      "ConnectToolDescription": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the tool does, from its server."
+          },
+          "id": {
+            "type": "string",
+            "description": "Qualified tool id: `<server>.<tool>` or `composio.<SLUG>`. Pass it to describe and exec."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The catalog lane: `mcp` or `composio` natively; in compatibility mode Core's tool kinds, such as `builtin`, `skill` or `core-api`, also appear."
+          },
+          "name": {
+            "type": "string",
+            "description": "The tool's name on its server."
+          },
+          "args": {
+            "description": "Compatibility mode only: Core's per-argument summary of the input.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "parameters": {
+            "description": "The tool's JSON Schema input. Compatibility mode may omit it and send `args` instead.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "shallow": {
+            "description": "Compatibility mode only: true when Core could not fully resolve the schema.",
+            "type": "boolean"
+          }
+        },
+        "required": ["description", "id", "kind", "name"]
+      },
+      "ConnectToolRequestInput": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "What the missing tool should do. Not blank."
+          },
+          "query": {
+            "description": "The search that came up empty.",
+            "type": "string",
+            "maxLength": 200
+          },
+          "toolkit": {
+            "description": "The vendor or toolkit wanted, such as `linear`.",
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": ["description"]
+      },
+      "ConnectToolRequestReceipt": {
+        "type": "object",
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When the request was filed (ISO 8601)."
+          },
+          "id": {
+            "type": "string",
+            "description": "`treq_` and 32 hex characters."
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "status": {
+            "type": "string",
+            "const": "received",
+            "description": "Always `received`."
+          }
+        },
+        "required": ["createdAt", "id", "ok", "status"]
+      },
+      "ConnectToolSearchResult": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "What the tool does, from its server."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Qualified tool id: `<server>.<tool>` or `composio.<SLUG>`. Pass it to describe and exec."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The catalog lane: `mcp` or `composio` natively; in compatibility mode Core's tool kinds, such as `builtin`, `skill` or `core-api`, also appear."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The tool's name on its server."
+                }
+              },
+              "required": ["description", "id", "kind", "name"]
+            },
+            "description": "The matching tools."
+          },
+          "object": {
+            "type": "string",
+            "const": "list",
+            "description": "Always `list`."
+          },
+          "partial": {
+            "description": "Present when some discovery lane was unavailable.",
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": ["data", "object"]
+      },
+      "ConnectUsageReport": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Window start, clipped to retained data."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "description": "When the call settled (ISO 8601)."
+                },
+                "transactionId": {
+                  "type": "string",
+                  "description": "The provider's transaction id for the call."
+                },
+                "usage": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "The usage metadata the provider's receipt reports for the call."
+                }
+              },
+              "required": ["at", "transactionId", "usage"]
+            },
+            "description": "One page of billed Composio calls: when (`at`), the provider `transactionId`, and its `usage` metadata."
+          },
+          "nextCursor": {
+            "description": "Repeat the request with the same window and `cursor` set to it.",
+            "type": ["string", "null"]
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always `true`."
+          },
+          "to": {
+            "type": "string",
+            "description": "Window end."
+          },
+          "type": {
+            "type": "string",
+            "const": "usage.report",
+            "description": "Always `usage.report`."
+          },
+          "unresolved": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "description": "When the call settled (ISO 8601)."
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": ["unverifiable", "expired"],
+                  "description": "`unverifiable`: the provider log is gone or cannot be verified. `expired`: lookups of the receipt kept failing until they were given up."
+                },
+                "transactionId": {
+                  "type": "string",
+                  "description": "The provider's transaction id for the call."
+                }
+              },
+              "required": ["at", "reason", "transactionId"]
+            },
+            "description": "Receipts that can never be read; first page only."
+          }
+        },
+        "required": [
+          "from",
+          "lines",
+          "nextCursor",
+          "ok",
+          "to",
+          "type",
+          "unresolved"
+        ]
+      }
+    }
+  }
+}

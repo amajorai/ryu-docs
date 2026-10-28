@@ -1,0 +1,170 @@
+---
+title: "Plugin Sidecar Capabilities"
+description: "How a plugin sidecar backs data categories, scheduled jobs, event subscriptions, and activity rows."
+---
+
+A plugin that ships a sidecar can implement host-called capabilities and receive events in that
+process. The manifest keys that declare these surfaces (`contributes.data_categories`,
+`contributes.hook_events`, `provides`, and `subscribes`) are listed in the
+[contribution reference](/docs/extend/develop/sdk/plugin-activation#contribution-reference).
+
+## Data category capabilities
+
+A `data_categories` row is backed by two capabilities your sidecar provides. Ryu calls them on
+your plugin directly (several plugins provide the same two names, each for its own data, so
+they are never bound to a single provider):
+
+```json
+"provides": [
+  { "capability": "data.count", "version": "1.0.0", "sidecar": "notes", "route": "/data/count", "grant": "notes:data" },
+  { "capability": "data.purge", "version": "1.0.0", "sidecar": "notes", "route": "/data/purge", "grant": "notes:data" }
+]
+```
+
+| Capability | Request body | Reply |
+|---|---|---|
+| `data.count` | `{ "category": "<id>" }` | `{ "count": <number> }` |
+| `data.purge` | `{ "category": "<id>" }` | `{ "removed": <number> }` after deleting every item in the category |
+
+Declare both routes on the sidecar's `http.routes` with method `POST`, before any `/:param`
+route they would overlap. Answer `404` for a category you do not own. A count that fails reads
+as `0` in Settings; a purge that fails is reported to the user. Use a grant in your own
+namespace so no other plugin can call these routes.
+
+## Scheduled job capabilities
+
+An app that needs scheduled work lists its jobs and lets Ryu tick them, instead of writing
+scheduler jobs itself. It provides two capabilities, and Ryu keeps one scheduler job (target
+`app_job`) per listed job:
+
+```json
+"provides": [
+  { "capability": "jobs.list", "version": "1.0.0", "sidecar": "notes", "route": "/jobs/list", "grant": "notes:jobs" },
+  { "capability": "jobs.run", "version": "1.0.0", "sidecar": "notes", "route": "/jobs/run", "grant": "notes:jobs" }
+]
+```
+
+| Capability | Request body | Reply |
+|---|---|---|
+| `jobs.list` | `{}` | `{ "jobs": [{ "id", "name", "schedule", "enabled"?, "payload"? }] }` |
+| `jobs.run` | `{ "id": "<job id>", "payload"?: { … } }` | Any `2xx` is success. A non-`2xx` reply's `error` string is recorded as the run's failure. |
+
+`schedule` uses the scheduler's own shape: `{ "kind": "every", "interval": "5m" }` or
+`{ "kind": "cron", "expr": "0 9 * * *", "tz"?: "Europe/Lisbon" }`. `enabled` defaults to `true`.
+`payload` is an optional object Ryu sends back with each run of that job.
+
+**The list is authoritative.** Ryu calls `jobs.list` about every 30 seconds. It writes jobs it has
+not seen, updates the ones that changed, and deletes the jobs of ids that are no longer listed,
+so deleting an item in your app retires its job. Answer `5xx` (never an empty `jobs` array) when
+you cannot read your own store: a reply without a `jobs` array, a non-`2xx` reply, a timeout or an
+oversized list is treated as unknown, and nothing is written or deleted. While your app is
+disabled your jobs are kept, and the scheduler skips them without recording a run. Uninstalling
+your app removes its jobs; after a reinstall Ryu recreates them from your list on the next pass,
+with an empty run history.
+
+| Limit | Value |
+|---|---|
+| Jobs per app | 500 (a longer list is ignored as a whole) |
+| Shortest `every` interval | 1 minute (shorter intervals are raised to 1 minute) |
+| Job `id` | 256 bytes, no control characters |
+| Job `name` | 200 characters, no control or bidirectional-override characters |
+| `payload` | an object of at most 4 KiB |
+| `jobs.list` reply | 4 MiB, answered within 30 seconds |
+| `jobs.run` reply | 64 KiB, answered within 120 seconds |
+| Recorded error text | 1 KiB, control characters removed |
+| Runs in flight | 1 per job, 2 per app (scheduled, Run now and approved runs alike) |
+
+An entry that breaks a rule (a bad schedule, an oversized payload, a name with control
+characters) is skipped but still counts as listed, so its existing job is kept. A duplicate id
+keeps its first entry.
+
+<Callout type="warn">
+  Scheduled app jobs are limited to first-party (Core-tier) apps. A third-party app that provides
+  `jobs.*` gets no scheduled jobs.
+</Callout>
+
+Only Ryu calls these two capabilities. The capability broker refuses `jobs.*` (and `data.*`) to
+every sidecar, whatever it declares or holds. A job's name, schedule, and `enabled` flag always
+follow your list, so users pause a job in your app (list it with `enabled: false`), not in Ryu's
+schedules. Users can run an app job now, but cannot create, retarget, rename, reschedule, pause,
+approval-gate, or (while your app is installed) delete one through Ryu's job API. To remove a
+job, stop listing it. `jobs.run` is never called twice at once for the same job id.
+
+## Sidecar event subscriptions
+
+A plugin that ships a sidecar can receive events in that process, not only in a sandboxed turn
+hook. Each `subscribes` entry binds an event to a sidecar route:
+
+```json
+"subscribes": [
+  { "event": "@acme/notes#note.archived", "sidecar": "notes", "route": "/events/note-archived" }
+]
+```
+
+| Field | Rule |
+|---|---|
+| `event` | One of this plugin's own `contributes.hook_events` ids, or a Core event (`core#<name>`) from the published list. Another app's event is rejected. |
+| `sidecar` | The `name` of one of this plugin's `sidecars`. |
+| `route` | A fixed path (no `:param` or `*rest`) declared on that sidecar's `http.routes` with method `POST` (or no method). |
+
+When the event is raised, Ryu sends `POST <route>` to the enabled subscriber with the body
+`{ "event", "payload", "emitted_at", "delivery_id" }`, authenticated with the sidecar's own
+credential, just like any other proxied request. Delivery is best-effort and never slows down
+or fails the code that raised the event:
+
+- each subscriber has a small queue; when it is full, the oldest pending delivery is dropped;
+- a delivery that fails because the sidecar is unreachable or answers `5xx` is retried once;
+- a `4xx` answer is treated as final;
+- a disabled plugin receives nothing.
+
+A subscription route is an ordinary declared route, so it is also reachable through the app's
+proxy mount. To tell a real delivery from a request someone sent through that mount, Ryu adds an
+`x-ryu-event-delivery` header whose value is the body's `delivery_id`. Ryu removes that header
+from every request it forwards from a caller, so only Ryu's own deliveries carry it. Before you act
+on a delivery, check that the header is present and matches `delivery_id`. Even then, treat the
+payload as a notification and re-read anything you need to trust.
+
+**Core events.** Ids in the `core#` namespace are raised only by Ryu itself. A plugin can
+subscribe to them but can never declare or emit one. A Core event whose payload carries user
+data requires a named grant in `permission_grants`, and Ryu delivers it only while that grant is
+approved. A subscription to an unknown `core#` id fails validation. Published Core events:
+
+| Event | Grant | When it fires | Payload |
+|---|---|---|---|
+| `core#run.failed` | `runs:failures` | A chat or agent run, a scheduled agent job, or a workflow run failed. | `source_id` (the conversation id, `job:<job id>`, or the workflow run id), `kind` (`agent` or `workflow`), `agent_id` (agent runs, may be `null`), `instruction` and `failure` (each cut to 4,000 characters). |
+
+`runs:failures` gives an app the instruction and error text of runs it did not start, so it is
+a reviewed grant: the user sees it when installing the app. Self-Healing is the built-in
+subscriber.
+
+## Activity rows on app events
+
+When a sidecar emits one of its own `hook_events`, it can attach an `activity` row so the event
+also appears in the node's activity feed:
+
+```json
+{
+  "event": "@acme/notes#note.archived",
+  "payload": { "note_id": "n_1" },
+  "activity": {
+    "kind": "note",
+    "title": "Note archived: Q3 plan",
+    "level": "success",
+    "metadata": { "note_id": "n_1" }
+  }
+}
+```
+
+`kind` matches `[a-z0-9_.-]{1,64}`, `title` is required (at most 512 bytes), `body` is optional
+(at most 4 KiB), `level` is `info`, `success`, or `warning`, and `metadata` is an optional JSON
+object (at most 4 KiB). The row is always attributed to the emitting app; the request cannot name
+another source. An invalid row is skipped and does not fail the event. The Rust
+`ryu-app-events` client exposes this as `EventEmitter::emit_with_activity`.
+
+## Related
+
+<Cards>
+  <DocCard href="/docs/extend/develop/sdk/plugin-activation" />
+  <DocCard href="/docs/extend/develop/sdk/plugin-api" />
+  <DocCard href="/docs/core/scheduler" />
+</Cards>
