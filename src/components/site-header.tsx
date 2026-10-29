@@ -101,22 +101,21 @@ export function SiteHeader({
       />
       <div className="relative z-10 flex h-full items-center justify-between gap-4 px-4 sm:px-6 lg:px-10">
         <div className="flex min-w-0 flex-1 items-center gap-4">
-          {/* The ghost goes to this site's landing page; the main site stays
-              one click away through the nav links and the footer. */}
-          <LocalizedLink
-            aria-label="Ryu docs home"
+          {/* The ghost is the Ryu brand, so it goes to the main site; the
+              Docs badge beside it is this site's home. */}
+          <a
+            aria-label="Ryu home"
             className="-m-1.5 flex min-h-10 shrink-0 items-center p-1.5 text-foreground"
-            href="/"
+            href={MAIN_SITE_URL}
           >
             <RyuLogo size={28} />
-          </LocalizedLink>
+          </a>
           <LocalizedLink
             className={cn(
               badgeVariants({ variant: "secondary" }),
               "shrink-0 rounded-bl-lg",
             )}
-            // The redirect's destination, so a click never pays its round trip.
-            href={DOCS_ENTRY_PATH}
+            href="/"
           >
             Docs
           </LocalizedLink>
@@ -188,7 +187,7 @@ export function SiteHeader({
           <ThemeSwitch className="rounded-full max-md:hidden" />
           {/* The landing's split download button and sign-in, styled as on
               ryuhq.com (apps/web/src/components/site-header-client.tsx). */}
-          <div className="[&>button]:corner-round ms-1.5 flex items-center gap-2 [&>button]:rounded-full">
+          <div className="ms-1.5 flex items-center gap-2 [&>button]:rounded-full">
             <DownloadMenu
               className="hidden sm:inline-flex"
               contentAlign="end"

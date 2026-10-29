@@ -24,6 +24,7 @@ import {
 import { realmTabTitle } from "@/components/realm-alpha-badge";
 import { SiteHeader } from "@/components/site-header";
 import { docsSegmentsFromPathname } from "@/lib/docs-version";
+import { bindTabsToOwnPages } from "@/lib/layout-tab-urls";
 
 import styles from "./docs-layout.module.css";
 
@@ -47,6 +48,8 @@ interface RootTabStyle extends CSSProperties {
  * (sidebar, content, TOC) takes on that root's color while you are inside it.
  */
 const NESTED_ROOTS = [
+  { path: "surfaces/desktop", segment: "desktop" },
+  { path: "surfaces/cli", segment: "cli" },
   { path: "extend/develop/api-reference", segment: "api-reference" },
   { path: "reference/benchmark", segment: "benchmark" },
 ] as const;
@@ -131,27 +134,29 @@ export function DocsLayoutClient({
   const activeRoot = rootSegment(pathname);
   const tabs = useMemo<LayoutTab[]>(
     () =>
-      getLayoutTabs(props.tree, {
-        transform(option, node) {
-          const segment = rootSegment(option.url);
-          const accent: RootTabStyle = {
-            "--docs-tab-accent": rootColor(segment),
-          };
-          return {
-            ...option,
-            description: undefined,
-            title: realmTabTitle(option.title, segment),
-            icon: (
-              <div
-                className={`${styles.icon} flex size-5 shrink-0 items-center justify-center rounded-md p-0.5 [&_svg]:size-4 max-md:size-9 max-md:p-1.5 max-md:[&_svg]:size-5`}
-                style={accent}
-              >
-                {node.icon}
-              </div>
-            ),
-          };
-        },
-      }),
+      bindTabsToOwnPages(
+        getLayoutTabs(props.tree, {
+          transform(option, node) {
+            const segment = rootSegment(option.url);
+            const accent: RootTabStyle = {
+              "--docs-tab-accent": rootColor(segment),
+            };
+            return {
+              ...option,
+              description: undefined,
+              title: realmTabTitle(option.title, segment),
+              icon: (
+                <div
+                  className={`${styles.icon} flex size-5 shrink-0 items-center justify-center rounded-md p-0.5 [&_svg]:size-4 max-md:size-9 max-md:p-1.5 max-md:[&_svg]:size-5`}
+                  style={accent}
+                >
+                  {node.icon}
+                </div>
+              ),
+            };
+          },
+        }),
+      ),
     [props.tree],
   );
 

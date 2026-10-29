@@ -284,3 +284,19 @@ export function tocTitle(locale: DocsLocale): string {
     FUMADOCS_TRANSLATIONS[locale as keyof typeof FUMADOCS_TRANSLATIONS] ?? {};
   return localized["On this page(table of contents)"] ?? "On this page";
 }
+
+/** Labels for the page "Open" menu, in the Fumadocs page-actions wording. */
+export function pageActionLabels(locale: DocsLocale): {
+  open: string;
+  openInGitHub: string;
+  viewAsMarkdown: string;
+} {
+  const localized: Partial<Record<string, string>> =
+    fumadocsProvider(locale).translations ?? {};
+  return {
+    open: localized["Open(page actions)"] ?? "Open",
+    openInGitHub: localized["Open in GitHub(page actions)"] ?? "Open in GitHub",
+    viewAsMarkdown:
+      localized["View as Markdown(page actions)"] ?? "View as Markdown",
+  };
+}

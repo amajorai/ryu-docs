@@ -6,7 +6,6 @@ import {
   DocsTitle,
   MarkdownCopyButton,
   PageLastUpdate,
-  ViewOptionsPopover,
 } from "fumadocs-ui/layouts/glass/page";
 import { createRelativeLink } from "fumadocs-ui/mdx";
 import type { Metadata } from "next";
@@ -20,6 +19,7 @@ import { FeedbackText } from "@/components/feedback/text";
 import { JsonLd } from "@/components/json-ld";
 import { DocsAnchor, getMDXComponents } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
+import { DocsPageOpenMenu } from "@/components/page-actions";
 import { hasLocalizedDocsContent } from "@/lib/canonical-docs";
 import {
   submitDocsBlockFeedback,
@@ -30,7 +30,7 @@ import {
   docsPathForLocale,
   isVersionSegment,
 } from "@/lib/docs-version";
-import { tocTitle } from "@/lib/fumadocs-translations";
+import { pageActionLabels, tocTitle } from "@/lib/fumadocs-translations";
 import {
   DEFAULT_DOCS_LOCALE,
   DOCS_LANGUAGES,
@@ -185,9 +185,11 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
             <CatalogMetadata attributes={page.data.catalog} />
             <div className="flex flex-row gap-2 items-center pb-6">
               <MarkdownCopyButton markdownUrl={`${page.url}.mdx`} />
-              <ViewOptionsPopover
-                markdownUrl={`${page.url}.mdx`}
+              <DocsPageOpenMenu
                 githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
+                labels={pageActionLabels(lang)}
+                markdownUrl={`${page.url}.mdx`}
+                pageUrl={pageUrl}
               />
             </div>
             <DocsBody>

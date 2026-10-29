@@ -28,9 +28,10 @@ export const DOCS_SECTIONS = {
   "release-notes": "release-notes",
   roadmap: "roadmap",
   rsi: "rsi",
-  // Legacy aliases → the realm that absorbed them.
+  // Realms whose pages live under another realm's URL prefix.
   desktop: "surfaces/desktop",
   cli: "surfaces/cli",
+  // Legacy aliases → the realm that absorbed them.
   island: "surfaces/island",
   raycast: "surfaces/raycast",
   develop: "extend/develop",

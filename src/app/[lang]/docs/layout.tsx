@@ -6,6 +6,7 @@ import { baseOptions } from "@/lib/layout.shared";
 import { source } from "@/lib/source";
 
 import { DocsLayoutClient } from "./docs-layout.client";
+import "./surface-roots.css";
 
 export default async function Layout({
   children,

@@ -26,6 +26,7 @@ test("docs home exposes every root selector destination", () => {
     "surfaces/desktop/user-guide",
     "surfaces/desktop/engines",
     "surfaces/desktop/productivity",
+    "surfaces/cli",
     "hardware",
     "core",
     "gateway",

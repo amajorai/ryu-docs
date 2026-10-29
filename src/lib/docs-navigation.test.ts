@@ -10,10 +10,12 @@ describe("docs navigation", () => {
     const realms = [
       "start-here",
       "learn",
-      "surfaces",
+      "surfaces/desktop",
       "mobile",
       "browser-extension",
+      "surfaces/cli",
       "hardware",
+      "surfaces",
       "apps",
       "plugins",
       "providers",
@@ -279,6 +281,42 @@ describe("docs navigation", () => {
         .slice(developerToolsHeader + 1)
         .some((page) => page.endsWith("-lsp")),
     ).toBe(false);
+  });
+
+  test("opens Surfaces with unsectioned links to every surface root", async () => {
+    const surfaces = await readMeta("surfaces/meta.json");
+    const pages = surfaces.pages ?? [];
+    const firstSeparator = pages.findIndex((page) => page.startsWith("---"));
+    expect(pages.slice(0, firstSeparator)).toEqual([
+      "index",
+      "[Monitor][Desktop App](/docs/surfaces/desktop)",
+      "[Smartphone][Mobile](/docs/mobile)",
+      "[Puzzle][Browser extension](/docs/browser-extension)",
+      "[Terminal][CLI](/docs/surfaces/cli)",
+      "[CircuitBoard][Hardware](/docs/hardware)",
+    ]);
+    // The surface roots are reached through those links and the root
+    // selector, never expanded as folders inside the Surfaces sidebar.
+    expect(pages).not.toContain("desktop");
+    expect(pages).not.toContain("cli");
+    for (const root of ["surfaces/desktop", "surfaces/cli"]) {
+      expect((await readMeta(`${root}/meta.json`)).root).toBe(true);
+    }
+    // Fumadocs picks the sidebar root from the first tree page whose URL
+    // matches, so each surface root must come before Surfaces, whose links
+    // share its landing URL; otherwise its landing page shows Surfaces' sidebar.
+    for (const metaFile of ["meta.json", "meta.es.json"]) {
+      const order = (await readMeta(metaFile)).pages ?? [];
+      for (const root of [
+        "surfaces/desktop",
+        "mobile",
+        "browser-extension",
+        "surfaces/cli",
+        "hardware",
+      ]) {
+        expect(order.indexOf(root)).toBeLessThan(order.indexOf("surfaces"));
+      }
+    }
   });
 
   test("nests desktop guides under the Desktop App root", async () => {

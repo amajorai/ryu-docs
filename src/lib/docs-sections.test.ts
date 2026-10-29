@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import { fileURLToPath } from "node:url";
 
-import { isDocsSection, pageInDocsSection } from "@/lib/docs-sections";
+import {
+  DOCS_SECTIONS,
+  isDocsSection,
+  pageInDocsSection,
+} from "@/lib/docs-sections";
 
 const rootMetaPath = fileURLToPath(
   new URL("../../content/docs/meta.json", import.meta.url),
@@ -39,6 +43,11 @@ describe("pageInDocsSection", () => {
   test("accepts every top-level realm in the root navigation", async () => {
     const root: { pages: string[] } = await Bun.file(rootMetaPath).json();
     const realms = root.pages.filter((page) => !page.startsWith("---"));
-    expect(realms.filter((realm) => !isDocsSection(realm))).toEqual([]);
+    // Nested realms such as `surfaces/desktop` are reached by their section
+    // slug (`desktop`), whose prefix is the realm's path.
+    const prefixes = new Set<string>(Object.values(DOCS_SECTIONS));
+    expect(
+      realms.filter((realm) => !(isDocsSection(realm) || prefixes.has(realm))),
+    ).toEqual([]);
   });
 });

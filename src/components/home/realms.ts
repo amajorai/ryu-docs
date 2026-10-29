@@ -81,6 +81,13 @@ export const REALMS: Realm[] = [
     track: "use",
   },
   {
+    slug: "surfaces/cli",
+    title: "CLI",
+    description:
+      "Chat, run agents, and manage a node from the terminal with ryu-cli",
+    track: "build",
+  },
+  {
     slug: "hardware",
     title: "Hardware",
     description: "Connect ESP32-S3 devices to a Ryu server.",
