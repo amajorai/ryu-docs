@@ -137,12 +137,13 @@ adds the Core-side checks that the Gateway cannot see.
 - Core approval mode, native command scanning, and whether Claude, Codex, or generic agent routes
   bypass Gateway coverage.
 
-Use `GET /v1/doctor` with the Gateway admin credential, or use Core's authenticated
-`GET /api/gateway/doctor` proxy from the desktop. Findings are structured with `checkId`,
-`category`, `severity`, `settingPath`, and `recommendedAction`; the report never mutates config and
-does not include credentials. Desktop renders the same report under **Gateway → Diagnostics** and
-on the onboarding safety step. The report contract, the `ryu-cli doctor` command, recovery actions, and
-Safe Mode are documented in
+Use `GET /v1/doctor` with the Gateway admin credential, or Core's authenticated
+`GET /api/gateway/doctor` proxy from the desktop. Desktop renders the same report under
+**Gateway → Diagnostics** and on the onboarding safety step.
+
+Findings carry `checkId`, `category`, `severity`, `settingPath`, and `recommendedAction`. The report
+never mutates config and does not include credentials. The report contract, the `ryu-cli doctor`
+command, recovery actions, and Safe Mode are documented in
 [Gateway operations](/docs/gateway/configuration-operations#diagnostics-and-safe-mode).
 
 <Callout type="info">
@@ -154,11 +155,23 @@ Safe Mode are documented in
 
 ## Agent tool-egress SSRF screening
 
-An agent tool that fetches a URL is a server-side request forgery risk: a poisoned page or a crafted
-argument can point the crawler at a loopback service, an RFC1918 host, or the cloud metadata
-endpoint (`169.254.169.254`). The Spider plugin runs a crawler CLI as a child process, and that
-child resolves DNS itself, follows redirects, and crawls links Core never saw, so screening only the
-first URL is not enough.
+An agent tool that fetches a URL is a server-side request forgery (SSRF) risk. A poisoned page or a
+crafted argument can point the crawler at a loopback service, an RFC1918 host, or the cloud
+metadata endpoint (`169.254.169.254`).
+
+Screening only the first URL is not enough. The Spider plugin runs a crawler CLI as a child
+process, and that child resolves DNS itself, follows redirects, and crawls links Core never saw.
+
+```mermaid
+flowchart LR
+  CALL["Command tool call"] --> SCREEN{"URL argument screen"}
+  SCREEN -->|"blocked"| REFUSE["Refuse the call"]
+  SCREEN -->|"allowed"| CHILD["Crawler child process"]
+  CHILD -->|"every connection"| PROXY["Per-call loopback proxy"]
+  PROXY --> RESCREEN{"Re-screen target"}
+  RESCREEN -->|"blocked"| DROP["Refuse the connection"]
+  RESCREEN -->|"allowed"| NET["Validated address only"]
+```
 
 Core applies two layers to a command tool that declares `egress_url_arg`.
 
@@ -168,17 +181,22 @@ Core applies two layers to a command tool that declares `egress_url_arg`.
    unique-local, and CGNAT targets. Ports other than 80 and 443 are refused too.
 2. **For every connection the child makes**, Core starts a loopback forward proxy for that one
    tool call (`apps/core/src/tool_exec/egress_broker.rs`) and points the child at it through
-   `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`, with `NO_PROXY` removed. The proxy requires a random
-   per-call credential, canonicalizes and re-screens each `CONNECT` tunnel or plain HTTP request
-   with the same rules, connects only to the address it validated (closing the DNS-rebinding
-   window), caps concurrent connections, and shuts down when the child exits or the tool times out.
+   `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`, with `NO_PROXY` removed. The proxy:
+   - requires a random per-call credential;
+   - canonicalizes and re-screens each `CONNECT` tunnel or plain HTTP request with the same rules;
+   - connects only to the address it validated, closing the DNS-rebinding window;
+   - caps concurrent connections;
+   - shuts down when the child exits or the tool times out.
 
-The proxy mediates clients that honor the standard proxy variables, which the Spider CLI's HTTP
-stack does in `spider_cli` 2.53.9, the version the [Spider plugin](/docs/plugins/spider) tells you
-to install. Because proxy support is a property of a specific release, a command tool that declares
-`egress_url_arg` must also declare a `bin_version` requirement, and Core refuses the call when the
-installed binary reports a version outside it (see
+The proxy mediates clients that honor the standard proxy variables. The Spider CLI's HTTP stack
+honors them in `spider_cli` 2.53.9, the version the [Spider plugin](/docs/plugins/spider) tells you
+to install.
+
+Proxy support is a property of a specific release. A command tool that declares `egress_url_arg`
+must therefore also declare a `bin_version` requirement. Core refuses the call when the installed
+binary reports a version outside it (see
 [command tool version requirements](/docs/extend/develop/extensions/plugin-json-manifest#command-tool-version-requirements)).
+
 The proxy is not an operating-system network sandbox, so only Core-allowlisted command binaries
 reach this path.
 
@@ -196,19 +214,22 @@ The screen is on by default and blocks.
 | `RYU_AGENT_EGRESS_SSRF_GUARD` | on | Set `0`/`false`/`off`/`no` to disable the egress screen |
 | `RYU_AGENT_EGRESS_ALLOW_HOSTS` | empty | Comma-separated, case-insensitive allowlist that bypasses the screen. Entries may be a bare host (`example.internal`) or a host and port (`127.0.0.1:3000`). Model-supplied crawler URLs and the crawler's egress proxy honor only `host:port` entries |
 
-Prefer the `host:port` form. A bare host exempts **every** port on that host, and the
-allowlist is process-wide. It also applies to URLs the model supplies to the agent's
-own fetch tools. Allowlisting a bare `127.0.0.1` to reach one local service therefore
-opens every other local service, including Ryu's own API, to model-chosen URLs.
-`127.0.0.1:3000` grants only that port.
+<Callout type="warn">
+  Prefer the `host:port` form. A bare host exempts **every** port on that host, and the allowlist
+  is process-wide. It also applies to URLs the model supplies to the agent's own fetch tools.
+  Allowlisting a bare `127.0.0.1` to reach one local service therefore opens every other local
+  service, including Ryu's own API, to model-chosen URLs. `127.0.0.1:3000` grants only that port.
+</Callout>
 
 ## Untrusted-content wrapping (tool results)
 
 A tool result is untrusted input. A malicious MCP server or a poisoned web page can return text that
 impersonates the chat transcript (`<|im_start|>system ...`) or smuggles new instructions to steer a
-high-privilege model. On the OpenAI-compatible plane the tool loop (`run_tool_loop`) folds each tool
-result back into the conversation as a `role:"tool"` message that goes straight to the provider, so
-that seam needs neutralizing.
+high-privilege model.
+
+On the OpenAI-compatible plane the tool loop (`run_tool_loop`) folds each tool result back into the
+conversation as a `role:"tool"` message that goes straight to the provider. That seam needs
+neutralizing.
 
 `apps/gateway/src/untrusted.rs` does two things to a tool result before it re-enters the model:
 
@@ -220,43 +241,53 @@ that seam needs neutralizing.
   `<<<EXTERNAL_UNTRUSTED_CONTENT>>>` ... `<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>`, so the model sees a
   clear trust boundary.
 
-Only a *successful external* tool result is neutralized: a catalog tool result in the unified tool
-loop, a Composio action result in the legacy Composio loop, and a hosted web search result on
-`/v1/responses`. `tool_search` descriptor envelopes and gateway-generated denial or execution-error
-envelopes are never wrapped, so the discovery and governance contracts stay unchanged.
+Only a *successful external* tool result is neutralized:
 
-Wrapping is a mitigation, not a guarantee: a model can still follow instructions inside the
-markers. Treat it as one layer alongside the firewall inspection below, tool allowlists, and
-approvals.
+- a catalog tool result in the unified tool loop;
+- a Composio action result in the legacy Composio loop;
+- a hosted web search result on `/v1/responses`.
+
+`tool_search` descriptor envelopes and gateway-generated denial or execution-error envelopes are
+never wrapped, so the discovery and governance contracts stay unchanged.
 
 Wrapping is gated by `FirewallConfig.wrap_untrusted_tool_results` (serde default `true`).
 `FirewallScanner::new` seeds the in-process flag at startup and on every config hot-swap, and the
-tool loop reads it synchronously. It is on by default because it touches only untrusted tool output,
-never user text.
+tool loop reads it synchronously. It is on by default because it touches only untrusted tool
+output, never user text.
+
+<Callout type="warn">
+  Wrapping is a mitigation, not a guarantee. A model can still follow instructions inside the
+  markers. Treat it as one layer alongside the firewall inspection below, tool allowlists, and
+  approvals.
+</Callout>
 
 ## Firewall inspection inside the tool loop
 
 The pipeline scans the request before the first completion, but a buffered tool loop sends its
 follow-up completions straight to the provider. Both Gateway tool loops (the unified loop and the
 legacy Composio loop) therefore screen each round's new content themselves before the next
-provider call. They read only what the round adds, never the earlier history, and never rewrite it:
+provider call.
+
+The loops read only what the round adds, never the earlier history, and never rewrite it.
 
 - **Model turn and tool arguments**: before any model-chosen call executes, the model's turn (its
-  text and every call's arguments) is screened. Under `block`, a match ends the request with 403
-  `policy_violation` and no call runs. Under the other policies, a call whose tool id and arguments
-  match the same inbound scan as `/v1/exec/tool` is denied and the model gets a denial result
-  instead, so injected instructions cannot exfiltrate data through tool arguments.
+  text and every call's arguments) is screened.
+  - Under `block`, a match ends the request with 403 `policy_violation` and no call runs.
+  - Under the other policies, a call whose tool id and arguments match the same inbound scan as
+    `/v1/exec/tool` is denied and the model gets a denial result instead, so injected instructions
+    cannot exfiltrate data through tool arguments.
 - **Tool results**: each raw result is screened before it re-enters the model. Under `block`, a
   match ends the request with 403 `policy_violation` before the next provider call. `sanitize`
   redacts PII and secrets in an external result (and withholds it if a match cannot be redacted),
   and `warn_and_continue` logs and forwards it.
 - **What is read**: every string in the turn or result, at any depth and inside stringified JSON,
-  plus every object key. URLs are read too, including under `url` and `image` style keys, because
-  a tool result is text the model receives. A result that carries a credential in a query string
-  (for example a presigned storage URL with an access key id) therefore ends the loop under
-  `block`. Only encoded bytes (base64 `data:` URIs and long base64 runs under a media key) are
-  skipped. Arguments a provider returns as a JSON object instead of a string are screened and
-  passed to the tool like string arguments.
+  plus every object key.
+  - URLs are read too, including under `url` and `image` style keys, because a tool result is text
+    the model receives. A result that carries a credential in a query string (for example a
+    presigned storage URL with an access key id) therefore ends the loop under `block`.
+  - Only encoded bytes (base64 `data:` URIs and long base64 runs under a media key) are skipped.
+  - Arguments a provider returns as a JSON object instead of a string are screened and passed to
+    the tool like string arguments.
 - **Injected tool definitions**: the definitions the loop adds itself, after a `tool_search` call
   or from capability hints, are screened for secrets before they join `tools`, the same rule the
   request's own tool definitions get. A match ends the request with 403 `policy_violation` before

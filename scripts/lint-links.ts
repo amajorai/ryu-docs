@@ -6,7 +6,6 @@ import {
   validateFiles,
 } from "next-validate-link";
 
-import { DOCS_VERSION } from "../src/lib/docs-version";
 import { source } from "../src/lib/source";
 
 function headings(page: (typeof source)["$inferPage"]): string[] {
@@ -14,16 +13,10 @@ function headings(page: (typeof source)["$inferPage"]): string[] {
 }
 
 function pageParams(page: (typeof source)["$inferPage"]) {
-  const hashes = headings(page);
-
   return [
     {
-      value: [DOCS_VERSION, ...page.slugs],
-      hashes,
-    },
-    {
       value: page.slugs,
-      hashes,
+      hashes: headings(page),
     },
   ];
 }

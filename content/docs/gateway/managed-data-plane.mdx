@@ -3,32 +3,67 @@ title: "Managed Data Plane"
 description: "Explains how Ryu's hosted Gateway serves many organizations, covering managed credentials, per-request rgw_ token resolution, end-user identity, the resolve cache, and hosted-only restrictions."
 ---
 
-The same Gateway binary that Core runs locally can be deployed once and shared by many organizations as the hosted managed-cloud **data plane**. In that topology, clients point at one Gateway and each carries its own minted `rgw_` token. On every request the Gateway resolves that token to an org, its credit budget, and its effective policy, then runs a pre-flight credit gate before dispatch.
+The same Gateway binary that Core runs locally can be deployed once and shared by many
+organizations as the hosted managed-cloud **data plane**. Clients point at one Gateway, and each
+carries its own minted `rgw_` token.
+
+On every request the Gateway resolves that token to an org, its credit budget, and its effective
+policy. It then runs a pre-flight credit gate before dispatch.
 
 ## Managed credential lifecycle
 
-Provisioned nodes contact the public control-plane API for bootstrap and enrollment.
-When the website and API use different origins, the website origin is reserved for
-browser sign-in and billing callbacks; it is not the node bootstrap endpoint.
+Provisioned nodes contact the public control-plane API for bootstrap and enrollment. When the
+website and API use different origins, the website origin is reserved for browser sign-in and
+billing callbacks. It is not the node bootstrap endpoint.
 
-Provisioning is a two-phase exchange. A short-lived bootstrap credential can obtain one sealed
-credential generation for its assigned node. Core durably stores the returned **node-control** and
-**inference-relay** credentials, verifies the node and organization binding, then acknowledges the
-bootstrap. Repeated exchanges return the same pending generation rather than minting competing
-pairs. Rotation follows the same persist-then-ack rule.
+Provisioning is a two-phase exchange (exchange, then acknowledge):
 
-The data plane validates credential purpose and requested operation in addition to organization,
-team, node, expiry, and revocation state. Inference routes accept the relay credential; lifecycle
-and resolution routes accept the control credential. A credential with conflicting tenant
-authority or an omitted operation is rejected instead of falling back to broader access.
+1. A short-lived bootstrap credential obtains one sealed credential generation for its assigned
+   node.
+2. Core durably stores the returned **node-control** and **inference-relay** credentials.
+3. Core verifies the node and organization binding, then acknowledges the bootstrap.
+
+Repeated exchanges return the same pending generation rather than minting competing pairs.
+Rotation follows the same persist-then-ack rule.
+
+```mermaid
+sequenceDiagram
+    participant Core as Core (node)
+    participant CP as Control plane
+    Core->>CP: Exchange bootstrap credential
+    CP-->>Core: Sealed node-control + inference-relay pair
+    Note over Core: Persist both, verify node and org binding
+    Core->>CP: Acknowledge bootstrap
+    Note over Core,CP: A repeated exchange returns the same pending pair
+```
+
+The data plane validates credential purpose and requested operation, in addition to organization,
+team, node, expiry, and revocation state:
+
+| Credential | Accepted on |
+|---|---|
+| Inference relay | Inference routes |
+| Node control | Lifecycle and resolution routes |
+
+A credential with conflicting tenant authority or an omitted operation is rejected instead of
+falling back to broader access.
 
 <Callout type="warn">
-This is a **hosted-only** path and runs as a **single replica**. Budget and rate-limit counters and the resolve cache are in-process maps, so N replicas each grant a full quota. Only the response and embedding caches can be shared, through the [Redis cache backend](/docs/gateway/reliability#shared-redis-cache-backend). Deploy one instance per fleet. When there is no `CONTROL_PLANE_URL`, the dynamic path is a no-op and the Gateway behaves as the ordinary single-org process documented in [Configuration and auth](/docs/gateway/configuration).
+This is a **hosted-only** path and runs as a **single replica**. Budget and rate-limit counters
+and the resolve cache are in-process maps, so N replicas each grant a full quota. Only the response
+and embedding caches can be shared, through the
+[Redis cache backend](/docs/gateway/reliability#shared-redis-cache-backend). Deploy one instance per
+fleet.
+
+When there is no `CONTROL_PLANE_URL`, the dynamic path is a no-op and the Gateway behaves as the
+ordinary single-org process documented in [Configuration and auth](/docs/gateway/configuration).
 </Callout>
 
 ## Per-request org identity
 
-A standalone Gateway authenticates one org at startup with its own `rgw_` key. The multi-tenant path instead resolves the org **per request** from whatever `rgw_` bearer the client sent. Any valid, non-revoked token resolves to its own org.
+A standalone Gateway authenticates one org at startup with its own `rgw_` key. The multi-tenant
+path instead resolves the org **per request** from whatever `rgw_` bearer the client sent. Any
+valid, non-revoked token resolves to its own org.
 
 ```http
 Authorization: Bearer rgw_<org-token>
@@ -52,9 +87,13 @@ The response maps to a `ResolvedOrg` carrying the fields the pipeline needs to a
 | `limits` | The org's budgets and rate limits: an org-wide cap, a member default, and per-member, per-team, and per-key caps. Missing means no limits |
 | `policy_version` | A hash of the effective policy and limits, so a Gateway can detect a change cheaply |
 
-The control plane has already cascaded org, team, project, and user layers and applied admin locks. The data plane receives one resolved policy and enforces it. It does not re-derive the cascade.
-
-Organization policies are managed from the organization's **Policies** settings. The page lists saved layers and can preview the effective organization, team, or project policy. Owners and admins can write organization-level layers and lock fields; a successful save confirms the new policy revision.
+The control plane has already cascaded org, team, project, and user layers and applied admin
+locks. The data plane receives one resolved policy and enforces it. It does not re-derive the
+cascade. How those layers are written and combined is on
+[Organization policy on nodes](/docs/gateway/organization-policy) and
+[Guardrail policies](/docs/gateway/guardrail-policies). Owners and admins save organization-level layers and
+locks from the organization's **Policies** settings, and a successful save confirms the new policy
+revision.
 
 ```mermaid
 flowchart TD
@@ -63,7 +102,9 @@ flowchart TD
   RESOLVE --> BALANCE["Remaining credit balance"]
   POLICY --> GATE["Pre-flight request gate"]
   BALANCE --> GATE
-  GATE -->|"policy or balance denies"| ERROR["401 / 402\nno provider call"]
+  RESOLVE -->|"token does not resolve"| UNAUTH["401, no provider call"]
+  GATE -->|"policy denies"| DENY["403, no provider call"]
+  GATE -->|"no credit left"| NOCREDIT["402, no provider call"]
   GATE -->|"allowed"| DISPATCH["Gateway dispatch"]
   DISPATCH --> DEBIT["Post-call usage\nand credit debit"]
 ```
@@ -72,10 +113,16 @@ flowchart TD
 
 An `rgw_` token proves the organization, not the person. The bare `x-ryu-user-id` header is caller
 input, so the hosted path ignores it. A Ryu node forwards the signed-in caller's identity token as
-`x-ryu-user-jwt` instead. The Gateway verifies it offline against the control plane's published
-signing keys (`/api/auth/jwks`, cached), accepting only EdDSA tokens that are unexpired, carry the
-expected issuer and audience, and list the resolved organization among the user's organizations.
-On success the request is attributed to that user and to the user's teams in that organization;
+`x-ryu-user-jwt` instead.
+
+The Gateway verifies it offline against the control plane's published signing keys
+(`/api/auth/jwks`, cached). It accepts only EdDSA tokens that:
+
+- are unexpired;
+- carry the expected issuer and audience;
+- list the resolved organization among the user's organizations.
+
+On success the request is attributed to that user and to the user's teams in that organization, and
 member and team limits then apply. Any verification failure attributes the request to the
 organization alone, so org and key limits still apply.
 
@@ -88,15 +135,18 @@ request with the `x-ryu-end-user` header:
 x-ryu-end-user: <your user id>
 ```
 
-Send your internal user id or a hash of it, never an email address or phone number. The value is 1
-to 128 printable ASCII characters with no spaces; use a `session:` prefix for a logged-out visitor.
-A missing header is fine. A malformed one, or the header sent more than once, is refused before
-anything runs with `400`, `type: "invalid_request_error"`, `code: "invalid_end_user"`.
+Send your internal user id or a hash of it, never an email address or phone number.
+
+- The value is 1 to 128 printable ASCII characters with no spaces.
+- Use a `session:` prefix for a logged-out visitor.
+- A missing header is fine.
+- A malformed value, or the header sent more than once, is refused before anything runs with
+  `400`, `type: "invalid_request_error"`, `code: "invalid_end_user"`.
 
 The Gateway hashes the value with a secret salt scoped to your organization as soon as the
 organization is known, then drops the raw value. It never appears in audit rows, the live traffic
-feed, logs or any provider request, and the same end-user id in two organizations produces
-unrelated hashes.
+feed, logs or any provider request. The same end-user id in two organizations produces unrelated
+hashes.
 
 Who a request is attributed to follows this order:
 
@@ -116,9 +166,10 @@ Audit rows record the id of the `rgw_` key that made the request.
 Providers attribute abuse to the identifier a request carries. On a hosted Gateway every provider
 request carries an opaque identifier that Ryu derives from the attribution above, in the format
 `ryu.<version>.<32 hex characters>`. It is stable for the same subject, reveals nothing about the
-user, and cannot be chosen by the caller. Any `user`, `safety_identifier` or `metadata.user_id` your
-request carries is removed first, so a request can never reach a provider under an identifier you
-supplied.
+user, and cannot be chosen by the caller.
+
+Any `user`, `safety_identifier` or `metadata.user_id` your request carries is removed first, so a
+request can never reach a provider under an identifier you supplied.
 
 | Provider | Field |
 |---|---|
@@ -131,25 +182,32 @@ supplied.
 | Every other provider, and OpenAI speech and transcription | None: the provider does not document an end-user field, so the identity stays in Ryu's own records |
 
 The identifier never changes your prompt, messages, tools or prompt-cache breakpoints, so cache hit
-rates are unaffected. A self-hosted Gateway, or one on a managed node, forwards the request body as
-you sent it and adds no identifier. Because those Gateways keep the identifier you send, they never
-offer the Vercel AI Gateway route, which carries only requests stamped with Ryu's identifier.
+rates are unaffected.
+
+A self-hosted Gateway, or one on a managed node, forwards the request body as you sent it and adds
+no identifier. Because those Gateways keep the identifier you send, they never offer the Vercel AI
+Gateway route, which carries only requests stamped with Ryu's identifier.
 
 ### Hard-401 on an unresolved token
 
-An `rgw_`-shaped bearer that does not resolve (invalid, revoked, or the control plane is unreachable) maps to a hard `401`. It is never let through as anonymous, and the resolved context sets `is_master_key = false`, so admin routes still reject it.
+An `rgw_`-shaped bearer that does not resolve (invalid, revoked, or the control plane is
+unreachable) maps to a hard `401`. It is never let through as anonymous. The resolved context sets
+`is_master_key = false`, so admin routes still reject it.
 
 ### Account standing
 
 Every resolution also carries the key's platform standing. A suspended organization or key, or a
 banned owner, still resolves, and the Gateway refuses the request with a specific code instead of
-a generic `401`. Throttled and restricted accounts, enforcement steps, provider safety refusals,
-and policy availability are covered on
-[Account standing on hosted Gateways](/docs/gateway/account-standing).
+a generic `401`.
+
+Throttled and restricted accounts, enforcement steps, provider safety refusals, and policy
+availability are covered on [Account standing on hosted Gateways](/docs/gateway/account-standing).
 
 ## The resolve cache
 
-Resolving a token is a control-plane round-trip, so the Gateway caches the outcome with separate lifetimes for successful and failed resolutions. The raw token is only used as an in-memory key and is never logged.
+Resolving a token is a control-plane round-trip, so the Gateway caches the outcome with separate
+lifetimes for successful and failed resolutions. The raw token is only used as an in-memory key and
+is never logged. The cache is enabled only when a managed control plane is configured.
 
 | Outcome | TTL | Why |
 |---|---|---|
@@ -157,14 +215,22 @@ Resolving a token is a control-plane round-trip, so the Gateway caches the outco
 | Negative (invalid / revoked / unreachable) | 10s | Blunts a resolve-DoS from a flood of bad bearers, but short enough that a just-minted token is not locked out for long |
 | Refusing or unreadable standing, or an unreadable credit balance | 10s | A lifted suspension or a recovered control plane serves again quickly |
 
-The cache holds at most 4,096 results, removes expired results during access, and evicts the oldest result when full. Bearers longer than 256 bytes are rejected before resolution. At most 32 uncached resolutions can run at once; requests beyond that limit, or another request already resolving the same token, receive a retryable `429` response without waiting or contacting the control plane again. These temporary failures are not cached as invalid credentials. Existing fresh cache entries remain usable while resolution is busy. A rejected request does not call a model provider.
+Limits:
 
-The cache is enabled only when a managed control plane is configured.
+- The cache holds at most 4,096 results. It removes expired results during access and evicts the
+  oldest result when full.
+- Bearers longer than 256 bytes are rejected before resolution.
+- At most 32 uncached resolutions run at once. A request beyond that limit, or a request for a token
+  another request is already resolving, receives a retryable `429` without waiting or contacting
+  the control plane again.
+
+These temporary failures are not cached as invalid credentials, and existing fresh cache entries
+remain usable while resolution is busy. A rejected request does not call a model provider.
 
 The Gateway re-fetches its own key's resolution every 60 seconds. When the reported
-`policy_version` changes, cached resolutions for that organization are dropped so a policy or limits
-edit applies on the next request instead of after the positive TTL. The last version is shown in the
-admin view of `GET /health`.
+`policy_version` changes, cached resolutions for that organization are dropped, so a policy or
+limits edit applies on the next request instead of after the positive TTL. The last version is
+shown in the admin view of `GET /health`.
 
 ## Budgets, credit gates, and metering
 
@@ -181,11 +247,12 @@ external liveness check; protect all model and admin routes with Gateway auth.
 ## Hosted Gateway restrictions
 
 A Gateway treats itself as hosted only when it loads its provider keys from the managed control
-plane's vault. Fleet mode (`fleet = true` or `RYU_GATEWAY_FLEET=1`) does not make a Gateway hosted:
-it only hardens exposure, so a self-hosted Gateway behind its own proxy can set it and keeps the
-behavior described elsewhere in these docs. A hosted Gateway spends Ryu-owned provider credentials
-on behalf of many organizations, so it turns off the routes that cannot be screened or attributed
-per request:
+plane's vault. Fleet mode (`fleet = true` or `RYU_GATEWAY_FLEET=1`) does not make a Gateway hosted.
+It only hardens exposure, so a self-hosted Gateway behind its own proxy can set it and keeps the
+behavior described elsewhere in these docs.
+
+A hosted Gateway spends Ryu-owned provider credentials on behalf of many organizations, so it turns
+off the routes and inputs that cannot be screened or attributed per request:
 
 | Route or input | On a hosted Gateway |
 |---|---|
@@ -208,10 +275,12 @@ per request:
 | A `PUT /v1/config` that carries a `screening` section | Refused with `403`, `code: "platform_locked"` |
 | Any request while the Gateway holds no version of the [Ryu platform policy](/docs/gateway/organization-policy#ryu-platform-policy-on-hosted-gateways), for example right after it starts while the control plane cannot read the policy | Refused with `503`, `type: "service_unavailable"`, `code: "screening_unavailable"`, `layer: "platform"` and a `Retry-After` header, before any provider is chosen. It is never served under your organization's policy alone |
 
-Batch, query-string, compression, tool, beta and weights refusals each write an audit row, and a query-string refusal never records
-the token. Self-hosted Gateways and Gateways on a managed node keep the behavior described elsewhere
-in these docs. The admin view of `GET /health` reports where the Gateway runs in its `custody` field, one of `fleet`,
-`managed_node` or `self_hosted`.
+Batch, query-string, compression, tool, beta and weights refusals each write an audit row, and a
+query-string refusal never records the token.
+
+Self-hosted Gateways and Gateways on a managed node keep the behavior described elsewhere in these
+docs. The admin view of `GET /health` reports where the Gateway runs in its `custody` field, one of
+`fleet`, `managed_node` or `self_hosted`.
 
 ## Related
 

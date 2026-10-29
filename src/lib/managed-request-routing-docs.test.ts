@@ -66,7 +66,11 @@ test("every public page that names the Managed request routing card gives its Ga
     for (const match of text.matchAll(/\*\*([^*]*→[^*]*)\*\*/g)) {
       const path = match[1]?.trim() ?? "";
       if (path.endsWith(CARD_TITLE)) {
-        locations.push({ file: file.slice(docsRoot.length), path });
+        // POSIX separators, so the expectations read the same on Windows.
+        locations.push({
+          file: file.slice(docsRoot.length).replaceAll("\\", "/"),
+          path,
+        });
       }
     }
   }

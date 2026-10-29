@@ -3,10 +3,14 @@ title: Spaces and RAG
 description: Reference for Core Spaces, the local document collections that ground agents through vector, graph, hybrid, and unified retrieval.
 ---
 
-A **Space** is a document collection used for retrieval-augmented generation (RAG). Attach a Space to
-an agent and it can pull relevant passages from your documents to ground its answers, instead of
-relying on the model's training alone. Core stores Spaces locally and keeps their text, embedding
-vectors, and uploaded files encrypted at rest (see [Encryption and search](#encryption-and-search)).
+A **Space** is a document collection used for retrieval-augmented generation (RAG). An agent with
+a Space attached pulls relevant passages from your documents to ground its answers. Core stores
+Spaces locally and keeps their text, vectors, and files encrypted at rest (see
+[Encryption and search](#encryption-and-search)).
+
+Chunking strategies and connector imports are on [Spaces Ingestion](/docs/core/spaces-ingestion).
+
+<Figure name="memory" />
 
 ## Retrieval modes
 
@@ -18,25 +22,33 @@ use the node default. The default on a new installation is `vector`.
   chunk and connects every pair that occurs in that chunk. A search matches terms from the query,
   then follows the stored graph for at most three hops to find grounded chunks.
 
-Graph extraction is deterministic and works offline. The only supported extractor ID is
-`local-cooccurrence`. Its edges mean "these terms occurred in the same chunk." They are not
-semantic relations inferred by an LLM, such as "works for" or "located in." Setting
-`graph_extraction_model` (or `RYU_GRAPH_EXTRACTION_MODEL`) to any other value makes Core reject the
-configuration at startup, so a model ID is never accepted while a different extractor runs.
+Graph extraction is deterministic and works offline. The only supported extractor id is
+`local-cooccurrence`. Its edges mean "these terms occurred in the same chunk", not semantic
+relations an LLM inferred, such as "works for".
 
-Both modes obey the requested result limit and return document-backed chunks. Graph traversal also
-bounds each next-hop frontier, so a dense graph cannot grow without limit. The same query over the
-same stored graph follows a deterministic order.
+Setting `graph_extraction_model` (or `RYU_GRAPH_EXTRACTION_MODEL`) to any other value makes Core
+reject the configuration at startup. A model id is never accepted while a different extractor runs.
 
-Graph construction has explicit resource limits. Core extracts at most 64 unique terms from one
-chunk or query, ignores terms larger than 128 UTF-8 bytes, accepts at most 256 chunks in one
-document while a Space is in Graph mode, and caps a Space at 2,000,000 graph node-plus-edge rows.
-Oversized writes and rebuilds fail with an actionable error while the previous mode remains active.
-Wiki-link expansion adds at most 16 linked documents and 32 linked chunks to a search.
+Both modes obey the requested result limit and return document-backed chunks. Graph traversal
+bounds each next-hop frontier, and the same query over the same graph follows a deterministic
+order.
+
+### Graph limits
+
+| Limit | Value |
+|---|---|
+| Unique terms per chunk or query | 64 |
+| Term size | 128 UTF-8 bytes (larger terms are ignored) |
+| Chunks per document in Graph mode | 256 |
+| Graph node-plus-edge rows per Space | 2,000,000 |
+| Wiki-link expansion per search | 16 linked documents, 32 linked chunks |
+
+Oversized writes and rebuilds fail with an actionable error while the previous mode stays active
+(`crates/core/spaces/src/lib.rs`).
 
 On an organization-bound node, visibility is applied inside vector selection, graph seeding and
 traversal, and link expansion. Private rows cannot steer a shared result or consume its candidate
-budget. Every verified team membership is considered; JWT team ordering does not change results.
+budget. Every verified team membership counts; JWT team ordering does not change results.
 
 ### Change a Space's retrieval mode
 
@@ -49,33 +61,31 @@ Changing a mode is an asynchronous index operation, not a metadata toggle.
 - The previous mode and graph remain active until the replacement is ready. Cancelling a rebuild
   leaves them unchanged.
 
-`POST /api/spaces/:id/retrieval-mode` accepts the change and returns `202` with a `job_id`. Poll
-`GET /api/spaces/:id/retrieval-mode/status?job_id=...` for progress and the final counts. To stop a
-running rebuild, send that `job_id` to `POST /api/spaces/:id/retrieval-mode/cancel`. Starting another
-mode change while one is running returns a conflict.
+To change the mode:
 
-Rebuild job records belong to the running Core process. If Core restarts, the staged graph is
-discarded and the previously committed mode remains active. Refresh the Space to read that mode,
-then submit the change again if it is still needed.
+1. `POST /api/spaces/:id/retrieval-mode` accepts the change and returns `202` with a `job_id`.
+2. Poll `GET /api/spaces/:id/retrieval-mode/status?job_id=...` for progress and the final counts.
+3. To stop a running rebuild, send the `job_id` to `POST /api/spaces/:id/retrieval-mode/cancel`.
+
+Starting another mode change while one is running returns a conflict. Rebuild jobs belong to the
+running Core process: after a restart the staged graph is discarded and the previous mode stays
+active. Refresh the Space, then submit the change again if needed.
 
 ## Space home
 
-The desktop Space home is a shared-context workspace for people and agents. Open a Space to see its
-name, a left navigation rail, quick templates for a new page or database, and the most recently
-updated Markdown pages. Each recent row shows a preview of the page; select it to open the full page.
+The desktop Space home is a shared-context workspace for people and agents. It shows:
 
-The recent-page area has **Recent**, **Pinned**, and **Shared with Me** tabs. Search filters the
-recent rows and the file index together.
+- the Space name, a left navigation rail, and quick templates for a new page or database;
+- the most recently updated Markdown pages with previews, under **Recent**, **Pinned**, and
+  **Shared with Me** tabs (select a row to open the page);
+- the **Files** table, one index of every page, database, whiteboard, uploaded file, and
+  app-owned document, with type, size when available, last modified date, and search reach;
+- the file drop zone and the retrieval-mode, import/export, backup, and semantic-search controls.
 
-Below the previews, the **Files** table keeps every item in the Space in one searchable table. Pages,
-databases, whiteboards, uploaded files, and documents owned by installed Ryu apps remain in this
-same index, with their type, size when available, last modified date, and search reach. The table's
-search filters the visible rows locally; the separate Space search still runs retrieval across the
-stored document text. File rows that only have a name and type indexed keep that status visible in
-the table without changing the fact that the stored file can still be opened.
-
-The file drop zone, retrieval-mode, import/export, backup, and semantic-search controls are on the
-Space home. Dropped files go through the node's configured extraction and embedding path.
+The home search filters the recent rows and the file index together, locally. The separate Space
+search runs retrieval across stored document text. A file row indexed by name and type only shows
+that status, and the file still opens. Dropped files go through the node's configured extraction
+and embedding path.
 
 ## Embeddings
 
@@ -89,23 +99,23 @@ Embeddings are a swappable default. Core can embed in two ways:
 
 RAG defaults to the local embedding engine, so it works without an API key.
 
-Changing the embedding model is an index migration. Core tags every
-vector with its model and dimensionality, installs the new provider only after it has a valid
-configuration, and re-embeds stale rows in Spaces, unified retrieval, and encrypted message
-search. The migration is resumable and also resumes after a restart; until a row is re-embedded,
-it is excluded from search rather than compared across vector spaces.
+Changing the embedding model is an index migration:
 
-Core sends the OpenAI `dimensions` parameter only to models that can shorten their output, such
-as `text-embedding-3-small` and `text-embedding-3-large`. Models with a fixed width, such as
-`text-embedding-ada-002`, are called without it. If an endpoint still rejects `dimensions`, Core
-retries the request once without it. Either way, every returned vector must match the configured
-dimensions, and a vector of the wrong width fails with an error naming both sizes instead of being
-stored.
+- Core tags every vector with its model and dimensionality.
+- It installs the new provider only after the provider has a valid configuration.
+- It re-embeds stale rows in Spaces, unified retrieval, and encrypted message search. The
+  migration resumes after a restart.
+- Until a row is re-embedded, it is excluded from search rather than compared across vector spaces.
+
+Core sends the OpenAI `dimensions` parameter only to models that can shorten their output, such as
+`text-embedding-3-small` and `text-embedding-3-large`. Fixed-width models such as
+`text-embedding-ada-002` are called without it, and an endpoint that rejects it gets one retry without it. A returned vector of the wrong width
+fails with an error naming both sizes instead of being stored.
 
 For cloud embeddings, set the model's provider to `gateway`. Core then calls the local or managed
-Gateway at `POST /v1/embeddings`; Gateway authenticates the request, routes the model through its
-provider map, and keeps the upstream key server-side. Reranking follows the same boundary at
-`POST /v1/rerank`. Both endpoints reject oversized batches before forwarding them.
+Gateway at `POST /v1/embeddings`. Gateway authenticates the request, routes the model through its
+provider map, and keeps the upstream key server-side. Reranking uses the same boundary at
+`POST /v1/rerank`, and both endpoints reject oversized batches before forwarding them.
 
 ## Working with Spaces
 
@@ -132,15 +142,16 @@ provider map, and keeps the upstream key server-side. Reranking follows the same
 | Re-embed progress | `GET /api/embeddings/reindex/status` |
 
 Ingesting a document splits it into chunks, embeds each chunk, and stores both the text and the
-vector. In Graph mode, ingestion also writes the chunk's term nodes and co-occurrence edges. A
-Space search returns grounded chunks with `chunk_id`, `document_id`, `content`, and `distance`.
-A non-finite distance is returned as `null`; the mobile app displays “distance unavailable”
-while keeping the result visible. Use the returned result order rather than distance to rank hits.
+vector. In Graph mode, ingestion also writes the chunk's term nodes and co-occurrence edges.
+
+A Space search returns grounded chunks with `chunk_id`, `document_id`, `content`, and `distance`.
+A non-finite distance is returned as `null`, and the mobile app shows "distance unavailable". Rank
+hits by the returned order, not by distance.
 
 File and connected-app imports use the same document lifecycle after conversion. Document-like
-files become editable pages, while delimited and spreadsheet data becomes a database whose cell
-text is flattened for embedding. The import history records the conversion result; the created
-documents remain ordinary Space documents and follow the same visibility and retrieval rules.
+files become editable pages. Delimited and spreadsheet data becomes a database whose cell text is
+flattened for embedding. The import history records the conversion result. The created documents
+are ordinary Space documents and follow the same visibility and retrieval rules.
 
 ```mermaid
 flowchart LR
@@ -190,10 +201,6 @@ upgrade. Those older builds cannot read the encrypted values, so export your dat
 [Sealed User Content](/docs/core/encryption-user-content#spaces-documents-versions-links-graph-vectors-search-files) for exactly what is encrypted and what the
 keyed tokens reveal.
 
-## Chunking and imports
-
-Chunking strategies and connector imports are on [Spaces Ingestion](/docs/core/spaces-ingestion).
-
 ## Search options
 
 `POST /api/spaces/:id/search` takes the query and `limit` plus these optional fields:
@@ -208,16 +215,32 @@ Chunking strategies and connector imports are on [Spaces Ingestion](/docs/core/s
 | `hyde` | `true` asks a model for a short passage that would answer the query and searches with it too. |
 | `expansion_model` | The model for `multi_query` and `hyde`. Without it, Core uses the model selected for the `retrieval-expansion-model` feature, then the node default. On an organization node, only organization owners and admins can choose a model here; for other members the field is ignored. |
 
-Keyword search ranks chunks with BM25 over the same keyed word index that global Spaces search
-uses, so it matches whole words only and ignores very common words, and Core keeps it in step with
-every chunk change. Both rankings are merged by weighted reciprocal rank, because a BM25 score and
-a vector distance are not on comparable scales. When fusion is used, each result carries a `score`
-(higher is better, comparable only within one response).
+Keyword search ranks chunks with BM25 over the same keyed word index as global Spaces search. It
+matches whole words only, ignores very common words, and stays in step with every chunk change.
+
+Both rankings merge by weighted reciprocal rank, because a BM25 score and a vector distance are not
+on comparable scales. With fusion, each result carries a `score` (higher is better, comparable only
+within one response).
 
 Query expansion calls the model through Gateway, so the usual routing, policy, and budget apply.
-It fails open: if the model is unavailable or returns nothing usable, the original query is still
-searched and the response includes a `warning`. When expansion ran, the response lists the
-`queries` that were searched and any `hypothetical_document`.
+It fails open: if the model is unavailable or returns nothing usable, Core still searches the
+original query and adds a `warning`. When expansion ran, the response lists the searched `queries`
+and any `hypothetical_document`.
+
+```mermaid
+flowchart LR
+  Q["Query"] --> Exp["multi_query, hyde (optional)"]
+  Exp --> Native["Vector or graph ranking"]
+  Exp --> BM["BM25 ranking (hybrid only)"]
+  F["filter"] --> Native
+  F --> BM
+  Native --> Fuse["Weighted reciprocal rank"]
+  BM --> Fuse
+  Fuse --> Links["Wiki-link expansion"]
+  Links --> RR["Reranker (rerank)"]
+  RR --> Par["Parent expansion (parent)"]
+  Par --> Out["Results"]
+```
 
 Each result includes `metadata` (the splitter metadata plus the chunk's `ordinal`) and, when
 `parent` was requested, `parent_content`.
@@ -245,9 +268,9 @@ Filters are JSON objects in the operator style most vector stores use:
 - Filters are limited to 16 levels of nesting, 256 predicates, and 1,024 values per list. An
   invalid filter is rejected with `400`.
 
-In a Space search a chunk's metadata is its splitter metadata plus `source` (always `space`),
-`space_id`, `document_id`, `title`, `kind`, `mime`, `ordinal`, `created_at`, and `updated_at`. The
-filter is applied before ranking and inside the caller's visibility rules, so a filtered search
+In a Space search, a chunk's metadata is its splitter metadata plus `source` (always `space`),
+`space_id`, `document_id`, `title`, `kind`, `mime`, `ordinal`, `created_at`, and `updated_at`.
+The filter applies before ranking and inside the caller's visibility rules, so a filtered search
 still returns up to `limit` matching chunks.
 
 ## Portable source and local retrieval
@@ -257,56 +280,78 @@ Markdown pages, YAML frontmatter, database schema files, and Markdown row files.
 embedding vectors, vector tables, provider identifiers, or model-specific dimensions.
 
 Importing a package creates a new private Space without vectors. Run the manual embedding re-index
-when you want RAG; the target node's current embedding and retrieval configuration is used then.
-This keeps a shared package portable across local, remote, and Gateway-backed embedding setups. If
-the package is edited outside Ryu, import it again to create a fresh source snapshot; changing the
-node's embedding model remains a normal local re-index operation.
+when you want RAG; it uses the target node's current embedding and retrieval configuration. This
+keeps a package portable across local, remote, and Gateway-backed embedding setups.
+
+If the package is edited outside Ryu, import it again to create a fresh source snapshot. Changing
+the node's embedding model stays a normal local re-index operation.
 
 ## Source history and realtime collaboration
 
-Space page and database source saves are checkpointed in the node-local Git repository under
-`files/source-history/spaces/` under the data directory. The existing generic `VersionHistory` control and version endpoints
-remain the UI/API contract, so diffs and restores continue to work without exposing Git details to
-the editor. Git commit ids are the source version ids for documents with Git checkpoints; older SQLite
-snapshots remain readable as a compatibility fallback. A successful SQLite document
-mutation is not rolled back if the local Git projection is temporarily unavailable; Core logs the
-degraded checkpoint and keeps the document write available for repair.
+Space page and database saves are checkpointed in a node-local Git repository at
+`files/source-history/spaces/` under the data directory.
 
-Yjs/CRDT is still the realtime collaboration and merge primitive. SQLite `document_versions` remains
-the bounded conflict/retry and legacy snapshot primitive, but it is not a second user-facing history
-once Git checkpoints exist. Neither Git history nor portable packages include embeddings, vectors,
-credentials, or chat/session state.
+- The generic `VersionHistory` control and version endpoints stay the UI and API contract, so
+  diffs and restores work without exposing Git to the editor.
+- Git commit ids are the version ids for documents with Git checkpoints. Older SQLite snapshots
+  stay readable as a fallback.
+- If the Git projection is temporarily unavailable, a successful SQLite write is not rolled back.
+  Core logs the degraded checkpoint and keeps the write available for repair.
+- Yjs (CRDT) is the realtime collaboration and merge primitive. SQLite `document_versions` is the
+  bounded conflict/retry and legacy snapshot store, not a second user-facing history.
+- Neither Git history nor portable packages include embeddings, vectors, credentials, or chat or
+  session state.
 
 ## Unified retrieval
 
 Beyond per-Space search, Core exposes one retrieval endpoint that spans both Spaces and encrypted
 [memory](/docs/core/memory).
 
-- `POST /api/retrieval/index` adds a stable-id chunk to retrieval. Its default
-  `memory` source is encrypted and replaces the same-id user-level memory on a
-  repeat request; use `POST /api/memory` when you need explicit scope, category,
-  importance, or tags. Pass `source: "space"` and a `space_id` for a Space chunk; a `space_id`
-  that names a Space needs write access to it. A Space chunk may carry a `metadata` JSON object (up
-  to 16 KiB) for filtering. A Space chunk can replace only a Space chunk you
-  indexed yourself: an id already used by memory, an imported knowledge bundle, or another
-  member's chunk returns `409`.
-- `POST /api/retrieval/search` searches across memory and selected Spaces, with options for
-  `top_k`, `space_ids`, `include_memory`, and a `min_score` threshold. It also accepts `filter`,
-  `hybrid`, `multi_query`, `hyde`, and `expansion_model` with the meanings described in
-  [Search options](#search-options). A filter matches an indexed chunk's `metadata` plus the
-  built-in fields `source`, `space_id`, `scope`, `agent_id`, and `importance`; inside each
-  selected Space it matches the Space fields listed above. `hybrid` applies inside the selected
-  Spaces.
+### Index a chunk
 
-This is also the path used for chat recall. When an agent has Space IDs in its memory settings,
-Core searches those Spaces under each Space's stored mode, then merges their results with eligible
-long-term memory. A Graph Space therefore uses the same bounded graph traversal in chat that it
-uses in the Space search screen.
+`POST /api/retrieval/index` adds a stable-id chunk to retrieval.
+
+- The default `memory` source is encrypted and replaces the same-id user-level memory on a repeat
+  request. Use `POST /api/memory` for explicit scope, category, importance, or tags.
+- For a Space chunk, pass `source: "space"` and a `space_id`. A `space_id` that names a Space needs
+  write access to it.
+- A Space chunk may carry a `metadata` JSON object (up to 16 KiB) for filtering.
+- A Space chunk can replace only a Space chunk you indexed yourself. An id already used by memory,
+  an imported knowledge bundle, or another member's chunk returns `409`.
+
+### Search memory and Spaces
+
+`POST /api/retrieval/search` searches across memory and selected Spaces. It takes `top_k`,
+`space_ids`, `include_memory`, and a `min_score` threshold, plus `filter`, `hybrid`, `multi_query`,
+`hyde`, and `expansion_model` as in [Search options](#search-options).
+
+A filter matches an indexed chunk's `metadata` plus `source`, `space_id`, `scope`, `agent_id`, and
+`importance`. Inside each selected Space it matches the Space fields listed above, and `hybrid`
+applies inside the selected Spaces.
+
+This is also the chat recall path. When an agent has Space ids in its memory settings, Core
+searches those Spaces under each Space's stored mode, then merges the results with eligible
+long-term memory. A Graph Space uses the same bounded traversal in chat as in Space search.
+
+```mermaid
+flowchart LR
+  Turn["Chat turn or retrieval/search"] --> Mem["Long-term memory"]
+  Turn --> V["Vector Spaces"]
+  Turn --> G["Graph Spaces"]
+  Turn --> VS["vector-store source"]
+  Mem --> Merge["Merge by rank"]
+  V --> Merge
+  G --> Merge
+  VS --> Merge
+  Merge --> Ctx["Grounding context"]
+```
 
 ### External vector stores
 
 A node can also attach one collection in Qdrant, Chroma, Pinecone, Weaviate, Milvus, pgvector, or a
-separate local sqlite-vec file. That collection answers as the `vector-store` source: include
+separate local sqlite-vec file.
+
+That collection answers as the `vector-store` source: include
 `"vector-store"` in `space_ids` (or in an agent's Space list) to search it, and its hits are merged
 by rank with memory and Spaces. See [Vector store configuration](/docs/start-here/configuration#vector-store).
 

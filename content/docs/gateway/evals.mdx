@@ -9,13 +9,31 @@ online for outputs you already have. This page is the reference for the eval run
 evaluators that score runs and guard live traffic are listed in the
 [evaluator catalog](/docs/gateway/evaluators). For request-level records, see [Gateway audit](/docs/gateway/audit).
 
-## Evals
+<Figure name="evals" />
 
-The eval runner (`EvalsRunner`) does three jobs: it passively scores sampled live responses and folds
-those scores into a rolling per-provider average, replays a dataset on demand for explicit eval runs,
-and scores already-completed outputs through the online scoring endpoint. Passive scoring is **on by
-default** (`EvalsConfig.enabled`
-defaults to `true` and `sample_rate` defaults to `1.0`).
+## Eval runner
+
+The eval runner (`EvalsRunner`) does three jobs:
+
+- **Passive scoring.** It scores sampled live responses and folds those scores into a rolling
+  per-provider average. This is **on by default** (`EvalsConfig.enabled` defaults to `true` and
+  `sample_rate` defaults to `1.0`).
+- **Dataset runs.** It replays a dataset on demand for explicit eval runs.
+- **Online scoring.** It scores already-completed outputs through the online scoring endpoint.
+
+Separately, [online evals](#online-evals) score a sampled fraction of production traffic with
+catalog evaluators.
+
+```mermaid
+flowchart LR
+  LIVE["Live chat traffic"] --> SAMPLE["Passive sampling"]
+  SAMPLE --> EMA["Rolling score per provider"]
+  EMA --> ROUTE["Eval-aware routing"]
+  LIVE --> ONLINE["Online evals queue"]
+  ONLINE --> RECORDS["GET /v1/evals/online"]
+  DATASET["Dataset"] --> RUN["POST /v1/evals/run"]
+  OUTPUT["Completed output"] --> SCORE["POST /v1/evals/score"]
+```
 
 ### Dimensions
 
@@ -31,9 +49,12 @@ The weighted score is `0.4 * latency + 0.3 * token_efficiency + 0.3 * policy`. A
 carries its `overall` value back in the `x-eval-score` response header.
 
 Every case reports `latency_available` and `policy_available`. Normal pipeline runs measure both;
-precomputed outputs can mark either dimension unavailable. Unmeasured dimensions are omitted from
-the case's weighted `overall`, from the corresponding aggregate average/pass rate, and from the
-available-case counts instead of being treated as zeroes or passes.
+precomputed outputs can mark either dimension unavailable. An unmeasured dimension is not treated as
+a zero or a pass. It is omitted from:
+
+- the case's weighted `overall`;
+- the corresponding aggregate average or pass rate;
+- the available-case counts.
 
 ### Sampling
 
@@ -45,10 +66,11 @@ predictable and even rather than bursty.
 ### Rolling scores
 
 Each sampled score is folded into a per-provider exponential moving average (`EMA_ALPHA = 0.2`),
-stored lock-free so the routing path reads it without a mutex. `eval_routing` consumes these averages
-to bias provider choice toward the current leader while reserving an `explore_ratio` of traffic for
-non-leaders, so scores stay fresh. See [Routing](/docs/gateway/routing) for the full A/B selection
-logic.
+stored lock-free so the routing path reads it without a mutex.
+
+`eval_routing` consumes these averages to bias provider choice toward the current leader. It
+reserves an `explore_ratio` of traffic for non-leaders, so scores stay fresh. See
+[Routing](/docs/gateway/routing) for the full A/B selection logic.
 
 ```http
 GET /v1/evals
@@ -92,23 +114,38 @@ POST /v1/evals/run
 
 replays each prompt in `dataset` through the full pipeline (firewall, routing, provider call) and
 returns per-case scores plus an aggregate. An explicit run always scores, independent of whether
-passive evals are enabled. The expanded dataset is capped at 1,000 cases and the request's
-conservative provider/judge-call upper bound is capped at 2,000 calls. Cases can run concurrently
-within those limits; the request body is capped at 8 MiB, each case at 256 KiB, and recursive
-assertion sets at eight levels/128 nodes. The response preserves input order so a result matrix
-remains deterministic.
+passive evals are enabled. The response preserves input order so a result matrix remains
+deterministic.
+
+Cases can run concurrently within these limits:
+
+| Limit | Value |
+|---|---|
+| Expanded dataset | 1,000 cases |
+| Provider and judge calls (conservative upper bound) | 2,000 calls |
+| Request body | 8 MiB |
+| One case | 256 KiB |
+| Recursive assertion sets | 8 levels, 128 nodes |
+
+#### Batch comparisons
 
 For larger, non-urgent comparisons, the admin-only [OpenRouter Batch API](/docs/gateway/batches)
 primitive can submit many text requests under one model and return independent rows by `custom_id`.
-It uses OpenRouter's asynchronous completion and billing path; its jobs do not run through the normal
-per-request Gateway budget and policy pipeline. The synchronous runner above remains the option when
-each case must traverse that pipeline.
+
+It uses OpenRouter's asynchronous completion and billing path, so its jobs do not run through the
+normal per-request Gateway budget and policy pipeline. Use the synchronous runner when each case
+must traverse that pipeline.
 
 The core-client `scoreGatewayEvalBatch` helper rejoins completed rows to the original eval cases and
-scores their precomputed outputs through this runner. It reports the batch turnaround time as the
-case latency because OpenRouter does not expose per-row latency. Gateway marks policy as unmeasured
-for those precomputed rows unless the caller supplies a verified `provider_output_policy_pass`; the
-scorecard flags those dimensions and does not count them as policy failures or passes.
+scores their precomputed outputs through this runner.
+
+- It reports the batch turnaround time as the case latency, because OpenRouter does not expose
+  per-row latency.
+- Gateway marks policy as unmeasured for those rows unless the caller supplies a verified
+  `provider_output_policy_pass`. The scorecard flags those dimensions and does not count them as
+  policy failures or passes.
+
+#### Request fields
 
 | Field | Purpose |
 |---|---|
@@ -126,45 +163,58 @@ scorecard flags those dimensions and does not count them as policy failures or p
 | `tags` | String key/value labels retained in the run envelope |
 | `prefix`, `suffix` | Run-level text around each single-turn prompt |
 
-Each case also supports stable `id`/`description`, typed `vars`, `metadata`, a per-case
-`provider`/`providers` selection, a precomputed `provider_output`, and `options` for prefix, suffix,
-output/variable transforms, timeout, and caching, plus an optional `context`/reference payload for
-factuality and faithfulness checks.
+Each case also supports:
 
-Assertions evaluated against the response include the
-deterministic Promptfoo-compatible set (`contains`, `not_contains`, `equals`, `regex`,
-`icontains`, `starts_with`, contains-any/all, JSON/HTML/XML/SQL containment, validity/refusal,
-Levenshtein, latency, cost, moderation, negation via `not: true`, and nested assertion sets) plus model-assisted
-`llm-rubric`, `similar`, `factuality`, `context-faithfulness`, and `answer-relevance`. Custom JS/Python
-assertions run through Core's sandbox seam and report unavailable runtimes as `executed: false`; the
-same flag is returned for model/media checks whose prerequisites are unavailable.
+- a stable `id` and `description`, typed `vars`, and `metadata`;
+- a per-case `provider` or `providers` selection, and a precomputed `provider_output`;
+- `options` for prefix, suffix, output and variable transforms, timeout, and caching;
+- an optional `context` or reference payload for factuality and faithfulness checks.
 
-Deterministic
-assertion sets may be nested, but model-graded assertions (`llm_judge`, `similar`, factuality,
-faithfulness, and answer relevance) must be top-level case assertions; the API rejects them inside
-an `assert_set` rather than reporting a misleading unexecuted failure. Assertion scores remain
-separate from latency, token, policy, and cost measurements.
+#### Assertions
 
-Unlike `GET /v1/audit`, this
-endpoint authenticates with any valid API key, not the master key, because a dataset run is a normal
-metered call.
+Assertions evaluated against the response include:
 
-A refused run answers with the same error object as a chat request, for example `401` with
-`type: "invalid_api_key"` for a bad key. On Ryu's hosted Gateway, a run that arrives while the
-Gateway holds no version of the
+- **Deterministic, Promptfoo-compatible.** `contains`, `not_contains`, `equals`, `regex`,
+  `icontains`, `starts_with`, contains-any/all, JSON/HTML/XML/SQL containment, validity and
+  refusal, Levenshtein, latency, cost, moderation, negation via `not: true`, and nested assertion
+  sets.
+- **Model-assisted.** `llm-rubric`, `similar`, `factuality`, `context-faithfulness`, and
+  `answer-relevance`.
+- **Custom JS/Python.** These run through Core's sandbox seam and report an unavailable runtime as
+  `executed: false`. The same flag is returned for model or media checks whose prerequisites are
+  unavailable.
+
+Deterministic assertion sets may be nested. Model-graded assertions (`llm_judge`, `similar`,
+factuality, faithfulness, and answer relevance) must be top-level case assertions; the API rejects
+them inside an `assert_set` rather than reporting a misleading unexecuted failure. Assertion scores
+remain separate from latency, token, policy, and cost measurements.
+
+#### Authentication and errors
+
+Unlike `GET /v1/audit`, this endpoint authenticates with any valid API key, not the master key,
+because a dataset run is a normal metered call. A refused run answers with the same error object as
+a chat request, for example `401` with `type: "invalid_api_key"` for a bad key.
+
+On Ryu's hosted Gateway, a run that arrives while the Gateway holds no version of the
 [Ryu platform policy](/docs/gateway/organization-policy#ryu-platform-policy-on-hosted-gateways) is
-refused with a retryable `503` whose `error.code` is `screening_unavailable` and a `Retry-After`
-header, before any case reaches a provider. `POST /v1/evals/score` answers the same way.
+refused before any case reaches a provider. The refusal is a retryable `503` whose `error.code` is
+`screening_unavailable`, with a `Retry-After` header. `POST /v1/evals/score` answers the same way.
 
-From Core, `POST /api/gateway/evals/run` proxies the dataset run (including optional
-`evaluators` and Core-local `code_evaluators`). `GET /api/gateway/evaluators` proxies the
-evaluator catalog.
+#### From Core and Desktop
+
+From Core, `POST /api/gateway/evals/run` proxies the dataset run (including optional `evaluators`
+and Core-local `code_evaluators`). `GET /api/gateway/evaluators` proxies the evaluator catalog.
 
 Open **Gateway → Quality tests** in Desktop to run the built-in three-case set without importing a
-dataset. Choose the model id to evaluate; the panel submits an empty `dataset` so Gateway uses its
-built-in cases, then shows aggregate latency, token efficiency, policy, and optional substring
-scores alongside each prompt's results. A failed request shows Gateway's returned error so you can
-address it and retry. For custom prompts, assertions, and judge rubrics, use Prompt Studio.
+dataset:
+
+1. Choose the model id to evaluate. The panel submits an empty `dataset`, so Gateway uses its
+   built-in cases.
+2. Read the aggregate latency, token efficiency, policy, and optional substring scores alongside
+   each prompt's results.
+3. If the request fails, the panel shows Gateway's returned error so you can address it and retry.
+
+For custom prompts, assertions, and judge rubrics, use Prompt Studio.
 
 ### Online scoring
 
@@ -173,17 +223,22 @@ POST /v1/evals/score
 ```
 
 scores an already-completed output without replaying its provider request. Send `response` plus
-optional `prompt`, `model`, typed `vars`, `metadata`, `expected`, assertions, and evaluator ids. Pass
-`latency_ms` and `cost_micro_usd` when the measurements came from an external trace; latency and cost
-assertions use those submitted measurements. Pass `policy_pass` only when the external trace records
-that outcome; omission marks policy as unmeasured rather than assuming a pass.
+optional `prompt`, `model`, typed `vars`, `metadata`, `expected`, assertions, and evaluator ids.
 
-The request body is capped at 512 KiB and the submitted response is bounded to 256 KiB; expensive
-Levenshtein comparisons skip oversized inputs. Model-graded assertions may make an explicit second judge
-call through the normal Gateway pipeline, judged by `judge_model` when the request names one, else
-`[evals].judge_model`, else `model` (or the configured default); deterministic-only scoring needs no
-model at all. Core exposes the owner-routed equivalent at
-`POST /api/gateway/evals/score`, so desktop clients never need the Gateway admin key.
+- Pass `latency_ms` and `cost_micro_usd` when the measurements came from an external trace. Latency
+  and cost assertions use those submitted measurements.
+- Pass `policy_pass` only when the external trace records that outcome. Omitting it marks policy as
+  unmeasured rather than assuming a pass.
+
+The request body is capped at 512 KiB and the submitted response at 256 KiB. Expensive Levenshtein
+comparisons skip oversized inputs.
+
+Model-graded assertions may make an explicit second judge call through the normal Gateway pipeline.
+The judge is `judge_model` when the request names one, else `[evals].judge_model`, else `model` (or
+the configured default). Deterministic-only scoring needs no model at all.
+
+Core exposes the owner-routed equivalent at `POST /api/gateway/evals/score`, so desktop clients
+never need the Gateway admin key.
 
 ### Online evals
 
@@ -240,10 +295,11 @@ GET /v1/evals/online?request_id=&trace_id=&tenant=&agent_id=&evaluator=&failed_o
 ```
 
 Each record links the scores to the production `requestId` and, when tracing is on, the W3C
-`traceId`, and carries the tenant, agent, model, provider, judge model, and a `pass` flag (every
+`traceId`. It also carries the tenant, agent, model, provider, judge model, and a `pass` flag (every
 executed evaluator passed). Records are newest first and held in memory up to `store_capacity`.
-`GET /v1/evals` also reports the online configuration and counters (`enqueued`,
-`droppedQueueFull`, `scored`, `judgeBudgetSkipped`). Both endpoints require admin authorization.
+
+`GET /v1/evals` also reports the online configuration and counters (`enqueued`, `droppedQueueFull`,
+`scored`, `judgeBudgetSkipped`). Both endpoints require admin authorization.
 
 ### Bounded red-team campaigns
 
@@ -254,13 +310,20 @@ POST /api/gateway/redteam/run
 ```
 
 The request accepts an agent id, an optional model, and an optional closed list of strategy ids.
-When the list is omitted, Core runs ten server-owned probes covering `prompt_injection`,
-`jailbreak`, `pii_exfiltration`, `tool_misuse`, `toxic_output`, system-prompt and indirect
-injection, SQL and shell injection, and bias/fairness. Each probe is scored through the existing
-Gateway evaluator catalog and returns a `protected` boolean plus bounded evaluator detail. Unknown
-strategy ids are rejected. The tool-misuse probe is text-only; the campaign never executes a real
-tool. Because the probes are provider-backed, they use the normal Gateway authentication, policy,
-budget, and audit path.
+Unknown strategy ids are rejected. When the list is omitted, Core runs all ten server-owned probes:
+
+| Strategy id | Scored by evaluator |
+|---|---|
+| `prompt_injection`, `system_prompt_leak`, `indirect_injection` | `prompt_injection` |
+| `jailbreak`, `toxic_output` | `toxicity` |
+| `pii_exfiltration` | `pii_leakage` |
+| `tool_misuse`, `sql_injection`, `shell_injection` | `code_injection` |
+| `bias_fairness` | `bias_fairness` |
+
+Each probe is scored through the existing Gateway evaluator catalog and returns a `protected`
+boolean plus bounded evaluator detail. The tool-misuse probe is text-only; the campaign never
+executes a real tool. Because the probes are provider-backed, they use the normal Gateway
+authentication, policy, budget, and audit path.
 
 Desktop (in an agent's observability view) and the [Activity app](/docs/apps/activity) render this
 as **Security sweep**. The CLI exposes the same contract:
@@ -281,10 +344,10 @@ number you pass.
 
 ## Local versus hosted capabilities
 
-Ryu runs the observe, evaluate, and secure workflow locally: correlated traces, prompt and model
-experiments, deterministic and model-assisted scoring, custom sandboxed evaluators, human review,
-facets/views, exports, online scoring, red-team probes, CI gates, and local retention. Ryu keeps these
-records on the node by default and routes provider calls through its own Gateway.
+Ryu runs the observe, evaluate, and secure workflow locally. That covers correlated traces, prompt
+and model experiments, deterministic and model-assisted scoring, custom sandboxed evaluators, human
+review, facets and views, exports, online scoring, red-team probes, CI gates, and local retention.
+Ryu keeps these records on the node by default and routes provider calls through its own Gateway.
 
 Some capabilities belong to hosted evaluation services. The table shows the local Ryu behavior that takes their place.
 

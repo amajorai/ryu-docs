@@ -4,46 +4,67 @@ description: "Reference for the Gateway evaluator catalog: built-in and custom e
 tags: ["Gateway", "Evals", "Evaluators", "Guardrails"]
 ---
 
-The [eval runner](/docs/gateway/evals) scores responses on three fixed dimensions. Separately, the Gateway ships a
-**unified evaluator catalog**: one taxonomy that powers both inline guardrails and offline eval
-scoring from a single definition.
+The [eval runner](/docs/gateway/evals) scores responses on three fixed dimensions. Separately, the
+Gateway ships a **unified evaluator catalog**: one taxonomy that powers both inline guardrails and
+offline eval scoring from a single definition.
 
 ```http
 GET /v1/evaluators
 ```
 
-The endpoint reads the built-in evaluator catalog without changing state or exposing provider credentials. This static catalog remains public. Live evaluation snapshots require admin authorization, and direct firewall checks require an authenticated caller.
+The endpoint reads the built-in evaluator catalog without changing state or exposing provider
+credentials.
+
+- This static catalog remains public.
+- Live evaluation snapshots require admin authorization.
+- Direct firewall checks require an authenticated caller.
+
+```mermaid
+flowchart TD
+  DEF["Evaluator definition"] --> GATE{"Runtime support check"}
+  GATE -->|"code, media target, or unknown detector"| OFF["Capability reported false"]
+  GATE -->|supported| CAPS["capabilities.inline / capabilities.offline"]
+  CAPS --> BIND["FirewallConfig.evaluators binding"]
+  BIND -->|inline| ACT["Block, Sanitize, or Warn on the chat pipeline"]
+  BIND -->|offline| SCORE["Score in dataset runs"]
+```
 
 ## The catalog
 
-30 built-in evaluators across 8 categories (`builtin_catalog`). Each entry carries a `capabilities`
-object with two booleans (`inline` and `offline`) derived from the entry's own config so they
-can never disagree. This is a **gate**: an evaluator that is offline-only is never
-offered as an inline guardrail.
+The catalog holds 30 built-in evaluators across 8 categories (`builtin_catalog`,
+`apps/gateway/src/evaluators/catalog.rs`). Each entry carries a `capabilities` object with two
+booleans, `inline` and `offline`.
 
-| Category | Count | Evaluators | Inline? | Offline? |
+- The booleans are derived from the entry's own config, so they can never disagree with it.
+- The Gateway then turns off any capability it cannot execute (`gate_unavailable_capabilities`).
+- This is a **gate**: an evaluator that is not inline-capable is never offered as an inline
+  guardrail.
+
+| Category | Count | Evaluators | Inline | Offline |
 |---|---|---|---|---|
 | **Security** | 3 | `pii_leakage`, `code_injection`, `prompt_injection` | Yes (enforced) | Yes |
 | **Safety** | 2 | `toxicity`, `bias_fairness` | Yes (enforced, LLM judge) | Yes |
-| **Quality** | 7 | `hallucination`, `assertions`, `code_checker`, `exact_match`, `correctness`, `conciseness`, `answer_relevance` | No | Yes |
+| **Quality** | 7 | `hallucination`, `assertions`, `code_checker`, `exact_match`, `correctness`, `conciseness`, `answer_relevance` | No | Yes, except `code_checker` |
 | **Conversation** | 6 | `perceived_error`, `support_intent`, `tone`, `knowledge_retention`, `user_satisfaction`, `task_completion` | No | Yes |
 | **Trajectory** | 3 | `plan_adherence`, `trajectory_accuracy`, `tool_selection` | No | Yes |
-| **Image** | 2 | `explicit_content`, `sensitive_imagery` | Yes (Block / Warn) | Yes |
-| **Voice** | 5 | `audio_quality`, `user_interrupts`, `transcription_accuracy`, `vocal_affect`, `language` | No | Yes |
-| **Custom** | 2 | `llm_as_a_judge`, `code_evaluator` | Configurable (LLM judge only) | Configurable |
+| **Image** | 2 | `explicit_content`, `sensitive_imagery` | No (catalogued only) | No |
+| **Voice** | 5 | `audio_quality`, `user_interrupts`, `transcription_accuracy`, `vocal_affect`, `language` | No | No |
+| **Custom** | 2 | `llm_as_a_judge`, `code_evaluator` | `llm_as_a_judge` only | `llm_as_a_judge` only |
+
+Code-backed entries (`code_checker`, `code_evaluator`) and the Image and Voice entries stay in the
+catalog as templates, but report both capabilities as `false`. See
+[Evaluator availability](#evaluator-availability).
 
 Key flags per entry:
 
-- **`enforced`** - whether the evaluator is wired to execution. The five Security + Safety text
+- **`enforced`** - whether the evaluator is wired to execution. The five Security and Safety text
   detectors (`pii_leakage`, `code_injection`, `prompt_injection`, `toxicity`, `bias_fairness`)
   report `enforced: true`. Every other entry reports `false` so the UI can distinguish catalogued
   from wired.
-- **`higherIsBetter`** - score polarity. Negative-signal judges (toxicity, bias, hallucination)
-  score a bad signal, so a high score is worse and this flag is `false`.
+- **`higherIsBetter`** - score polarity. Negative-signal judges (such as toxicity, bias, and
+  hallucination) score a bad signal, so a high score is worse and this flag is `false`.
 
 ## Inline vs offline
-
-The two execution modes serve different purposes:
 
 | Mode | When it runs | What it needs | Action |
 |---|---|---|---|
@@ -62,11 +83,16 @@ Two blank-slate evaluators let you create your own:
 | `llm_as_a_judge` | Sends the response to a configurable judge model with a custom rubric | `judge_model`, `rubric` |
 | `code_evaluator` | Runs JS/Python code against the response in a sandboxed environment | `language`, `code`, `entry_point` |
 
-Saving a custom evaluator (`PUT /v1/config` with `custom_evaluators`) applies immediately: the
+### Saving and applying
+
+Saving a custom evaluator (`PUT /v1/config` with `custom_evaluators`) applies immediately. The
 catalog, dataset runs, online evals, and inline guardrails use the new set on the next request, and
-the configuration receipt reports `restartRequired: false`. Custom `regex` evaluators run their own
-patterns inline and offline; patterns that do not compile within the size limit are rejected when you
-save.
+the configuration receipt reports `restartRequired: false`.
+
+Custom `regex` evaluators run their own patterns inline and offline. Patterns that do not compile
+within the size limit are rejected when you save.
+
+### Builtin detectors
 
 A custom evaluator can also use a named `builtin` detector, which runs the firewall's curated
 patterns for that kind: `pii`, `secret`, `prompt_injection`, `code_injection`, `toxicity`, or
@@ -76,20 +102,25 @@ patterns for that kind: `pii`, `secret`, `prompt_injection`, `code_injection`, `
 { "id": "no_secrets", "impl": { "kind": "builtin", "detector": "secret" } }
 ```
 
-Custom evaluators follow the same `inline`/`offline` capability pattern, except that the Gateway
-does not run code inline, so a code evaluator is never an inline guardrail. In Desktop, the
-inline-guardrail toggle and the pass threshold appear only for an LLM judge. **Safety filters** lists
-inline evaluators, so it offers only the LLM-as-a-Judge editor; create a code evaluator from an
-agent's **Evals** view.
+### Code evaluators and Desktop
 
-Promptfoo-style JavaScript assertions can use the injected `output`, `input`, `expected`, `vars`, and
-`context` names, and may return a boolean, numeric score, or `{ score, pass, reason }` result. Ryu
-executes these forms in Core's deny-all sandbox and reports `executed: false` when the required
-runtime is unavailable.
+Custom evaluators follow the same `inline`/`offline` capability pattern. The Gateway does not run
+code inline, so a code evaluator is never an inline guardrail.
+
+- In Desktop, the inline-guardrail toggle and the pass threshold appear only for an LLM judge.
+- **Safety filters** lists inline evaluators, so it offers only the LLM-as-a-Judge editor.
+- Create a code evaluator from an agent's **Evals** view.
+
+Promptfoo-style JavaScript assertions can use the injected `output`, `input`, `expected`, `vars`,
+and `context` names. They may return a boolean, a numeric score, or a `{ score, pass, reason }`
+result. Ryu executes these forms in Core's deny-all sandbox and reports `executed: false` when the
+required runtime is unavailable.
 
 ## Binding an evaluator
 
-Evaluators are bound to a firewall scope through `FirewallConfig.evaluators`, a list of `EvaluatorBinding` entries that cascade node → org → agent with the same union-plus-lock semantics as the firewall dials (see [Hierarchical policy resolution](/docs/gateway/security)).
+Evaluators are bound to a firewall scope through `FirewallConfig.evaluators`, a list of
+`EvaluatorBinding` entries. Bindings cascade node → org → agent with the same union-plus-lock
+semantics as the firewall dials (see [Hierarchical policy resolution](/docs/gateway/security)).
 
 | Binding field | Meaning |
 |---|---|
@@ -106,25 +137,34 @@ Image-target evaluators are catalogued but not yet enforced on the image path.
 
 ## Evaluator availability
 
-Use `GET /v1/evaluators` to check each entry's `capabilities.inline` and
-`capabilities.offline` before offering it for a run or guardrail. Entries can remain
-in the catalog as templates while both capabilities are `false`.
+Use `GET /v1/evaluators` to check each entry's `capabilities.inline` and `capabilities.offline`
+before offering it for a run or guardrail. Entries can remain in the catalog as templates while both
+capabilities are `false`.
 
-Gateway does not currently execute JavaScript/Python `code` evaluators, and a `builtin`
-evaluator whose detector name is not one of the listed firewall detectors is unavailable. Image and audio evaluator targets are unavailable: the
-dataset runner accepts text, and the inline pipeline has no media judge. Wasm
-policy evaluators support inline execution only. Supported text evaluators continue
-to run through their existing deterministic or LLM judge paths. The agent evals
-surface can separately execute populated Code definitions through Core's sandbox
-and merge their scores; this does not enable code guardrails in Gateway.
+### What is unavailable
 
-Offline runs requesting these unavailable modes return a `400` error before any
-provider or judge call. Configuration updates cannot enable an unavailable mode.
-Legacy active unavailable inline bindings also reject traffic rather than silently
-allowing requests under an unexecuted guardrail. Disable or remove the binding to
-recover; disabled bindings may remain in configuration. Offline-only bindings do
-not guard live traffic. Custom definitions loaded
-from older configuration are projected with unavailable capabilities set to `false`.
+| Evaluator kind | Inline | Offline |
+|---|---|---|
+| JavaScript/Python `code` evaluators | Unavailable | Unavailable |
+| `builtin` with a detector name not in the list above | Unavailable | Unavailable |
+| Image and audio targets | Unavailable (no media judge) | Unavailable (the dataset runner accepts text) |
+| Wasm policy evaluators | Supported | Unavailable |
+
+Supported text evaluators continue to run through their existing deterministic or LLM judge paths.
+The agent evals surface can separately execute populated Code definitions through Core's sandbox
+and merge their scores. This does not enable code guardrails in Gateway.
+
+### How unavailable modes fail
+
+- Offline runs requesting an unavailable mode return a `400` error before any provider or judge
+  call.
+- Configuration updates cannot enable an unavailable mode.
+- Legacy active unavailable inline bindings reject traffic rather than silently allowing requests
+  under an unexecuted guardrail. Disable or remove the binding to recover; disabled bindings may
+  remain in configuration.
+- Offline-only bindings do not guard live traffic.
+- Custom definitions loaded from older configuration are projected with unavailable capabilities
+  set to `false`.
 
 ## Related
 

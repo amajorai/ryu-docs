@@ -3,12 +3,34 @@ title: "Hardware Firmware"
 description: "How to build and flash the ESP32-S3 firmware with ESP-IDF, plus the shared components, per-device apps, buttons, host tests, and board configuration."
 ---
 
-The firmware is one ESP-IDF codebase shared across all three devices. Reusable components live in `apps/hardware/firmware/shared/`. Each device app (`watch/`, `necklace/`, `desk/`) supplies a `main.c`, a board config, and a display implementation, then calls `rhp_app_run()` with its capability profile.
+The firmware is one ESP-IDF codebase shared across all three devices. Reusable components live in `apps/hardware/firmware/shared/`. Each device app (`watch/`, `necklace/`, `desk/`) supplies a `main.c`, a board config, and (watch and desk) a display implementation, then calls `rhp_app_run()` with its capability profile.
+
+```mermaid
+flowchart TD
+  App["Device app main.c"] --> Core["app_core"]
+  App --> Dash["dash_client (watch, desk)"]
+  Core --> WS["ws_client"]
+  Core --> Audio["audio_io + opus_codec + vad"]
+  Core --> Net["wifi_mgr + ble_prov + pairing"]
+  Core --> Pair["rhp_pair"]
+  Core --> Noise["noise"]
+  Core --> Cap["capability"]
+  Core --> Face["face"]
+  Noise --> Crypto["rhp_crypto"]
+  Pair --> Crypto
+  Pair --> Proto
+  WS --> Proto["protocol"]
+  Cap --> Proto
+```
 
 ## Toolchain
 
 - **ESP-IDF >= 5.1** with the ESP32-S3 toolchain.
-- The first build auto-pulls managed components: `chmorgan/esp-libopus`, `espressif/esp_websocket_client`, `lvgl/lvgl ^9.2`, `espressif/esp_lcd_gc9a01`, `espressif/esp_lvgl_port`, `espressif/qrcode`, and (necklace only, when `CONFIG_RYU_NECKLACE_CAMERA` is set) `espressif/esp32-camera`.
+- The first build auto-pulls these managed components:
+  - `chmorgan/esp-libopus`, `espressif/esp_websocket_client`, `lvgl/lvgl ^9.2`, and `espressif/esp_lcd_gc9a01` (pulled by the shared components);
+  - `espressif/esp_lvgl_port` (watch and desk);
+  - `espressif/qrcode` (desk);
+  - `espressif/esp32-camera` (necklace only, when `CONFIG_RYU_NECKLACE_CAMERA` is set).
 
 <Callout type="info">
   The node also needs CMake. See the node prerequisites in [Hardware Deployment](/docs/hardware/deployment#prerequisites).
@@ -37,16 +59,27 @@ Each is an ESP-IDF component that the three device apps reuse.
 | `app_core` | The device state machine (idle, chat, ambient) that wires every component together, runs the encrypted link and the pairing screens, and exposes `rhp_app_run()`. |
 | `dash_client` | The TRMNL poll-bitmap client for the [dashboard](/docs/hardware/dashboard): HTTP poll, image fetch, and blit. |
 
-The playback task drains bounded PCM chunks and keeps each item until the I2S driver
-acknowledges all bytes. A transient timeout retries the unwritten tail instead of
-silently dropping it. A persistent peripheral error applies back-pressure, and the
-item is released when the device shuts down.
+### Audio playback
+
+The `audio_io` playback task drains bounded PCM chunks and keeps each item until the I2S driver acknowledges all bytes.
+
+- A transient timeout retries the unwritten tail instead of silently dropping it.
+- A persistent peripheral error applies back-pressure, and the item is released when the device shuts down.
+
+### Host-testable components
 
 The `rhp_crypto`, `noise`, `rhp_pair`, and `capability` components, together with `protocol`, are plain C with no ESP-IDF dependencies beyond logging and randomness. That is what lets them be tested on an ordinary computer (see [Host tests](#host-tests)).
 
 ## Per-device apps
 
-Each device directory holds a `main.c`, a board config (SPI and I2S pins, codec selection), an `sdkconfig.defaults` (octal PSRAM, LVGL, and similar), and a display implementation. Each app's top-level `CMakeLists.txt` sets `EXTRA_COMPONENT_DIRS` to `../shared`, and `main/CMakeLists.txt` requires `app_core`.
+Each device directory holds:
+
+- a `main.c` that calls `rhp_app_run()`;
+- a board config with the SPI and I2S pins and the codec selection;
+- an `sdkconfig.defaults` (octal PSRAM, LVGL, and similar);
+- a display implementation (watch and desk; the necklace has no display).
+
+Each app's top-level `CMakeLists.txt` sets `EXTRA_COMPONENT_DIRS` to `../shared`, and `main/CMakeLists.txt` requires `app_core`.
 
 The reference panels assumed where unspecified are GC9A01 for the watch, Waveshare UC8179 7.5-inch e-ink plus optional ST7789 for the desk, and OV2640 for the necklace camera.
 
@@ -81,8 +114,8 @@ Run these per device, with `watch`, `necklace`, or `desk` as the target director
 ## Buttons while pairing and resetting
 
 - During pairing, a **short press** confirms the code shown on screen or beeped by the necklace. See [Pairing](/docs/hardware/pairing).
-- **Holding the button for 10 seconds** factory-resets the device: it forgets its node, credentials, and key, makes a new key, and returns to pairing. Use it to re-pair a legacy device or after your node's key changes.
-- The desk uses its BOOT button for these actions. The necklace keeps its long press for the camera.
+- **Holding the button for 10 seconds** factory-resets the device. It forgets its node, credentials, and key, makes a new key, and returns to pairing. Use it to re-pair a legacy device or after your node's key changes.
+- The desk uses its BOOT button for these actions. The necklace keeps its shorter long press (about 700 ms) for the camera.
 
 ## Host tests
 
@@ -105,7 +138,9 @@ Adjust the board config to your actual hardware before flashing:
 - **Flash encryption** - for devices that leave your desk, enable ESP32-S3 flash encryption and NVS encryption so the device's key and tokens cannot be read out of a stolen device. See [Hardware Security](/docs/hardware/security#protect-the-devices-storage).
 
 <Callout type="warn">
-  The shared components pass the host tests, but building the device apps for the ESP32-S3 is not part of the automatic checks, and the boards are not yet hardware-tested. Treat these steps as first bring-up, not a proven appliance image. Verify pins against your board, and bring up [Mode B first](/docs/hardware/deployment#first-end-to-end-smoke-test-do-mode-b-first) to isolate the core path before testing the BLE relay.
+  The shared components pass the host tests, but building the device apps for the ESP32-S3 is not part of the automatic checks, and the boards are not yet hardware-tested. Treat these steps as first bring-up, not a proven appliance image.
+
+  Verify pins against your board, and bring up [Mode B first](/docs/hardware/deployment#first-end-to-end-smoke-test-do-mode-b-first) to isolate the core path before testing the BLE relay.
 </Callout>
 
 ## Related

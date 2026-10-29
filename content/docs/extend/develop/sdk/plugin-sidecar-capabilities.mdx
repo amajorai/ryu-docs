@@ -26,10 +26,11 @@ they are never bound to a single provider):
 | `data.count` | `{ "category": "<id>" }` | `{ "count": <number> }` |
 | `data.purge` | `{ "category": "<id>" }` | `{ "removed": <number> }` after deleting every item in the category |
 
-Declare both routes on the sidecar's `http.routes` with method `POST`, before any `/:param`
-route they would overlap. Answer `404` for a category you do not own. A count that fails reads
-as `0` in Settings; a purge that fails is reported to the user. Use a grant in your own
-namespace so no other plugin can call these routes.
+- Declare both routes on the sidecar's `http.routes` with method `POST`, before any `/:param`
+  route they would overlap.
+- Answer `404` for a category you do not own.
+- A count that fails reads as `0` in Settings. A purge that fails is reported to the user.
+- Use a grant in your own namespace so no other plugin can call these routes.
 
 ## Scheduled job capabilities
 
@@ -53,14 +54,28 @@ scheduler jobs itself. It provides two capabilities, and Ryu keeps one scheduler
 `{ "kind": "cron", "expr": "0 9 * * *", "tz"?: "Europe/Lisbon" }`. `enabled` defaults to `true`.
 `payload` is an optional object Ryu sends back with each run of that job.
 
-**The list is authoritative.** Ryu calls `jobs.list` about every 30 seconds. It writes jobs it has
-not seen, updates the ones that changed, and deletes the jobs of ids that are no longer listed,
-so deleting an item in your app retires its job. Answer `5xx` (never an empty `jobs` array) when
-you cannot read your own store: a reply without a `jobs` array, a non-`2xx` reply, a timeout or an
-oversized list is treated as unknown, and nothing is written or deleted. While your app is
-disabled your jobs are kept, and the scheduler skips them without recording a run. Uninstalling
-your app removes its jobs; after a reinstall Ryu recreates them from your list on the next pass,
-with an empty run history.
+### The list is authoritative
+
+Ryu calls `jobs.list` about every 30 seconds and reconciles its scheduler jobs with the reply.
+
+```mermaid
+flowchart TD
+  Poll["Call jobs.list"] --> Valid{"2xx with a jobs array?"}
+  Valid -->|no| Skip["Treat as unknown: write and delete nothing"]
+  Valid -->|yes| New["Create jobs for new ids"]
+  New --> Changed["Update changed jobs"]
+  Changed --> Gone["Delete jobs for ids no longer listed"]
+```
+
+- Deleting an item in your app retires its job, because its id is no longer listed.
+- Answer `5xx` (never an empty `jobs` array) when you cannot read your own store. A reply without
+  a `jobs` array, a non-`2xx` reply, a timeout, or an oversized list is treated as unknown.
+- While your app is disabled, your jobs are kept. The scheduler skips them without recording a
+  run.
+- Uninstalling your app removes its jobs. After a reinstall, Ryu recreates them from your list on
+  the next pass, with an empty run history.
+
+### Limits
 
 | Limit | Value |
 |---|---|
@@ -83,12 +98,18 @@ keeps its first entry.
   `jobs.*` gets no scheduled jobs.
 </Callout>
 
+### Who controls a job
+
 Only Ryu calls these two capabilities. The capability broker refuses `jobs.*` (and `data.*`) to
-every sidecar, whatever it declares or holds. A job's name, schedule, and `enabled` flag always
-follow your list, so users pause a job in your app (list it with `enabled: false`), not in Ryu's
-schedules. Users can run an app job now, but cannot create, retarget, rename, reschedule, pause,
-approval-gate, or (while your app is installed) delete one through Ryu's job API. To remove a
-job, stop listing it. `jobs.run` is never called twice at once for the same job id.
+every sidecar, whatever it declares or holds.
+
+A job's name, schedule, and `enabled` flag always follow your list. Users pause a job in your app
+(list it with `enabled: false`), not in Ryu's schedules.
+
+- Users can run an app job now through Ryu's job API.
+- They cannot create, retarget, rename, reschedule, pause, or approval-gate one there, or delete
+  one while your app is installed. To remove a job, stop listing it.
+- `jobs.run` is never called twice at once for the same job id.
 
 ## Sidecar event subscriptions
 
@@ -108,26 +129,36 @@ hook. Each `subscribes` entry binds an event to a sidecar route:
 | `route` | A fixed path (no `:param` or `*rest`) declared on that sidecar's `http.routes` with method `POST` (or no method). |
 
 When the event is raised, Ryu sends `POST <route>` to the enabled subscriber with the body
-`{ "event", "payload", "emitted_at", "delivery_id" }`, authenticated with the sidecar's own
-credential, just like any other proxied request. Delivery is best-effort and never slows down
-or fails the code that raised the event:
+`{ "event", "payload", "emitted_at", "delivery_id" }`. The request is authenticated with the
+sidecar's own credential, like any other proxied request.
+
+Delivery is best-effort and never slows down or fails the code that raised the event:
 
 - each subscriber has a small queue; when it is full, the oldest pending delivery is dropped;
 - a delivery that fails because the sidecar is unreachable or answers `5xx` is retried once;
 - a `4xx` answer is treated as final;
 - a disabled plugin receives nothing.
 
-A subscription route is an ordinary declared route, so it is also reachable through the app's
-proxy mount. To tell a real delivery from a request someone sent through that mount, Ryu adds an
-`x-ryu-event-delivery` header whose value is the body's `delivery_id`. Ryu removes that header
-from every request it forwards from a caller, so only Ryu's own deliveries carry it. Before you act
-on a delivery, check that the header is present and matches `delivery_id`. Even then, treat the
-payload as a notification and re-read anything you need to trust.
+### Verify a delivery
 
-**Core events.** Ids in the `core#` namespace are raised only by Ryu itself. A plugin can
-subscribe to them but can never declare or emit one. A Core event whose payload carries user
-data requires a named grant in `permission_grants`, and Ryu delivers it only while that grant is
-approved. A subscription to an unknown `core#` id fails validation. Published Core events:
+A subscription route is an ordinary declared route, so it is also reachable through the app's
+proxy mount. To tell a real delivery apart, Ryu adds an `x-ryu-event-delivery` header whose value
+is the body's `delivery_id`. Ryu removes that header from every request it forwards from a
+caller, so only Ryu's own deliveries carry it.
+
+Before you act on a delivery, check that the header is present and matches `delivery_id`. Even
+then, treat the payload as a notification and re-read anything you need to trust.
+
+### Core events
+
+Ids in the `core#` namespace are raised only by Ryu itself. A plugin can subscribe to them but can
+never declare or emit one.
+
+- A Core event whose payload carries user data requires a named grant in `permission_grants`. Ryu
+  delivers it only while that grant is approved.
+- A subscription to an unknown `core#` id fails validation.
+
+Published Core events:
 
 | Event | Grant | When it fires | Payload |
 |---|---|---|---|
@@ -155,11 +186,17 @@ also appears in the node's activity feed:
 }
 ```
 
-`kind` matches `[a-z0-9_.-]{1,64}`, `title` is required (at most 512 bytes), `body` is optional
-(at most 4 KiB), `level` is `info`, `success`, or `warning`, and `metadata` is an optional JSON
-object (at most 4 KiB). The row is always attributed to the emitting app; the request cannot name
-another source. An invalid row is skipped and does not fail the event. The Rust
-`ryu-app-events` client exposes this as `EventEmitter::emit_with_activity`.
+| Field | Rule |
+|---|---|
+| `kind` | Required, matches `[a-z0-9_.-]{1,64}` |
+| `title` | Required, at most 512 bytes |
+| `body` | Optional, at most 4 KiB |
+| `level` | `info`, `success`, or `warning` (default `info`) |
+| `metadata` | Optional JSON object, at most 4 KiB |
+
+The row is always attributed to the emitting app; the request cannot name another source. An
+invalid row is skipped and does not fail the event. The Rust `ryu-app-events` client exposes this
+as `EventEmitter::emit_with_activity`.
 
 ## Related
 

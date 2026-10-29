@@ -12,8 +12,24 @@ const docsRouteAliases = Array.isArray(docsRouteAliasesModule)
     ? docsRouteAliasesModule.default
     : [];
 const docsLocalePattern = "en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar";
+// Docs URLs carry no version because only the current release is published.
+// Links from older releases put one first (`/docs/0.4.0/start-here`); drop it
+// so every such link lands on the same page.
+const docsVersionPattern = "[0-9]+\\.[0-9]+\\.[0-9]+";
+const legacyVersionedDocsRedirects = [
+  [`/docs/:version(${docsVersionPattern})`, "/docs/start-here"],
+  [`/docs/:version(${docsVersionPattern})/:path+`, "/docs/:path+"],
+  [
+    `/:locale(${docsLocalePattern})/docs/:version(${docsVersionPattern})`,
+    "/:locale/docs/start-here",
+  ],
+  [
+    `/:locale(${docsLocalePattern})/docs/:version(${docsVersionPattern})/:path+`,
+    "/:locale/docs/:path+",
+  ],
+].map(([source, destination]) => ({ source, destination, permanent: true }));
 const localizedLegacyDocsRedirects = [
-  ["/docs", "/docs/0.5.0/start-here"],
+  ["/docs", "/docs/start-here"],
   ["/docs/using-ryu/recipes", "/docs/learn/cookbook"],
   ["/docs/using-ryu/recipes/:path*", "/docs/learn/cookbook/:path*"],
   ["/docs/using-ryu", "/docs/surfaces/desktop"],
@@ -161,9 +177,10 @@ const config = {
       // (the bare docs root) forwards into the first realm.
       {
         source: "/docs",
-        destination: "/docs/0.5.0/start-here",
+        destination: "/docs/start-here",
         permanent: false,
       },
+      ...legacyVersionedDocsRedirects,
       // Keep compatibility redirects and canonical sitemap exclusions together.
       ...docsRouteAliases.flatMap(({ from, to }) => [
         {
@@ -172,18 +189,8 @@ const config = {
           permanent: true,
         },
         {
-          source: `/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/${from}`,
-          destination: `/docs/:version/${to}`,
-          permanent: true,
-        },
-        {
           source: `/:locale(${docsLocalePattern})/docs/${from}`,
           destination: `/:locale/docs/${to}`,
-          permanent: true,
-        },
-        {
-          source: `/:locale(${docsLocalePattern})/docs/:version([0-9]+\\.[0-9]+\\.[0-9]+)/${from}`,
-          destination: `/:locale/docs/:version/${to}`,
           permanent: true,
         },
       ]),

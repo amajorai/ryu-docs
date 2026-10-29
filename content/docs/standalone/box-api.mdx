@@ -121,35 +121,52 @@ Ryu-hosted service the projection also carries:
 ### Asynchronous lifecycle
 
 With `repo` or `setup`, create returns `202` while the Box is still
-provisioning. On Ryu-hosted Box, where a Box gets its own virtual machine or a
-sandboxed slot on a shared overflow host, create, stop, and resume always answer `202` and the Box moves through its states in
-the background: create and resume go `provisioning` → `ready`, and stop goes
-`stopping` → `stopped` while the workspace is saved. Poll `GET /v1/boxes/:id`
-until it reaches the state you need. Running time is metered from `ready` and
-ends when `stopping` starts, so saving a stopped Box is not billed as compute.
+provisioning. On Ryu-hosted Box (its own virtual machine, or a sandboxed slot
+on a shared overflow host), create, stop, and resume always answer `202`.
+
+The Box then moves through its states in the background: create and resume
+go `provisioning` → `ready`, and stop goes `stopping` → `stopped` while the
+workspace is saved. Poll `GET /v1/boxes/:id` until it reaches the state you
+need. Running time is
+metered from `ready` and ends when `stopping` starts, so saving a stopped Box
+is not billed as compute.
+
+```mermaid
+stateDiagram-v2
+  [*] --> provisioning: create
+  provisioning --> ready
+  ready --> stopping: stop
+  stopping --> stopped: workspace saved
+  stopped --> provisioning: resume
+```
 
 If no capacity is available at all, create and resume answer
 `503 capacity_unavailable` with a `Retry-After` header instead of `202`. A
-failed create frees its name and idempotency key, and a failed resume leaves
-the Box `stopped` with its saved workspace untouched, so retry the same
-request.
+failed create frees its name and idempotency key. A failed resume leaves the
+Box `stopped` with its saved workspace untouched, so retry the same request.
 
 ### Admission and limits
 
 Admission is tenant- and service-scoped and counts running and stored Boxes
-separately. Running Boxes are those `provisioning`, `ready`, `running`, or
-`stopping`; stored Boxes are `stopped` or `error`. By default, a self-hosted
-tenant may run up to eight Boxes and 16 resource units (`small` = 1,
-`default` = 2, `large` = 4) and keep up to 64 stopped Boxes; the service runs
-up to 64 Boxes and 128 resource units in total. On Ryu-hosted Box, your plan
-sets the tenant limits.
+separately. Running Boxes are `provisioning`, `ready`, `running`, or
+`stopping`; stored Boxes are `stopped` or `error`.
 
-A create is refused when either the running or the stored limit is reached; a
-resume is checked against the running limits, and a stop is never refused. An
-admission failure returns `429 quota_exceeded` before the driver is called. A
-create or fork that fails before the driver started anything is retired at
-once: it frees its quota, its name, and its `Idempotency-Key`, so the same
-request can be retried. Box names are unique among a tenant's live Boxes; deleting or expiring a Box frees its name.
+| Default limit | Self-hosted tenant | Whole service |
+|---|---|---|
+| Running Boxes | 8 | 64 |
+| Resource units (`small` = 1, `default` = 2, `large` = 4) | 16 | 128 |
+| Stored Boxes | 64 | not limited |
+
+On Ryu-hosted Box, your plan sets the tenant limits.
+
+- A create is refused when either the running or the stored limit is reached.
+- A resume is checked against the running limits. A stop is never refused.
+- An admission failure returns `429 quota_exceeded` before the driver is called.
+- A create or fork that fails before the driver started anything is retired at
+  once. It frees its quota, its name, and its `Idempotency-Key`, so the same
+  request can be retried.
+- Box names are unique among a tenant's live Boxes. Deleting or expiring a Box
+  frees its name.
 
 `GET /v1/limits` reports where the tenant stands:
 
@@ -238,13 +255,16 @@ An action body with any other field is refused with `400 invalid_request`.
 
 ## Idempotency and errors
 
-Create and fork store the request body hash with the idempotency key. Repeating the same request returns the existing Box with `200` and the
-header `Idempotent-Replayed: true`. Reusing a key with a different body returns
-`409 idempotency_conflict`. Once the Box a key created or forked is deleted,
-repeating the request returns `409 idempotency_key_resource_deleted`. The key
-stays spent, so send a new key to create another Box. A fork replay is
-answered from its key before the source Box is loaded, so it still returns
-the fork, or that `409`, after the source Box was deleted.
+Create and fork store the request body hash with the idempotency key.
+
+| You send | Answer |
+|---|---|
+| The same key and body again | The existing Box, `200`, header `Idempotent-Replayed: true` |
+| The same key with a different body | `409 idempotency_conflict` |
+| The key of a Box that was since deleted | `409 idempotency_key_resource_deleted`; the key stays spent, so send a new one |
+
+A fork replay is answered from its key before the source Box is loaded, so it
+still returns the fork, or that `409`, after the source Box was deleted.
 
 Keys are scoped to your account. A fork's key is bound to its route and source
 Box: sending the same key and body to `POST /v1/boxes`, or to a fork of a
@@ -261,25 +281,31 @@ problem details instead: `type`, `title`, `status`, `detail`, `instance`,
 as `*/*` keep the envelope.
 
 `429 quota_exceeded` is a quota, not a rate limit, and carries no `Retry-After`
-or `RateLimit` header. The body adds `retryable` and a `hint`. Active-Box,
-resource, snapshot, and storage quotas are `retryable: false` until you delete a
-Box, snapshot, or files, or the operator raises the limit. Preview concurrency
-limits are `retryable: true` and clear once an open preview request or WebSocket
-finishes. `@ryuhq/services` never retries `quota_exceeded` on its own.
+or `RateLimit` header. The body adds `retryable` and a `hint`.
+
+- Active-Box, resource, snapshot, and storage quotas are `retryable: false`
+  until you delete a Box, snapshot, or files, or the operator raises the limit.
+- Preview concurrency limits are `retryable: true` and clear once an open
+  preview request or WebSocket finishes.
+- `@ryuhq/services` never retries `quota_exceeded` on its own.
 
 A command that cannot start is not an HTTP error. Like a shell, it completes
 with exit code `127` when the command or its interpreter is not found and `126`
 when it cannot be run, with the reason on stderr. A missing working directory
 also completes with a non-zero exit code (`126` on the filesystem driver).
 
-A Ryu-hosted Box service refuses new work with `402 insufficient_credits` once
-the organization's credits are exhausted: creating, forking, and resuming Boxes,
-running commands and managed prompts, enabling SSH, creating previews, taking
-snapshots, and opening terminals and tunnels. The refusal starts within about a
-minute. Listing, reading, stopping, and deleting Boxes and snapshots, and
-`GET /v1/usage`, keep working so you can clean up. What happens to stopped Boxes
-is described in [Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing).
-A self-hosted Box service is unaffected.
+A Ryu-hosted Box service answers `402 insufficient_credits` within about a
+minute of the organization's credits running out. A self-hosted Box service is
+unaffected.
+
+- **Refused:** creating, forking, and resuming Boxes; running commands and
+  managed prompts; enabling SSH; creating previews; taking snapshots; opening
+  terminals and tunnels.
+- **Still allowed, so you can clean up:** listing, reading, stopping, and
+  deleting Boxes and snapshots, and `GET /v1/usage`.
+
+What happens to stopped Boxes is described in
+[Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing).
 
 ### Error codes
 

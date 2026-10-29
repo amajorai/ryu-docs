@@ -12,19 +12,25 @@ A device reaches the node one of two ways.
 - **Mode B (direct WiFi)** - the device opens a WebSocket straight to the node. This is the home case, where known WiFi is available and the node is reachable.
 - **Mode A (BLE relay)** - the device speaks BLE to a paired phone, and the phone relays the traffic to the node over a WebSocket. This is the mobile, away-from-home case.
 
-The logical protocol is **identical** in both modes. A device paired with RHP v1.1 runs an end-to-end encrypted session with the node in both, so in Mode A the phone is an **opaque forwarder**: it carries encrypted packets between the BLE GATT characteristics and the node WebSocket without being able to read or change them. The node learns that a session is relayed from the device's authenticated `hello` and the relay credential the phone presents. Devices still on the v1 protocol use the phone as a plaintext tunnel until they are re-paired. See [Protocol](/docs/hardware/protocol) for the session, frame, and message detail.
+The logical protocol is **identical** in both modes. A device paired with RHP v1.1 runs an end-to-end encrypted session with the node in both.
 
-Because the ESP32-S3 has both radios, the device picks its mode at runtime:
+- In Mode A the phone is an **opaque forwarder**. It carries encrypted packets between the BLE GATT characteristics and the node WebSocket without being able to read or change them.
+- The node learns that a session is relayed from the device's authenticated `hello` and the relay credential the phone presents.
+- Devices still on the v1 protocol use the phone as a plaintext tunnel until they are re-paired.
+
+See [Protocol](/docs/hardware/protocol) for the session, frame, and message detail.
+
+Because the ESP32-S3 has both radios, the device picks its mode when it starts (`select_transport` in `apps/hardware/firmware/shared/app_core/app_core.c`):
 
 <Steps>
   <Step>
-    If provisioned WiFi credentials are present and the node WebSocket is reachable, use Mode B (direct).
+    If provisioned WiFi credentials are present, WiFi connects, and the node is reachable, use Mode B (direct).
   </Step>
   <Step>
-    Otherwise, if a paired phone is in BLE range and connected, use Mode A (relay).
+    Otherwise start the BLE relay service and advertise, then wait for the paired phone to attach (Mode A).
   </Step>
   <Step>
-    Otherwise buffer to flash (for ambient capture) or show an offline state (for chat), and retry.
+    If the BLE relay cannot start either, the device has no transport and stays offline.
   </Step>
 </Steps>
 
@@ -41,13 +47,33 @@ Because the ESP32-S3 has both radios, the device picks its mode at runtime:
 
 ## Where inference happens
 
-All inference is on the node. When a device streams audio, the node decodes Opus, transcribes with whisper.cpp, runs the chat turn through Core's `run_text_turn` (called from `apps/core/src/hardware/turn.rs`), and synthesizes TTS with OuteTTS. For ambient capture it hands the audio to the Meetings app through its `meetings.*` capabilities, which drive transcription, summary, and recall. Model calls from the chat turn route through the Gateway. Hardware adds no separate inference stack.
+All inference is on the node. Hardware adds no separate inference stack.
+
+For a chat turn, the node:
+
+1. decodes the device's Opus audio;
+2. transcribes it with whisper.cpp;
+3. runs the chat turn through Core's `run_text_turn` (called from `apps/core/src/hardware/turn.rs`), whose model calls route through the Gateway;
+4. synthesizes the reply with OuteTTS and streams it back.
+
+```mermaid
+flowchart LR
+  Device -->|"Opus audio"| Decode["Opus decode"]
+  Decode --> ASR["whisper.cpp"]
+  ASR --> Turn["run_text_turn"]
+  Turn --> Gateway
+  Gateway --> Turn
+  Turn --> TTS["OuteTTS"]
+  TTS -->|"Opus audio"| Device
+```
+
+For ambient capture the node hands the audio to the Meetings app through its `meetings.*` capabilities, which drive transcription, summary, and recall. See [Ambient Capture](/docs/hardware/ambient-capture).
 
 The ESP32-S3 has megabytes of PSRAM, while a 4-bit 8B model needs several gigabytes, so the device cannot run a useful model and does not try.
 
 ## The phone relay
 
-The relay exists because WiFi transmit dominates a wearable's power budget, so a wearable cannot keep WiFi on all day. The device uses low-power BLE to reach a phone, and the phone, which has power and a network connection, carries the traffic to the node.
+The relay exists because WiFi transmit dominates a wearable's power budget, so a wearable cannot keep WiFi on all day. The device uses low-power BLE to reach a phone. The phone, which has power and a network connection, carries the traffic to the node.
 
 The relay does three jobs:
 

@@ -19,8 +19,19 @@ the full thread and relies on llama.cpp's engine context-shift. That shift is a 
   memory, skills) along with the oldest turns
 - There is no guarantee the system block is preserved
 
-Ryu's context-management layer exists to fix this: it guarantees the system block is always kept,
+Ryu's context-management layer exists to fix this. It guarantees the system block is always kept,
 and provides an option to summarize dropped turns instead of silently losing them.
+
+```mermaid
+flowchart TD
+  T["New turn"] --> E{"Budget set? (context.max-tokens or a scoped key)"}
+  E -->|"no (default)"| S["Send full history; engine context-shift"]
+  E -->|"yes"| F{"History fits the budget?"}
+  F -->|"yes"| K["Send as is"]
+  F -->|"no"| C{"context.auto-compact?"}
+  C -->|"false"| TR["Trim: drop older turns, keep system block"]
+  C -->|"true"| CO["Compact: summarize older turns via Gateway"]
+```
 
 ## Token accounting
 
@@ -30,10 +41,10 @@ Ryu uses a conservative character heuristic, not a tokenizer:
 tokens = ceil(characters / 3.5)
 ```
 
-A per-message overhead of 4 tokens is added for the role and formatting
-wrapper. Base64 image payloads are **not** counted. A flat per-image cost of 768 tokens is used
-instead, so a vision chat does not look like 100k tokens. A 512-token reserve is held for
-downstream skill injection.
+- A per-message overhead of 4 tokens is added for the role and formatting wrapper.
+- Base64 image payloads are **not** counted. A flat per-image cost of 768 tokens is used instead,
+  so a vision chat does not look like 100k tokens.
+- A 512-token reserve is held for downstream skill injection.
 
 ## Two modes
 
@@ -92,9 +103,12 @@ Context management is **opt-in / off by default**. These preferences control it:
 | `context.compact-on-cache-expire` | `true` / `false`; compacts harder once the provider prompt cache has expired ([details](#compacting-when-the-prompt-cache-expires)) | `false` |
 
 The most specific setting wins: the per-engine key, then `.local` (for local engines), then the
-global `context.max-tokens`. An unset or blank scoped key falls through to the next one; an explicit
-`off` disables trimming for that scope. `auto` uses the model's `ctx_size`, including an engine-wide
-`ctx_size` default when the model has no override of its own.
+global `context.max-tokens`.
+
+- An unset or blank scoped key falls through to the next one.
+- An explicit `off` disables trimming for that scope.
+- `auto` uses the model's `ctx_size`, including an engine-wide `ctx_size` default when the model
+  has no override of its own.
 
 ```bash
 # Auto-size to the loaded model's context window
@@ -129,11 +143,15 @@ curl -X PUT http://localhost:7980/api/preferences/context.compact-on-cache-expir
 
 Both modes move the cut in steps, not one turn at a time. Once history goes over budget, Ryu drops
 turns up to a fixed checkpoint. Checkpoints fall every quarter of the configured window, counted
-from the start of the conversation. The cut never moves back to an earlier checkpoint within a
-conversation, even when the room left for history shrinks or grows from turn to turn, until the
-history changes or the context settings do. New turns then fill the freed space while the replayed
-history stays byte-identical from turn to turn. In Compact mode the same summary is reused until
-the cut moves again. The kept history always still fits the budget.
+from the start of the conversation.
+
+The cut never moves back to an earlier checkpoint within a conversation, even when the room left
+for history shrinks or grows from turn to turn. It holds until the history changes or the context
+settings do.
+
+New turns then fill the freed space while the replayed history stays byte-identical from turn to
+turn. In Compact mode the same summary is reused until the cut moves again. The kept history always
+still fits the budget.
 
 A provider prompt cache can only reuse this stable history when everything sent ahead of it is
 stable too. Per-turn context such as auto-recall results and memory therefore goes after the
@@ -142,19 +160,23 @@ history, on the newest user message, rather than into the system block.
 ## Compacting when the prompt cache expires
 
 Hosted providers keep a conversation's prompt prefix cached for a while after each turn, and every
-cache hit refreshes that lifetime. Core tracks this per conversation and per provider: after each
-turn that reports cache reads or writes, it starts a countdown using the provider's published
-default lifetime (Anthropic about 5 minutes, OpenAI about 30). Providers that publish no expiry
-(Google, DeepSeek, xAI) and local models are never treated as expired. The countdown lives in Core's
-memory, so a restart forgets it and nothing is compacted early until a new turn reports cache use.
+cache hit refreshes that lifetime. Core tracks this per conversation and per provider.
+
+- After each turn that reports cache reads or writes, Core starts a countdown using the provider's
+  published default lifetime (Anthropic about 5 minutes, OpenAI about 30).
+- Providers that publish no expiry (Google, DeepSeek, xAI) and local models are never treated as
+  expired.
+- The countdown lives in Core's memory. A restart forgets it, and nothing is compacted early until
+  a new turn reports cache use.
 
 With `context.compact-on-cache-expire` on (it needs `context.auto-compact`), the first agent turn
 after the countdown runs out keeps only half the history budget verbatim and summarizes the rest.
 The whole prompt is re-sent at full price on that turn anyway, so moving the cut then costs no cache
-hits, and the smaller history is what the next stretch of turns caches. The agent starts that turn
-from the summarized history instead of reopening its previous session, and later turns resume the
-new session. If the summary cannot be produced, the turn falls back to the normal budget and the
-agent keeps its session.
+hits. The smaller history is what the next stretch of turns caches.
+
+The agent starts that turn from the summarized history instead of reopening its previous session,
+and later turns resume the new session. If the summary cannot be produced, the turn falls back to
+the normal budget and the agent keeps its session.
 
 This applies to agent conversations (the Ryu agent and other ACP agents). The OpenAI-compatible
 path sends the message list the client supplied, so it is not compacted early.
@@ -163,9 +185,10 @@ path sends the message list the client supplied, so it is not compacted early.
 
 Switching a conversation to another model mid-chat can leave the new model with more history than
 it can hold, for example going from a 1M-token model to a 256K one, or from a cloud model to a
-local 8K model. Ryu can hand the conversation off instead: it summarizes everything said before
-the switch once, then gives the new model that summary plus the messages after the switch. The
-transcript shows a **Context handed off** marker after the model change as soon as the turn
+local 8K model. Ryu can hand the conversation off instead. It summarizes everything said before
+the switch once, then gives the new model that summary plus the messages after the switch.
+
+The transcript shows a **Context handed off** marker after the model change as soon as the turn
 starts, with the number of messages summarized and both context windows.
 
 This is separate from the budget above and is **on by default** for the case that would otherwise
@@ -182,13 +205,17 @@ break the chat. Choose when it happens in **Settings → Memory → Model switch
 The summary is produced once per model change and reused unchanged on every later turn, so the
 prompt cache keeps hitting. If you edit or branch from a message sent before the switch, that
 branch gets its own summary of its own history. Switching back to the original branch reuses the
-original summary, and the marker follows whichever branch is shown. The summary is written by
-`context.compact-model` (or the node-wide default model) when set. Otherwise the model you switched
-from writes it, since that model already held the full history. The new model is the last
-fallback. If no summary can be produced, the turn is sent with the
-full history and Ryu tries again on the next turn. The same `session_before_compact` and
-`session_compact` plugin hooks that govern compaction also see and can rewrite the handoff
-summary.
+original summary, and the marker follows whichever branch is shown.
+
+The summary writer is chosen in this order:
+
+1. `context.compact-model` (or the node-wide default model), when set.
+2. The model you switched from, since that model already held the full history.
+3. The new model, as the last fallback.
+
+If no summary can be produced, the turn is sent with the full history and Ryu tries again on the
+next turn. The same `session_before_compact` and `session_compact` plugin hooks that govern
+compaction also see and can rewrite the handoff summary.
 
 ```bash
 curl -X PUT http://localhost:7980/api/preferences/context.handoff-on-model-change \

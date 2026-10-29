@@ -12,13 +12,18 @@ listed and describe answers it as not found.
 ## Search and describe
 
 `GET /v1/tools/search?q=<words>` ranks the tenant's tools by relevance with
-the BM25 scoring that Ryu Core's tool search uses for lexical ranking: whole
-words of a tool's ID, name, description, and argument names, rare words
-counting most, and an exact ID or name first. A word that is not a whole word
-of any tool matches the words it starts, so `authent` finds `..._AUTHENTICATED_USER`. `limit` is 1 to
-25 (default 8), `q` at most 200 characters, and an empty `q` lists tools in
-catalog order. Word search is free; [hybrid search](#hybrid-search) is opt-in
-and charged as Ryu Gateway inference.
+the BM25 scoring that Ryu Core's tool search uses for lexical ranking:
+
+- It matches whole words of a tool's ID, name, description, and argument
+  names, with rare words counting most.
+- An exact ID or name comes first.
+- A word that is not a whole word of any tool matches the words it starts, so
+  `authent` finds `..._AUTHENTICATED_USER`.
+
+`limit` is 1 to 25 (default 8), `q` at most 200 characters, and an empty `q`
+lists tools in catalog order. Word search is free;
+[hybrid search](#hybrid-search) is opt-in and charged as Ryu Gateway
+inference.
 
 Each result, and `GET /v1/tools/describe?id=<id>`, carries these fields beside
 `id`, `name`, `kind`, and `description` (describe adds `parameters`, the JSON
@@ -40,11 +45,13 @@ Schema of the arguments):
 A Composio price is `estimated`, because a premium action's surcharge is only
 known from its receipt.
 
-`catalog` says what Ryu has checked about a tool against the vendor itself.
-`source` names whose catalog the entry comes from (`ryu` for Ryu's own).
-`capability` and `platform` name the job and the system it acts on, such as
-`issue.create` on `github`, and `docsUrl` is the vendor's own reference page.
-`state` is the latest verification verdict.
+`catalog` says what Ryu has checked about a tool against the vendor itself:
+
+- `source` names whose catalog the entry comes from (`ryu` for Ryu's own).
+- `capability` and `platform` name the job and the system it acts on, such as
+  `issue.create` on `github`.
+- `docsUrl` is the vendor's own reference page.
+- `state` is the latest verification verdict.
 
 | `state` | Meaning |
 |---|---|
@@ -77,8 +84,8 @@ gives the count from each (`connect`, `gateway`).
   counted. A tenant's registered MCP servers and relay tools are never
   recorded, and no tenant, argument or answer is stored.
 
-The field comes from a cache refreshed every few minutes, never changes what a
-call costs or whether it runs, and Connect never switches tools based on it:
+The field comes from a cache refreshed every few minutes. It never changes what
+a call costs or whether it runs, and Connect never switches tools based on it:
 you choose. The same evidence appears in the public
 [tool catalog](/docs/standalone/connect-api-catalog).
 
@@ -87,6 +94,21 @@ you choose. The same evidence appears in the public
 Word search misses a request phrased as a job ("check my inbox for new mail")
 when the tool's words differ. Add `ranking=hybrid` to rank by meaning as well.
 
+```mermaid
+flowchart LR
+  Q["Query"] --> L["Word ranking (BM25)"]
+  Q --> E["Embedding via Ryu Gateway"]
+  E --> T["Similarity to tool"]
+  E --> J["Similarity to job"]
+  L --> F["Reciprocal rank fusion"]
+  T --> F
+  J --> F
+  F --> G{"judge=true?"}
+  G -->|yes| K["Judge reorders top eight"]
+  G -->|no| A["Answer"]
+  K --> A
+```
+
 ```sh
 curl -fsS 'https://connect.example/v1/tools/search?q=check%20my%20inbox&ranking=hybrid&judge=true' \
   -H 'Authorization: Bearer <connect-api-token>' \
@@ -94,12 +116,12 @@ curl -fsS 'https://connect.example/v1/tools/search?q=check%20my%20inbox&ranking=
 ```
 
 - **How it ranks.** Connect embeds the query, each tool's description, and the
-  job each curated tool serves (its `catalog.capability`), and merges three
+  job each curated tool serves (its `catalog.capability`). It merges three
   rankings with weighted reciprocal rank fusion: word relevance (the same
   scoring as word search), similarity to the tool, and similarity to its job.
-  Every tool that does a recalled job ranks together, so the tools you can
-  compare for one job appear side by side. An exact ID or name still comes
-  first.
+- **Jobs rank together.** Every tool that does a recalled job ranks together,
+  so the tools you can compare for one job appear side by side. An exact ID or
+  name still comes first.
 - **The judge.** `judge=true` asks a small model to read the top results (up to
   eight) and the task, answer a verdict (`match`, `partial`, `none`) and put
   the tools that help first. It never removes a result. A tenant may make 60
@@ -107,9 +129,10 @@ curl -fsS 'https://connect.example/v1/tools/search?q=check%20my%20inbox&ranking=
 - **Who pays.** Embeddings and the judge run through Ryu Gateway, never
   directly to a model provider, on the key in `x-ryu-gateway-key`. The
   Gateway reserves and charges them to that key's organization like any other
-  Gateway inference; Connect adds no charge of its own. Tool descriptions are
-  embedded once and cached for every tenant (the operator's own key pays for
-  them when one is configured), so you pay for your query and the judge.
+  Gateway inference; Connect adds no charge of its own.
+- **Tool embeddings are shared.** Tool descriptions are embedded once and
+  cached for every tenant (the operator's own key pays for them when one is
+  configured), so you pay for your query and the judge.
 - **Repeats are free.** A query's vector is kept for an hour and a judge
   verdict for ten minutes, so repeating a search (or retrying one that timed
   out) replays the same answer without calling the Gateway again. Identical
@@ -127,19 +150,23 @@ A search that asked for hybrid ranking carries a `ranking` object.
 | `gatewayRequestIds` | The Gateway requests this search made on your key, to match against your Gateway usage |
 | `judge` | `{ status, reason, verdict, model, considered, ref, gatewayRequestId }`; `status` is `applied`, `cached` (a replay of the verdict `ref` names, not charged again), `skipped` or `failed`, and `reason` is `unconfigured`, `lexical_only`, `no_candidates`, `cap_reached`, `gateway_key_rejected`, `insufficient_credits`, `rate_limited`, `gateway_unavailable`, or `invalid_verdict` (the judge answered something unreadable; the call was charged and the order is unchanged) |
 
-Each hybrid row keeps `score` (its word relevance) and adds
-`ranking` - `{ fused, lexicalRank, semanticRank, jobRank, similarity, judged }`. A rank is
-`null` when that ranking did not place the tool. `ranking` and `judge` are
-query parameters over REST (`true` or `false` for `judge`) and arguments of the
-MCP `search` tool, which reads `x-ryu-gateway-key` from the MCP request. A
-malformed `x-ryu-gateway-key` is refused with `400`. Connect never stores or
-returns your Gateway key.
+Each hybrid row keeps `score` (its word relevance) and adds `ranking` -
+`{ fused, lexicalRank, semanticRank, jobRank, similarity, judged }`. A rank is
+`null` when that ranking did not place the tool.
 
-When a search with words finds nothing, the answer adds `missedTerms` (the
-words no tool matched) and `didYouMean` (up to three tool IDs one typo away).
-Describe of an ID the tenant has no tool for answers `404` with
-`code: "not_found"` and `didYouMean`; a `composio.<SLUG>` the tenant is not
-granted keeps answering `403` with `code: "tool_denied"`.
+`ranking` and `judge` are query parameters over REST (`true` or `false` for
+`judge`) and arguments of the MCP `search` tool, which reads
+`x-ryu-gateway-key` from the MCP request. A malformed `x-ryu-gateway-key` is
+refused with `400`. Connect never stores or returns your Gateway key.
+
+### No match
+
+- When a search with words finds nothing, the answer adds `missedTerms` (the
+  words no tool matched) and `didYouMean` (up to three tool IDs one typo away).
+- Describe of an ID the tenant has no tool for answers `404` with
+  `code: "not_found"` and `didYouMean`.
+- A `composio.<SLUG>` the tenant is not granted keeps answering `403` with
+  `code: "tool_denied"`.
 
 ## Ask for a missing tool
 
@@ -200,15 +227,20 @@ not load a large catalog into context.
 | `request_missing_tool` | Ask for a tool: `description`, optional `toolkit` and `query` | `POST /v1/tools/requests` |
 
 `search`, `describe`, and `balance` return their answer as structured content
-and as JSON text. `call` returns the tool's own result, with the call's cost in
+and as JSON text. Every tool carries MCP annotations, so clients can tell
+read-only tools from `call`.
+
+`call` returns the tool's own result, with the call's cost in
 `_meta["com.ryuhq/call"]`, and is charged and refused exactly as `tools/call`
-is. Its `idempotency_key` works like the `Idempotency-Key` header, and a retry
-with the same key, tool, and arguments returns the first answer without running
-or charging again; it shares labels with `tools/call` on `/mcp`.
-`max_cost_micro_usd` can only lower the request's `x-ryu-max-cost-micro-usd`.
-An unknown tool ID is refused with `code: "not_found"` and `didYouMean` in
-`_meta["com.ryuhq/refusal"]`. Every tool carries MCP annotations, so clients
-can tell read-only tools from `call`.
+is:
+
+- Its `idempotency_key` works like the `Idempotency-Key` header. A retry with
+  the same key, tool, and arguments returns the first answer without running
+  or charging again. It shares labels with `tools/call` on `/mcp`.
+- `max_cost_micro_usd` can only lower the request's
+  `x-ryu-max-cost-micro-usd`.
+- An unknown tool ID is refused with `code: "not_found"` and `didYouMean` in
+  `_meta["com.ryuhq/refusal"]`.
 
 `POST /mcp/meta/read` lists only `search`, `describe`, and `balance`, all
 read-only, for MCP directories that must not offer a tool that acts on another

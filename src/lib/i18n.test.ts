@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { isVersionSegment } from "./docs-version";
 import { translations } from "./fumadocs-translations";
 import {
   DEFAULT_DOCS_LOCALE,
@@ -28,10 +29,10 @@ describe("Fumadocs locale contract", () => {
 
     for (const locale of DOCS_LANGUAGES) {
       expect(localeForDocument(locale)).toBeString();
-      expect(localizedPath("/docs/0.4.0/start-here", locale)).toBe(
+      expect(localizedPath("/docs/start-here", locale)).toBe(
         locale === DEFAULT_DOCS_LOCALE
-          ? "/docs/0.4.0/start-here"
-          : `/${locale}/docs/0.4.0/start-here`,
+          ? "/docs/start-here"
+          : `/${locale}/docs/start-here`,
       );
       expect(openGraphLocale(locale)).toBeString();
       expect(directionForDocsLocale(locale)).toBe(
@@ -62,7 +63,7 @@ describe("Fumadocs locale contract", () => {
       expect(pages.every((page) => page.locale === language)).toBe(true);
       expect(
         pages.every((page) =>
-          page.url.startsWith(localizedPath("/docs/0.4.0", language)),
+          page.url.startsWith(localizedPath("/docs", language)),
         ),
       ).toBe(true);
     }
@@ -71,21 +72,21 @@ describe("Fumadocs locale contract", () => {
 
     const english = getPage(["start-here"], "en");
     const spanish = getPage(["start-here"], "es");
-    expect(english?.url).toBe("/docs/0.4.0/start-here");
-    expect(spanish?.url).toBe("/es/docs/0.4.0/start-here");
+    expect(english?.url).toBe("/docs/start-here");
+    expect(spanish?.url).toBe("/es/docs/start-here");
     expect(spanish?.locale).toBe("es");
     expect(spanish?.path).toBe("start-here/index.es.mdx");
     expect(spanish ? getPageImage(spanish).url : undefined).toBe(
-      "/og/docs/es/0.4.0/start-here/image-v4.png",
+      "/og/docs/es/start-here/image-v4.png",
     );
   });
 
-  test("generates static params for each locale without dropping the version", () => {
+  test("generates static params for each locale without a version segment", () => {
     const params = generateDocsParams();
     expect(new Set(params.map(({ lang }) => lang))).toEqual(
       new Set(DOCS_LANGUAGES),
     );
-    expect(params.every(({ slug }) => slug[0] === "0.4.0")).toBe(true);
+    expect(params.some(({ slug }) => isVersionSegment(slug[0]))).toBe(false);
   });
   test("keeps every generated API route available without eager duplicate artifacts", () => {
     const all = generateDocsParams();
@@ -114,7 +115,7 @@ describe("Fumadocs locale contract", () => {
         const isEager = eager.has(`${lang}/${param.slug.join("/")}`);
         const expectedEager =
           page.data._openapi === undefined &&
-          (lang === DEFAULT_DOCS_LOCALE || param.slug.length <= 2);
+          (lang === DEFAULT_DOCS_LOCALE || param.slug.length <= 1);
         expect(isEager).toBe(expectedEager);
       }
       expect(

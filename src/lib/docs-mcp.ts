@@ -86,7 +86,7 @@ function formatHit(hit: SearchHit): string {
 
 /**
  * Accept a docs path in any of the forms agents naturally pass: a full URL
- * (`https://docs.ryuhq.com/docs/...`), a versioned or bare `/docs/...` path, or
+ * (`https://docs.ryuhq.com/docs/...`), a `/docs/...` path (a legacy version segment is dropped), or
  * bare slugs (`mcp/quickstart`). Returns the resolved page, or `undefined`.
  */
 function resolvePage(path: string) {
@@ -105,8 +105,8 @@ function resolvePage(path: string) {
   if (byHref?.page) {
     return byHref.page;
   }
-  // Fall back to treating the remainder as slugs (version segment is handled by
-  // `getPage` itself via `stripDocsVersion`).
+  // Fall back to treating the remainder as slugs (a legacy version segment is
+  // dropped by `getPage` itself via `stripDocsVersion`).
   const slugs = href.split("/").filter(Boolean).slice(1);
   return getPage(slugs, locale);
 }

@@ -3,14 +3,20 @@ title: "Permissions and Roles"
 description: "Reference for Ryu's permission model: the 44 permission keys, built-in and custom roles, how Core gates requests on organization-bound nodes, and how custom roles are resolved and cached."
 ---
 
-Ryu is local-first and single-tenant by default, but a node can be bound to an organization (a shared "company brain"). On such a node, Core enforces org/team role-based access control on its REST surface, keyed to a per-user identity verified from a signed JWT. The permission vocabulary and the built-in role sets are a contract shared byte-for-byte with the TypeScript control plane (`apps/core/src/identity_verify/permissions.rs`), so an effective-permission check agrees on both sides.
+Ryu is local-first and single-tenant by default, but a node can be bound to an organization (a shared "company brain"). On such a node, Core enforces organization and team role-based access control on its REST surface. The check is keyed to a per-user identity verified from a signed JWT.
+
+The permission vocabulary and the built-in role sets are a contract shared byte-for-byte with the TypeScript control plane (`apps/core/src/identity_verify/permissions.rs`). An effective-permission check therefore agrees on both sides.
+
+<Figure name="approvals" />
 
 <Callout type="warn">
-This is Core-side enforcement of a caller's role. Ryu's classic and fine-grained personal access
+This page covers Core-side enforcement of a caller's role. Classic and fine-grained personal access
 tokens, organization API keys, and official MCP OAuth grants are separate control-plane credentials.
-They do not become a node bearer automatically. The one exception is the short-lived
-`userJwt` returned for an organization-bound managed node; Core verifies it against the control-plane
-JWKS and still applies the node's organization, team, personal-owner, and route checks. See
+They do not become a node bearer automatically.
+
+The one exception is the short-lived `userJwt` returned for an organization-bound managed node.
+Core verifies it against the control-plane JWKS and still applies the node's organization, team,
+personal-owner, and route checks. See
 [Authentication and pairing](/docs/security/authentication-and-pairing) for the credential boundaries.
 </Callout>
 
@@ -78,10 +84,16 @@ Four built-in roles map from a caller's Better Auth org role (`permissions_for_r
 
 The built-in `billing` role is not a rung on this ladder. It is additive: Core adds `billing.manage` to the set of the caller's other role, or to `viewer` when `billing` is the only role (`permissions_for_ba_role`). For what each role is for, see [Organization admin controls](/docs/security/organization-admin-controls#roles).
 
-A member's **effective** permissions are the built-in set of their role plus every applicable permission granted by a custom role assigned to them. Organization assignments apply at organization scope; a team assignment applies only when the caller is a member of that team and the resource is in that team. The role tier is the fail-closed fallback when the custom-role lookup is unavailable.
+### Custom roles and effective permissions
+
+A member's **effective** permissions are the built-in set of their role plus every applicable permission granted by a custom role assigned to them.
+
+- An organization assignment applies at organization scope.
+- A team assignment applies only when the caller is a member of that team and the resource is in that team.
+- When the custom-role lookup is unavailable, the built-in role tier is the fail-closed fallback.
 
 Better Auth remains the source of truth for membership, invitations, and teams, using only the
-static roles above. Custom roles are Ryu's own: they are resolved by the control plane and carried
+static roles above. Custom roles are Ryu's own. The control plane resolves them and carries them
 to Core separately, so a role that merely looks like `admin` is never proof of a Ryu capability.
 
 Custom-role changes are bounded by the person making them:
@@ -97,12 +109,14 @@ Custom-role changes are bounded by the person making them:
 ### Owners and the primary owner
 
 Each organization has one **primary owner** above the other owners. Nobody can demote or remove the
-primary owner, and only the primary owner can grant or revoke the owner role, transfer primary
-ownership, or delete the organization. The primary owner has the same permission set as any owner,
-so every permission check above treats them as `owner`. See
+primary owner. Only the primary owner can grant or revoke the owner role, transfer primary
+ownership, or delete the organization.
+
+The primary owner has the same permission set as any owner, so every permission check above treats
+them as `owner`. See
 [Organization admin controls](/docs/security/organization-admin-controls#primary-owner).
 
-### Self-hosted node binding
+## Self-hosted node binding
 
 Binding a self-hosted node to an organization requires the caller's current
 `gateway.configure` permission. Owners and admins receive it through their
@@ -111,19 +125,21 @@ Team-scoped grants authorize only enrollment for the matching team; they do not
 widen to organization, personal, or another team's nodes.
 
 Desktop and the web Fleet page use the same effective-permission result to show
-or disable the action, but the organization service remains authoritative. It
-checks the permission when it issues the ten-minute enrollment code and again
-on first redemption. Issuing the code also asks the caller to confirm it's you
-(the same step-up that issuing a gateway key needs), because an enrolled node
-can resolve members' shared secrets. Losing membership, removing the custom role, or revoking
-the grant therefore stops a code from creating a binding even if an older page
-still has its form open.
+or disable the action, but the organization service remains authoritative:
+
+- It checks the permission when it issues the ten-minute enrollment code, and again on first redemption.
+- Issuing the code asks the caller to confirm it's you (the same step-up that issuing a gateway key
+  needs), because an enrolled node can resolve members' shared secrets.
+- Losing membership, removing the custom role, or revoking the grant stops a code from creating a
+  binding, even if an older page still has its form open.
 
 The code owns the organization scope. A node cannot submit an organization ID,
 plan, tier, wallet, or owner override. Once activated, the enrolled relay
 credential resolves the organization's live subscription and policy for each
 managed inference connection. Rebinding to another organization requires an
 explicit revoke-and-rebind flow.
+
+## Deleting agents, Spaces, and channels
 
 By default, only organization owners and admins can delete agents or Spaces. A custom role may grant
 the corresponding delete permission explicitly, but Core still checks that effective permission on
@@ -139,22 +155,48 @@ Only `channel.delete` removes a shared channel record.
 ## How Core gates a request
 
 An already authenticated node request may carry a signed user identity. Middleware verifies it
-offline with the control plane's signing keys and attaches the verified caller. On an unbound
-local/self-hosted node, that JWT is only identity context: the node bearer, paired token, or
-delegation still admits the request. On an organization-bound managed node, the short-lived
-`userJwt` may also be the primary bearer; Core narrows it to this node's organization and then to
-its team or personal owner before applying route capabilities. A handler then intersects the
-caller's node capability with `enforce_permission(state, caller, perm)`.
+offline with the control plane's signing keys and attaches the verified caller.
 
-Hosted MCP delegations carry the verified subject, organization, team, exact node, exact agent,
-scopes, audience, issuer, unique ID, and a short expiry in one signed envelope. Core verifies all of
-those fields locally. A destination path cannot select a different agent than the signed binding.
-The `gateway:route` OAuth scope permits routing and vault metadata reads; changing or deleting a
-vault secret requires separate `vault:write` consent. Reads that release secret or key material
-need `vault:write` consent too, even though they are `GET` requests: value subkeys, TOTP codes,
-static-role credentials, passwords generated from a password policy, and transit key export and
-backup. Shared node, team, and organization secrets
-also require the handler's existing management permission.
+- On an unbound local or self-hosted node, that JWT is only identity context. The node bearer,
+  paired token, or delegation still admits the request.
+- On an organization-bound managed node, the short-lived `userJwt` may also be the primary bearer.
+  Core narrows it to this node's organization, then to its team or personal owner, before applying
+  route capabilities.
+
+A handler then intersects the caller's node capability with `enforce_permission(state, caller, perm)`.
+
+```mermaid
+flowchart TD
+  A["Request with node credential or userJwt"] --> B["Verify JWT offline (JWKS)"]
+  B --> C{"Node bound to an org?"}
+  C -- No --> D["Admit by node bearer, pairing, or delegation"]
+  C -- Yes --> E{"JWT for this org?"}
+  E -- No --> F["Deny (403)"]
+  E -- Yes --> G{"Inside node team or personal owner?"}
+  G -- No --> F
+  G -- Yes --> H{"Permission in built-in role?"}
+  H -- Yes --> I["Allow"]
+  H -- No --> J["Resolve custom roles from control plane"]
+  J --> K{"Permission in effective set?"}
+  K -- Yes --> I
+  K -- No --> F
+```
+
+### Hosted MCP delegations
+
+Hosted MCP delegations carry these fields in one signed envelope, and Core verifies all of them
+locally: the verified subject, organization, team, exact node, exact agent, scopes, audience,
+issuer, unique ID, and a short expiry. A destination path cannot select a different agent than the
+signed binding.
+
+- The `gateway:route` OAuth scope permits routing and vault metadata reads.
+- Changing or deleting a vault secret requires separate `vault:write` consent.
+- Reads that release secret or key material also need `vault:write` consent, even though they are
+  `GET` requests. These are value subkeys, TOTP codes, static-role credentials, passwords generated
+  from a password policy, and transit key export and backup.
+- Shared node, team, and organization secrets also require the handler's existing management permission.
+
+### Enforcement by node state
 
 Enforcement branches on whether **this node** is bound to an org (`registered_org()`). Per-user role-based access control (RBAC) applies only on a shared node, so the single-user local flow is unchanged.
 

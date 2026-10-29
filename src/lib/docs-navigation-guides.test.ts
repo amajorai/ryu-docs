@@ -11,7 +11,7 @@ describe("docs navigation: split guides", () => {
     const sections = [
       {
         meta: "surfaces/desktop/user-guide/meta.json",
-        header: "---Chat & agents---",
+        header: "---Chat---",
         nextHeader: "---Knowledge & tools---",
         pages: [
           "agents",
@@ -32,8 +32,8 @@ describe("docs navigation: split guides", () => {
       },
       {
         meta: "gateway/meta.json",
-        header: "---Configuration & Security---",
-        nextHeader: "---Tools & Channels---",
+        header: "---Configuration---",
+        nextHeader: "---Security---",
         pages: [
           "configuration",
           "configuration-settings",
@@ -44,8 +44,8 @@ describe("docs navigation: split guides", () => {
       },
       {
         meta: "gateway/meta.json",
-        header: "---Tools & Channels---",
-        nextHeader: "---Observability & Reliability---",
+        header: "---Channels---",
+        nextHeader: "---Observability---",
         pages: [
           "channels",
           "channel-setup",
@@ -55,20 +55,26 @@ describe("docs navigation: split guides", () => {
       },
       {
         meta: "gateway/meta.json",
-        header: "---Observability & Reliability---",
+        header: "---Reliability & Cost---",
         nextHeader: "---Hosted Fleet---",
         pages: ["prompt-caching", "reliability"],
       },
       {
         meta: "core/meta.json",
-        header: "---Operations---",
-        nextHeader: "---Automation---",
-        pages: ["observability", "observability-traces", "node-and-presence"],
+        header: "---Observability---",
+        nextHeader: "---Nodes & Fleet---",
+        pages: ["observability", "observability-traces"],
       },
       {
         meta: "core/meta.json",
-        header: "---Orchestration---",
-        nextHeader: "---Tools & Catalogs---",
+        header: "---Nodes & Fleet---",
+        nextHeader: "---App-backed Features---",
+        pages: ["node-and-presence"],
+      },
+      {
+        meta: "core/meta.json",
+        header: "---Workflows---",
+        nextHeader: "---Orchestration---",
         pages: [
           "workflows",
           "workflow-triggers-and-history",
@@ -105,7 +111,7 @@ describe("docs navigation: split guides", () => {
       },
       {
         meta: "security/meta.json",
-        header: "---Identity & Access---",
+        header: "---Sign-in & Accounts---",
         nextHeader: "---Secret Vault---",
         pages: [
           "authentication-and-pairing",
@@ -119,7 +125,7 @@ describe("docs navigation: split guides", () => {
       {
         meta: "extend/develop/sdk/meta.json",
         header: "---TypeScript SDK---",
-        nextHeader: "---Agent protocols---",
+        nextHeader: "---Agents---",
         pages: ["runnables", "builders", "tooling"],
       },
     ];

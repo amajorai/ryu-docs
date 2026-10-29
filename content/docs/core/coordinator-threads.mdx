@@ -3,18 +3,24 @@ title: "Coordinator Threads"
 description: "Reference for the threads.* tools a coordinator agent uses to list conversations, start worker threads, message them, and wait for their runs"
 ---
 
-A coordinator agent can inspect active Ryu conversations, spot shared workspaces, create worker
-threads, send a message that runs a worker's agent, wait for a run to finish, and pin, archive, or
-title threads. Worktree isolation is off by default. Enable it for coordinator workers in
-**Settings → Gateway → Worktrees → Coordinator workers**.
+A coordinator agent uses the `threads.*` tools to run durable worker threads. It can:
+
+- inspect active Ryu conversations and spot shared workspaces;
+- create worker threads and send a message that runs a worker's agent;
+- wait for a run to finish;
+- pin, archive, fork, or title threads.
 
 A thread is a [conversation](/docs/core/conversations-sessions), so workers are durable,
-searchable, and resumable like any chat. The capability ships as the built-in
-`threads` registry server (`apps/core/src/sidecar/mcp/threads.rs`), a reserved server like
-`search_conversations` and `delegate`, so the `<server>.<tool>` id scheme, per-agent allowlist,
-catalog search, and the single `call_tool` entry apply to it. It is allowlist-gated and audited on
-both the ACP and OpenAI-compatible planes, so coordination is opt-in. Only an agent whose allowlist
-grants `threads.*` can spawn workers.
+searchable, and resumable like any chat. Worktree isolation is off by default. Enable it for
+coordinator workers in **Settings → Gateway → Worktrees → Coordinator workers**.
+
+The capability ships as the built-in `threads` registry server
+(`apps/core/src/sidecar/mcp/threads.rs`), a reserved server like `search_conversations` and
+`delegate`. The `<server>.<tool>` id scheme, per-agent allowlist, catalog search, and the single
+`call_tool` entry all apply to it.
+
+Coordination is opt-in. The tools are allowlist-gated and audited on both the ACP and
+OpenAI-compatible planes, and only an agent whose allowlist grants `threads.*` can spawn workers.
 
 <Callout type="warn">
 This is an agent-facing capability with no desktop coordinator UI. Desktop shows the `pinned`
@@ -47,14 +53,14 @@ Pass an installed `agent_id` to `create_thread` to route a worker to that bot. T
 `thread_id` is the address used by `send_message_to_thread`, `read_thread`, and `wait_for_thread`.
 
 By default, worker turns use the thread's working directory. The Worktrees setting is saved on the
-Core node. Set `isolate: true` or `isolate: false` on an individual `send_message_to_thread` call to
-override the saved default; isolation creates or reuses that worker's git worktree.
+Core node. Set `isolate: true` or `isolate: false` on one `send_message_to_thread` call to override
+the saved default. Isolation creates or reuses that worker's git worktree.
 
 ## send_message_to_thread
 
-`send_message_to_thread` appends the instruction to a worker conversation and runs that conversation's configured agent with
-`persist = true`, so both the user instruction and the assistant reply land in the worker's
-history. The coordinator reads them back later with `read_thread`.
+`send_message_to_thread` appends the instruction to a worker conversation and runs that
+conversation's configured agent with `persist = true`. Both the instruction and the reply land in
+the worker's history, and the coordinator reads them back later with `read_thread`.
 
 ### Arguments
 
@@ -68,12 +74,15 @@ history. The coordinator reads them back later with `read_thread`.
 
 ### How a turn runs
 
-The worker's agent and working folder are resolved from its stored conversation row
-(`folder_path`), then the call routes through `AgentRunner::run_worker`
-(`apps/core/src/sidecar/agent_runner.rs`) into `adapters::run_text_turn_in`. The worktree is
-created lazily and reused across turns by `route_chat_stream`'s persistent-session logic, keyed on
-`conversation_id`, so a worker keeps the same checkout across instructions. See
-[Git Workspace](/docs/surfaces/desktop/user-guide/git-workspace) for how per-conversation worktrees work.
+1. Core resolves the worker's agent and working folder from its stored conversation row
+   (`folder_path`).
+2. The call routes through `AgentRunner::run_worker` (`apps/core/src/sidecar/agent_runner.rs`) into
+   `adapters::run_text_turn_in`.
+3. `route_chat_stream`'s persistent-session logic, keyed on `conversation_id`, creates the worktree
+   lazily and reuses it across turns, so a worker keeps the same checkout across instructions.
+
+See [Git Workspace](/docs/surfaces/desktop/user-guide/git-workspace) for how per-conversation
+worktrees work.
 
 ```mermaid
 sequenceDiagram
@@ -93,19 +102,19 @@ sequenceDiagram
 
 ### Background vs blocking
 
-By default a turn runs in the background and returns `{ ok: true, thread_id, dispatched: true,
-status: "running" }` immediately, so the coordinator can fan out and then poll each worker with
-`read_thread`. The chat path persists both turns and sets
-the terminal `run_status`; the tool only sets `"failed"` defensively when an early error never
-reached the persist path.
+By default a turn runs in the background and returns
+`{ ok: true, thread_id, dispatched: true, status: "running" }` immediately. The coordinator can fan
+out and then check each worker. The chat path persists both turns and sets the terminal
+`run_status`. The tool sets `"failed"` itself only when an early error never reached the persist
+path.
 
-Pass `wait: true` to block and get the reply inline as `{ ok: true, thread_id, reply }`. When the
-message runs in the background, call `wait_for_thread` to sleep until the run stops, then use
-`read_thread` to inspect the result instead of polling.
+Pass `wait: true` to block and get the reply inline as `{ ok: true, thread_id, reply }`. For a
+background turn, call `wait_for_thread` to sleep until the run stops, then `read_thread` to inspect
+the result, instead of polling.
 
-Background concurrency is bounded by a process-global semaphore (`MAX_CONCURRENT_WORKERS`, 8
-permits, mirroring the scheduler's `MAX_CONCURRENT_JOBS`). Excess background turns queue for a
-permit rather than being rejected.
+A process-global semaphore bounds background concurrency (`MAX_CONCURRENT_WORKERS`, 8 permits,
+mirroring the scheduler's `MAX_CONCURRENT_JOBS`). Excess background turns queue for a permit instead
+of being rejected.
 
 <Callout type="info">
 If no agent runner is published on the node (for example a headless instance), the tool degrades
@@ -115,39 +124,43 @@ can adapt.
 
 ## Reading and listing behavior
 
-`list_threads` accepts `active_only: true` to show conversations with a running turn or a running
-Runnable session, including sessions outside the coordinator's worker set. Rows include the agent
-id, `thread_id`, workspace folder, branch, worktree path, and a `sessions` array with each active
-Runnable's `session_id`, `runnable_id`, `runnable_kind`, and `status`. Use the row's `thread_id` with
-`send_message_to_thread` to message that session's thread. If multiple active runs point at the same
-effective workspace path, each row sets `workspace_overlap: true`. This is a path-level warning
-that edits may collide; separate worktrees are reported separately. The list does not include
-prompts or message bodies. `active_sessions_may_be_truncated` is true when the 100-session result
-cap is reached.
+### list_threads
 
-`wait_for_thread` accepts exactly one of `thread_id` or `session_id`, checks visibility on every
-status read, and waits for its run to leave `running`. Its default timeout is 30 seconds and its
-maximum is five minutes; pass `timeout_ms: 0` to read the current status without waiting. On timeout
-it returns `status: "running"` and `timed_out: true`, so the coordinator can continue other work and
-wait again later. A completed status does not include the transcript; read the associated thread
-with `read_thread`.
+Each row surfaces `thread_id`, `title`, `agent_id`, `run_status`, active `sessions`,
+`message_count`, `pinned`, `archived`, `folder_path`, `branch`, `worktree_path`,
+`workspace_overlap`, and `updated_at`. The list never includes prompts or message bodies.
+
+| Argument or field | Behavior |
+|---|---|
+| `include_archived` | Archived finished threads are hidden by default; pass `true` to see them |
+| `active_only` | Show only conversations with a running turn or a running Runnable session, including sessions outside the coordinator's worker set. A running thread shows even if archived |
+| `sessions` | Each active Runnable's `session_id`, `runnable_id`, `runnable_kind`, and `status`. Message that session's thread with the row's `thread_id` |
+| `workspace_overlap` | `true` on each row when several active runs point at the same effective workspace path. A path-level warning that edits may collide; separate worktrees are reported separately |
+| `active_sessions_may_be_truncated` | `true` when the 100-session result cap is reached |
+
+Pinned threads always sort first. Otherwise the store's most-recently-updated order is kept.
+
+### wait_for_thread
+
+- Accepts exactly one of `thread_id` or `session_id`, and checks visibility on every status read.
+- Waits for the run to leave `running`. The default timeout is 30 seconds and the maximum is five
+  minutes. Pass `timeout_ms: 0` to read the current status without waiting.
+- On timeout it returns `status: "running"` and `timed_out: true`, so the coordinator can do other
+  work and wait again later.
+- A completed status does not include the transcript. Read the thread with `read_thread`.
+
+### read_thread
 
 `read_thread` returns the most recent messages and the thread's `run_status`. The `limit` argument
-defaults to 20 and is clamped to a maximum of 100. Each message body is truncated to 2000
-characters with a trailing ellipsis, so a long worker turn does not fill the coordinator's context.
-
-`list_threads` hides archived finished threads by default; pass `include_archived: true` to see
-them. `active_only: true` still includes a running thread if it was archived. Pinned threads always
-sort first, otherwise the store's most-recently-updated order is preserved. Each row surfaces
-`thread_id`, `title`, `agent_id`, `run_status`, active `sessions`, `message_count`, `pinned`,
-`archived`, `folder_path`, `branch`, `worktree_path`, `workspace_overlap`, and `updated_at`.
+defaults to 20 and is clamped to 100. Each message body is truncated to 2000 characters with a
+trailing ellipsis, so a long worker turn does not fill the coordinator's context.
 
 ## Storage
 
-Threads are backed by `ConversationStore`, which stores the `pinned` and `archived` columns. The `create_thread` tool mints a UUID `thread_id` and calls
-`ensure_conversation`; when a `cwd` is supplied it is recorded as run metadata so `list_threads`
-surfaces the working folder, while the worktree itself is created lazily on the first
-`send_message_to_thread`.
+Threads are backed by `ConversationStore`, which stores the `pinned` and `archived` columns.
+`create_thread` mints a UUID `thread_id` and calls `ensure_conversation`. A supplied `cwd` is
+recorded as run metadata so `list_threads` shows the working folder. The worktree itself is created
+lazily on the first `send_message_to_thread`.
 
 ## Related
 

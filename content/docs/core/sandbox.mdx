@@ -3,23 +3,30 @@ title: "Execution Backends"
 description: "Reference for Core execution backends (Wasmtime, containers, microVMs, SSH, and remote workspaces), the sandbox_exec tool, capability grants, limits, and how to select or add a backend"
 ---
 
-Core can run untrusted code through an explicit execution backend. The default secure backend is
-[wasmtime](https://wasmtime.dev) running WASIp1 modules: no daemon, no external process, no network
-or filesystem access unless explicitly preopened. A backend is a runtime choice, not a promise that
-the host has that runtime installed. This page is for operators and plugin authors who choose or
-add a backend.
+Core can run untrusted code through an explicit execution backend. This page is for operators and
+plugin authors who choose or add a backend.
 
-Placement follows the Core-vs-Gateway rule (see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)).
-Deciding *what runs* - which module, which capabilities - is Core. Deciding *what is allowed* -
-DLP on the module's stdout, network egress - is the Gateway. The sandbox module enforces only the
-structural default-deny; policy belongs upstream.
+<Figure name="sandbox" />
+
+The default secure backend is [wasmtime](https://wasmtime.dev) running WASIp1 modules. It needs no
+daemon and no external process, and it has no network or filesystem access unless a directory is
+explicitly preopened. A backend is a runtime choice, not a promise that the host has that runtime
+installed.
+
+Placement follows the [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway) rule:
+
+- **Core decides what runs** - which module and which capabilities.
+- **The Gateway decides what is allowed** - DLP on the module's stdout and network egress.
+- **The sandbox module enforces only the structural default-deny.** Policy belongs upstream.
 
 ## Backend vocabulary
 
-The public configuration term is **backend**. The historical MCP server name remains `sandbox` so
-existing tool ids and allowlists keep working. `sandbox.sandbox_exec` is the one-shot entry point;
-the persistent `sandbox_create`, `sandbox_run`, and `sandbox_destroy` tools use the configured Box
-or Daytona workspace path.
+The public configuration term is **backend**. The historical MCP server name remains `sandbox`, so
+existing tool ids and allowlists keep working.
+
+- `sandbox.sandbox_exec` is the one-shot entry point.
+- The persistent `sandbox_create`, `sandbox_run`, and `sandbox_destroy` tools use the configured
+  Box or Daytona workspace path.
 
 | Backend | Shape | Current status |
 |---|---|---|
@@ -38,32 +45,33 @@ or Daytona workspace path.
 
 <Callout type="warn">
   A recognized backend is not automatically available, and availability is not authorization. Core
-  probes only what it can safely identify, then returns an explicit unavailable/error result when a
-  selected backend is missing or not wired. It never silently falls back from an explicit backend to
-  another runtime. This makes a Box, Daytona, Modal, Vercel Sandbox, or Singularity plugin a valid
-  extension point: it can own provider credentials and implementation while Core keeps the stable
-  backend vocabulary and approval boundary.
+  probes only what it can safely identify. It returns an explicit unavailable or error result when a
+  selected backend is missing or not wired, and it never silently falls back from an explicit
+  backend to another runtime.
 </Callout>
 
-The Docker backend is unavailable when the reachable daemon is rootful. A Docker
-socket backed by a rootful daemon is equivalent to host-root access; use a rootless daemon or the
-default Wasmtime backend for local execution.
+This strictness makes a Box, Daytona, Modal, Vercel Sandbox, or Singularity plugin a valid extension
+point. The plugin owns provider credentials and the implementation, while Core keeps the stable
+backend vocabulary and approval boundary.
 
-Docker, microsandbox, and opensandbox return captured standard output, standard error, and the
-command exit code. Supplied standard input reaches the command; commands without input receive
-an end of input immediately. Command output is capped at 4 MiB per stream. On overflow or
-deadline, Core terminates the CLI child. Docker also asks the rootless daemon to remove the affected
-container. Microsandbox one-shot runs use a named VM that Core force-removes after execution or a
-deadline; a cleanup failure is reported as an error. A timed-out Docker, microsandbox, or opensandbox
-workspace must be recreated.
+### Command backend behavior
 
-Daytona runs register their provider workspace before execution so a budget stop targets the running
-sandbox. If the provider cannot confirm a stop, Ryu keeps metering and retries instead of treating
-that workspace as terminated.
+- **Docker refuses rootful daemons.** A Docker socket backed by a rootful daemon is equivalent to
+  host-root access. Use a rootless daemon or the default Wasmtime backend for local execution.
+- **Docker, microsandbox, and opensandbox return** captured standard output, standard error, and
+  the command exit code. Supplied standard input reaches the command; a command without input
+  receives end of input immediately.
+- **Output is capped at 4 MiB per stream.** On overflow or deadline, Core terminates the CLI child. Docker also asks the rootless
+  daemon to remove the affected container.
+- **Microsandbox one-shot runs** use a named VM that Core force-removes after execution or a
+  deadline. A cleanup failure is reported as an error.
+- **A timed-out workspace** on Docker, microsandbox, or opensandbox must be recreated.
+- **Daytona runs** register their provider workspace before execution, so a budget stop targets the
+  running sandbox. If the provider cannot confirm a stop, Ryu keeps metering and retries instead of
+  treating that workspace as terminated.
 
-Per-backend behaviour (the wasmtime run sequence, local, SSH, MXC, Apptainer and Singularity, Modal and
-Vercel Sandbox) is on
-[Execution Backend Reference](/docs/core/sandbox-backends).
+Per-backend behavior (the wasmtime run sequence, local, SSH, MXC, Apptainer and Singularity, Modal
+and Vercel Sandbox) is on [Execution Backend Reference](/docs/core/sandbox-backends).
 
 ## The execution contract
 
@@ -87,9 +95,9 @@ One-shot runtimes and command backends share the same request shape.
 
 ## The `sandbox_exec` tool
 
-The backends are exposed to agents as the built-in MCP tool `sandbox.sandbox_exec`
-(`apps/core/src/sidecar/mcp/sandbox.rs`), reachable through the same registry call surface as every
-other tool. See the [MCP registry](/docs/core/mcp-registry) for how built-in tools are listed and
+Agents reach the backends through the built-in MCP tool `sandbox.sandbox_exec`
+(`apps/core/src/sidecar/mcp/sandbox.rs`). It uses the same registry call surface as every other
+tool; see the [MCP registry](/docs/core/mcp-registry) for how built-in tools are listed and
 dispatched.
 
 | Argument | Meaning |
@@ -103,16 +111,35 @@ dispatched.
 | `timeout_secs` | Wall-clock cap in seconds, `30` when omitted. On `wasmtime` it is clamped to between 1 and 30 seconds |
 | `scope`, `workspace_access` | See [Scope and workspace access](#scope-and-workspace-access). The `wasmtime` path runs with the deny-all capability set |
 
-The tool returns stdout, stderr, and the exit code. Each run checks the Gateway exec budget before it
-starts (fail-closed) and reports an exec-audit row after it ends. Calls go through the existing
-tool-approval path in the ACP adapter. The sandbox adds no approval UI of its own.
+The tool returns stdout, stderr, and the exit code. Each call follows the same path:
+
+```mermaid
+flowchart TD
+  A["sandbox_exec call"] --> B["Tool approval (ACP adapter)"]
+  B --> C{"backend argument set?"}
+  C -- yes --> E["Use that backend"]
+  C -- no --> D["Node default backend"]
+  D --> E
+  E --> F{"Gateway exec budget"}
+  F -- denied --> G["Refuse run (fail-closed)"]
+  F -- allowed --> H["Run in backend"]
+  H --> I["stdout, stderr, exit code"]
+  H --> J["Exec-audit row to Gateway"]
+```
+
+- **Approval.** Calls go through the existing tool-approval path in the ACP adapter. The sandbox
+  adds no approval UI of its own.
+- **Budget.** Each run checks the Gateway exec budget before it starts (fail-closed), and is refused
+  when the Gateway denies it.
+- **Audit.** Each run reports an exec-audit row to the Gateway after it ends.
+- **Disable switch.** `RYU_SANDBOX_DISABLED=1` disables the tool at runtime. It stays listed so the
+  agent knows it exists, and calls return an unavailable result.
 
 ## Scope and workspace access
 
-Two declarative capability fields on `SandboxCapabilities` let an agent narrow how a sandbox run is
-isolated and what it may do to the workspace. Both default to the per-exec run, so a call that sets
-neither gets the per-exec default. They are parsed from optional tool arguments. An absent or
-unknown value falls through to the deny-safe default.
+Two declarative capability fields on `SandboxCapabilities` narrow how a run is isolated and what it
+may do to the workspace. They are parsed from optional tool arguments. An absent or unknown value
+falls through to the deny-safe default, so a call that sets neither gets the per-exec run.
 
 ### Sandbox scope
 
@@ -126,9 +153,8 @@ unknown value falls through to the deny-safe default.
 | `shared` | `Shared` | Declared, not yet honored |
 
 <Callout type="warn">
-  Scope is declarative metadata. Only `Exec` is wired. `Agent`, `Session`, and `Shared` are declared
-  but have no runtime effect. Declaring one records intent without changing how the run is
-  isolated.
+  Scope is declarative metadata. Only `Exec` is wired. `Agent`, `Session`, and `Shared` record
+  intent but do not change how the run is isolated.
 </Callout>
 
 ### Workspace access
@@ -141,89 +167,115 @@ unknown value falls through to the deny-safe default.
 | `read_only` | `ReadOnly` | Every mount is forced read-only |
 | `none` | `None` | All workspace mounts are stripped |
 
-Because the default is `ReadWrite`, the clamp changes nothing unless a caller sets it. A shared
-`SandboxCapabilities::effective_mounts()` centralizes the strip/force-read-only/per-path semantics so
-both the wasmtime backend (preopened dirs) and the Docker backend (`-v` mounts) apply identical
-rules. The network-deny posture is untouched, because the clamp only tightens filesystem access.
+Because the default is `ReadWrite`, the clamp changes nothing unless a caller sets it. The shared
+`SandboxCapabilities::effective_mounts()` applies the same strip, force-read-only, and per-path rules
+to wasmtime preopened directories and Docker `-v` mounts. The clamp only tightens filesystem access;
+the network-deny posture is unchanged.
 
 ## Execution limits
 
-Local command backends capture at most 4 MiB from each output stream. Remote Box responses have
-a 4 MiB body limit. Daytona responses have a 12 MiB body limit and a 4 MiB command-output limit.
-Both limits apply to responses without a declared length. Exceeding a limit returns an error instead of silently truncating output.
-When a caller passes no timeout, Local, SSH, and MXC commands default to 120 seconds. Docker,
-microsandbox, and OpenSandbox default to 30 seconds. `sandbox_exec` always passes one to command
-backends: 30 seconds unless the call sets `timeout_secs`. All host command backends reject
-timeouts outside 1 to 300 seconds before execution or workspace cleanup. A
-failed command capture or timeout kills and reaps the local launcher and triggers
-workspace cleanup. Cancellation keeps a bounded cleanup task alive so dropping
-a tool call cannot leave its known workspace running.
+### Output and timeouts
 
-A persistent sandbox's requested budget may tighten the operator's configured
-per-run cap. Setting the requested budget to zero or a larger amount cannot disable
-or raise that cap. Paid Box and Daytona executions register their real workspaces
-for metering. An explicitly active Box subscription passthrough remains unmetered,
-and cancelling a paid execution still finalizes its accrued charge so
-a stop verdict can destroy the billed workspace.
+| Limit | Value |
+|---|---|
+| Local command backend output | At most 4 MiB captured from each stream |
+| Remote Box response body | 4 MiB |
+| Daytona response body / command output | 12 MiB / 4 MiB |
+| Default timeout, Local, SSH, and MXC | 120 seconds when the caller passes none |
+| Default timeout, Docker, microsandbox, and OpenSandbox | 30 seconds when the caller passes none |
+| `sandbox_exec` timeout for command backends | Always passed: 30 seconds unless the call sets `timeout_secs` |
+| Accepted timeout range, host command backends | 1 to 300 seconds, checked before execution or workspace cleanup |
 
-A persistent sandbox is billed for the shape its backend provisions from operator
-configuration. A create request may omit `spec` or restate that shape. Any other
-shape is refused, so a caller cannot choose a cheaper or larger billed shape than
-the machine it gets. A Box that reports a time to live stops being metered when that
-time ends, and Core then removes it from its live sandboxes.
+The body limits also apply to responses without a declared length. Exceeding any limit returns an
+error instead of silently truncating output.
 
-Core records each persistent workspace in its data directory before returning it.
-Workspaces outlive the Core process, but their metering does not. When Core
-starts again, it deletes the workspaces a stopped or crashed Core left running.
-Destroying such a run by id also deletes its workspace, and reports an error if the
-provider delete fails. A Box that never becomes ready is deleted, not left running.
-A metered run survives a short Gateway outage: Core retries a failed metering tick
-and stops the workspace after three consecutive failed ticks or 30 seconds of
-failed ticks, whichever comes first. A stop verdict from the Gateway still takes
-effect immediately.
+A failed command capture or a timeout kills and reaps the local launcher and triggers workspace
+cleanup. Cancellation keeps a bounded cleanup task alive, so dropping a tool call cannot leave its
+known workspace running.
 
-The WASM backend limits each guest memory to 64 MiB, allows one memory, and limits
-each table to 10,000 elements with at most four tables. Module input is capped at
-4 MiB and at most two WASM workers run at once. Before compilation, the runtime
-limits defined functions, expanded imports, exports, globals, element segments,
-and types to 4,096 each, each function body to 16 KiB, total code
-to 1 MiB, and locals per function to 4,096. Recursive type groups count toward the
-same type limit. Each type may contain at most 4,096 parameters, results, or fields,
-with at most 65,536 such elements across the module. Compilation runs sequentially
-within each admitted worker.
+### Persistent sandboxes and metering
+
+- **Budget can only tighten.** A persistent sandbox's requested budget may tighten the operator's
+  configured per-run cap. Zero or a larger amount cannot disable or raise that cap.
+- **Paid runs are metered.** Paid Box and Daytona executions register their real workspaces for
+  metering. An explicitly active Box subscription passthrough remains unmetered.
+- **Cancelling still bills.** Cancelling a paid execution finalizes its accrued charge, so a stop
+  verdict can destroy the billed workspace.
+- **The billed shape is fixed.** A persistent sandbox is billed for the shape its backend provisions
+  from operator configuration. A create request may omit `spec` or restate that shape; any other
+  shape is refused, so a caller cannot choose a cheaper or larger billed shape than the machine it
+  gets.
+- **Box time to live.** A Box that reports a time to live stops being metered when that time ends,
+  and Core then removes it from its live sandboxes.
+- **Never-ready Boxes** are deleted, not left running.
+
+Core records each persistent workspace in its data directory before returning it. Workspaces outlive
+the Core process, but their metering does not:
+
+- When Core starts again, it deletes the workspaces a stopped or crashed Core left running.
+- Destroying such a run by id also deletes its workspace, and reports an error if the provider
+  delete fails.
+- A metered run survives a short Gateway outage. Core retries a failed metering tick and stops the
+  workspace after three consecutive failed ticks or 30 seconds of failed ticks, whichever comes
+  first.
+- A stop verdict from the Gateway still takes effect immediately.
+
+### WASM module limits
+
+| Limit | Value |
+|---|---|
+| Guest memory | 64 MiB per memory, one memory |
+| Tables | At most four, each at most 10,000 elements |
+| Module input | 4 MiB |
+| Concurrent WASM workers | Two |
+| Defined functions, expanded imports, exports, globals, element segments, types | 4,096 each (recursive type groups count toward the type limit) |
+| Function body size | 16 KiB each, 1 MiB total code |
+| Locals per function | 4,096 |
+| Parameters, results, or fields per type | 4,096, with at most 65,536 across the module |
+
+These shape limits are checked before compilation. Compilation runs sequentially within each
+admitted worker.
 
 ## Selecting a backend
 
-The node default backend resolves in this order:
+A per-call `backend` argument always wins. Otherwise the node default backend resolves in this
+order:
 
 1. The selection saved through `POST /api/sandbox/backend` (stored in `sandbox-backend.json`).
 2. The `RYU_SANDBOX_BACKEND` environment variable.
 3. `wasmtime`.
 
-A per-call `backend` argument always wins over the node default. The selected backend,
-credentials, quota, approval, and runtime availability remain separate checks. When a backend is
-disabled or unavailable, the tool remains discoverable and returns an explicit unavailable result.
-It does not silently change runtimes.
+The selected backend, credentials, quota, approval, and runtime availability remain separate checks.
+When a backend is disabled or unavailable, the tool remains discoverable and returns an explicit
+unavailable result. It does not silently change runtimes.
 
-The desktop can validate a default-backend choice without changing the node by sending
-`dryRun: true` to `POST /api/sandbox/backend`. Core checks that the backend is known and reports
-its current default, platform support, live detection result, and the `sandbox-backend.json` write
-that a live request would perform. A dry run never changes the default or starts a sandbox.
+To validate a default-backend choice without changing the node, send `dryRun: true` to
+`POST /api/sandbox/backend`. Core checks that the backend is known and reports:
+
+- the current default;
+- platform support;
+- the live detection result;
+- the `sandbox-backend.json` write that a live request would perform.
+
+A dry run never changes the default or starts a sandbox.
 
 ## Sandbox vs programmatic tool calling
 
-The wasmtime sandbox runs an arbitrary WASM module. It is distinct from
-[programmatic tool calling](/docs/core/programmatic-tool-calling), which runs model-authored
-JavaScript that fans out across tools. PTC runs that JavaScript in a QuickJS engine compiled to
-WebAssembly, also on Wasmtime but with its own runtime and no filesystem or network at all. It does
-not go through the backends on this page. Use the sandbox when you have a
-WASM workload to run in isolation. Use PTC when an agent needs to orchestrate many tool
-calls in code.
+The wasmtime sandbox runs an arbitrary WASM module.
+[Programmatic tool calling](/docs/core/programmatic-tool-calling) (PTC) is different: it runs
+model-authored JavaScript that fans out across tools.
+
+PTC runs that JavaScript in a QuickJS engine compiled to WebAssembly. It also uses Wasmtime, but
+with its own runtime and no filesystem or network at all, and it does not go through the backends on
+this page.
+
+- Use the sandbox when you have a WASM workload to run in isolation.
+- Use PTC when an agent needs to orchestrate many tool calls in code.
 
 ## Building a backend plugin
 
-Use a plugin when a backend needs a provider SDK, credentials, quota model, or a sidecar that should
-not be compiled into Core. The plugin should:
+Use a plugin when a backend needs a provider SDK, credentials, a quota model, or a sidecar that
+should not be compiled into Core. The plugin should:
 
 - Declare the backend name and required grants.
 - Expose a typed tool or app contribution that accepts the shared execution request.
@@ -232,7 +284,9 @@ not be compiled into Core. The plugin should:
 - Return an explicit unavailable result when its provider is not configured.
 
 Do not register an arbitrary name and quietly route it to host execution. The backend selector is
-strict so a typo, an unsupported Hermes-compatible name, or a disabled provider is visible to the
-caller. See [built-in tools](/docs/core/built-in-tools) for the stable tool ids and the
+strict, so a typo, an unsupported Hermes-compatible name, or a disabled provider is visible to the
+caller.
+
+See [built-in tools](/docs/core/built-in-tools) for the stable tool ids. The
 [Hermes terminal backend configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration#terminal-backend-configuration)
-for the backend vocabulary this contract is compared with.
+shows the backend vocabulary this contract is compared with.

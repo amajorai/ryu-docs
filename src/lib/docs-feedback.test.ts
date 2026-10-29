@@ -11,7 +11,7 @@ beforeEach(() => {
 const validFeedback = {
   message: "The code sample needs a note about the required scope.",
   opinion: "bad" as const,
-  url: "http://localhost:4000/docs/0.3.0/extend/mcp/quickstart",
+  url: "http://localhost:4000/docs/extend/mcp/quickstart",
 };
 
 describe("docs feedback action", () => {
@@ -157,12 +157,12 @@ describe("docs feedback action", () => {
   test("accepts localized docs URLs", async () => {
     const response = await submitDocsFeedback({
       ...validFeedback,
-      url: "http://localhost:4000/es/docs/0.4.0/start-here",
+      url: "http://localhost:4000/es/docs/start-here",
     });
 
     expect(response.submitted).toBe(false);
     expect(new URL(response.destinationUrl).searchParams.get("body")).toContain(
-      "/es/docs/0.4.0/start-here",
+      "/es/docs/start-here",
     );
   });
 

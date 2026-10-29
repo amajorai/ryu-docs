@@ -5,6 +5,24 @@ description: "How Ryu scans shell commands before execution, blocks permanent fi
 
 Before Core runs a shell command that a tool produced, it sends the command to the Gateway's exec-governance scanner. The scanner classifies the command and returns a verdict: allow, deny, or approval required. This human-in-the-loop (HITL) gate sits between untrusted model output and your shell.
 
+<Figure name="approvals" />
+
+```mermaid
+flowchart TD
+  Cmd["Tool produces a command"] --> Guard{"Permanent deletion or hardline?"}
+  Guard -->|"Yes"| Deny["deny"]
+  Guard -->|"No"| Mode{"Mode is off?"}
+  Mode -->|"Yes"| Allow["allow"]
+  Mode -->|"No"| Scan["POST /v1/exec/scan"]
+  Scan -->|"Unreachable (default)"| Deny
+  Scan --> Verdict{"Verdict"}
+  Verdict -->|"allow"| Allow
+  Verdict -->|"deny"| Deny
+  Verdict -->|"approval_required"| Path{"Interactive ACP?"}
+  Path -->|"Yes"| Ask["Ask the user"]
+  Path -->|"No (PTC, tool-exec, headless)"| Deny
+```
+
 ## Modes
 
 The mode comes from `RYU_EXEC_APPROVAL_MODE`. **The gate is armed whenever that value is anything
@@ -45,8 +63,9 @@ managed rule would otherwise allow the command. The guard covers:
 - literal nested deletion commands inside `bash -c`, `bash -lc`, `sh -c`, `zsh -c`, `cmd /c`, and PowerShell wrappers
 
 The local guard (`crates/core/deletion-guard`) also refuses commands above 2 MiB and commands whose
-repeated or nested wrapper searches exceed its scan-work budget. A `scan_work_limit` denial means
-the command was too expensive to classify safely. Simplify the command or split the work into
+repeated or nested wrapper searches exceed its scan-work budget.
+
+A `scan_work_limit` denial means the command was too expensive to classify safely. Simplify the command or split the work into
 smaller commands that are checked one by one. The guard never skips classification to allow an
 oversized request.
 
@@ -63,9 +82,11 @@ ordinary approval rule. They have no legitimate agent use.
 The hardline also blocks mutable package-manager execution from agent commands. That includes bare
 `pip install`, `npx`, `npm install`, `uvx`, `cargo install`, `go install`, `gem install`, and
 tag-based `docker run` forms. This closes the supply-chain path where an agent reads a public setup
-file and runs its package command. Use an exact package version, a locked/hash-verified dependency
-set, or an immutable OCI `@sha256:` digest. Pinning is not a claim that a package is safe; review
-the publisher and keep the catalog provenance checks enabled.
+file and runs its package command.
+
+Use an exact package version, a locked/hash-verified dependency set, or an immutable OCI `@sha256:`
+digest instead. Pinning is not a claim that a package is safe. Review the publisher and keep the
+catalog provenance checks enabled.
 
 Ryu never silently rewrites a blocked command. Use the verified recoverable mechanism instead:
 
@@ -104,14 +125,17 @@ Beyond the hardline set, about 56 compiled regex patterns (`build_patterns` in `
 | Workspace code execution (`untrusted_code_exec`) | `./security.sh`, `bash scripts/check.sh`, `source ./env.sh`, `vendor/bin/tool` |
 
 **Workspace code execution** catches a command that runs a script or program by its path. A
-repository's README can ask an agent to "run the security script before testing"; the script looks
-harmless to a pattern scanner and can start any binary. Ryu treats that shape as code the
-repository supplied and asks before it runs, including inside `bash -lc '…'` wrappers. The finding
-has `medium` severity. Programs under system install prefixes (`/usr/bin`, `/opt/homebrew/bin`, …)
-are not flagged, and the rule applies only to commands that run on your machine, not to sandboxed
-backends. Interpreter and build commands (`python app.py`, `npm test`, `make`) also run repository
-code but are not flagged, because nearly every development turn uses them. For those, rely on
-[workspace trust](/docs/security/workspace-trust).
+repository's README can ask an agent to "run the security script before testing". The script looks
+harmless to a pattern scanner and can start any binary.
+
+Ryu treats that shape as code the repository supplied and asks before it runs, including inside
+`bash -lc '…'` wrappers. The finding has `medium` severity. Limits:
+
+- Programs under system install prefixes (`/usr/bin`, `/opt/homebrew/bin`, …) are not flagged.
+- The rule applies only to commands that run on your machine, not to sandboxed backends.
+- Interpreter and build commands (`python app.py`, `npm test`, `make`) also run repository code but
+  are not flagged, because nearly every development turn uses them. For those, rely on
+  [workspace trust](/docs/security/workspace-trust).
 
 ## The scan endpoint
 
@@ -172,7 +196,10 @@ command instead of falling back to its own shorter list. Retry once Ryu is reach
 
 ## ACP seam
 
-ACP agents (Claude Code, Codex, and Pi) run their own shell, so Ryu gates them at the ACP permission-request seam. When an agent asks to run a tool and `RYU_EXEC_APPROVAL_MODE` is not `off`, Core extracts the command from the request and runs it through the same scanner before it grants the request. A `deny` verdict rejects the permission, even in a headless session that would otherwise auto-approve. `approval_required` rejects in a headless session and goes to the user in an interactive one.
+ACP agents (Claude Code, Codex, and Pi) run their own shell, so Ryu gates them at the ACP permission-request seam. When an agent asks to run a tool and `RYU_EXEC_APPROVAL_MODE` is not `off`, Core extracts the command from the request and runs it through the same scanner before it grants the request.
+
+- A `deny` verdict rejects the permission, even in a headless session that would otherwise auto-approve.
+- `approval_required` rejects in a headless session and goes to the user in an interactive one.
 
 A headless session approves a request on your behalf only when nothing above rejected it, and then
 only within these limits:
@@ -184,24 +211,35 @@ only within these limits:
   rejected. The scanner is accident prevention, and a malicious README can ask for a command that
   matches none of its patterns.
 
-**File-mutating tools are gated with shell execution.** Native coding agents edit a file through a
+### File-mutating tools
+
+File-mutating tools are gated with shell execution. Native coding agents edit a file through a
 dedicated tool shaped `{ file_path, content }` or `{ file_path, new_string }`, with no `command`
-field, so a shell-only scan would miss every write. For `Write`, `Edit`, `MultiEdit`,
-`NotebookEdit`, and their equivalents, Core builds a `write <path>` string and scans that, so a
-policy that denies writes under `.ssh`, `.env`, or `/etc` still applies. Read-only tools that carry a
-path but no write payload (`Read`, `Grep`) are not scanned.
+field, so a shell-only scan would miss every write.
+
+For `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and their equivalents, Core builds a
+`write <path>` string and scans that. A policy that denies writes under `.ssh`, `.env`, or `/etc`
+still applies. Read-only tools that carry a path but no write payload (`Read`, `Grep`) are not
+scanned.
 
 Otherwise, command extraction is best-effort, because the scanner prevents accidents and is not
 containment. A tool call with no recoverable command or write target is not scanned. ACP agents keep
-the credentials in their own configuration, so this gate matters for them; see
+the credentials in their own configuration, so this gate matters for them. See
 [Credential and environment scrubbing](/docs/security/credential-scrubbing) for what their
 environment holds.
 
-For the Ryu-managed Codex entry, Ryu also materializes an isolated Codex home with a durable global
-deletion instruction, user-level `forbidden` command rules, `workspace-write` and `on-request`
-defaults when those settings are absent, and a `PreToolUse` hook. The hook is an extra layer: Codex requires the user to review and trust non-managed hooks, and Core's local
-guard still denies permanent deletion if the hook is skipped, disabled, or bypassed. Ryu never
-edits the user's normal `~/.codex` configuration.
+### Managed Codex
+
+For the Ryu-managed Codex entry, Ryu also materializes an isolated Codex home with:
+
+- a durable global deletion instruction;
+- user-level `forbidden` command rules;
+- `workspace-write` and `on-request` defaults when those settings are absent;
+- a `PreToolUse` hook.
+
+The hook is an extra layer. Codex requires the user to review and trust non-managed hooks, and
+Core's local guard still denies permanent deletion if the hook is skipped, disabled, or bypassed.
+Ryu never edits the user's normal `~/.codex` configuration.
 
 Managed Codex also starts through Ryu's OS-aware child runner, which denies file removal at the OS
 level and fails closed on Windows. It does not prevent truncation or overwrite. See
@@ -212,7 +250,11 @@ Ryu's isolated Codex home. Use their own system or user policy layer for those p
 approval also works with each agent's permission mode; see [ACP integration](/docs/extend/integrate/acp-integration).
 
 <Callout type="warn">
-Smart mode lets low-severity pattern matches run without asking, and neither mode asks about a command that matches no pattern at all. Prefer `manual` anywhere the blast radius matters, and do not rely on either mode against a repository written to fool an agent: that is what [workspace trust](/docs/security/workspace-trust) and the agent sandbox are for. The permanent-deletion and catastrophic hardline blocks deny unconditionally; ordinary risk patterns still depend on the configured mode. In shared or server deployments keep `RYU_EXEC_APPROVAL_MODE=manual` and never set `RYU_ALLOW_GATEWAY_FALLBACK=1`.
+Smart mode lets low-severity pattern matches run without asking, and neither mode asks about a command that matches no pattern at all. Prefer `manual` anywhere the blast radius matters.
+
+Do not rely on either mode against a repository written to fool an agent. That is what [workspace trust](/docs/security/workspace-trust) and the agent sandbox are for.
+
+The permanent-deletion and catastrophic hardline blocks deny unconditionally; ordinary risk patterns still depend on the configured mode. In shared or server deployments keep `RYU_EXEC_APPROVAL_MODE=manual` and never set `RYU_ALLOW_GATEWAY_FALLBACK=1`.
 </Callout>
 
 ## Related

@@ -3,11 +3,18 @@ title: "Channel Access and Allowlists"
 description: "How DM pairing, group allowlists, and agent routing allowlists gate who can reach a channel bot and what it can do."
 ---
 
-A channel (a chat surface, a bot connection, an inbound route) is an untrusted ingress: anyone who can find the bot can make it spend your model budget. Two independent layers gate it. **Access** decides whose messages are answered. **Routing allowlists** decide which agent a channel can address and, through that agent, which tools it can invoke. Widening one does not widen the other.
+A channel (a chat surface, a bot connection, an inbound route) is an untrusted ingress. Anyone who can find the bot can make it spend your model budget.
+
+Two independent layers gate it:
+
+- **Access** decides whose messages are answered.
+- **Routing allowlists** decide which agent a channel can address and, through that agent, which tools it can invoke.
+
+Widening one does not widen the other.
 
 ## Access: who may talk to the bot
 
-Every channel carries a DM policy and a group policy (`DmPolicy` and `GroupPolicy` in `crates/gateway/channels/src/pairing.rs`). They are separate because consent differs: a direct message is one person choosing to talk to your bot, while in a group one member typing at the bot is not consent from everyone in the room.
+Every channel carries a DM policy and a group policy (`DmPolicy` and `GroupPolicy` in `crates/gateway/channels/src/pairing.rs`). They are separate because consent differs. A direct message is one person choosing to talk to your bot. In a group, one member typing at the bot is not consent from everyone in the room.
 
 ### Direct messages
 
@@ -20,6 +27,22 @@ Every channel carries a DM policy and a group policy (`DmPolicy` and `GroupPolic
 
 ### Approving a pairing code
 
+Pairing enrols senders without editing config. The sender gets a code, an operator approves it, and the allowlist updates itself. Nobody is admitted until a human acts.
+
+```mermaid
+sequenceDiagram
+  participant Sender
+  participant Bot as Channel bot (Gateway)
+  participant Owner as Operator
+  Sender->>Bot: First direct message
+  Bot-->>Sender: One-time pairing code
+  Sender->>Owner: Relays the code
+  Owner->>Bot: POST /v1/channels/pairing/approve
+  Bot-->>Owner: approved, platform
+  Sender->>Bot: Next message
+  Bot-->>Sender: Answered by the bound agent
+```
+
 Pairing codes are never written to the Gateway log, so the owner relays the code the sender received. Approve it with an authenticated admin request to the Gateway (the master key, or a loopback caller when the Gateway runs without auth):
 
 ```bash
@@ -29,7 +52,11 @@ curl -X POST "$GATEWAY_URL/v1/channels/pairing/approve" \
   -d '{"code": "ABC234"}'
 ```
 
-The response is `{"approved": true, "platform": "telegram"}`. It names the channel and never the sender id or phone number. The code is not case-sensitive and works once. An unknown, expired, or already-used code returns `404`. The sender's next message is answered normally.
+The response is `{"approved": true, "platform": "telegram"}`. It names the channel and never the sender id or phone number.
+
+- The code is not case-sensitive and works once.
+- An unknown, expired, or already-used code returns `404`.
+- The sender's next message is answered normally.
 
 ### Groups
 
@@ -47,8 +74,6 @@ Groups have **no pairing flow**. A pairing code proves one participant wants the
 
 ## Legacy environment variables
 
-Pairing enrols senders without editing config: the sender gets a code, an operator approves it as described above, and the allowlist updates itself. Nobody is admitted until a human acts.
-
 The older environment variables still set the policies:
 
 | Environment | DM policy | Group policy |
@@ -63,11 +88,19 @@ The per-platform key overrides the global one.
 
 Paired senders are kept in a per-node file, not in the control-plane database. The same bot token running on another node is a different deployment with its own approvals. The Gateway also has to gate inbound traffic **while the control plane is unreachable**, so the gate cannot depend on it.
 
-A pairing code expires after 24 hours (`CODE_TTL`). Messaging the bot again before then returns the *same* code instead of a second one. A blocked sender never receives another code. Expired codes are discarded, and while 1,024 codes are awaiting approval, messages from new unknown senders are ignored without a reply until some codes are approved or expire.
+Pairing code limits:
+
+- A code expires after 24 hours (`CODE_TTL`).
+- Messaging the bot again before then returns the *same* code instead of a second one.
+- A blocked sender never receives another code.
+- Expired codes are discarded.
+- While 1,024 codes are awaiting approval, messages from new unknown senders are ignored without a reply until some codes are approved or expire.
 
 ## Routing allowlists: what the channel can reach
 
-Routing allowlists are account-global: they apply across nodes, not to one node. See [Channels in the Gateway dialog](/docs/gateway/channels) for where to configure them. A channel routes to a specific agent or team, and the allowlist on that route bounds what a sender into the channel can reach.
+Routing allowlists are account-global: they apply across nodes, not to one node. See [Channels in the Gateway dialog](/docs/gateway/channels) for where to configure them.
+
+A channel routes to a specific agent or team, and the allowlist on that route bounds what a sender into the channel can reach.
 
 ```mermaid
 flowchart LR

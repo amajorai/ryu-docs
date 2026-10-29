@@ -34,10 +34,11 @@ Pick one deployment.
 - **Self-hosted Box**: the self-hosted Box service is not yet published, so
   there is no source or container image to download and run today (see
   [Ryu Box](/docs/standalone/box#self-hosting)). A Box service that Ryu runs
-  for you at another URL, or one you already operate, takes the same calls:
-  its tenant key is the value set in `RYU_BOX_API_TOKEN` (or one entry of
-  `RYU_BOX_API_TOKENS`) on the service, and by default it listens on
-  `http://127.0.0.1:8090`. Ryu never bills a self-hosted Box.
+  for you at another URL, or one you already operate, takes the same calls.
+  Ryu never bills a self-hosted Box.
+  - Its tenant key is the value set in `RYU_BOX_API_TOKEN` (or one entry of
+    `RYU_BOX_API_TOKENS`) on the service.
+  - By default it listens on `http://127.0.0.1:8090`.
 
 HTTP calls work in any runtime with `fetch`. Terminals, tunnels, and SSH use
 WebSockets, so they need a server runtime with a `WebSocket` implementation:
@@ -145,23 +146,37 @@ elif data:
     print(data["box"]["id"], data["result"]["exitCode"], data["result"]["stdout"])
 ```
 
-`box.run()` never deletes the Box. If the Box ends in `error`, the call fails
-with `box_failed`; if it is still provisioning after `readyTimeoutMs` (default
-30 minutes; `ready_timeout=`, in seconds, in Python), it fails with
-`box_ready_timeout` (a `RyuTimeoutError`, not the service's
-`409 box_not_ready`). Both carry the Box id in
-`error.details.boxId`, so you can inspect or delete it.
+### How box.run() ends
+
+`box.run()` never deletes the Box. It can end in two SDK errors, and both
+carry the Box id in `error.details.boxId`, so you can inspect or delete it:
+
+- If the Box ends in `error`, or in any status other than `ready` or
+  `running`, the call fails with `box_failed`.
+- If it is still provisioning after `readyTimeoutMs` (default 30 minutes;
+  `ready_timeout=`, in seconds, in Python), it fails with `box_ready_timeout`
+  (a `RyuTimeoutError`, not the service's `409 box_not_ready`).
+
+<Mermaid chart={`flowchart LR
+  Create["Create Box"] --> Prov["provisioning"]
+  Prov -->|"ready or running"| Exec["Stream command output"]
+  Prov -->|"error or other status"| Failed["box_failed"]
+  Prov -->|readyTimeoutMs passes| Timeout["box_ready_timeout"]
+  Exec --> Result["data.box and data.result"]
+`} />
 
 `box.run()` reads the command's output as a stream and collects it, so a
-command may run longer than the SDK's `timeoutMs`; the command's own
+command may run longer than the SDK's `timeoutMs`. The command's own
 `timeoutSecs` (service default 120, at most 3600) bounds it. Aborting the
 call's `signal` closes the stream, and the service then stops the command.
+
 The Python client has no `signal`. Its `box.run()` runs to the end, and you stop
 an `exec_stream()` by breaking out of a `for` loop written directly over the
 call (`for event in box.exec_stream(...)`), which releases the stream and
 closes it. A stream you keep in a variable is a generator: call `close()` on
-it, or wrap it in `contextlib.closing()`. Python spells the polling interval
-`poll_interval=`, in seconds.
+it, or wrap it in `contextlib.closing()`.
+
+Python spells the polling interval `poll_interval=`, in seconds.
 
 An array `command` is sent word for word. A string is a command line that
 the service splits like a shell would (quotes group words), without running
@@ -172,6 +187,8 @@ same input (in Python, the same `idempotency_key=` to `ryu.box.run()`).
 Without a `name`, the Box name is derived from the key, so the
 repeated create replays the first Box instead of failing with
 `idempotency_conflict`.
+
+### Namespaces
 
 The same namespace wraps every method of the `@ryuhq/client` Box client,
 arranged by resource. Boxes are the primary resource, so calls on a Box
@@ -334,11 +351,13 @@ Creating a Box returns it in a `box.created` envelope. Example from the
 ```
 
 With `setup` commands or a `repo`, the answer is `202` with the Box
-`provisioning`. A repeat with the same key and body answers `200` with type
-`box.existing` and the same Box; newer Box servers also send an
-`Idempotent-Replayed: true` header. The SDK reports either signal as
-`meta.replayed: true`. This sample repeats the curl create above, with the
-same key and the same body, so it replays that Box instead of creating one:
+`provisioning`.
+
+A repeat with the same key and body answers `200` with type `box.existing` and
+the same Box; newer Box servers also send an `Idempotent-Replayed: true`
+header. The SDK reports either signal as `meta.replayed: true`. This sample
+repeats the curl create above, with the same key and the same body, so it
+replays that Box instead of creating one:
 
 ```ts tab="Node"
 const {
@@ -365,14 +384,19 @@ elif replayed and replay_meta:
     print(replayed["id"], replay_meta.replayed)
 ```
 
+### Replays after a delete
+
 After that Box is deleted, a replay of its key answers
-`409 idempotency_key_resource_deleted` (a `RyuConflictError`; like every
-`409` except `idempotency_in_progress`, it is not retried): the key stays
-spent, so choose a new key for a new Box. A fork replay gets the same answer
-even after its source Box was deleted. Box servers built before this code
-existed answer `404 not_found` instead, so code that detects a deleted Box
-should handle both. Use one key per create or fork: a fork's key reused on
-`create`, or on a fork of another Box, is a `409 idempotency_conflict`.
+`409 idempotency_key_resource_deleted`. The key stays spent, so choose a new
+key for a new Box.
+
+- It is a `RyuConflictError`. Like every `409` except
+  `idempotency_in_progress`, it is not retried.
+- A fork replay gets the same answer even after its source Box was deleted.
+- Box servers built before this code existed answer `404 not_found` instead,
+  so code that detects a deleted Box should handle both.
+- Use one key per create or fork. A fork's key reused on `create`, or on a
+  fork of another Box, is a `409 idempotency_conflict`.
 
 ## Errors, retries, CLI, and MCP
 

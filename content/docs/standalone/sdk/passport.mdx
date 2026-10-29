@@ -10,10 +10,11 @@ Early access: hosted keys are provisioned by Ryu; the self-hosted service is not
 
 This page makes a first call to [Ryu Passport](/docs/standalone/passport)
 with curl, with the `@ryuhq/services` TypeScript SDK, with the `ryu_sdk.services` Python client, with the `ryu-services`
-command line, and with its MCP tools. The full route list is on
-[Passport API](/docs/standalone/passport-api), and destination and header
-rules for fetches are on
-[Fetch through a Passport connection](/docs/standalone/passport-fetch-api).
+command line, and with its MCP tools.
+
+- The full route list is on [Passport API](/docs/standalone/passport-api).
+- Destination and header rules for fetches are on
+  [Fetch through a Passport connection](/docs/standalone/passport-fetch-api).
 
 <Callout type="info">
 @ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
@@ -61,6 +62,7 @@ Set `RYU_PASSPORT_URL` and at least one key. An agent process needs only
 Both keys are sent as `Authorization: Bearer`, and only to
 `RYU_PASSPORT_URL`. The SDK sends the runtime key on `/v1/runtime/*` and on
 `runtime.connections.fetch()`, and the administration key everywhere else.
+
 Passport refuses the administration key on runtime routes, so a runtime call
 without `RYU_PASSPORT_RUNTIME_KEY` fails with a `RyuConfigurationError`
 before any request. An administration call without `RYU_PASSPORT_API_KEY`
@@ -70,7 +72,18 @@ fails the same way, naming that variable.
 
 Create a connection, start its login, import the credential state you
 captured, then fetch through it. A new connection is `NEEDS_AUTH`, and a fetch
-answers `409 conflict` until the import marks it `AUTHENTICATED`. Use the
+answers `409 conflict` until the import marks it `AUTHENTICATED`.
+
+```mermaid
+stateDiagram-v2
+  [*] --> NEEDS_AUTH: create
+  NEEDS_AUTH --> NEEDS_AUTH: fetch answers 409 conflict
+  NEEDS_AUTH --> AUTHENTICATED: login, then import state
+  AUTHENTICATED --> AUTHENTICATED: fetch with the stored login
+  AUTHENTICATED --> [*]: delete
+```
+
+Use the
 `connection.id` from the create response in place of `<connection-id>`.
 GitHub, like some other APIs, refuses a request without a `User-Agent` header
 with `403`, so the fetch sends one in `headers`.
@@ -133,17 +146,21 @@ elif data:
     print(data["connection"]["id"], data["connection"]["status"])  # "NEEDS_AUTH"
 ```
 
-A new connection starts as `NEEDS_AUTH`, and a fetch through it answers
-`409 conflict` until it is `AUTHENTICATED`. `connections.login(id)` starts the
-configured login source. When the flow's `kind` is `manual`, complete the
-provider login yourself, then hand Passport the captured state (one string of
-at most 512 KiB, such as a cookie header) with `connections.importState(id, { state })`
-(`connections.import_state` in Python). It uses the administration key, is
+`connections.login(id)` starts the
+configured login source:
+
+- When the flow's `kind` is `manual`, complete the
+  provider login yourself, then hand Passport the captured state (one string of
+  at most 512 KiB, such as a cookie header) with `connections.importState(id, { state })`
+  (`connections.import_state` in Python).
+- A `hosted` flow returns a URL to open instead (see
+  [Passport API](/docs/standalone/passport-api#create-a-connection)).
+
+`importState` uses the administration key, is
 never retried, and returns status metadata only; Passport never returns the
 state. A missing or non-string `state` is refused with `invalid_request` before
 any request, and a reply that is not a connection detail fails with
-`invalid_response`, in Node and Python alike. A `hosted` flow returns a URL to open instead (see
-[Passport API](/docs/standalone/passport-api#create-a-connection)).
+`invalid_response`, in Node and Python alike.
 
 Every Passport method checks the reply's shape the same way in Node and Python:
 a connection, profile, login flow, fetch result, capabilities or usage body
@@ -208,12 +225,16 @@ The namespace also has `capabilities()`, `profiles.list()`,
 `connections.list()`, `connections.get(id)`, `connections.delete(id)`,
 `connections.fetch(id, input)` (administration key, `GET` only),
 `runtime.connections.list()`, `runtime.connections.hasRuntimeGrant()`, and
-`usage({ from, to })`. `hasRuntimeGrant()` resolves to whether
+`usage({ from, to })`. Passport lists are not paginated.
+
+`hasRuntimeGrant()` resolves to whether
 `RYU_PASSPORT_RUNTIME_KEY` is set, without a request, so an agent can choose
-the runtime routes before it calls them. Bodies keep
+the runtime routes before it calls them.
+
+Bodies keep
 Passport's wire casing: `profile_id`, `flow_status`, and `created_at` on
 connections; `credentialHeaders` and `maxContentChars` on fetches; and
-`connectionSeconds` in the usage report. Passport lists are not paginated.
+`connectionSeconds` in the usage report.
 
 ## Expected response
 
@@ -264,7 +285,9 @@ Passport sends no request id, so `error.requestId` is null.
 Earlier Passport releases answered some errors with plain text or an empty
 body, and used `unauthenticated` for `401` and `bad_request` for prose `400`s.
 Code that compares `error.code` should also accept those older values while
-older servers are still running. The `idempotency_*` codes in the
+older servers are still running.
+
+The `idempotency_*` codes in the
 [HTTP API reference](/docs/standalone/passport-api#errors) reach the SDK only
 on a Passport that advertises idempotency keys (see below):
 `409 idempotency_in_progress` is retried with the same key, and
@@ -276,12 +299,16 @@ Newer Passport builds deduplicate `POST /v1/connections` keyed with an
 `Idempotency-Key` header (see the
 [HTTP API reference](/docs/standalone/passport-api#create-a-connection)) and
 say so in `GET /v1/capabilities` as `features.idempotency_keys: true`; an
-older build ignores the header. Before a `connections.create()`, the SDK reads
-the capabilities with the administration key. This is one extra request that
-your `onRequest`, `onResponse`, and `onRetry` hooks do not see. It is never
-retried, times out after 5 seconds (or your shorter `timeoutMs`), and is not
-cancelled by one call's signal, because concurrent creates share it. The
-answer is remembered per `Ryu` instance and base URL for five minutes:
+older build ignores the header.
+
+Before a `connections.create()`, the SDK reads
+the capabilities with the administration key. This is one extra request that:
+
+- your `onRequest`, `onResponse`, and `onRetry` hooks do not see;
+- is never retried, and times out after 5 seconds (or your shorter `timeoutMs`);
+- is not cancelled by one call's signal, because concurrent creates share it.
+
+The answer is remembered per `Ryu` instance and base URL for five minutes:
 
 | Capabilities answer | What `connections.create()` does |
 |---|---|
@@ -315,24 +342,38 @@ minutes, and always sends a key you bind with `with_options(idempotency_key=...)
 To retry the same operation after a lost response, call
 `.with({ idempotencyKey })` again with the same key. On a Passport without
 the flag, that retry can still create a second connection for the same
-domain: list the profile's connections first and reuse one. With
-`autoIdempotency: false` and no key of your own, the SDK skips the
+domain: list the profile's connections first and reuse one.
+
+With `autoIdempotency: false` and no key of your own, the SDK skips the
 capabilities read and sends the create unkeyed. If Passport is rolled back to
 a build without the flag, the SDK can keep keying and retrying creates for up
-to five minutes, until its cached answer expires. A fetch is never retried,
-because the upstream call may already have happened.
+to five minutes, until its cached answer expires.
 
-Reads and `connections.delete()` are retried on network errors, timeouts, and
-`500`, `502`, `503`, and `504` responses. A `429` with `Retry-After` is retried for any method,
-because Passport refused it before doing anything. The defaults are two
-retries and a 60-second timeout until response headers arrive; change them
-with `maxRetries` and `timeoutMs`.
+What the SDK retries:
+
+- A fetch is never retried, because the upstream call may already have
+  happened.
+- Reads and `connections.delete()` are retried on network errors, timeouts,
+  and `500`, `502`, `503`, and `504` responses.
+- A `429` with `Retry-After` is retried for any method, because Passport
+  refused it before doing anything.
+
+The defaults are two retries and a 60-second timeout until response headers
+arrive; change them with `maxRetries` and `timeoutMs`.
 
 If a delete succeeded but its response was lost, the retry answers
 `404 not_found`, so treat a `404` from `connections.delete()` as already
 deleted.
 
 ## CLI
+
+<Callout type="info">
+Until `@ryuhq/services-cli` is on npm, run the commands below as
+`ryu-cli services passport ...`, with the same flags. `ryu-cli services`
+arrives in a Ryu release after 0.4.0, and until then neither the CLI nor the
+MCP server can be installed outside the Ryu repository (see
+[ryu-services CLI](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
+</Callout>
 
 The `ryu-services` command line reads the same variables. Every Passport
 command only reads, so the CLI cannot create a connection, start a login, or
@@ -348,12 +389,6 @@ ryu-services passport connections get <connection-id>
 ryu-services passport usage --from 2026-10-12T00:00:00Z --to 2026-10-12T02:00:00Z
 ```
 
-Until `@ryuhq/services-cli` is on npm, run these as
-`ryu-cli services passport ...`, with the same flags; `ryu-cli services`
-arrives in a Ryu release after 0.4.0, and until then neither the CLI nor the
-MCP server can be installed outside the Ryu repository (see
-[ryu-services CLI](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
-
 `profiles` and `connections list` print one JSON line per profile or
 connection (see [list output](/docs/standalone/sdk/cli#list-output)). `usage` without `--from` and `--to` reads the last
 24 whole UTC hours, including the current one.
@@ -368,16 +403,16 @@ tool reads, so the default read-only mode keeps all three and
 Read-only mode still includes `passport_fetch`, which sends a `GET` with the
 stored login to the connection's site, and most hosts do not ask before a
 read-only tool. An agent that also reads untrusted email, messages, or files
-could be steered into fetches whose query strings carry data out. Keep
+could be steered into fetches whose query strings carry data out.
+
+Keep
 Passport in its own `ryu-services mcp --services passport` entry, away from
 agents that read untrusted text, or set your host to ask before
 `passport_fetch`.
 
-Until `@ryuhq/services-cli` is on npm, start the server through `ryu-cli`,
-as below (`ryu-cli services` arrives in a Ryu release after 0.4.0; until then
-neither the CLI nor the MCP server can be installed outside the Ryu
-repository); once it is published, use
-`"command": "ryu-services"` and drop `"services"` from `args`.
+Until `@ryuhq/services-cli` is on npm, start the server through `ryu-cli`, as
+below. Once it is published, use `"command": "ryu-services"` and drop
+`"services"` from `args`.
 
 ```json
 {
@@ -402,7 +437,9 @@ repository); once it is published, use
 
 An agent's MCP server needs only the runtime grant, as above. Add
 `RYU_PASSPORT_API_KEY` only for an operator's own tools: `passport_fetch`
-uses the runtime grant when it is set, and the administration key otherwise. It reaches the connection's site with the
+uses the runtime grant when it is set, and the administration key otherwise.
+
+`passport_fetch` reaches the connection's site with the
 stored login, so hosts should treat it as an outside request. Failures are
 tool errors that carry the `RyuError` fields and never a key.
 

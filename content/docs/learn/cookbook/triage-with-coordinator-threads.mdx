@@ -7,6 +7,23 @@ Use a coordinator agent to split independent tasks, such as bug reports, file su
 audits, into worker threads. The workers run in parallel, optionally in separate git worktrees, and
 the coordinator collects their results when they finish.
 
+```mermaid
+sequenceDiagram
+  participant You
+  participant C as Coordinator agent
+  participant T as threads tools
+  participant W as Worker thread
+  You->>C: Task list
+  C->>T: create_thread
+  C->>T: send_message_to_thread
+  T->>W: Start agent turn in the background
+  T-->>C: dispatched, status running
+  Note over W: Optionally runs in its own worktree
+  C->>T: wait_for_thread or read_thread
+  T-->>C: run_status and latest messages
+  C-->>You: Summary
+```
+
 ## What you'll use
 
 - [Coordinator threads](/docs/core/coordinator-threads): the built-in `threads.*` tools a
@@ -61,7 +78,14 @@ coordinator dispatches the whole list without waiting on each worker.
 The response confirms the dispatch without waiting for the work to finish:
 
 ```json
-{ "ok": true, "thread_id": "<worker-id>", "dispatched": true, "status": "running" }
+{
+  "ok": true,
+  "thread_id": "<worker-id>",
+  "title": "<thread title>",
+  "agent_id": "<worker agent>",
+  "dispatched": true,
+  "status": "running"
+}
 ```
 
 A process-global limit of 8 concurrent background workers applies. If you queue more than eight at
@@ -75,12 +99,15 @@ once, the extras wait for a slot instead of being rejected.
 
 When the working directory is a git repo and `isolate` is true, each worker runs in its own
 per-conversation git worktree. Two workers editing the same repo do not change each other's files,
-because each has its own checkout. When `isolate` is omitted, the **Worktrees** setting in the
-Gateway settings decides. That setting is off by default. The worktree is created on the first
-`send_message_to_thread` and reused for that thread's later turns, keyed on its conversation id.
+because each has its own checkout.
 
-See [Git workspace](/docs/surfaces/desktop/user-guide/git-workspace) for how the per-conversation worktrees
-are created and how their diffs surface.
+- When `isolate` is omitted, the **Worktrees** setting in the Gateway settings decides. That setting
+  is off by default.
+- The worktree is created on the first `send_message_to_thread` and reused for that thread's later
+  turns, keyed on its conversation id.
+
+See [Git workspace](/docs/surfaces/desktop/user-guide/git-workspace) for how the per-conversation
+worktrees are created and how their diffs surface.
 
 </Step>
 
@@ -88,20 +115,24 @@ are created and how their diffs surface.
 
 ### Read the results back
 
-The workers run in the background, so the coordinator checks on them. `threads.list_threads` shows
-every thread with its `run_status`, title, message count, and pinned and archived flags.
-`threads.wait_for_thread` blocks until a thread's run finishes, up to `timeout_ms` (default 30000,
-maximum 300000). `threads.read_thread` returns a thread's most recent messages plus its
-`run_status`. `limit` defaults to 20 and is capped at 100.
+The workers run in the background, so the coordinator checks on them with three tools:
+
+| Tool | What it returns |
+|---|---|
+| `threads.list_threads` | Every thread with its `run_status`, title, message count, and pinned and archived flags |
+| `threads.wait_for_thread` | Blocks until a thread's run finishes, up to `timeout_ms` (default 30000, maximum 300000; `0` reads the status without waiting) |
+| `threads.read_thread` | A thread's most recent messages plus its `run_status`. `limit` defaults to 20 and is capped at 100 |
 
 ```json
 { "thread_id": "<worker-id>", "limit": 20 }
 ```
 
-Each message body is truncated to 2,000 characters so a long worker reply does not fill the
+Each message body is truncated to 2,000 characters, so a long worker reply does not fill the
 coordinator's context. `run_status` tells the coordinator whether a worker is `running`,
-`completed`, `failed`, or `interrupted`. Once a worker is finished, the coordinator can summarize
-it, archive it with `threads.set_thread_archived`, or pin the ones worth keeping in view with
+`completed`, `failed`, or `interrupted`.
+
+Once a worker is finished, the coordinator can summarize it, archive it with
+`threads.set_thread_archived`, or pin the ones worth keeping in view with
 `threads.set_thread_pinned`.
 
 For a blocking call, pass `wait: true` to `send_message_to_thread`. It returns the reply inline

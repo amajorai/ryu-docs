@@ -5,14 +5,20 @@ tags: ["notifications", "events", "sse", "standalone", "api"]
 ---
 
 Ryu Notify is a standalone notification and event API for products and agents.
-It stores bounded JSON events in SQLite, exposes tenant-scoped history and
-aggregates, streams events and live activities over Server-Sent Events (SSE),
-and delivers through durable, retrying HTTP destinations.
+It does four things for each tenant:
+
+- stores bounded JSON events in SQLite, with history and aggregates;
+- streams new events and live activities over Server-Sent Events (SSE);
+- delivers events to durable, retrying HTTP destinations;
+- collects interactive replies such as approvals.
+
+<Figure name="notify" />
 
 <Callout type="warn">
 Hosted Ryu Notify is in **early access**. Ryu enables it one organization at a
 time, and it is not open for new organizations yet. Notify is also not
 published: there is no public source repository, package, or container image.
+
 The self-hosting commands below apply to a Ryu source checkout that contains
 the service. Organization billing and account notifications in the Ryu
 dashboard are a separate feature and are not affected.
@@ -23,6 +29,16 @@ owns Ryu users, workflow gates, desktop and native notifications, and Expo
 push. Notify owns this external product API. See
 [Notify parity and adapters](/docs/standalone/notify-parity) for the supported
 channel boundaries and the comparison with other notification services.
+
+```mermaid
+flowchart LR
+  P["Producer (product or agent)"] -->|"POST /v1/events or /v1/topics/:topic"| N["Notify"]
+  N --> DB[("events.db (SQLite)")]
+  N -->|"SSE /v1/events/stream"| C["Live consumers"]
+  N -->|"Retried HTTPS deliveries"| D["Destinations: webhook, ntfy, BuzzKit"]
+  DB -->|"GET /v1/events"| H["History readers"]
+  N -->|"Reply callback (optional)"| CB["callbackUrl"]
+```
 
 ## Start the service
 
@@ -44,32 +60,50 @@ bun run apps/notify/src/index.ts
 ```
 
 Use long random keys. The service starts with a key shorter than 24 characters
-but logs a warning for it.
+but logs a warning for it. With only `RYU_NOTIFY_API_TOKEN` set and no
+`RYU_NOTIFY_TENANT_ID`, the tenant id is `default`.
+
+### Network binding
 
 The default bind is `127.0.0.1:8092`. Set `RYU_NOTIFY_HOSTNAME` and
-`RYU_NOTIFY_PORT` when the service has an authenticated network boundary. The
-service's container build binds `0.0.0.0:8092` inside the container, so publish
-that port only behind TLS. Notify caps concurrent live streams, limits publish
-rates per tenant, and backs off addresses that present invalid keys (see
+`RYU_NOTIFY_PORT` when the service has an authenticated network boundary.
+
+The service's container build binds `0.0.0.0:8092` inside the container, so
+publish that port only behind TLS. Notify caps concurrent live streams, limits
+publish rates per tenant, and backs off addresses that present invalid keys (see
 [Abuse limits](/docs/standalone/notify#abuse-limits)).
+
+### Data directory
 
 API keys stay in process memory and are never written to the Notify database or
 returned in responses. The service stores its state in `events.db` below
-`RYU_NOTIFY_DATA_DIR`. When that variable is unset, the directory is
-`$XDG_DATA_HOME/ryu-notify`, or `~/.local/share/ryu-notify`. Notify never
-defaults into a Core data directory. The database holds destination signing
-secrets, custom header values, and callback secrets, so Notify creates the
-directory owner-only and the database files with mode `0600`. Keep it private
-and back it up like any other credential store.
+`RYU_NOTIFY_DATA_DIR`.
+
+When that variable is unset, the directory is `$XDG_DATA_HOME/ryu-notify`, or
+`~/.local/share/ryu-notify`. Notify never defaults into a Core data directory.
+
+The database holds destination signing secrets, custom header values, and
+callback secrets. Notify creates the directory owner-only and the database files
+with mode `0600`. Keep it private and back it up like any other credential store.
+
+### Secrets key
 
 Notify requires `RYU_NOTIFY_SECRETS_KEY`, a random 32-byte key (64 hex
 characters or base64, for example `openssl rand -hex 32`), and does not start
-without it. It encrypts each destination's URL, signing secret, and custom
-header values, and each interactive event's callback URL and callback secret,
-in the database with AES-256-GCM. Values an older build stored unencrypted are
-still read and are encrypted the next time the service starts. Keep the key
-outside the data directory and keep a copy: without it, encrypted values cannot
-be read, and deliveries and callbacks for them fail.
+without it. With AES-256-GCM, it encrypts these values in the database:
+
+- each destination's URL, signing secret, and custom header values;
+- each interactive event's callback URL and callback secret.
+
+Values an older build stored unencrypted are still read and are encrypted the
+next time the service starts.
+
+<Callout type="warn">
+Keep the key outside the data directory and keep a copy. Without it, encrypted
+values cannot be read, and deliveries and callbacks for them fail.
+</Callout>
+
+### Root path
 
 `GET /` returns a short JSON description of the service: its name, version,
 and the `/health` path. It redirects browsers only when
@@ -97,35 +131,45 @@ separated by commas (empty by default). An invalid value stops startup.
 
 Over a limit, Notify returns `429 rate_limited` with a `Retry-After` header in
 seconds. A blocked address is refused before its key is checked, so even a
-correct key from that address waits until the block ends. Requests that send no
-bearer key are not counted, and `/health` is never blocked. IPv6 clients are
-grouped by their `/64`.
+correct key from that address waits until the block ends.
+
+Requests that send no bearer key are not counted, and `/health` is never
+blocked. IPv6 clients are grouped by their `/64`.
+
+### Behind a reverse proxy
 
 The client address is the TCP peer, and `X-Forwarded-For` is ignored by
 default. Behind a reverse proxy such as Traefik, Caddy, or nginx, add the
 proxy's address or network to `RYU_NOTIFY_TRUSTED_PROXIES` (for example
-`172.16.0.0/12` for a Docker bridge network), or one client retrying a stale key
-could block every client. Notify then picks the client address from
-`X-Forwarded-For` by the same rule as Passport; see
+`172.16.0.0/12` for a Docker bridge network). Otherwise one client retrying a
+stale key could block every client.
+
+Notify then picks the client address from `X-Forwarded-For` by the same rule as
+Passport. See
 [Failed authentication backoff](/docs/standalone/passport#failed-authentication-backoff)
 for which hop it trusts and which proxies to list.
 
 ## Pricing
 
-Ryu-hosted Notify costs **$0.10 per 1,000 accepted events**, and the first
-10,000 accepted events per organization each calendar month (UTC) are free. An
-accepted event is one stored by `POST /v1/events` or `POST /v1/topics/:topic`;
-idempotent replays and refused requests are not counted. Usage is charged
-hourly to the organization's Ryu credits, drawing on the plan's included pool
-first.
+Ryu-hosted Notify costs **$0.10 per 1,000 accepted events**. The first 10,000
+accepted events per organization each calendar month (UTC) are free.
+
+- An accepted event is one stored by `POST /v1/events` or `POST /v1/topics/:topic`.
+- Idempotent replays and refused requests are not counted.
+- Usage is charged hourly to the organization's Ryu credits, drawing on the
+  plan's included pool first.
+
+### When credits run out
 
 Once the organization's Ryu credits are exhausted, Ryu-hosted Notify refuses
 publishing on both routes with `402 insufficient_credits` until credits are
-added. Everything else keeps working, so the organization can still read
-history, acknowledge and archive events, keep streams open, remove
-destinations, and read its usage report. Notify learns about exhausted credits
-within about a minute, and if it cannot check, it keeps accepting publishes
-rather than refusing them.
+added. Everything else keeps working: reading history, acknowledging and
+archiving events, open streams, removing destinations, and the usage report.
+
+Notify learns about exhausted credits within about a minute. If it cannot
+check, it keeps accepting publishes rather than refusing them.
+
+### Self-hosted
 
 Self-hosted Notify is never billed by Ryu and never refuses publishing for
 credits. It does not contact Ryu billing; it only serves the same usage

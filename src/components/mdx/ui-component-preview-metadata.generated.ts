@@ -506,6 +506,10 @@ export const UI_COMPONENT_PREVIEW_METADATA = {
     props: {},
     targetExport: "ActionSwapRollButton",
   },
+  "components/motion/adaptive-stepper": {
+    props: { disabled: ["false", "true"] },
+    targetExport: "AdaptiveStepper",
+  },
   "components/apple-hello-effect": {
     props: {},
     targetExport: "AppleHelloEffect",
@@ -527,6 +531,7 @@ export const UI_COMPONENT_PREVIEW_METADATA = {
     props: { disabled: ["false", "true"] },
     targetExport: "Input",
   },
+  "components/motion/liquid": { props: {}, targetExport: "Liquid" },
   "components/motion/loader": {
     props: {
       variant: [

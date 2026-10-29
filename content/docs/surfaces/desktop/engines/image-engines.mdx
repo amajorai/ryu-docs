@@ -12,8 +12,8 @@ the startup order, installed and started from the Store.
 |---|---|
 | Sidecar name | `sdcpp` |
 | Default port | `8101` (dev `9101`) |
-| Image model | Chosen for the node's memory and disk: Qwen Image 2.1 Q4_K (`qwen_image_2.1-Q4_K.gguf` + Qwen3-VL Q4_K_M text encoder, F16 vision projector, and matching VAE, ~11 GB) when it fits, otherwise SDXL base 1.0 Q4_K (`sd_xl_base_1.0_0_Q4_K.gguf`, ~2.8 GB), otherwise none. Any diffusion model via `RYU_SD_MODEL` |
-| Video model | Wan2.1 T2V 1.3B (`wan2.1_t2v_1.3b-q8_0.gguf` + `umt5-xxl` encoder + Wan VAE), provisioned lazily, or via `RYU_SD_MODEL` |
+| Image model | Chosen for the node's memory and disk: Qwen Image 2.1 Q4_K (`qwen_image_2.1-Q4_K.gguf` + Qwen3-VL Q4_K_M text encoder, F16 vision projector, and matching VAE, ~11 GB) when it fits, otherwise SDXL base 1.0 Q4_K (`sd_xl_base_1.0_0_Q4_K.gguf`, ~2.8 GB), otherwise none. Any diffusion model via `sd.model` (`RYU_SD_MODEL`) |
+| Video model | Wan2.1 T2V 1.3B (`wan2.1_t2v_1.3b-q8_0.gguf` + `umt5-xxl` encoder + Wan VAE), provisioned lazily, or via `sd.model` (`RYU_SD_MODEL`) |
 | Frame-guided video | An installed Wan2.1 I2V / FLF2V 14B, Wan2.2 TI2V 5B, or Wan2.2 I2V A14B (low- and high-noise pair) model selected as the local diffusion model; its encoders download on first use |
 | Lifecycle | Adopt an already-running `sd-server` on the port, otherwise spawn one from `~/.ryu/engines/image/sdcpp` |
 
@@ -28,14 +28,35 @@ picks one tier per node from its RAM and the free space on the models drive:
 | Lite | SDXL base 1.0 Q4_K, a single self-contained file | ~2.8 GB | 4.6 GB of RAM |
 | None | No local image model | - | - |
 
-Each tier also needs its download plus 2 GB of free disk. When RAM can't be detected, Core installs
-the Lite model rather than risk the 11 GB stack on a small machine. A node that already has the
-Qwen stack keeps using it. When a node gets Lite or None, Core logs a warning with the
-numbers. In the None tier, `POST /api/images/generate` without a cloud `provider` returns HTTP `503`
-with `code: "local_image_unavailable"` and points you at a cloud image provider (OpenRouter,
-Replicate, or fal). Set `image.tier` in [`node-config.json`](/docs/start-here/configuration#core-node-config)
-(or `RYU_IMAGE_TIER`) to `standard`, `lite`, or `none` to choose the tier
-yourself. It can always lower the tier, but it can't raise it past a known memory or disk shortfall.
+Each tier also needs its download plus 2 GB of free disk. The rules:
+
+- When RAM can't be detected, Core installs the Lite model rather than risk the 11 GB stack on a
+  small machine.
+- A node that already has the Qwen stack keeps using it.
+- When a node gets Lite or None, Core logs a warning with the numbers.
+- In the None tier, `POST /api/images/generate` without a cloud `provider` returns HTTP `503` with
+  `code: "local_image_unavailable"`. The message points you at a cloud image provider (OpenRouter,
+  Replicate, or fal).
+
+Set `image.tier` in [`node-config.json`](/docs/start-here/configuration#core-node-config) (or
+`RYU_IMAGE_TIER`) to `standard`, `lite`, or `none` to choose the tier yourself. It can always
+lower the tier, but it can't raise it past a known memory or disk shortfall.
+
+```mermaid
+flowchart TD
+  A["Pick image tier"] --> B{"Qwen stack fits known RAM and free disk?"}
+  B -->|yes| S["Standard: Qwen Image 2.1"]
+  B -->|no| C{"SDXL fits free disk, and RAM fits or is unknown?"}
+  C -->|yes| L["Lite: SDXL base"]
+  C -->|no| N["None: use a cloud provider"]
+  S --> R{"image.tier or RYU_IMAGE_TIER set?"}
+  L --> R
+  N --> R
+  R -->|no| H["Use the hardware tier"]
+  R -->|yes| Q{"Known shortfall blocks the requested tier?"}
+  Q -->|yes| H
+  Q -->|no| U["Use the requested tier"]
+```
 
 If you replace the bundled `sd-server` with a GPU build (CUDA or Metal), Ryu checks the model
 against your GPU memory as well, so a model that fits your GPU is not refused for having more than
@@ -47,20 +68,32 @@ hold it in memory or on disk gets a clear error asking for a bigger node or a cl
 
 ## Bundled defaults
 
-The bundled defaults ship with the engine: a stable-diffusion.cpp-compatible Qwen Image 2.1 Q4_K
-model (or the lighter tier above) for images and Wan2.1 T2V 1.3B for video. Qwen Image 2.1 uses
-the matching Qwen3-VL text encoder, vision projector, and VAE; Wan uses `--t5xxl --vae`. Override either with
-`RYU_SD_MODEL` (`sd.model` in `node-config.json`); the engine resolves the diffusion architecture from the model path (`sd`, `wan`,
-`ltx`, `ltx-video`, …) and picks the matching flags.
+The bundled defaults ship with the engine:
+
+- **Images** - a stable-diffusion.cpp-compatible Qwen Image 2.1 Q4_K model (or the lighter tier
+  above). It uses the matching Qwen3-VL text encoder, vision projector, and VAE.
+- **Video** - Wan2.1 T2V 1.3B, started with `--t5xxl --vae`.
+
+Override either with `sd.model` in `node-config.json` (or `RYU_SD_MODEL`). The engine resolves the
+diffusion architecture from the model path (`sd`, `wan`, `ltx`, `ltx-video`, …) and picks the
+matching flags.
+
+### Frame-guided video
 
 Wan image-to-video and first/last-frame models start a video from your frames. Install the model
 from the catalog and select it as the local diffusion model. On first start, Ryu downloads the
-files that model needs: the `umt5-xxl` encoder, the matching Wan VAE, and, for the Wan2.1 models,
-the CLIP-vision H image encoder. It then starts the engine with `--diffusion-model` and those files.
-A Wan2.2 I2V A14B model also loads its other half with `--high-noise-diffusion-model`; install both
+files that model needs:
+
+- the `umt5-xxl` encoder;
+- the matching Wan VAE;
+- for the Wan2.1 models, the CLIP-vision H image encoder.
+
+It then starts the engine with `--diffusion-model` and those files. The extra files come from a
+fixed repository revision and are checked against their SHA-256.
+
+A Wan2.2 I2V A14B model also loads its other half with `--high-noise-diffusion-model`. Install both
 the low-noise and the high-noise file from the catalog, because Ryu refuses to select one half
-without the other. The extra files come from a fixed repository revision and are checked against
-their SHA-256.
+without the other.
 
 A video request's first and last frames reach the engine as `init_image` and
 `end_image`. Ryu waits up to one hour for a frame-guided video (10 minutes for text-to-video) and
@@ -72,18 +105,24 @@ The Qwen Image 2.1 weights are distributed under the
 permits non-commercial use only unless you obtain a separate commercial license.
 </Callout>
 
-The lifecycle mirrors whisper.cpp: if an `sd-server` is already answering on the port, Core adopts it
-and leaves it running on stop; otherwise it spawns `sd-server` with the resolved model. Diffusion
+## Lifecycle and port
+
+The lifecycle mirrors whisper.cpp. If an `sd-server` is already answering on the port, Core adopts it
+and leaves it running on stop. Otherwise it spawns `sd-server` with the resolved model. Diffusion
 weights load slowly, so startup uses a long timeout.
 
 <Callout type="info">
 Earlier releases used `8083` for this engine, the same port as the
 [classifier tier](/docs/core/classifier-tier), so the two could not run at the same time. The
 engine now defaults to `8101`. The port is not a saved setting, so Core-started engines move on
-their own after an upgrade. If you start `sd-server` yourself for Core to adopt, launch it with
-`--listen-port 8101` (`9101` on a dev profile). An old `sd-server` still listening on `8083` is not
-adopted, and it keeps the classifier from starting until you stop it.
+their own after an upgrade.
+
+If you start `sd-server` yourself for Core to adopt, launch it with `--listen-port 8101` (`9101` on
+a dev profile). An old `sd-server` still listening on `8083` is not adopted, and it keeps the
+classifier from starting until you stop it.
 </Callout>
+
+## Generation endpoints
 
 Two data paths consume the engine (`apps/core/src/server/media.rs`):
 
@@ -92,11 +131,13 @@ POST /api/images/generate
 POST /api/video/generate
 ```
 
-`POST /api/images/generate` proxies an OpenAI-style body to the engine's OpenAI-compatible
-`/v1/images/generations` endpoint and returns the upstream JSON, with image bytes as base64 in
-`data[].b64_json`. `POST /api/video/generate` proxies to the same engine's native `/sdcpp/v1/vid_gen`
-endpoint. Both forward the request body as-is, with only a default merged in when absent, so
-the full sd-server parameter surface stays reachable. Core does not enforce a request schema.
+- `POST /api/images/generate` proxies an OpenAI-style body to the engine's OpenAI-compatible
+  `/v1/images/generations` endpoint. It returns the upstream JSON, with image bytes as base64 in
+  `data[].b64_json`.
+- `POST /api/video/generate` proxies to the same engine's native `/sdcpp/v1/vid_gen` endpoint.
+
+Both forward the request body as-is, with only a default merged in when absent, so the full
+sd-server parameter surface stays reachable. Core does not enforce a request schema.
 
 The desktop Store surfaces `sdcpp` under the Engines tab's Image group with install, start, and stop
 (`apps/desktop/src/components/store/EnginesCatalogSection.tsx`).
@@ -110,10 +151,17 @@ downloads it lazily, and only if your node can hold it.
 
 ## Browser-local image editing
 
-Desktop chat also has separate browser-local engines for image segmentation and background removal.
-They do not use the `sdcpp` sidecar or the active Chat model. The default segmentation model is
-`Xenova/detr-resnet-50-panoptic`; the default background-removal model is `Xenova/modnet`. Change
-either model ID from the image editor's **Models** panel. Compatible model files download on first
-use and remain in the browser cache. Images stay in the browser while these models find masks or
-remove the background. **AI Resize** instead sends the current image through the Gateway's configured
+Desktop chat also has separate browser-local engines for image editing. They do not use the
+`sdcpp` sidecar or the active Chat model.
+
+| Task | Default model |
+|---|---|
+| Segmentation | `Xenova/detr-resnet-50-panoptic` |
+| Background removal | `Xenova/modnet` |
+
+Change either model ID from the image editor's **Models** panel. Compatible model files download on
+first use and remain in the browser cache. Images stay in the browser while these models find masks
+or remove the background.
+
+**AI Resize** works differently. It sends the current image through the Gateway's configured
 image-generation provider and model, which must accept image input and produce an image.

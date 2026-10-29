@@ -9,6 +9,7 @@ import { LocalizedAnchor } from "@/components/localized-anchor";
 import { LocalizedCard } from "@/components/localized-card";
 import { Architecture } from "@/components/mdx/architecture";
 import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
+import { Figure } from "@/components/mdx/figure";
 import {
   ContributionSurfaces,
   Mermaid,
@@ -17,14 +18,14 @@ import {
   UiComponentPreview,
 } from "@/components/mdx/lazy-client";
 import { TryInRyu } from "@/components/mdx/try-in-ryu";
-import { versionedDocsHref } from "@/lib/docs-version";
+import { canonicalDocsHref } from "@/lib/docs-version";
 import { DEFAULT_DOCS_LOCALE } from "@/lib/i18n";
 
-export function VersionedAnchor({
+export function DocsAnchor({
   href,
   ...props
 }: AnchorHTMLAttributes<HTMLAnchorElement>) {
-  return <LocalizedAnchor href={versionedDocsHref(href)} {...props} />;
+  return <LocalizedAnchor href={canonicalDocsHref(href)} {...props} />;
 }
 
 /** Markdown tables sit in the landing's frame: header on a muted tray, rows in
@@ -37,11 +38,8 @@ function FramedTable(props: ComponentProps<"table">) {
   );
 }
 
-function VersionedCard({
-  href,
-  ...props
-}: ComponentProps<typeof FumadocsCard>) {
-  return <LocalizedCard {...props} href={versionedDocsHref(href)} />;
+function DocsCard({ href, ...props }: ComponentProps<typeof FumadocsCard>) {
+  return <LocalizedCard {...props} href={canonicalDocsHref(href)} />;
 }
 
 export function getMDXComponents(
@@ -56,12 +54,13 @@ export function getMDXComponents(
   // instead of weakening component types throughout the docs pages.
   return {
     ...defaultMdxComponents,
-    a: VersionedAnchor,
+    a: DocsAnchor,
     Architecture,
     AutoCards: (props) => <AutoCards {...props} locale={locale} />,
-    Card: VersionedCard,
+    Card: DocsCard,
     ContributionSurfaces,
     DocCard: (props) => <DocCard {...props} locale={locale} />,
+    Figure,
     File,
     Files,
     Folder,

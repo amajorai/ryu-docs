@@ -4,17 +4,37 @@ description: "A quick question about the current conversation, answered with ful
 ---
 
 A side question asks something quick about the conversation you are already in, without starting
-a new turn or calling a tool. It is the inverse of a sub-agent: full conversation context, zero tools.
-This page documents the Core primitive for client and integration developers. For how to ask one
-from the composer, see [Chat](/docs/surfaces/desktop/user-guide/chat).
+a new turn or calling a tool. It is the inverse of a sub-agent: full conversation context, zero
+tools.
+
+This page documents the Core primitive for client and integration developers. To ask one from the
+composer, see [Chat](/docs/surfaces/desktop/user-guide/chat).
 
 Core handles side questions with `POST /api/btw` (`btw_handler` in `apps/core/src/server/mod.rs`).
 It reuses the single non-streaming Gateway call from [double-check](/docs/core/double-check)
 (`call_side_model`), so the model call routes through the Gateway like every other model call.
 
 The built-in `@ryu/side-chats` plugin owns the feature. It contributes the `/btw` command and the
-desktop side-chat UI, and gates the routes below. Disabling the plugin removes the command and makes
-the routes unavailable.
+desktop side-chat UI, and gates the routes below. Disabling the plugin removes the command and
+makes the routes unavailable.
+
+```mermaid
+sequenceDiagram
+  participant Client as Client (desktop, CLI, mobile)
+  participant Core
+  participant DB as conversations.db
+  participant GW as Gateway
+  Client->>Core: POST /api/btw (question, messages or conversation_id)
+  opt no messages, conversation_id given
+    Core->>DB: load last 30 messages
+  end
+  Core->>GW: one non-streaming call, no tools
+  GW-->>Core: answer
+  opt conversation_id supplied
+    Core->>DB: save btw_entries row
+  end
+  Core-->>Client: answer, model, id
+```
 
 ## What it is
 
@@ -42,11 +62,14 @@ The body is a `question` plus a transcript, supplied one of two ways.
 | `messages` | array of `{ role, content }` | no | A client-held transcript. The server uses at most the most recent 30 messages |
 | `conversation_id` | string | no | A stored Core conversation used when `messages` is absent; the last 30 messages are loaded |
 
-If `messages` is present and non-empty it wins; otherwise Core loads the transcript from
-`conversation_id`. If neither is supplied, the side question still answers, without prior
-context. The desktop sends the visible main-chat transcript with the request, including
-the latest in-flight user/assistant text, so a side question has the same context the user is
-looking at rather than a stale server snapshot.
+Transcript selection:
+
+1. If `messages` is present and non-empty, Core uses it.
+2. Otherwise Core loads the transcript from `conversation_id`.
+3. If neither is supplied, the side question still answers, without prior context.
+
+The desktop sends `conversation_id` plus the visible main-chat transcript, including the latest
+in-flight text. The side question then sees what the user sees, not a stale server snapshot.
 
 ```json
 POST /api/btw
@@ -73,9 +96,11 @@ best-effort: if the write fails, the answer still returns, with `id: null`.
 
 Side questions over a stored conversation are kept in the `btw_entries` table of
 `db/conversations.db` under the data directory, next to the messages. They are sealed at rest with
-the same `FieldCipher` (see [Encryption at rest](/docs/core/encryption-at-rest)). Each row stores the question, answer, model
-and timestamp, keyed to its parent conversation. It is **not** chat history and never renders
-in the conversation timeline, but it can be listed and deleted:
+the same `FieldCipher` (see [Encryption at rest](/docs/core/encryption-at-rest)).
+
+Each row stores the question, answer, model, and timestamp, keyed to its parent conversation. It
+is **not** chat history and never renders in the conversation timeline. You can list and delete
+rows:
 
 | Route | Purpose |
 |---|---|
@@ -84,32 +109,34 @@ in the conversation timeline, but it can be listed and deleted:
 | `DELETE /api/btw/:id` | Delete one side chat |
 
 When the `@ryu/side-chats` plugin is enabled, the desktop Context rail and sidebar both show a
-conversation's persisted side chats and can re-open them; the rail's "New side chat" action and
+conversation's persisted side chats and can re-open them. The rail's "New side chat" action and
 the sidebar rows round-trip through these endpoints (`apps/desktop/src/lib/api/btw.ts`). A
 `conversation_id` supplied only for context also leaves a recoverable entry behind.
 
 ## Model and effort resolution
 
 The answering model and reasoning effort resolve through a preference chain, like Core's other
-side-model surfaces.
-
-When the desktop launches **Ask in side chat** or **Explain** from a highlighted selection, it
-passes the active main-chat model in `model`, which takes precedence over `btw-model`. The selected
-text is included in the question, along with any note the user typed into the selection's annotate
-box (as the question for **Ask in side chat**). The visible transcript is sent separately, so the side answer
-uses the same model and bounded context the user was looking at. This does not copy tools, pending
-main-chat actions, or the main timeline into the side chat.
+side-model surfaces. A request `model` takes precedence over the `btw-model` preference.
 
 | Setting | Preference | Env fallback | Final fallback |
 |---|---|---|---|
 | Model | `btw-model` | `RYU_BTW_MODEL`, then `RYU_DEFAULT_LLM_MODEL` | the active chat model, then the built-in default (`registry::DEFAULT_LLM_MODEL`) |
 | Effort | `btw-effort` | `RYU_BTW_EFFORT` | resolver default |
 
+### Selection actions in the desktop
+
+When the desktop launches **Ask in side chat** or **Explain** from a highlighted selection:
+
+- It passes the active main-chat model in `model`, so the side answer uses the same model.
+- The question includes the selected text and any note typed into the selection's annotate box
+  (the note is the question for **Ask in side chat**).
+- The visible transcript is sent separately, with the same bounded context.
+- Tools, pending main-chat actions, and the main timeline are not copied into the side chat.
+
 ## Behavior and guarantees
 
-- **Side chat, not history.** When asked over a stored conversation, the exchange is persisted as
-  a `btw_entries` row (sealed at rest) and can be listed and deleted, but it never becomes a chat
-  message. A client-held transcript with no `conversation_id` is answered and forgotten.
+- **Side chat, not history.** See [Persistence](#persistence). A client-held transcript with no
+  `conversation_id` is answered and forgotten.
 - **No tools.** The system prompt instructs the model to answer only from the provided context and
   to say so briefly rather than guess when the answer is not there.
 - **Single answer.** One Gateway call in, one `{ answer, model, id }` out. There is no streaming and no
@@ -126,7 +153,7 @@ before the message is sent.
 
 | Client | Intercept | Transport | Surface |
 |---|---|---|---|
-| Desktop | `ChatPage` | `lib/api/btw.ts` (passes `conversation_id`) | `components/chat/BtwOverlay.tsx` dialog |
+| Desktop | `ChatPage` | `lib/api/btw.ts` (passes `conversation_id` and the visible transcript) | `components/chat/BtwOverlay.tsx` dialog |
 | CLI (`ryu-cli`) | `apps/cli/src/surfaces/chat/index.tsx` `/btw` command | `askBtw` from `@ryuhq/core-client/btw` (passes `conversation_id`) | Chat surface overlay |
 | Mobile | `apps/native/app/(drawer)/ai.tsx` `onSubmit` | `lib/btw.ts` (posts the `useChat` transcript) | `components/btw-modal.tsx` |
 

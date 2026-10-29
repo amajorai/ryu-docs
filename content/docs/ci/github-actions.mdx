@@ -6,6 +6,8 @@ description: How to use the Ryu for GitHub action (amajorai/ryu) to run agents, 
 The Ryu for GitHub action (`amajorai/ryu`) connects a GitHub Actions workflow to a Ryu Core node.
 It is for teams that want CI jobs to call Ryu agents, tools, vault secrets, or eval gates.
 
+<Figure name="ci" />
+
 Pick the job with the `operation` input:
 
 | `operation` | What it does |
@@ -17,6 +19,23 @@ Pick the job with the `operation` input:
 
 Any operation can also export [Ryu Vault secrets](#export-ryu-vault-secrets) with the `secrets`
 input.
+
+```mermaid
+flowchart TD
+  A["Resolve target and token"] --> B["Check URL is https or loopback"]
+  B --> C["GET /api/health"]
+  C --> D["GET /api/system/info"]
+  D --> E["Export node variables (export-env)"]
+  E --> F["Export listed vault secrets"]
+  F --> G{"operation"}
+  G -->|setup| S["Outputs and summary"]
+  G -->|run| R["POST /api/chat/stream"]
+  G -->|tool| T["POST /api/mcp/tools/call"]
+  G -->|eval| V["POST /api/gateway/evals/run"]
+  R --> S
+  T --> S
+  V --> S
+```
 
 ## Node targeting
 
@@ -43,22 +62,39 @@ For a managed node, use `target: managed` and the managed-node inputs:
     operation: setup
 ```
 
-Managed mode checks `/api/system/info` and fails unless the node reports
-`managed: true`. `target: auto` (the default) accepts either node type. Inputs fall back to
-`RYU_CORE_URL`/`RYU_CORE_TOKEN` and `RYU_MANAGED_NODE_URL`/
-`RYU_MANAGED_NODE_TOKEN`. The pairs stay coupled. A managed URL is never sent
-with a self-hosted token, and a self-hosted URL is never sent with a managed token.
+| `target` | Inputs | Environment fallback | Check |
+|---|---|---|---|
+| `auto` (default) | `node-url` pair if set, else `managed-node-url` pair | `RYU_CORE_URL` pair, else the managed pair | Health and system info only; accepts either node type |
+| `self-hosted` | `node-url`, `node-token` | `RYU_CORE_URL`, `RYU_CORE_TOKEN` | Health and system info only |
+| `managed` | `managed-node-url`, `managed-node-token` | `RYU_MANAGED_NODE_URL`, `RYU_MANAGED_NODE_TOKEN` | Fails unless `/api/system/info` reports `managed: true` |
 
-The node URL must use `https://`. Plain `http://` is accepted only for a node on the
-runner itself at a literal loopback address (`127.0.0.0/8`, such as `http://127.0.0.1:<port>`, or
-`http://[::1]:<port>`). `localhost` and any other `http://` host are rejected before a token or vault credential
-is sent. The action does not follow HTTP redirects, so point it at the node's final URL.
+The pairs stay coupled. A managed URL is never sent with a self-hosted token, and a self-hosted
+URL is never sent with a managed token.
+
+### URL rules
+
+- The node URL must use `https://`.
+- Plain `http://` is accepted only for a node on the runner itself at a literal loopback address
+  (`127.0.0.0/8`, such as `http://127.0.0.1:<port>`, or `http://[::1]:<port>`).
+- `localhost` and any other `http://` host are rejected before a token or vault credential is sent.
+- The action does not follow HTTP redirects, so point it at the node's final URL.
+
+### Health check and exported variables
 
 Every operation checks `/api/health` and `/api/system/info` before it does anything else. A
 `setup` step that only exports vault secrets and has no node token tolerates an unauthorized
-`/api/system/info`, except with `target: managed`. With
-`export-env: true` (the default), the action then exports `RYU_CORE_URL`, `RYU_CORE_TOKEN`,
-`RYU_NODE_URL`, and `RYU_NODE_TOKEN` to later steps. The token is masked.
+`/api/system/info`, except with `target: managed`.
+
+With `export-env: true` (the default), the action then exports `RYU_CORE_URL`, `RYU_CORE_TOKEN`,
+`RYU_NODE_URL`, and `RYU_NODE_TOKEN` to later steps. The token is masked. Every operation also
+sets these outputs.
+
+| Output | Contents |
+|---|---|
+| `node-url` | Validated node URL |
+| `node-managed` | `true` when the node reports `managed: true` |
+| `node-version`, `node-channel` | Ryu version and release channel from `/api/health` |
+| `health-json`, `node-info-json` | The validated `/api/health` and `/api/system/info` payloads |
 
 ## Run Ryu in a workflow
 
@@ -93,7 +129,10 @@ and the Core run id.
 Set `response-file` to also write the text to a file in the runner workspace.
 
 CI runs do not save conversations or use long-term memory by default. Set `persist: true` or
-`enable-long-term: true` to turn them on.
+`enable-long-term: true` to turn them on. Two optional JSON inputs tune a run:
+
+- `inference` - per-run inference overrides;
+- `plugin-flags` - per-run Ryu plugin flags.
 
 <Callout type="warn">
 `cwd` and `worktree-isolation` work only when the Core process can access the selected
@@ -118,7 +157,8 @@ directory. A remote managed node cannot see the GitHub runner's checkout.
 ```
 
 `tool` and `agent` are required. Core checks the call against that agent's tool allowlist and
-approval rules. A denied or failed call fails the workflow step.
+approval rules. A denied or failed call fails the workflow step. The optional `user-id` input sets
+the Composio entity and audit user id for the call.
 
 ## Gate a pull request on evals
 
@@ -152,11 +192,16 @@ score falls below a threshold.
 | `eval-threshold` | A bare number applies to every scorer (or `overall` when none is listed); `scorer=n` sets one |
 | `eval-junit-file` | Writes a JUnit XML report for test reporters |
 
-Negative-signal evaluators such as `toxicity` are inverted before comparison, so every
-threshold reads "at least this good", and a scorer that never executed fails its threshold.
-The step summary lists each threshold check and the failing case ids or truncated prompts.
-The `eval-passed` output is `true` or `false`, and `eval-json` carries the full result with
-its `gate`. The same datasets and thresholds work locally with
+How the gate reads scores:
+
+- Negative-signal evaluators such as `toxicity` are inverted before comparison, so every threshold
+  reads "at least this good".
+- A scorer that never executed fails its threshold.
+
+The step summary lists each threshold check and the failing case ids or truncated prompts. The
+`eval-passed` output is `true` or `false`, and `eval-json` carries the full result with its `gate`.
+
+The same datasets and thresholds work locally with
 [`ryu-cli eval`](/docs/surfaces/cli/reference#eval-gates).
 
 ## Export Ryu Vault secrets
@@ -190,19 +235,26 @@ steps:
 
 With AppRole, pass `vault-role-id` and `vault-secret-id` together (keep the secret id in a GitHub
 secret) instead of `vault-jwt-identity`. The action rejects a step that sets both methods.
-Machine tokens read **Node** values that the identity's policies allow, so save values for CI with `ryu-cli secrets set NAME --scope node`. A listed value the
-token cannot read fails the step before anything is exported. The `vault-secrets` output lists
-the exported names, never values.
+
+Machine tokens read **Node** values that the identity's policies allow, so save values for CI with
+`ryu-cli secrets set NAME --scope node`. A listed value the token cannot read fails the step before
+anything is exported. The `vault-secrets` output lists the exported names, never values.
 
 ## Security and failure behavior
 
-The action masks the node token before any request and never logs prompts, tool
-arguments, or response text. The step summary (`write-summary`, on by default) contains node and operation
+The action masks the node token before any request and never logs prompts, tool arguments, or
+response text. The step summary (`write-summary`, on by default) contains node and operation
 metadata, plus the threshold table and failing case names for `eval`.
 
-The action fails on health failures, authentication failures, malformed JSON, timeouts
-(`timeout-ms`, default 600000 per request), non-success HTTP responses, stream errors, and denied
-tools. Chat and tool calls are not retried automatically.
+The action fails the step on:
+
+- health failures and authentication failures;
+- malformed JSON;
+- timeouts (`timeout-ms`, default 600000 per request);
+- non-success HTTP responses and stream errors;
+- denied tools.
+
+The health check is tried twice. Chat and tool calls are not retried automatically.
 
 ## Related pages
 

@@ -11,11 +11,21 @@ Self-hosted: run Ryu Gateway with your own provider keys.
 This page makes a first call to a [Ryu Gateway](/docs/standalone/gateway) you
 run yourself. The Gateway speaks the OpenAI wire format, so you can call it
 with `@ryuhq/services`, with the `ryu_sdk.services` Python client, with the
-official `openai` SDK, or with the AI SDK. The
-route list and authentication rules are on
-[standalone Gateway API](/docs/standalone/gateway-api), and the base-URL swap
-for existing OpenAI clients is described in
-[OpenAI-compatible endpoints](/docs/extend/integrate/openai-compat).
+official `openai` SDK, or with the AI SDK.
+
+- The route list and authentication rules are on
+  [standalone Gateway API](/docs/standalone/gateway-api).
+- The base-URL swap for existing OpenAI clients is in
+  [OpenAI-compatible endpoints](/docs/extend/integrate/openai-compat).
+
+```mermaid
+flowchart LR
+  App["Your code"] -->|"Bearer RYU_GATEWAY_TOKEN"| GW["Ryu Gateway (self-hosted)"]
+  GW --> Route["Route by model id"]
+  Route --> P1["OpenAI"]
+  Route --> P2["Anthropic"]
+  Route --> P3["OpenRouter, ..."]
+```
 
 <Callout type="info">
 @ryuhq/services is not yet published to npm; it requires @ryuhq/client 0.4 or later, which is also not yet on npm (latest is 0.3.0).
@@ -59,15 +69,18 @@ If the Gateway has a sealing key, such as `RYU_MASTER_KEY`, the key file is
 sealed. Read the key with `ryu-gateway print-key relay` instead, run with the
 same environment as the Gateway.
 
-The token is sent as `Authorization: Bearer`. It is the same relay key that
-[Start a standalone Gateway](/docs/standalone/gateway#start-a-standalone-gateway)
-exports as `RYU_GATEWAY_KEY`; the SDK and the CLI read it as
-`RYU_GATEWAY_TOKEN` (or `gateway.apiKey`). The SDK never sends `RYU_API_KEY`
-to the Gateway, and never sends the Gateway token to another origin.
+About the token:
 
-The SDK's default is the local Gateway at `http://127.0.0.1:7981`. To call
-another Gateway origin, set `RYU_GATEWAY_URL` (or `gateway.baseUrl`) and the
-token that Gateway accepts.
+- It is sent as `Authorization: Bearer`.
+- It is the same relay key that
+  [Start a standalone Gateway](/docs/standalone/gateway#start-a-standalone-gateway)
+  exports as `RYU_GATEWAY_KEY`. The SDK and the CLI read it as
+  `RYU_GATEWAY_TOKEN` (or `gateway.apiKey`).
+- The SDK never sends `RYU_API_KEY` to the Gateway, and never sends the
+  Gateway token to another origin.
+
+To call a Gateway other than the local default, set `RYU_GATEWAY_URL` (or
+`gateway.baseUrl`) and the token that Gateway accepts.
 
 ## First call with curl
 
@@ -127,11 +140,17 @@ elif data:
 ```
 
 `ryu.gateway` also has `health()`, `auth.status()`, `models.list()` and
-`embeddings.create({ model, input })`. To stream, pass `stream: true` or call
-`chat.completions.stream()`. Both return an async iterable in either result
-mode, and in object mode `create({ stream: true })` is typed as a stream, not
-as `{ data, error, meta }`; like every iterator, it throws a `RyuError` on
-failure. Chunks arrive until the Gateway sends `[DONE]`.
+`embeddings.create({ model, input })`.
+
+### Stream a completion
+
+To stream, pass `stream: true` or call `chat.completions.stream()`.
+
+- Both return an async iterable in either result mode. In object mode,
+  `create({ stream: true })` is typed as a stream, not as
+  `{ data, error, meta }`.
+- Like every iterator, it throws a `RyuError` on failure.
+- Chunks arrive until the Gateway sends `[DONE]`.
 
 ```ts tab="Node"
 import { Ryu } from "@ryuhq/services";
@@ -173,10 +192,11 @@ A stream is one request: if the connection drops, the SDK raises a
 ## Use the official openai SDK or the AI SDK
 
 `ryu.gateway.openAICompatible()` returns `{ baseURL, apiKey }` for any
-OpenAI-compatible client. It makes no network call, and it throws a
+OpenAI-compatible client. It makes no network call. It throws a
 `RyuConfigurationError` straight away (in both result modes) when the Gateway
-settings are invalid, such as a malformed `RYU_GATEWAY_URL`. With the `openai`
-package in Node:
+settings are invalid, such as a malformed `RYU_GATEWAY_URL`.
+
+With the `openai` package:
 
 ```ts tab="Node"
 import OpenAI from "openai";
@@ -227,9 +247,10 @@ console.log(text);
 In Python, `gateway.openai_compatible()` returns `{"base_url", "api_key"}`,
 the keyword arguments `openai.OpenAI` takes. Type checkers see it as
 `GatewayOpenAICompatibleConfig` from `ryu_sdk.services.shapes`, with both keys
-always present. Until the `ryu-sdk` package is on
-PyPI, you can also point the official `openai` package at the Gateway
-yourself:
+always present.
+
+Until the `ryu-sdk` package is on PyPI, you can point the official `openai`
+package at the Gateway yourself:
 
 ```python
 import os
@@ -273,8 +294,9 @@ A chat completion has the OpenAI `chat.completion` shape. The SDK checks
 ## Errors
 
 Gateway errors are `{ "error": { "message", "type", "code" } }`. Each becomes
-a `RyuError` subclass whose `code` is the Gateway's own code. Gateway error
-responses carry no request id, so log the code and the time of the call.
+a `RyuError` subclass whose `code` is the Gateway's own code. Every Gateway
+response, errors included, carries `X-Request-ID`, which the SDK keeps as
+`error.requestId`; log it with the code.
 
 | Status and code | SDK error | Notes |
 |---|---|---|
@@ -296,25 +318,30 @@ is listening at `RYU_GATEWAY_URL`.
 ## Idempotency and retries
 
 No Gateway route deduplicates writes, so the SDK sends no `Idempotency-Key`.
-Reads (`health`, `auth.status`, `models.list`) are retried on network errors,
-timeouts, and `5xx` responses. Chat completions and embeddings are **not**
-retried on those failures, because the provider may already have run, and
-billed for, the request.
 
-A `429 provider_rate_limited` is retried for every method when it says how
-long to wait, in `Retry-After` or in the body's `error.retry_after`, and that
-wait is at most `maxRetryDelayMs` (30 seconds by default): the provider
-refused the request without running it. The Gateway's own
-`429 rate_limit_exceeded` carries no wait hint and is not retried. A
-`502 provider_error` whose `upstreamStatus` is a `4xx` is not retried for any
-method, because the provider would refuse the same request again. An upstream
-`408`, `425`, or `429` is transient: like an upstream `5xx`, or none, it keeps
-`retryable: true` and a read is retried as above. A streamed
-completion is never retried. The
-defaults are two retries and a 60-second timeout until response headers
+| Failure | Reads (`health`, `auth.status`, `models.list`) | Chat completions and embeddings |
+|---|---|---|
+| Network error, timeout, `5xx` | Retried. | Not retried: the provider may already have run, and billed for, the request. |
+| `429 provider_rate_limited` with a wait of at most `maxRetryDelayMs` (30 seconds by default) | Retried after the wait. | Retried after the wait: the provider refused the request without running it. |
+| `429 rate_limit_exceeded` (the Gateway's own limit) | Not retried: it carries no wait hint. | Not retried. |
+| `502 provider_error` with an upstream `4xx` | Not retried: the provider would refuse the same request again. | Not retried. |
+| `502 provider_error` with an upstream `408`, `425`, `429`, `5xx`, or none | Retried, as `retryable: true`. | Not retried. |
+
+The wait for `provider_rate_limited` comes from `Retry-After` or the body's
+`error.retry_after`. A streamed completion is never retried.
+
+The defaults are two retries and a 60-second timeout until response headers
 arrive; change them with `maxRetries` and `timeoutMs`.
 
 ## CLI
+
+<Callout type="info">
+Until `@ryuhq/services-cli` is on npm, run the commands below as
+`ryu-cli services gateway ...`, with the same flags. `ryu-cli services`
+arrives in a Ryu release after 0.4.0, and until then neither the CLI nor the
+MCP server can be installed outside the Ryu repository (see
+[ryu-services CLI](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
+</Callout>
 
 The `ryu-services` command line reads the same variables. Add `--json` for
 `{ data, meta }` output, or `--dry-run` to print the equivalent curl command
@@ -325,17 +352,12 @@ ryu-services gateway models
 ryu-services gateway chat "Say hello" --model openai/gpt-4o-mini
 ```
 
-Until `@ryuhq/services-cli` is on npm, run these as
-`ryu-cli services gateway ...`, with the same flags; `ryu-cli services`
-arrives in a Ryu release after 0.4.0, and until then neither the CLI nor the
-MCP server can be installed outside the Ryu repository (see
-[ryu-services CLI](/docs/standalone/sdk/cli#run-it-from-ryu-cli)).
-
-`models` prints one JSON line per model (see
-[list output](/docs/standalone/sdk/cli#list-output)); `--json` prints the whole
-`/v1/models` reply with its meta. `chat` prints the assistant's reply. It also takes `--system`,
-`--max-tokens`, and `--temperature`, and `--stream` prints one JSON chunk per
-line.
+- `models` prints one JSON line per model (see
+  [list output](/docs/standalone/sdk/cli#list-output)). `--json` prints the
+  whole `/v1/models` reply with its meta.
+- `chat` prints the assistant's reply. It also takes `--system`,
+  `--max-tokens`, and `--temperature`, and `--stream` prints one JSON chunk
+  per line.
 
 ## MCP
 
@@ -343,11 +365,9 @@ line.
 configured. The Gateway's tools are registered only when `RYU_GATEWAY_URL` or
 `RYU_GATEWAY_TOKEN` is set; the built-in local default alone exposes nothing.
 
-Until `@ryuhq/services-cli` is on npm, start the server through `ryu-cli`,
-as below (`ryu-cli services` arrives in a Ryu release after 0.4.0; until then
-neither the CLI nor the MCP server can be installed outside the Ryu
-repository); once it is published, use
-`"command": "ryu-services"` and drop `"services"` from `args`.
+Until `@ryuhq/services-cli` is on npm, start the server through `ryu-cli`, as
+below (see the note under [CLI](/docs/standalone/sdk/gateway#cli)). Once it is
+published, use `"command": "ryu-services"` and drop `"services"` from `args`.
 
 ```json
 {
@@ -369,11 +389,12 @@ repository); once it is published, use
 | `gateway_list_models` | Lists the models the Gateway can route to. | Yes |
 | `gateway_chat` | Sends one chat completion from a `prompt`, with optional `system`, `maxTokens`, and `temperature`. | No |
 
-Results carry `{ data, meta }`; failures are tool errors that carry the
-`RyuError` fields and never the key. `gateway_chat` reaches a model provider
-that may bill for the call, so hosts should ask before running it.
-By default the server registers only `gateway_list_models`; add
-`--allow-writes` to the args to expose `gateway_chat`.
+Results carry `{ data, meta }`. Failures are tool errors that carry the
+`RyuError` fields and never the key.
+
+By default the server registers only `gateway_list_models`. Add
+`--allow-writes` to the args to expose `gateway_chat`. It reaches a model
+provider that may bill for the call, so hosts should ask before running it.
 
 ## Read next
 

@@ -3,11 +3,8 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  ARCHIVED_DOCS_VERSIONS,
-  archivedDocsUrl,
+  canonicalDocsHref,
   DOCS_ENTRY_PATH,
-  DOCS_VERSION,
-  DOCS_VERSIONS,
   docsPath,
   docsPathForLocale,
   docsSegmentsFromPathname,
@@ -15,7 +12,6 @@ import {
   isVersionSegment,
   localizeDocsHref,
   stripDocsVersion,
-  versionedDocsHref,
 } from "./docs-version";
 
 const API_REFERENCE_ROOT = path.resolve(
@@ -39,44 +35,71 @@ async function markdownFiles(directory: string): Promise<string[]> {
 }
 
 describe("docs version policy", () => {
-  test("offers only the current deployment", () => {
-    expect(ARCHIVED_DOCS_VERSIONS).toEqual([]);
-    expect(DOCS_VERSIONS).toEqual([
-      {
-        slug: DOCS_VERSION,
-        title: DOCS_VERSION,
-      },
-    ]);
-    expect(archivedDocsUrl("0.1.4")).toBeUndefined();
+  test("builds docs paths without a version segment", () => {
+    expect(docsPath()).toBe("/docs");
+    expect(docsPath("start-here")).toBe("/docs/start-here");
+    expect(docsPathForLocale("en", "start-here")).toBe("/docs/start-here");
+    expect(docsPathForLocale("es", "start-here")).toBe("/es/docs/start-here");
   });
 
-  test("keeps current and legacy paths on the same content tree", () => {
-    expect(docsPath("start-here")).toBe(`/docs/${DOCS_VERSION}/start-here`);
-    expect(docsPathForLocale("es", "start-here")).toBe(
-      `/es/docs/${DOCS_VERSION}/start-here`,
+  test("drops the version segment of links published by older releases", () => {
+    expect(canonicalDocsHref("/docs/start-here")).toBe("/docs/start-here");
+    expect(canonicalDocsHref("/docs/0.4.0/start-here")).toBe(
+      "/docs/start-here",
     );
-    expect(versionedDocsHref("/docs/start-here")).toBe(
-      `/docs/${DOCS_VERSION}/start-here`,
+    expect(canonicalDocsHref("/es/docs/0.1.2/start-here#install")).toBe(
+      "/es/docs/start-here#install",
     );
-    expect(versionedDocsHref(`/docs/${DOCS_VERSION}/start-here`)).toBe(
-      `/docs/${DOCS_VERSION}/start-here`,
+    expect(canonicalDocsHref("/pricing")).toBe("/pricing");
+    expect(canonicalDocsHref("#install")).toBe("#install");
+    expect(localizeDocsHref("/docs/0.4.0/start-here", "es")).toBe(
+      "/es/docs/start-here",
     );
-    expect(versionedDocsHref("/es/docs/start-here")).toBe(
-      `/es/docs/${DOCS_VERSION}/start-here`,
+    expect(localizeDocsHref("/fr/docs/start-here?q=1", "es")).toBe(
+      "/es/docs/start-here?q=1",
     );
-    expect(localizeDocsHref(`/docs/${DOCS_VERSION}/start-here`, "es")).toBe(
-      `/es/docs/${DOCS_VERSION}/start-here`,
-    );
-    expect(stripDocsVersion([DOCS_VERSION, "start-here"])).toEqual([
+    expect(stripDocsVersion(["0.4.0", "start-here"])).toEqual(["start-here"]);
+    expect(stripDocsVersion(["start-here"])).toEqual(["start-here"]);
+    expect(stripDocsVersion(undefined)).toEqual([]);
+    expect(docsSegmentsFromPathname("/docs/start-here")).toEqual([
       "start-here",
     ]);
-    expect(
-      docsSegmentsFromPathname(`/docs/${DOCS_VERSION}/start-here`),
-    ).toEqual(["start-here"]);
-    expect(
-      docsSegmentsFromPathname(`/es/docs/${DOCS_VERSION}/start-here`),
-    ).toEqual(["start-here"]);
+    expect(docsSegmentsFromPathname("/es/docs/0.4.0/start-here")).toEqual([
+      "start-here",
+    ]);
     expect(isVersionSegment("0.1.4")).toBe(true);
+    expect(isVersionSegment("start-here")).toBe(false);
+  });
+
+  test("redirects every version-shaped docs URL to its unversioned page", async () => {
+    const { default: config } = await import("../../next.config.mjs");
+    if (!config.redirects) {
+      throw new Error("next.config.mjs defines no redirects");
+    }
+    const redirects = await config.redirects();
+    const source = (pattern: string) =>
+      redirects.find((redirect) => redirect.source === pattern);
+    const version = String.raw`[0-9]+\.[0-9]+\.[0-9]+`;
+    const locales = "en|es|fr|de|pt-br|ja|zh-cn|it|ko|hi|ru|ar";
+    expect(source(`/docs/:version(${version})/:path+`)).toEqual({
+      source: `/docs/:version(${version})/:path+`,
+      destination: "/docs/:path+",
+      permanent: true,
+    });
+    expect(source(`/docs/:version(${version})`)?.destination).toBe(
+      DOCS_ENTRY_PATH,
+    );
+    expect(
+      source(`/:locale(${locales})/docs/:version(${version})/:path+`)
+        ?.destination,
+    ).toBe("/:locale/docs/:path+");
+    expect(
+      redirects.some(
+        (redirect) =>
+          redirect.destination.includes(":version") ||
+          /\/docs\/\d+\.\d+\.\d+/u.test(redirect.destination),
+      ),
+    ).toBe(false);
   });
 
   test("links the header straight to the bare /docs redirect target", async () => {
@@ -99,7 +122,7 @@ describe("docs version policy", () => {
   test("recognizes docs routes with or without a locale prefix", () => {
     expect(isDocsPathname(DOCS_ENTRY_PATH)).toBe(true);
     expect(isDocsPathname("/docs")).toBe(true);
-    expect(isDocsPathname(`/ja/docs/${DOCS_VERSION}/start-here`)).toBe(true);
+    expect(isDocsPathname("/ja/docs/start-here")).toBe(true);
     expect(isDocsPathname("/")).toBe(false);
     expect(isDocsPathname("/es")).toBe(false);
     expect(isDocsPathname("/proof")).toBe(false);
@@ -107,19 +130,17 @@ describe("docs version policy", () => {
     expect(isDocsPathname(null)).toBe(false);
   });
 
-  test("generated API pages use the current docs version", async () => {
+  test("generated API pages link to unversioned docs URLs", async () => {
     const files = await markdownFiles(API_REFERENCE_ROOT);
-    const staleLinks: string[] = [];
+    const versionedLinks: string[] = [];
     for (const file of files) {
       const content = await readFile(file, "utf8");
       for (const match of content.matchAll(/\/docs\/(\d+\.\d+\.\d+)\//gu)) {
-        if (match[1] !== DOCS_VERSION) {
-          staleLinks.push(
-            `${path.relative(API_REFERENCE_ROOT, file)}:${match[1]}`,
-          );
-        }
+        versionedLinks.push(
+          `${path.relative(API_REFERENCE_ROOT, file)}:${match[1]}`,
+        );
       }
     }
-    expect(staleLinks).toEqual([]);
+    expect(versionedLinks).toEqual([]);
   });
 });

@@ -3,22 +3,27 @@ title: "Execution Backend Reference"
 description: "Per-backend reference for Core execution backends: how wasmtime runs a module, the local and SSH backends, MXC on Windows, Apptainer and Singularity, and the recognized Modal and Vercel Sandbox names"
 ---
 
-This page gives the behaviour of each backend. The backend list, the shared execution contract, the
+This page gives the behavior of each backend. The backend list, the shared execution contract, the
 `sandbox_exec` tool, and limits are on [Execution Backends](/docs/core/sandbox).
 
-Each backend setting below that names a `node-config.json` path can live in
+Each setting below that names a `node-config.json` path can live in
 [`node-config.json`](/docs/start-here/configuration#core-node-config) under `settings`. The
-environment name still works, and a set environment value wins over the file. The Docker,
-microsandbox, and OpenSandbox CLIs follow the same pattern: `sandbox.<backend>Binary`,
-`sandbox.<backend>Image`, and `sandbox.<backend>DetectSecs` (`RYU_SANDBOX_<BACKEND>_BINARY`,
-`…_IMAGE`, `…_DETECT_SECS`), with defaults `docker` and `alpine:3.20`, `msb` and `python`, and
-`osb` and `python:3.12`, each probed for 3 seconds. `sandbox.opensandboxTimeout`
-(`RYU_SANDBOX_OPENSANDBOX_TIMEOUT`) bounds an OpenSandbox run (default `30m`).
+environment name still works, and a set environment value wins over the file.
+
+The Docker, microsandbox, and OpenSandbox CLIs follow one pattern. `<backend>` is `docker`,
+`microsandbox`, or `opensandbox`, and each CLI is probed for 3 seconds by default.
+
+| Variable (`node-config.json` path) | Meaning |
+|---|---|
+| `RYU_SANDBOX_<BACKEND>_BINARY` (`sandbox.<backend>Binary`) | CLI to invoke (defaults `docker`, `msb`, `osb`) |
+| `RYU_SANDBOX_<BACKEND>_IMAGE` (`sandbox.<backend>Image`) | Image to run (defaults `alpine:3.20`, `python`, `python:3.12`) |
+| `RYU_SANDBOX_<BACKEND>_DETECT_SECS` (`sandbox.<backend>DetectSecs`) | Timeout for the availability probe, in seconds (default 3) |
+| `RYU_SANDBOX_OPENSANDBOX_TIMEOUT` (`sandbox.opensandboxTimeout`) | Upper bound on an OpenSandbox run (default `30m`) |
 
 ## How the wasmtime backend behaves
 
 `WasmtimeSandbox` (`crates/core/sandbox/src/wasmtime.rs`, behind the `sandbox-wasmtime` feature)
-holds a shared `Engine`, so Cranelift initialization is paid once and reused across calls.
+holds a shared `Engine`. Cranelift initialization is paid once and reused across calls.
 
 Each run then:
 
@@ -31,13 +36,17 @@ Each run then:
    grants, after the workspace-access clamp.
 4. Invokes the module's default `_start` export.
 
-Core enables Wasmtime epoch interruption and gives each store its own deadline, so a non-yielding
-module is interrupted and reported as a timeout. A wasmtime run without `timeout_secs` stops after
-120 seconds. The `sandbox_exec` tool always sets one: the caller's `timeout_secs`, clamped to
-between 1 and 30 seconds, or 30 seconds when omitted.
+### Timeouts and exit codes
 
-A clean exit, including `proc_exit(0)` (which WASI surfaces as a trap wrapping `I32Exit(0)`), is
-treated as success. A non-zero exit code surfaces as an error carrying the captured stderr.
+- Core enables Wasmtime epoch interruption and gives each store its own deadline, so a non-yielding
+  module is interrupted and reported as a timeout.
+- A wasmtime run without `timeout_secs` stops after 120 seconds. The `sandbox_exec` tool always sets
+  one: the caller's `timeout_secs`, clamped to between 1 and 30 seconds, or 30 seconds when omitted.
+- A clean exit is success, including `proc_exit(0)`, which WASI surfaces as a trap wrapping
+  `I32Exit(0)`.
+- A non-zero exit code surfaces as an error carrying the captured stderr.
+
+### Default-deny
 
 The default-deny posture is structural. With the default capability set, no directories are
 preopened and no socket WASI ABI is wired, so a module cannot reach the host disk or network.
@@ -49,19 +58,32 @@ mapping.
 
 ## Local and SSH backends
 
-`local` runs the command as a child process of Core, in a new temporary directory that is removed
-after a one-shot run (or on `destroy` for a workspace). The child gets a cleared environment: only
-`PATH` is inherited, and `HOME`/`TMPDIR` point at the temporary directory, so Core's own environment
-is not passed through. No other isolation applies: the child runs as the Core user, can reach any file
-that user can, and has the host's network, so filesystem and network grants are **not** enforced.
-Because host execution is not a sandbox, `local` stays unavailable and every run fails until the
-operator opts in with `RYU_SANDBOX_LOCAL_ENABLE=1` (or `sandbox.localEnable`). It is never a default or a fallback.
+<Callout type="warn">
+  Neither backend enforces filesystem or network grants. `local` has no isolation at all, and `ssh`
+  relies only on the remote account.
+</Callout>
+
+### Local
+
+`local` runs the command as a child process of Core, in a new temporary directory. The directory is
+removed after a one-shot run, or on `destroy` for a workspace.
+
+- **Environment.** The child gets a cleared environment. Only `PATH` is inherited, and `HOME` and
+  `TMPDIR` point at the temporary directory, so Core's own environment is not passed through.
+- **No other isolation.** The child runs as the Core user, can reach any file that user can, and has
+  the host's network.
+- **Opt-in only.** Because host execution is not a sandbox, `local` stays unavailable and every run
+  fails until the operator sets `RYU_SANDBOX_LOCAL_ENABLE=1` (or `sandbox.localEnable`). It is never a
+  default or a fallback.
+
+### SSH
 
 `ssh` runs the command on a remote host with non-interactive authentication (`BatchMode=yes`, keys or
-an agent) and your normal `known_hosts` verification. Each one-shot run uses a fresh remote temporary
-directory that is removed afterwards; a workspace keeps its remote directory until `destroy`. The
-isolation boundary is the remote account; Ryu adds nothing on top, and grants are not enforced
-remotely.
+an agent) and your normal `known_hosts` verification.
+
+- Each one-shot run uses a fresh remote temporary directory that is removed afterwards.
+- A workspace keeps its remote directory until `destroy`.
+- The isolation boundary is the remote account. Ryu adds nothing on top.
 
 | Variable (`node-config.json` path) | Meaning |
 |---|---|
@@ -75,32 +97,42 @@ remotely.
 ## MXC backend (Windows)
 
 `mxc` runs each command inside a [Microsoft eXecution Container](https://github.com/microsoft/mxc)
-using MXC's Windows `processcontainer` containment: an AppContainer or BaseContainer process
-boundary. It needs no extra Windows accounts, no administrator setup, and no firewall rules, which
-makes it the native option on Windows nodes where Docker is not available. Ryu does not install MXC;
-put `wxc-exec.exe` on `PATH` (or point `RYU_SANDBOX_MXC_BINARY` at it). Core runs
-`wxc-exec --probe` with a request shaped like a real run (a writable working directory and the
-node's host-permission setting) to decide whether the backend is available, and reports it
-unavailable on every non-Windows node. If MXC rejects a run's request or finds no isolation tier the
-request may use, the call reports the backend unavailable instead of returning a command exit code.
-
-Each run gets a fresh working directory that is the only writable path unless more are granted, and
-is removed afterwards (a workspace keeps its directory until `destroy`). Filesystem grants map to
-MXC read-only and read-write paths, and must be absolute. Network is denied, including host loopback,
-unless the run is granted network, which allows outbound traffic only. Visible UI, input injection,
-and the clipboard are disabled, and the child gets an explicit environment rather than Core's.
-Programs the container runs must be readable by an AppContainer: system locations such as
-`C:\Windows` and `C:\Program Files` are, but tools installed only in your user profile need a read
-grant.
-
-On machines where MXC can only isolate by temporarily editing host file permissions, Ryu reports the
-backend unavailable rather than allowing those edits silently. Set
-`RYU_SANDBOX_MXC_ALLOW_DACL_MUTATION=1` (or `sandbox.mxcAllowDaclMutation`) to consent; MXC reverts the edits after each run.
+using MXC's Windows `processcontainer` containment, an AppContainer or BaseContainer process
+boundary. It needs no extra Windows accounts, no administrator setup, and no firewall rules. That
+makes it the native option on Windows nodes where Docker is not available.
 
 <Callout type="warn">
   Ryu treats `mxc` as OS-level process isolation for everyday agent commands, not a VM or container
   boundary. Prefer Docker (rootless), microsandbox, or OpenSandbox when you need one.
 </Callout>
+
+### Availability
+
+Ryu does not install MXC. Put `wxc-exec.exe` on `PATH`, or point `RYU_SANDBOX_MXC_BINARY` (`sandbox.mxcBinary`) at it.
+
+- Core runs `wxc-exec --probe` with a request shaped like a real run (a writable working directory
+  and the node's host-permission setting) to decide whether the backend is available.
+- The backend is reported unavailable on every non-Windows node.
+- If MXC rejects a run's request or finds no isolation tier the request may use, the call reports
+  the backend unavailable instead of returning a command exit code.
+- On machines where MXC can only isolate by temporarily editing host file permissions, Ryu reports
+  the backend unavailable rather than allowing those edits silently. Set
+  `RYU_SANDBOX_MXC_ALLOW_DACL_MUTATION=1` (or `sandbox.mxcAllowDaclMutation`) to consent. MXC
+  reverts the edits after each run.
+
+### What a run gets
+
+- **Working directory.** A fresh directory that is the only writable path unless more are granted.
+  It is removed afterwards; a workspace keeps its directory until `destroy`.
+- **Filesystem grants** map to MXC read-only and read-write paths, and must be absolute.
+- **Network** is denied, including host loopback, unless the run is granted network, which allows
+  outbound traffic only.
+- **Desktop access.** Visible UI, input injection, and the clipboard are disabled.
+- **Environment.** The child gets an explicit environment rather than Core's.
+
+Programs the container runs must be readable by an AppContainer. System locations such as
+`C:\Windows` and `C:\Program Files` are, but tools installed only in your user profile need a read
+grant.
 
 | Variable (`node-config.json` path) | Meaning |
 |---|---|
@@ -115,26 +147,52 @@ container through whichever CLI the host has: `apptainer` is preferred, then `si
 neither is installed, discovery reports the backend unavailable and every run fails with an error
 that says what to install. It never falls back to host execution.
 
-Every one-shot run and every workspace start uses `--containall` (no host home, no host
-environment, private `/tmp`), `--no-privs`, and `--no-mount hostfs,bind-paths,cwd`, so the current
-working directory and administrator-configured bind paths are not mounted automatically (Apptainer
-1.0 or newer).
-Without a network grant it adds `--net --network none`, which leaves only loopback. Filesystem
-grants become `--bind <path>:<path>:ro` or `:rw` at the same path inside the container, under the same
-workspace-access clamp as Docker. Paths that contain `:` or `,` cannot be expressed as a bind and are
-rejected.
+### Container flags
 
-The CLI itself starts with a cleared environment that keeps only `PATH`, `HOME`, `LANG`,
-temporary and runtime directories, the user session bus, Apptainer's own cache, config, and temp
-locations, and the host's proxy and CA certificate settings for image pulls. Node secrets never
-reach it, and variables such as `APPTAINER_BIND` or `APPTAINERENV_*` cannot add host mounts or
-inject container variables, so the capability set is the only source of host mounts.
+Every one-shot run and every workspace start uses (Apptainer 1.0 or newer):
 
-A workspace is an Apptainer instance started with the workspace's capabilities; later runs join
-that instance and `destroy` stops it. Each run inside a workspace also passes `--cleanenv` and
-`--no-privs`, because Apptainer applies the environment and privilege drop to every joining
-process, not to the instance. A failed or timed-out workspace run stops the instance, so the
-workspace must be recreated.
+- `--containall` - no host home, no host environment, private `/tmp`;
+- `--no-privs`;
+- `--no-mount hostfs,bind-paths,cwd` - the current working directory and administrator-configured
+  bind paths are not mounted automatically.
+
+Grants map to flags as follows:
+
+- **Network.** Without a network grant it adds `--net --network none`, which leaves only loopback.
+- **Filesystem.** Grants become `--bind <path>:<path>:ro` or `:rw` at the same path inside the
+  container, under the same workspace-access clamp as Docker.
+- **Unexpressible paths.** Paths that contain `:` or `,` cannot be expressed as a bind and are
+  rejected.
+
+Some Apptainer installations restrict `--net` for unprivileged users. In that case a run without a
+network grant fails with the CLI's error instead of running with the host network.
+
+### CLI environment
+
+The CLI itself starts with a cleared environment. It keeps only `PATH`, `HOME`, `LANG`, temporary
+and runtime directories, the user session bus, Apptainer's own cache, config, and temp locations,
+and the host's proxy and CA certificate settings for image pulls.
+
+Node secrets never reach it. Variables such as `APPTAINER_BIND` or `APPTAINERENV_*` cannot add host
+mounts or inject container variables, so the capability set is the only source of host mounts.
+
+### Workspaces
+
+A workspace is an Apptainer instance started with the workspace's capabilities.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Running: instance start (workspace caps)
+  Running --> Running: exec joins instance
+  Running --> Stopped: destroy
+  Running --> Stopped: failed or timed-out run
+  Stopped --> [*]
+```
+
+- Later runs join that instance, and `destroy` stops it.
+- Each run inside a workspace also passes `--cleanenv` and `--no-privs`, because Apptainer applies
+  the environment and privilege drop to every joining process, not to the instance.
+- A failed or timed-out workspace run stops the instance, so the workspace must be recreated.
 
 | Variable (`node-config.json` path) | Meaning |
 |---|---|
@@ -142,13 +200,10 @@ workspace must be recreated.
 | `RYU_SANDBOX_SINGULARITY_BINARY` (`sandbox.singularityBinary`) | CLI to invoke instead of searching `PATH` for `apptainer`, then `singularity` |
 | `RYU_SANDBOX_SINGULARITY_DETECT_SECS` (`sandbox.singularityDetectSecs`) | Timeout for the `--version` availability probe (default 3) |
 
-Some Apptainer installations restrict `--net` for unprivileged users. In that case a run without a
-network grant fails with the CLI's error instead of running with the host network.
-
 ## Modal and Vercel Sandbox
 
 `modal` and `vercel_sandbox` are recognized names, but Core has no driver for either provider.
-Discovery reports them as not implemented, and selecting one returns an error that suggests a
+Discovery reports them as not implemented. Selecting one returns an error that suggests either a
 backend plugin that owns the provider credentials, or an implemented backend such as `docker`,
 `singularity`, `daytona`, or `box`.
 

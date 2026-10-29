@@ -1,72 +1,26 @@
 import { DEFAULT_DOCS_LOCALE, isDocsLocale } from "./i18n";
 
-export const DOCS_VERSION = "0.5.0" as const;
-
 /**
- * Ryu's public docs intentionally serve one current version.
+ * Ryu's public docs serve only the current release, so docs URLs carry no
+ * version segment: `/docs/start-here`, `/es/docs/start-here`.
  *
- * The version segment remains in the URL so links can identify the release that
- * produced them, but it is a label for this deployment rather than a selector
- * for a fleet of historical sites. Keeping archives live would require one
- * separately built deployment per release and would grow the production surface
- * without a bounded retention policy.
+ * Earlier releases published links shaped like `/docs/0.4.0/start-here`. No
+ * archive of those releases is kept, so next.config.mjs permanently redirects
+ * any version-shaped first segment to the same page without it, and the helpers
+ * below drop such a segment wherever an old href or pathname still carries one.
  */
-export const ARCHIVED_DOCS_VERSIONS: readonly {
-  readonly slug: string;
-  readonly url: string;
-}[] = [];
 
 /** Matches a bare semver-ish version segment, e.g. `0.1.1`. */
 const VERSION_SEGMENT_RE = /^\d+\.\d+\.\d+$/;
 
-/**
- * True for a path segment that is SHAPED like a version, whoever owns it.
- *
- * Distinct from {@link isDocsVersionSlug}, which answers "does THIS deployment
- * serve it". The difference is what keeps old links alive: a stale version
- * segment has to be recognised as a version so it can be stripped and redirected,
- * rather than falling through to content resolution and 404ing.
- */
+/** True for a path segment shaped like a release version, e.g. `0.4.0`. */
 export function isVersionSegment(slug: string | undefined): boolean {
   return slug !== undefined && VERSION_SEGMENT_RE.test(slug);
 }
 
-/**
- * Compatibility seam for stale-link routing. Latest-only mode intentionally
- * returns `undefined` for every historical version.
- */
-export function archivedDocsUrl(slug: string): string | undefined {
-  return ARCHIVED_DOCS_VERSIONS.find((v) => v.slug === slug)?.url;
-}
-
-/**
- * The one version the switcher offers. `stripDocsVersion` still drops a version
- * segment before resolving, so `/docs/<current>/foo` and `/docs/foo` are the
- * same page. A stale version-shaped URL is redirected to that current page.
- */
-export const DOCS_VERSIONS: readonly {
-  readonly slug: string;
-  readonly title: string;
-  /** Reserved for compatibility with older callers; archives are disabled. */
-  readonly externalUrl?: string;
-}[] = [
-  {
-    slug: DOCS_VERSION,
-    // Bare number, no "v" prefix — the switcher reads "0.5.0", not "v0.5.0".
-    title: DOCS_VERSION,
-  },
-];
-
-export function docsPathForVersion(
-  version: string,
-  ...segments: string[]
-): string {
-  const suffix = segments.filter(Boolean).join("/");
-  return `/docs/${version}${suffix ? `/${suffix}` : ""}`;
-}
-
 export function docsPath(...segments: string[]): string {
-  return docsPathForVersion(DOCS_VERSION, ...segments);
+  const suffix = segments.filter(Boolean).join("/");
+  return `/docs${suffix ? `/${suffix}` : ""}`;
 }
 
 /** Add the visible locale prefix for a non-default docs page. */
@@ -78,30 +32,28 @@ export function docsPathForLocale(
   return locale === DEFAULT_DOCS_LOCALE ? path : `/${locale}${path}`;
 }
 
-export function isDocsVersionSlug(slug: string | undefined): boolean {
-  return DOCS_VERSIONS.some((version) => version.slug === slug);
-}
-
 /** Next's default-locale rewrite must select the same tree as its public URL. */
 export function normalizeDocsNavigationPathname(pathname: string): string {
   const hiddenDocsPrefix = `/${DEFAULT_DOCS_LOCALE}/docs`;
-  const visiblePath =
-    pathname === hiddenDocsPrefix || pathname.startsWith(`${hiddenDocsPrefix}/`)
-      ? pathname.slice(DEFAULT_DOCS_LOCALE.length + 1)
-      : pathname;
-  const parts = visiblePath.split("/").filter(Boolean);
-  const offset = isDocsLocale(parts[0]) ? 1 : 0;
-  // Version-shaped routes have their own redirect contract; don't prepend a
-  // second version while Next is resolving one of those routes.
-  return parts[offset] === "docs" && !isVersionSegment(parts[offset + 1])
-    ? versionedDocsHref(visiblePath)
-    : visiblePath;
+  return pathname === hiddenDocsPrefix ||
+    pathname.startsWith(`${hiddenDocsPrefix}/`)
+    ? pathname.slice(DEFAULT_DOCS_LOCALE.length + 1)
+    : pathname;
 }
 
-export function versionedDocsHref(href: string): string;
-export function versionedDocsHref(href: undefined): undefined;
-export function versionedDocsHref(href: string | undefined): string | undefined;
-export function versionedDocsHref(
+/** Drop a legacy version segment from the docs part of a path. */
+function withoutVersionSegment(parts: string[]): string[] {
+  return isVersionSegment(parts[0]) ? parts.slice(1) : parts;
+}
+
+/**
+ * Canonicalize an internal docs href: a legacy `/docs/<version>/...` link loses
+ * its version segment. Non-docs hrefs, anchors, and queries pass through.
+ */
+export function canonicalDocsHref(href: string): string;
+export function canonicalDocsHref(href: undefined): undefined;
+export function canonicalDocsHref(href: string | undefined): string | undefined;
+export function canonicalDocsHref(
   href: string | undefined,
 ): string | undefined {
   if (!href) {
@@ -116,16 +68,11 @@ export function versionedDocsHref(
   const [, pathname, suffix = ""] = match;
   const pathParts = pathname.split("/").filter(Boolean);
   const locale = isDocsLocale(pathParts[0]) ? pathParts.shift() : undefined;
-  if (pathParts[0] !== "docs") {
+  if (pathParts[0] !== "docs" || !isVersionSegment(pathParts[1])) {
     return href;
   }
 
-  if (isDocsVersionSlug(pathParts[1])) {
-    return href;
-  }
-
-  const segments = pathParts.slice(1);
-  const path = docsPath(...segments);
+  const path = docsPath(...pathParts.slice(2));
   return `${locale ? `/${locale}` : ""}${path}${suffix}`;
 }
 
@@ -156,15 +103,13 @@ export function localizeDocsHref(
     return href;
   }
 
-  const segments = isDocsVersionSlug(parts[1])
-    ? parts.slice(2)
-    : parts.slice(1);
+  const segments = withoutVersionSegment(parts.slice(1));
   return `${docsPathForLocale(locale, ...segments)}${suffix}`;
 }
 
+/** Page slugs with any legacy version segment removed. */
 export function stripDocsVersion(slugs: string[] | undefined): string[] {
-  const normalized = slugs ?? [];
-  return isDocsVersionSlug(normalized[0]) ? normalized.slice(1) : normalized;
+  return withoutVersionSegment(slugs ?? []);
 }
 
 export function docsSegmentsFromPathname(pathname: string): string[] {
@@ -174,9 +119,7 @@ export function docsSegmentsFromPathname(pathname: string): string[] {
     return [];
   }
 
-  return isDocsVersionSlug(parts[offset + 1])
-    ? parts.slice(offset + 2)
-    : parts.slice(offset + 1);
+  return withoutVersionSegment(parts.slice(offset + 1));
 }
 
 /** The page the bare "/docs" route redirects to (next.config.mjs). */

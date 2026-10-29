@@ -174,7 +174,9 @@ describe("apps/fumadocs Tailwind sources", () => {
       .sort();
 
     expect(
-      styled.filter((file) => file.includes("/packages/ui/")).length,
+      styled.filter((file) =>
+        file.replaceAll("\\", "/").includes("/packages/ui/"),
+      ).length,
     ).toBeGreaterThan(100);
     expect(uncovered).toEqual([]);
   }, 60_000);

@@ -40,13 +40,14 @@ run these samples against; see
   A Core-issued token is never accepted by a standalone process.
 - **Public Sites allowed on the process, to open what you deploy.** The
   operator allows them with `RYU_SITES_PUBLIC=1` (or the runtime config's
-  `publicEnabled` when that variable is unset). A new
-  Site is private, and without an OpenID Connect client (`RYU_SITES_ISSUER`
-  and its client settings) nobody can sign in on the visitor origin, so a
-  private Site serves nobody: its pages answer `403` with a "This site is
-  private" page. With public Sites allowed, you can set a Site's audience to
-  `public`, as in [Open the Site to visitors](#open-the-site-to-visitors).
+  `publicEnabled` when that variable is unset). Then you can set a Site's
+  audience to `public`, as in
+  [Open the Site to visitors](#open-the-site-to-visitors).
   `ryu-services sites status` shows `publicEnabled` and `identityAvailable`.
+
+A new Site is private. Without an OpenID Connect client (`RYU_SITES_ISSUER` and
+its client settings) nobody can sign in on the visitor origin, so a private
+Site serves nobody: its pages answer `403` with a "This site is private" page.
 
 The SDK talks to the management listener only. Deployed pages and their
 browser routes are served on the visitor listener, which the SDK never calls.
@@ -70,18 +71,21 @@ Sites has no default URL, so a missing `RYU_SITES_URL` gives a
 `RyuConfigurationError` that names the variable. The bearer is sent only to
 `RYU_SITES_URL`.
 
+<Callout type="warn">
 `RYU_SITES_URL` must be the management listener (`RYU_SITES_PORT`, 8021 on the
 setup page), not the visitor listener (`RYU_SITES_VISITOR_PORT`, 8022). The
 visitor listener answers management calls with `404` "Site is not deployed".
 In both SDKs, that error's `hint` says that `RYU_SITES_URL` looks like the
 visitor listener.
+</Callout>
 
 ## First call with curl
 
-Create a Site, save a version with the revision you read, then deploy it.
-Use the `id` from the create response as `<site-id>`. The save response is the
-Site; its new version is the last entry in `versions`, so use that entry's
-`id` as `<version-id>`.
+Create a Site, save a version with the revision you read, then deploy it:
+
+- Use the `id` from the create response as `<site-id>`.
+- The save response is the Site. Its new version is the
+  last entry in `versions`, so use that entry's `id` as `<version-id>`.
 
 ```sh
 curl -sS -X POST "$RYU_SITES_URL/api/sites/projects" \
@@ -105,7 +109,20 @@ curl -sS -X POST "$RYU_SITES_URL/api/sites/projects/<site-id>/deploy" \
 With `result: "object"`, every call resolves to `{ data, error, meta }` and
 never throws for API or configuration errors. `sites.deploy()` reads the
 Site's revision, saves the HTML as a version with that `expectedRevision`,
-then deploys it:
+then deploys it.
+
+```mermaid
+sequenceDiagram
+  participant App as Your code
+  participant SDK as ryu.sites.deploy()
+  participant S as Sites management listener
+  App->>SDK: projectId, html
+  SDK->>S: GET /api/sites/projects/{id}
+  SDK->>S: GET /api/sites/status
+  SDK->>S: POST /versions with expectedRevision
+  SDK->>S: POST /deploy with versionId
+  SDK-->>App: project, version, url
+```
 
 ```ts tab="Node"
 import { Ryu } from "@ryuhq/services";
@@ -169,11 +186,13 @@ as in [Clean up](#clean-up).
 
 The first deploy keeps the Site private. In standalone mode a private Site is
 open only to visitors who sign in through an OpenID Connect client that the
-operator configured; without one, nobody can open the printed URL. To serve the
-Site to everyone, the operator must allow public Sites (`RYU_SITES_PUBLIC=1`,
-or the runtime config's `publicEnabled`; `status()` reports `publicEnabled`), then set the
-Site's audience to `public`. `projects.makePublic()` does that, and
-`projects.updateSettings()` changes any other settings:
+operator configured; without one, nobody can open the printed URL.
+
+To serve the Site to everyone, the operator must allow public Sites
+(`RYU_SITES_PUBLIC=1`, or the runtime config's `publicEnabled`; `status()`
+reports `publicEnabled`). Then set the Site's audience to `public`.
+`projects.makePublic()` does that, and `projects.updateSettings()` changes any
+other settings:
 
 ```ts tab="Node"
 const { data: opened, error: openError } =
@@ -215,18 +234,23 @@ ryu-services sites settings <site-id-or-slug> --audience public
 ryu-services sites settings <site-id-or-slug> --allow-remix on
 ```
 
+### How the settings helpers write
+
 The settings route, `PUT /api/sites/projects/{id}/settings`, replaces every
 setting at once. So the SDK and the CLI read the Site first, send its current
 settings with your changes laid over them, and send the `revision` they read
-as `expectedRevision`. Pass `{ expectedRevision }` (`expected_revision=` in
-Python, `--expected-revision` in the CLI) to refuse the change with
-`409 conflict` unless the Site is still at the revision you reviewed. A failed
-call names its step, `read` or `settings`, in `error.details.step`. The
-`database` and `extensions` settings have their own routes, so
-`updateSettings()` refuses them before sending anything. `null` clears
-`workspaceId` or `spaceId` and is refused on every other setting.
+as `expectedRevision`.
 
-Some settings depend on how the operator runs the process:
+- Pass `{ expectedRevision }` (`expected_revision=` in Python,
+  `--expected-revision` in the CLI) to refuse the change with `409 conflict`
+  unless the Site is still at the revision you reviewed.
+- A failed call names its step, `read` or `settings`, in `error.details.step`.
+- The `database` and `extensions` settings have their own routes, so
+  `updateSettings()` refuses them before sending anything.
+- `null` clears `workspaceId` or `spaceId` and is refused on every other
+  setting.
+
+### Settings that depend on the operator
 
 - `invited`, `workspace`, `editors`, and `optionalSignIn` need the process's
   OpenID Connect sign-in (`RYU_SITES_ISSUER` and its client settings). Without
@@ -234,9 +258,9 @@ Some settings depend on how the operator runs the process:
   because only an operator change fixes it. With sign-in configured,
   `updateSettings("<site-id>", { audience: "invited", viewers: ["ada@example.com"] })`
   (or `ryu-services sites settings <id> --audience invited --viewer ada@example.com`)
-  opens the Site to the people you name; check its `error` as above. Shared data, AI, Space retrieval,
-  and owner reset checks answer the same way when their service is not
-  connected.
+  opens the Site to the people you name; check its `error` as above.
+- Shared data, AI, Space retrieval, and owner reset checks answer
+  `503 unavailable` the same way when their service is not connected.
 - A non-null `workspaceId` must be a workspace you belong to, or the route
   answers `403 forbidden`. A standalone process without Ryu Core gives its
   management caller no workspaces, so it refuses every `workspaceId`.
@@ -247,8 +271,10 @@ If a Site was saved as `public` and the operator has since turned public Sites
 off, the route refuses every change to it with `403 policy_denied` until the
 change also sets another audience. The SDK's hint says so.
 
-Without the SDK, read the Site and send its settings back with `audience`
-changed. This pipeline uses `jq`.
+### Without the SDK
+
+Read the Site and send its settings back with `audience` changed. This
+pipeline uses `jq`.
 
 ```sh
 curl -sS "$RYU_SITES_URL/api/sites/projects/<site-id>" \
@@ -264,21 +290,26 @@ While public Sites are off, the settings call answers `403 policy_denied`.
 See [Visitor access](/docs/standalone/sites#visitor-access) and the settings
 route on [Ryu Sites API](/docs/standalone/sites-api#management-routes).
 
+### The Sites namespace
+
 `deploy()` also takes `{ projectId, versionId }` to publish a version that is
-already saved. The namespace has `status()`, `projects.list({ scope })`,
-`projects.get(id)`, `projects.create(input)`,
-`projects.delete(id, { expectedRevision, slug })`,
-`projects.updateSettings(id, settings)`, `projects.makePublic(id)`,
-`versions.create(id, { html, expectedRevision })`, and
-`unpublish(id)`. Site lists are not paginated.
+already saved. The namespace has these methods. Site lists are not paginated.
+
+- `status()`
+- `projects.list({ scope })`, `projects.get(id)`, `projects.create(input)`
+- `projects.delete(id, { expectedRevision, slug })`
+- `projects.updateSettings(id, settings)`, `projects.makePublic(id)`
+- `versions.create(id, { html, expectedRevision })`
+- `unpublish(id)`
 
 ## Clean up
 
-`projects.get()` takes a Site's `id`, not its slug, and `projects.delete()`
-takes the `id` plus the Site's current `revision` as `expectedRevision` and
-its `slug`, which confirms the delete. This lists your Sites and deletes the
-ones the samples on this page create (`launch-notes`, `launch-notes-sdk`, and
-`launch-notes-cli`):
+`projects.get()` takes a Site's `id`, not its slug. `projects.delete()` takes
+the `id` plus the Site's current `revision` as `expectedRevision` and its
+`slug`, which confirms the delete.
+
+This lists your Sites and deletes the ones the samples on this page create
+(`launch-notes`, `launch-notes-sdk`, and `launch-notes-cli`):
 
 ```ts tab="Node"
 const sampleSlugs = new Set(["launch-notes", "launch-notes-sdk", "launch-notes-cli"]);
@@ -349,12 +380,17 @@ after the deploy, as in this abridged example from the
 }
 ```
 
-A full `SitesProject` also carries `domains` (each custom domain's `host`,
-`status`, `verification` value and `checkedAt`), `aliases`, `access`,
-`schemaVersion`, `connections` (owner-managed connector bindings), and, on a
-Site that was remixed or duplicated, `remixedFrom` (the Site and version it
-was copied from). Each version saved since Site tools exist carries
-`extensions`, the Site tools saved with it. The SDK exports their types (`SitesDomainBinding`,
+A full `SitesProject` also carries:
+
+- `domains` - each custom domain's `host`, `status`, `verification` value and
+  `checkedAt`.
+- `aliases`, `access`, and `schemaVersion`.
+- `connections` - owner-managed connector bindings.
+- `remixedFrom` - on a Site that was remixed or duplicated, the Site and
+  version it was copied from.
+
+Each version saved since Site tools exist carries `extensions`, the Site tools
+saved with it. The SDK exports their types (`SitesDomainBinding`,
 `SitesConnection`, `SitesRemixSource`, `SitesExtensions`, `SitesTool`); the
 Python `ryu_sdk.services.shapes` module has `TypedDict`s with the same names.
 

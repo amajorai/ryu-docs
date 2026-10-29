@@ -7,11 +7,14 @@ MCP (Model Context Protocol) is an open standard that lets an AI host call tools
 an MCP server. A tool exposed over MCP is callable by any MCP host, including Ryu Core's MCP
 registry. Registering an existing MCP server needs no manifest, no SDK, and no Core restart.
 
-Ryu speaks MCP over stdio, current Streamable HTTP, and legacy HTTP+SSE. Stdio uses
-newline-delimited JSON-RPC. Streamable HTTP uses a POST endpoint whose response may be JSON or
-request-scoped SSE. The legacy transport opens an SSE endpoint first and POSTs messages to the
-endpoint it announces. See the
+Ryu speaks MCP over three transports. See the
 [MCP specification](https://modelcontextprotocol.io) for the full protocol.
+
+| Transport | How it works |
+|---|---|
+| stdio | Newline-delimited JSON-RPC. |
+| Streamable HTTP | A POST endpoint whose response may be JSON or request-scoped SSE. |
+| Legacy HTTP+SSE | Opens an SSE endpoint first and POSTs messages to the endpoint it announces. |
 
 This guide uses the **headroom** context-compression engine
 ([`chopratejas/headroom`](https://github.com/chopratejas/headroom)) as the worked example: it
@@ -88,11 +91,12 @@ registration API:
 }
 ```
 
-`http` is accepted as a compatibility alias for Streamable HTTP. If `type` is omitted, Ryu infers
-stdio from `command` and Streamable HTTP from `url`. Remote headers are sent on every request;
-Core reserves protocol headers, screens remote URLs before connecting, does not follow redirects,
-and withholds configured credentials if a legacy SSE server announces a different-origin message
-endpoint.
+- `http` is accepted as a compatibility alias for Streamable HTTP.
+- If `type` is omitted, Ryu infers stdio from `command` and Streamable HTTP from `url`.
+- Remote headers are sent on every request. Core reserves protocol headers, screens remote URLs
+  before connecting, and does not follow redirects.
+- Core withholds configured credentials if a legacy SSE server announces a different-origin message
+  endpoint.
 
 ## Step 1 - Install headroom
 
@@ -176,13 +180,16 @@ in its settings.
 ### Automatic compression vs. tool calls
 
 Registering headroom as above gives agents compress/retrieve **as tools they choose to call**.
-Compressing model calls automatically is a separate, complementary path: an egress
-transform in the **Gateway**, switched on by enabling the
-[Headroom Compression](/docs/plugins/headroom) plugin. It is off by default and, when enabled,
-applies to eligible OpenAI-format requests on the default chat path with no per-agent setup.
-It does not cover every ACP runtime, provider-native passthrough, or direct-egress path. See
-[Context Compression](/docs/gateway/compression) for the exact coverage. Keep MCP servers focused
-on the tool surface and let the Gateway own on-the-wire transforms and policy.
+Compressing model calls automatically is a separate, complementary path: an egress transform in the
+**Gateway**, switched on by enabling the [Headroom Compression](/docs/plugins/headroom) plugin.
+
+That transform is off by default. When enabled, it applies to eligible OpenAI-format requests on the
+default chat path with no per-agent setup. It does not cover every ACP runtime, provider-native
+passthrough, or direct-egress path; see [Context Compression](/docs/gateway/compression) for the
+exact coverage.
+
+Keep MCP servers focused on the tool surface and let the Gateway own on-the-wire transforms and
+policy.
 
 ## Protocol behavior
 
@@ -190,46 +197,72 @@ The sections below describe how Core handles MCP protocol features for any regis
 
 ### MCP 2026-07-28
 
-Core probes modern servers with `server/discover`. On a 2026 connection it sends
-`protocolVersion`, `clientCapabilities`, and client identity in every request's
-`_meta`. It also mirrors `Mcp-Method` and the applicable `Mcp-Name` into Streamable
-HTTP headers. For tool parameters annotated with `x-mcp-header`, Core reads the
-latest tool schema and sends encoded `Mcp-Param-*` headers; malformed annotations
-are excluded from HTTP tool discovery.
+Core probes modern servers with `server/discover`. On a 2026 connection:
 
-Core validates `resultType`, handles `input_required` responses through its
-caller-provided MRTR resolver, and exposes cache hints from `ttlMs` and
-`cacheScope`. Task-aware calls opt into `io.modelcontextprotocol/tasks` only when
-the remote server advertises that extension. They return a durable task ID and
-can resume with `tasks/get`, send input with `tasks/update`, or request
-cancellation with `tasks/cancel`.
+- Every request's `_meta` carries `protocolVersion`, `clientCapabilities`, and client identity.
+- Core mirrors `Mcp-Method` and the applicable `Mcp-Name` into Streamable HTTP headers.
+- For tool parameters annotated with `x-mcp-header`, Core reads the latest tool schema and sends
+  encoded `Mcp-Param-*` headers. Malformed annotations are excluded from HTTP tool discovery.
 
-Legacy SSE connection setup has a 60-second deadline, including response headers
-and the initial message-endpoint event. A server that stalls during setup releases
-its discovery slot when that deadline expires. Established event streams remain
-open for the session, with a separate deadline for each RPC response.
+Core also handles results and tasks:
+
+- It validates `resultType` and handles `input_required` responses through its caller-provided MRTR
+  resolver.
+- It exposes cache hints from `ttlMs` and `cacheScope`.
+- Task-aware calls opt into `io.modelcontextprotocol/tasks` only when the remote server advertises
+  that extension. They return a durable task ID and can resume with `tasks/get`, send input with
+  `tasks/update`, or request cancellation with `tasks/cancel`.
+
+### Legacy SSE deadlines
+
+Legacy SSE connection setup has a 60-second deadline, including response headers and the initial
+message-endpoint event. A server that stalls during setup releases its discovery slot when that
+deadline expires. Established event streams remain open for the session, with a separate deadline
+for each RPC response.
 
 ### Request structured information in chat
 
-An MCP tool running in a conversation can request a form through standard
-`elicitation/create` or `openai/elicitation/create`, or through a modern `input_required` response
-containing an `elicitation` input request. Ryu shows the server's message and schema fields,
-then returns the user's `accept`, `decline`, or `cancel` decision to the waiting
-tool. Accept includes structured `content`; declining or cancelling does not.
-Forms expire after five minutes, and answers are scoped to the conversation that
-owns the tool call. Conversation-scoped tool forwards allow six minutes for a
-human answer and transport overhead; detached calls keep their ordinary timeout.
+An MCP tool running in a conversation can request a form in three ways:
 
-Use an object `requestedSchema` with up to 32 string, boolean, number, integer,
-or string-array properties. Required fields, numeric bounds, string length bounds,
-patterns, enums, and titled choices are supported. `x-openai-suggestions` supplies
-suggestions while preserving custom text; arrays support multiple selections.
-Choices can include descriptions and `x-openai-thumbnail` icons with HTTPS or
-base64 PNG, JPEG, WebP, or GIF images. Remote thumbnails omit credentials and
-referrers. `x-openai-input` resource fields support explicit selection from supplied
-resources and submit their URI strings. User uploads and implicit resource selection
-are not supported. Keep passwords and authentication tokens in your OAuth flow.
-Unsupported schemas fail explicitly instead of being flattened into free text.
+- standard `elicitation/create`;
+- `openai/elicitation/create`;
+- a modern `input_required` response containing an `elicitation` input request.
+
+```mermaid
+sequenceDiagram
+  participant T as MCP tool
+  participant C as Core
+  participant U as User (chat)
+  T->>C: elicitation request
+  C->>U: Show message and schema fields
+  U-->>C: accept, decline, or cancel
+  C-->>T: Decision (accept carries content)
+```
+
+Ryu shows the server's message and schema fields, then returns the user's `accept`, `decline`, or
+`cancel` decision to the waiting tool. Accept includes structured `content`; declining or cancelling
+does not.
+
+Forms expire after five minutes, and answers are scoped to the conversation that owns the tool call.
+Conversation-scoped tool forwards allow six minutes for a human answer and transport overhead;
+detached calls keep their ordinary timeout.
+
+#### Supported form schemas
+
+Use an object `requestedSchema` with up to 32 string, boolean, number, integer, or string-array
+properties.
+
+- Required fields, numeric bounds, string length bounds, patterns, enums, and titled choices are
+  supported.
+- `x-openai-suggestions` supplies suggestions while preserving custom text; arrays support multiple
+  selections.
+- Choices can include descriptions and `x-openai-thumbnail` icons with HTTPS or base64 PNG, JPEG,
+  WebP, or GIF images. Remote thumbnails omit credentials and referrers.
+- `x-openai-input` resource fields support explicit selection from supplied resources and submit
+  their URI strings. User uploads and implicit resource selection are not supported.
+- Unsupported schemas fail explicitly instead of being flattened into free text.
+
+Keep passwords and authentication tokens in your OAuth flow, not in a form.
 
 ```json
 {
@@ -256,25 +289,30 @@ user message or grant permission for unrelated tools.
 
 ### Open an MCP App from the sidebar
 
-An approved, enabled MCP App with a global entrypoint opens beside a conversation
-and composer. Choose an agent for the app; Ryu creates an empty conversation with
-that agent and the current user's ownership before invoking the entrypoint. The
-conversation is available while the app loads, so an opening tool can request a
-form without waiting for the app to finish rendering. Opening an app from an
-existing conversation preserves that conversation.
+An approved, enabled MCP App with a global entrypoint opens beside a conversation and composer.
+Choose an agent for the app. Ryu creates an empty conversation with that agent and the current
+user's ownership before invoking the entrypoint.
 
-The host reuses an activation UUID when recovering a dropped response. Identical
-retries recover the pending conversation or completed app without invoking the
-opening tool again. Recovery lasts for 30 minutes while the same Core process
-remains running; it does not guarantee provider-side exactly-once execution after
-a Core restart. Conflicting retries are rejected. Settings action tools that do
-not declare a static entrypoint can open their UI without creating a conversation.
+- The conversation is available while the app loads, so an opening tool can request a form without
+  waiting for the app to finish rendering.
+- Opening an app from an existing conversation preserves that conversation.
+- Settings action tools that do not declare a static entrypoint can open their UI without creating
+  a conversation.
+
+The host reuses an activation UUID when recovering a dropped response. Identical retries recover the
+pending conversation or completed app without invoking the opening tool again, and conflicting
+retries are rejected.
+
+Recovery lasts for 30 minutes while the same Core process remains running. It does not guarantee
+provider-side exactly-once execution after a Core restart.
 
 ## Build your own
 
 To author a new MCP server rather than register an existing one, use the SDK's `McpServer`
 (`packages/sdk/src/mcp/server.ts`). Register `SdkRunnable` objects (a `name` plus a `run`
-function); the SDK handles MCP `2026-07-28` per-request metadata, `server/discover`, `tools/list`,
+function).
+
+The SDK handles MCP `2026-07-28` per-request metadata, `server/discover`, `tools/list`,
 `tools/call`, result envelopes, and the legacy initialize flow for older hosts. Register the
 resulting stdio command with Core exactly as in Step 2. See the
 [TypeScript SDK guide](/docs/extend/develop/extensions/typescript-sdk) for the full surface.

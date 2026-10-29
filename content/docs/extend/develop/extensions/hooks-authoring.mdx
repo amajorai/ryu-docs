@@ -5,11 +5,12 @@ tags: ["Extensions", "Plugins", "Hooks"]
 ---
 
 A turn hook is a sandboxed JavaScript body that Core runs at a chat lifecycle boundary. The steps
-below declare a hook, write it with the TypeScript SDK, and use the `ctx` and `host` globals. For
-every phase, directive, and match gate, see
-[Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle). For the opt-in middleware
-form (`mode: "middleware"`, `defineFunctionHook`), see
-[Function-hook middleware](/docs/extend/develop/extensions/hook-recipes#function-hook-middleware).
+below declare a hook, write it with the TypeScript SDK, and use the `ctx` and `host` globals.
+
+- For every phase, directive, and match gate, see
+  [Hook Phases and Directives](/docs/extend/develop/extensions/hook-phases).
+- For the opt-in middleware form (`mode: "middleware"`, `defineFunctionHook`), see
+  [Function-hook middleware](/docs/extend/develop/extensions/hook-recipes#function-hook-middleware).
 
 ## 1. Declare the hook in manifest.json
 
@@ -24,7 +25,7 @@ form (`mode: "middleware"`, `defineFunctionHook`), see
       {
         "id": "dc.review",
         "on": "post_assistant_turn",
-        "code": "// JS body: return { kind: 'note', text: '...' }"
+        "code_file": "hooks/review.js"
       }
     ],
     "composer_controls": [
@@ -33,6 +34,10 @@ form (`mode: "middleware"`, `defineFunctionHook`), see
   }
 }
 ```
+
+`hooks/review.js` holds the JavaScript body, which returns a directive such as
+`{ kind: "note", text: "..." }`. `code_file` is the authoring form. Packing inlines the body as
+`code`, the wire form Core receives.
 
 ## 2. Write the hook with the TypeScript SDK
 
@@ -95,30 +100,48 @@ Each hook body runs in a fresh JS sandbox with exactly two globals:
 | `host.runFanout({ delegates, caps? })` | same as `host.runAgent`, checked per delegate preset | `{ ok, count, results }` |
 | `host.log(...args)` | none | Written to the Ryu log, tagged with your plugin and hook id |
 
-`images` is optional: up to 8 inline `data:image/png`, `data:image/jpeg` or `data:image/webp`
-base64 URIs, totalling at most 1.5 MiB. Remote image URLs are rejected. The whole request,
-prompt and system text included, must also fit in 2 MiB once encoded. A call over that limit is
-refused with a `host.sideModel` error before it is sent. With images, the
-prompt is sent as OpenAI content parts (the text, then one `image_url` part per image), and the
-Gateway translates them for the selected provider. A model that cannot read images returns the
-provider's error; the call does not silently drop the images.
+### Images in `host.sideModel`
 
-Storage is namespaced per plugin. An ungranted capability call rejects with `is_error: true`. An
-uncaught throw degrades the hook to `{ kind: "none" }`, so a failing hook does not block the turn.
+`images` is optional. These limits apply:
+
+- Up to 8 inline `data:image/png`, `data:image/jpeg`, or `data:image/webp` base64 URIs, totalling
+  at most 1.5 MiB. Remote image URLs are rejected.
+- The whole request, prompt and system text included, must fit in 2 MiB once encoded. A call over
+  that limit is refused with a `host.sideModel` error before it is sent.
+
+With images, the prompt is sent as OpenAI content parts (the text, then one `image_url` part per
+image), and the Gateway translates them for the selected provider. A model that cannot read images
+returns the provider's error. The call does not silently drop the images.
+
+### Errors, storage, and logs
+
+- Storage is namespaced per plugin.
+- An ungranted capability call rejects with `is_error: true`.
+- An uncaught throw degrades the hook to `{ kind: "none" }`, so a failing hook does not block the
+  turn.
+- `host.log` output is captured per run and written to the Ryu log with the plugin id and hook id.
+  Each run keeps at most 20 lines of up to 1,024 characters each. Control characters are removed.
+
+### Sub-agent grants
 
 `hook:run-agent` alone starts only **read-only** sub-agents: the `code_read` (default), `research`,
 and `summarise` presets. A `code_write` sub-agent can edit files, apply patches, and run commands,
-so it also needs `hook:run-agent:write`. That grant is not approved for marketplace plugins by
-default; an organization administrator must allow it. Request it only when your plugin really
-needs a sub-agent that makes changes.
+so it also needs `hook:run-agent:write`.
 
-`host.log` output is captured per run and written to the Ryu log with the plugin id and hook id.
-Each run keeps at most 20 lines of up to 1,024 characters each; control characters are removed.
+<Callout type="warn">
+  `hook:run-agent:write` is not approved for marketplace plugins by default. An organization
+  administrator must allow it. Request it only when your plugin really needs a sub-agent that makes
+  changes.
+</Callout>
+
+### Failing hooks are paused
 
 A hook that fails three times in a row (it throws, times out, or returns an error) is skipped for
-five minutes, then retried once. A successful run resets the count. While a hook is skipped the turn
-continues as if it returned `{ kind: "none" }`, so one broken hook does not add its timeout to every
-turn or tool call. To run it again, fix the hook and wait for the cool-down to end, or restart Ryu.
+five minutes, then retried once. A successful run resets the count.
+
+While a hook is skipped, the turn continues as if it returned `{ kind: "none" }`. One broken hook
+therefore does not add its timeout to every turn or tool call. To run it again, fix the hook and
+wait for the cool-down to end, or restart Ryu.
 
 ## Keep hook bodies cross-platform
 
@@ -192,13 +215,20 @@ Declare the hook in the plugin or app manifest:
 }
 ```
 
-For buttons that send a normal text reply, use `layout: "reply_keyboard"` and
-`action: { type: "reply" }`; the selected label arrives as the user's message. For typed callbacks,
-read `ctx.channel_action.action_id` and `ctx.channel_action.payload` in `pre_user_turn`. The callback
-is passed through the channel access gate and normal Core turn hooks, but the payload itself is not
-proof of identity, permission, or current state. Check those in the hook before making changes. If a
-Telegram callback is too large to include its button label within the 64-byte limit, `label` falls
-back to the action id. Use `action_id` and `payload` for routing.
+There are two kinds of button:
+
+- **Reply buttons** send a normal text reply. Use `layout: "reply_keyboard"` and
+  `action: { type: "reply" }`. The selected label arrives as the user's message.
+- **Typed callbacks** reach `pre_user_turn` as `ctx.channel_action.action_id` and
+  `ctx.channel_action.payload`. Use `action_id` and `payload` for routing. If a Telegram callback
+  is too large to include its button label within the 64-byte limit, `label` falls back to the
+  action id.
+
+<Callout type="warn">
+  A callback passes through the channel access gate and normal Core turn hooks, but its payload is
+  not proof of identity, permission, or current state. Check those in the hook before making
+  changes.
+</Callout>
 
 For example, a pre-turn hook can handle the selected action directly:
 
@@ -221,8 +251,9 @@ return { kind: "none" };
 ## Where hooks run
 
 Core runs enabled hooks at the chat lifecycle boundaries listed in
-[Hooks & Lifecycle](/docs/extend/develop/extensions/hook-phases). Any model call a
-hook makes through `host.sideModel` still routes through the Gateway.
+[Hook Phases and Directives](/docs/extend/develop/extensions/hook-phases). Any model call a hook
+makes through `host.sideModel` still routes through the Gateway. This diagram shows the
+`post_assistant_turn` path.
 
 ```mermaid
 flowchart TD
@@ -235,7 +266,6 @@ flowchart TD
   F -->|note| G[Emit data-plugin_note frame]
   F -->|continue| H[Inject follow-up user turn, loop < 25]
   F -->|none| Z2[Stop]
-  F -->|deny| Z3[Block tool call]
   H --> A
 ```
 

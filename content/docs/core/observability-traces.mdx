@@ -10,10 +10,24 @@ trace routes, and OTLP export presets, see [Run Traces and Export](/docs/surface
 ## Where traces live
 
 Core writes spans through `TraceStore` (`crates/core/tracing/src/lib.rs`) into SQLite at
-`~/.ryu/db/traces.db`. The run id is the conversation id from the chat request. Each chat turn
-opens an `agent_run` root span, and model calls, tool calls, retrieval, memory, and guardrail work
-nest under it. A workflow execution opens a `workflow_run` root with one `workflow_step` span per
-node. The full kind list is in [What a trace contains](/docs/surfaces/desktop/observability#what-a-trace-contains).
+`~/.ryu/db/traces.db`. The run id is the conversation id from the chat request.
+
+- Each chat turn opens an `agent_run` root span. Model calls, tool calls, retrieval, memory, and
+  guardrail work nest under it.
+- A workflow execution opens a `workflow_run` root with one `workflow_step` span per node.
+
+```mermaid
+flowchart TD
+  A["agent_run (chat turn)"] --> M[model_call]
+  A --> T[tool_call]
+  A --> R[retrieval]
+  A --> Me[memory]
+  A --> G[guardrail]
+  W["workflow_run"] --> S1["workflow_step (node 1)"]
+  W --> S2["workflow_step (node 2)"]
+```
+
+The full kind list is in [What a trace contains](/docs/surfaces/desktop/observability#what-a-trace-contains).
 
 Rows written by older builds used the flat kinds `tool-call` and `model-call`. They still parse, so
 older runs remain readable in the tree view.
@@ -59,11 +73,12 @@ Core records sequencing, fingerprints, latency, and errors. Token counts and cos
 
 ## Routes
 
-The trace routes are served from `apps/core/src/server/trace_api.rs`. `GET /api/runs/:id/trace` and
-`GET /api/traces` (query parameters and response shapes) are documented in
-[Run Traces and Export](/docs/surfaces/desktop/observability#api). A run with no spans yet returns an
-empty list rather than `404`, so a client can poll during an active run. Two more routes serve the
-background-runs view:
+The trace routes are served from `apps/core/src/server/trace_api.rs`. The query parameters and
+response shapes of `GET /api/runs/:id/trace` and `GET /api/traces` are documented in
+[Run Traces and Export](/docs/surfaces/desktop/observability#api).
+
+A run with no spans yet returns an empty list rather than `404`, so a client can poll during an
+active run. Two more routes serve the background-runs view:
 
 | Method + path | Purpose |
 |---|---|
@@ -72,14 +87,19 @@ background-runs view:
 
 ## Retention and access
 
-Trace retention defaults to 90 days and 1,000,000 spans. Set `RYU_TRACE_RETENTION_DAYS=0` or
-`RYU_TRACE_MAX_ROWS=0` (or `trace.retentionDays` and `trace.maxRows` in
-[`node-config.json`](/docs/start-here/configuration#core-node-config)) to disable one bound, or set a positive value to change it. Local audit and
-trace stores run the same bounded retention pass at startup.
+| Bound | Default | Variable | `node-config.json` key |
+|---|---|---|---|
+| Age | 90 days | `RYU_TRACE_RETENTION_DAYS` | `trace.retentionDays` |
+| Span count | 1,000,000 spans | `RYU_TRACE_MAX_ROWS` | `trace.maxRows` |
 
-Trace reads require the owning conversation's resource access. If that owner row is gone, Core
-deletes any orphaned spans and returns `404`. Temporary plugin-eval spans are deleted immediately
-after grading.
+Set either bound to `0` to disable it, or to a positive value to change it. The keys live in
+[`node-config.json`](/docs/start-here/configuration#core-node-config), and an explicitly set
+environment variable still wins. Local audit and trace stores run the same bounded retention pass
+at startup.
+
+- Trace reads require the owning conversation's resource access.
+- If that owner row is gone, Core deletes any orphaned spans and returns `404`.
+- Temporary plugin-eval spans are deleted immediately after grading.
 
 ## Explore traces in Activity
 
@@ -99,15 +119,28 @@ The desktop agent editor's **Activity → Observability** view, and the pre-inst
   idempotent.
 
 The Activity app also offers a Promptfoo-compatible quality replay and a bounded local security
-sweep. The sweep uses the Gateway evaluator catalog for prompt injection, jailbreak, PII-leakage,
-tool-misuse, and toxic-output probes. The server owns the fixed prompts, rejects unknown strategies,
-and does not execute a real tool. Provider-backed actions use the normal Gateway budget and audit path.
+sweep:
+
+- The sweep uses the Gateway evaluator catalog for prompt injection, jailbreak, PII-leakage,
+  tool-misuse, and toxic-output probes.
+- The server owns the fixed prompts, rejects unknown strategies, and does not execute a real tool.
+- Provider-backed actions use the normal Gateway budget and audit path.
 
 The dashboards poll every 15 seconds and have a manual refresh action. The explorer is a read-only
-projection. Core owns run state, the Gateway owns measured usage and policy, and the UI is never a
+projection: Core owns run state, the Gateway owns measured usage and policy, and the UI is never a
 billing source.
 
 ## Core and Gateway correlation
+
+A span's `session_id` links it to the Gateway audit session. Core spans carry sequencing and timing;
+the matching audit rows carry tokens and cost.
+
+```mermaid
+flowchart LR
+  S["Core span (session_id)"] --> A["Gateway audit row"]
+  S --> T["Timing, nesting, errors"]
+  A --> U["Tokens, cost, policy"]
+```
 
 <Callout type="warn">
   The span-to-audit link is only present when the request carries a Core conversation or session

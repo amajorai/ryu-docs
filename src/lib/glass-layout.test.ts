@@ -29,7 +29,7 @@ test("active Fumadocs routes use the Glass layout contract", async () => {
   expect(globalCss).toContain("display: flex !important;");
   expect(globalCss).toContain("@media (width >= 48rem)");
   expect(globalCss).toContain(
-    '--docs-glass-grid-areas: "left-margin left main right-margin right";',
+    '--docs-glass-grid-areas: "left-margin left main right right-margin";',
   );
   expect(globalCss).toContain("--docs-glass-grid-columns:");
   expect(globalCss).toContain("var(--fd-left-width)");

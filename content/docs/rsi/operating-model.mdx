@@ -3,10 +3,9 @@ title: "RSI Operating Model"
 description: "The shared improvement record, its Core API and promotion states, and which Ryu surface owns each part of the loop."
 ---
 
-Learning and Experiments share an improvement contract, not an implementation. Learning owns
-experience and skill proposals. Research owns campaign execution and winner selection. Core owns
-execution, workspaces, and the improvement record. Gateway owns policy, measurement, budgets, and
-audit. The owning app owns its domain state.
+Learning and Experiments share an improvement contract, not an implementation. Each part of the
+loop has one owner (see [Where each responsibility belongs](#where-each-responsibility-belongs)),
+and Core stores the improvement record that links them.
 
 This follows Ryu's [platform consistency rules](/docs/start-here/architecture/platform-consistency):
 one owner, one canonical contract, explicit projections, and evidence that says what actually ran.
@@ -44,17 +43,28 @@ the node bearer token like other protected Core routes:
 | `POST /api/improvements/{id}/transition` | Apply one guarded lifecycle transition |
 
 The transition body names the target state in `to` and carries the `candidate`, `evaluation`,
-`guardrails`, `decision`, and `rollback` fields that the transition needs. Core validates the whole
-resulting record before the SQLite update, so a rejected transition cannot leave a half-promoted
-record behind. The API stores records and enforces the lifecycle. It does not run an experiment or
-approve a change.
+`guardrails`, `decision`, and `rollback` fields that the transition needs. Send `evaluation` and
+`guardrails` together; a body with only one of them is rejected with `400`.
+
+Core validates the whole resulting record before the SQLite update, so a rejected transition cannot
+leave a half-promoted record behind. The API stores records and enforces the lifecycle. It does not
+run an experiment or approve a change.
 
 ## Correlating Learning and Research
 
 `POST /api/learn/cycle` (Learning) and `POST /api/research/workspace` (Research) accept an optional
 opaque `improvementRunId`. It lets an owner join experience, experiment, evidence, and promotion
-history without copying private conversation content between stores. Research rejects an invalid
-id with `400` (`invalid_improvement_run_id`) before it starts a workspace.
+history without copying private conversation content between stores.
+
+```mermaid
+flowchart LR
+  L["Learning: POST /api/learn/cycle"] -->|improvementRunId| R["Core improvement record"]
+  X["Research: POST /api/research/workspace"] -->|improvementRunId| R
+  R --> O[Owning app approves and promotes]
+```
+
+Research rejects an invalid id with `400` (`invalid_improvement_run_id`) before it starts a
+workspace.
 
 <Callout type="info">
 `improvementRunId` is a correlation id, not an approval mechanism. It does not promote anything by
@@ -66,7 +76,9 @@ itself. The owning app still controls approval, activation, and rollback.
 | Responsibility | Owner | Example projection |
 |---|---|---|
 | Execute a task, workflow, tool, or experiment | Core or the owning app | A campaign attempt or a tool call. |
-| Decide whether it is allowed and how much it may spend | Gateway | Grants, budgets, firewall, evaluator policy, and audit. |
+| Store workspaces and the improvement record | Core | An improvement record and its lifecycle state. |
+| Hold the artifact's domain state | The owning app | The active version, its history, and its rollback path. |
+| Decide whether it is allowed and how much it may spend | Gateway | Grants, budgets, firewall, evaluator policy, measurement, and audit. |
 | Capture a user experience and propose a skill | Learning | Experience log and approval request. |
 | Generate candidates and compare variants | Research | Campaign, proposal lease, attempt, and winner. |
 | Render progress and decisions | Desktop, Web, Mobile, or Companion | A bounded view of the same run. |
@@ -79,14 +91,35 @@ to the same run and keep their separate product boundaries.
 
 Promotion is a one-way, inspectable path. Core accepts only these transitions:
 
-```text
-draft → baseline → candidate → verified → approved → canary → promoted
-candidate, verified, approved, or canary → rejected
-promoted → rolled_back
+```mermaid
+stateDiagram-v2
+  [*] --> draft
+  draft --> baseline
+  baseline --> candidate
+  candidate --> verified
+  verified --> approved
+  approved --> canary
+  canary --> promoted
+  candidate --> rejected
+  verified --> rejected
+  approved --> rejected
+  canary --> rejected
+  promoted --> rolled_back
+  rejected --> [*]
+  rolled_back --> [*]
 ```
 
-`rejected` and `rolled_back` are terminal. A record that reaches `rolled_back` must carry a
-rollback reference and a rollback decision.
+`rejected` and `rolled_back` are terminal. A skipped or backward transition fails, and repeating
+the current state is a no-op. Each target state has entry requirements:
+
+| Target state | Required on the record |
+|---|---|
+| `candidate` | A candidate artifact reference. |
+| `verified` | Evaluation with metrics and evidence, plus guardrails that passed. |
+| `approved`, `canary` | A `promote` decision, plus the candidate and passing evaluation from `verified`. |
+| `promoted` | A rollback reference and a `promote` decision. |
+| `rejected` | A `reject` decision. |
+| `rolled_back` | A rollback reference and a `rollback` decision. |
 
 The storage can change; these semantics do not. A candidate that has only been generated
 is not verified. A candidate that passed an offline score is not automatically safe to run. A canary
@@ -105,14 +138,9 @@ for its own improvement.
 
 ## Applying the model
 
-When a campaign or design note uses the model, make the fields explicit:
-
-- name the objective and baseline before changing anything;
-- keep candidate changes in a bounded workspace;
-- run a fixed task set plus a regression and safety set;
-- attach the result to the Learning entry or Research campaign;
-- require approval for activation; and
-- record the previous version and the rollback action.
+When a campaign or design note uses the model, follow the
+[complete campaign](/docs/rsi/roadmap#a-complete-campaign) steps and attach the result to the
+Learning entry or Research campaign it came from.
 
 The [guardrails](/docs/rsi/guardrails#the-promotion-ladder) page defines the minimum evidence by change class, and the
 [RSI maturity model](/docs/rsi/roadmap) describes how the pieces fit together.

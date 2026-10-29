@@ -36,8 +36,17 @@ that you have set a limit for that key.
 
 ## Where Ryu stores your keys
 
-Ryu has two places where you can link provider keys, and they are stored differently. This
-section describes both as they work today, including the gap that remains.
+Ryu has two places where you can link provider keys, and they are stored differently. Both use
+the same master key.
+
+```mermaid
+flowchart LR
+  MK["Master key (OS credential store)"] --> V["Provider vault (secrets/)"]
+  MK --> HK["HKDF-SHA256"]
+  HK --> GK["Gateway-only key"]
+  GK --> GT["Sealed values in gateway.toml"]
+  V --> RT["Agent runtime env at start"]
+```
 
 ### Settings → Providers (chat providers)
 
@@ -46,26 +55,26 @@ providers, go into Core's provider vault:
 
 - **Encrypted at rest.** Each key is sealed with ChaCha20-Poly1305, an authenticated cipher, using
   a 256-bit master key and a fresh random 96-bit nonce for every record. The vault is a SQLite
-  database in the data folder's `secrets/` directory. That directory is owner-only (`0700` on
-  macOS and Linux).
+  database in the data folder's `secrets/` directory, which is owner-only (`0700` on macOS and Linux).
 - **The master key is kept outside the data folder.** By default it lives in your operating
   system's credential store: macOS Keychain, Windows Credential Manager, or the Linux Secret
   Service. A copy of `~/.ryu` (for example, a backup, a synced folder, or a stolen disk image) is
-  not enough to decrypt the vault. On a machine with no working credential store, Ryu falls back
-  to an owner-only `master.key` file in the same `secrets/` directory. Servers can supply the key
-  through the `RYU_MASTER_KEY` environment variable instead. See
+  not enough to decrypt the vault.
+- **Fallbacks.** On a machine with no working credential store, Ryu falls back to an owner-only
+  `master.key` file in the same `secrets/` directory. Servers can supply the key through the
+  `RYU_MASTER_KEY` environment variable instead. See
   [Encryption at rest](/docs/core/encryption-at-rest) for the full key resolution order and the
   backup implications.
 - **Fail-closed.** If the master key cannot be loaded, the vault refuses to open. Ryu does not
   substitute a temporary key or fall back to storing plaintext.
 - **No plaintext copy for the agent runtime.** The agent runtime reads its provider settings from
   its own `auth.json` and `models.json` files. Ryu writes only a `${RYU_PI_…}` reference there and
-  hands the real key to the runtime in its process environment when it starts, so the key itself
-  stays in the vault on disk. The runtime and the tools it starts (its shell, sub-agents, language
-  servers) can read that environment while they run.
+  hands the real key to the runtime in its process environment when it starts, so on disk the key
+  stays only in the vault. The runtime and the tools it starts (its shell, sub-agents, language servers) can read that
+  environment while they run.
 - **Exception: OAuth subscription logins.** When you sign in to a provider with OAuth instead of an
-  API key, the agent runtime refreshes those tokens itself and writes them back to `auth.json`, so
-  they stay plaintext in an owner-only file (`0600`) inside an owner-only directory (`0700`).
+  API key, the agent runtime refreshes those tokens itself and writes them back to `auth.json`.
+  They stay plaintext in an owner-only file (`0600`) inside an owner-only directory (`0700`).
 
 ### Gateway → Keys (BYOK)
 
@@ -80,10 +89,11 @@ routing, are stored in the Gateway's `gateway.toml` configuration file:
   Google Cloud TTS and Amazon Polly credentials, SDK accounts, the Gateway's client API keys and
   admin key, channel bot tokens and secrets, and service secrets such as the Composio key.
 - **The Gateway never holds the master key.** When Ryu starts the Gateway, Core hands it only its
-  derived key, and the Gateway removes that key from its environment before it starts anything
-  else, so plugins, MCP servers, and channel adapters it launches do not inherit it. A Gateway you
-  run on its own gets the same derived key from `ryu-core gateway-seal-env` or from
-  `RYU_MASTER_KEY`; until it has one, Ryu does not save new credentials into its file.
+  derived key. The Gateway removes that key from its environment before it starts anything else,
+  so plugins, MCP servers, and channel adapters it launches do not inherit it.
+- **Standalone Gateways.** A Gateway you run on its own gets the same derived key from
+  `ryu-core gateway-seal-env` or from `RYU_MASTER_KEY`. Until it has one, Ryu does not save new
+  credentials into its file.
 - **Existing files are converted automatically.** Keys saved by an older version, or typed into
   the file by hand, are read as they are and sealed in place the next time the Gateway starts
   (comments and layout are kept). If no key is available, Ryu refuses to save a new credential
@@ -123,9 +133,11 @@ routing, are stored in the Gateway's `gateway.toml` configuration file:
 A program running under your own user account has the same permissions as Ryu. It can read the
 same owner-only files Ryu reads, and depending on the operating system it can ask the credential
 store for the same master key. On Linux, for example, the Secret Service hands an unlocked secret
-to any process in your session. No local app that has to use your key without asking for a
-password every time can fully hide that key from other code running as you. Any app that claims
-otherwise is relying on secrecy, not security.
+to any process in your session.
+
+No local app that has to use your key without asking for a password every time can fully hide
+that key from other code running as you. Any app that claims otherwise is relying on secrecy, not
+security.
 
 That is why Ryu asks you to:
 

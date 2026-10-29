@@ -3,7 +3,9 @@ title: "Network Binding and Auth"
 description: "Loopback-by-default binding, when to set RYU_TOKEN, and how clients authenticate when you expose Ryu to other machines."
 ---
 
-By default Core binds `127.0.0.1:7980` and the Gateway binds `127.0.0.1:7981` (loopback only, release profile). No other machine can reach them until you change the bind address (`RYU_BIND` for Core). Core still mints and requires a local node credential. Loopback limits network reach, but it does not replace authentication between local processes. Other profiles shift these ports; see [Local data and state](/docs/start-here/release-channels#local-data-and-state).
+By default Core binds `127.0.0.1:7980` and the Gateway binds `127.0.0.1:7981` (loopback only, release profile). No other machine can reach them until you change the bind address (`RYU_BIND` for Core). Other profiles shift these ports; see [Local data and state](/docs/start-here/release-channels#local-data-and-state).
+
+Core still mints and requires a local node credential. Loopback limits network reach, but it does not replace authentication between local processes.
 
 ## Token auth for non-loopback exposure
 
@@ -26,22 +28,40 @@ Authorization: Bearer <RYU_TOKEN>
 ## Gateway authentication
 
 Gateway inference requires a credential by default, including on loopback. Ryu provisions
-separate credentials for administration, trusted Core forwarding, and app or agent inference.
-Apps and agents receive an inference credential; they do not receive the Gateway administrator
-credential. Core applies the credentials when it starts the Gateway and forwards model requests,
-so normal local use does not require copying a key into settings.
+separate credentials for three roles:
+
+| Credential | Held by | Grants |
+|---|---|---|
+| Administration | Core, or the operator of a standalone Gateway | Gateway administration |
+| Trusted forwarding | Core | Forwarding model requests on behalf of callers |
+| Inference | Apps and agents | Model requests only |
+
+Core applies the credentials when it starts the Gateway and forwards model requests, so normal
+local use does not require copying a key into settings. Apps and agents never receive the Gateway
+administrator credential.
+
+```mermaid
+flowchart LR
+  Apps["Apps and agents"] -- "inference credential" --> GW["Gateway"]
+  Agents["ACP and Pi agents"] -- "signed, agent-bound credential" --> GW
+  Core["Core"] -- "admin and forwarding credentials" --> GW
+  Ext["External client"] -- "gateway-relay.key" --> GW
+```
 
 Native ACP and Pi agents receive signed inference credentials bound to their assigned agent
 and, when available, user and conversation. Changing a request's identity cannot move its spend
 to another agent or bypass that agent's budget. These credentials grant neither administration
 nor trusted forwarding authority.
 
+### Standalone Gateway keys
+
 A standalone Gateway stores private `gateway-admin.key` and `gateway-relay.key` files beside
 its configuration. External clients use the inference key from `gateway-relay.key` as their bearer;
-the administrator key is reserved for administration. Explicitly configured credentials must have
-at least 24 printable characters without whitespace, and the placeholders `ryu-local`, `changeme`,
-and `password` are rejected. Invalid configuration or unavailable credential storage stops Gateway
-startup.
+the administrator key is reserved for administration.
+
+Explicitly configured credentials must have at least 24 printable characters without whitespace.
+The placeholders `ryu-local`, `changeme`, and `password` are rejected. Invalid configuration or
+unavailable credential storage stops Gateway startup.
 
 Core verifies a fresh signed readiness proof, bound to the listening address, protocol version,
 and credential roles, before sending credentials to an already-running Gateway.
@@ -60,21 +80,31 @@ to start with it on a non-loopback bind.
   loopback, it refuses to start with a known placeholder token or a token shorter than 32 printable
   characters.
 - Exposing through Tailscale, Headscale, Tailcat, Cloudflare Quick Tunnel, OpenTunnel, a plugin tunnel, or
-  another proxy: set the token and verify the transport forwards the `Authorization` header. A Cloudflare
-  Quick Tunnel, OpenTunnel, or plugin tunnel URL is public and is not an access policy. While any of
-  these runs, Core treats loopback connections as remote and stops issuing local-only credentials; see
-  [local-only features while a tunnel runs](/docs/core/private-networking#local-only-features-while-a-tunnel-runs).
-  A Tailcat address is separate from the Core token and grants access to its listener; treat both values
-  as secrets. For a tailnet, also follow [Harden your tailnet](/docs/core/private-networking#harden-your-tailnet).
+  another proxy: set the token and verify the transport forwards the `Authorization` header. See the
+  tunnel notes below.
 - Local single-user use on loopback: let Core generate its local credential. Clients pair for narrower access.
+
+<Callout type="warn">
+A Cloudflare Quick Tunnel, OpenTunnel, or plugin tunnel URL is public and is not an access policy.
+While any of these runs, Core treats loopback connections as remote and stops issuing local-only
+credentials; see
+[local-only features while a tunnel runs](/docs/core/private-networking#local-only-features-while-a-tunnel-runs).
+
+A Tailcat address is separate from the Core token and grants access to its listener; treat both
+values as secrets. For a tailnet, also follow
+[Harden your tailnet](/docs/core/private-networking#harden-your-tailnet).
+</Callout>
 
 Use the owner token only for recovery and owner-only administration. Ordinary apps and MCP hosts
 should use a paired capability bearer. Each paired bearer can be scoped, bound, expired, and revoked
 on its own; see [Authentication and pairing](/docs/security/authentication-and-pairing).
 
+## Rotate the owner token
+
 For a locally generated owner token, `POST /api/node/token/rotate` atomically persists a new token and
 switches every live Core verifier before responding. The previous bearer stops working immediately
 across REST, realtime sockets, extension proxies, and local self-calls; no Core restart is required.
+
 An operator-supplied `RYU_TOKEN` cannot be rotated through this route because the environment remains
 authoritative. Change the deployment secret and restart the process instead.
 

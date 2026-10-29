@@ -93,10 +93,14 @@ plugins use, so an editor that validates `manifest.json` against it accepts thei
 | `{ kind: "handled", text, interactive_markup? }` | Fully handle the turn: `text` becomes the assistant reply, no model call; optionally attach channel buttons | `pre_user_turn` |
 | `{ kind: "select_model", model, effort?, acp_config?, reason? }` | Choose the model for this turn before the transport opens. `effort` is carried into the request, and `acp_config` sets ACP session options as strings. | `pre_model_select` |
 
-`interactive_message` uses the platform-neutral markup contract described in [Channel bots](/docs/gateway/channels).
-Reply-keyboard rows accept `{ label, action: { type: "reply" } }`. Inline rows accept callback
-actions `{ type: "callback", actionId, payload }` and HTTPS or Telegram `tg:` URL actions. Markup
-is validated before it reaches a provider. A channel without button support sends the reply text.
+`interactive_message` uses the platform-neutral markup contract described in
+[Channel bots](/docs/gateway/channels):
+
+- Reply-keyboard rows accept `{ label, action: { type: "reply" } }`.
+- Inline rows accept callback actions `{ type: "callback", actionId, payload }` and HTTPS or
+  Telegram `tg:` URL actions.
+- Markup is validated before it reaches a provider. A channel without button support sends the
+  reply text.
 
 ### `deny` and `transform` are the two halves of a tool firewall
 
@@ -123,51 +127,85 @@ awaited cost.
 
 ### Message-plane phases
 
-Beyond the chat turn, a set of Pi-parity phases fire at Ryu's own dispatch sites, so one plugin
-governs every agent (Claude, Codex, or any other ACP agent) rather than only Pi-routed turns.
+Beyond the chat turn, a set of Pi-parity phases fire at Ryu's own dispatch sites. One plugin
+therefore governs every agent (Claude, Codex, or any other ACP agent), not only Pi-routed turns.
 
-- **`context`** is the context-engineering phase, and it spans two structurally different planes. On
-  the OpenAI-compat / local-engine / SDK plane, Ryu owns a real message array: `ctx.messages` is
-  populated and a hook returns `{ kind: "rewrite", messages }` to replace the whole array (multimodal
-  content survives because the array is carried as raw JSON). On the ACP plane there is no array to
-  rewrite; Ryu flattens the window into one prompt string, so `ctx.input` carries that string and a
-  hook returns `{ kind: "replace", text }` instead. A hook must check which field is set; the wrong
-  directive for the plane is ignored. When project instructions are active, `ctx.project_instructions`
-  contains the exact project-instructions block used for the current turn, so a hook can repeat it
-  without parsing the surrounding prompt. The field is absent when no project instruction file is
-  available or Safe Mode suppresses project instructions.
+#### `context` - two planes
 
-  **Context hooks may only change the latest message.** The system prompt and every earlier turn
-  are the prefix that provider prompt caches reuse, so editing them after a chat has started would
-  make every later turn pay full price for the whole window. Ryu enforces this: a `rewrite` must
-  keep every message before the newest user message byte-for-byte identical (it may change that
-  message and anything after it), and an ACP `replace` must keep `ctx.input` as its exact prefix and
-  only append to it. A directive that edits the frozen prefix is ignored and the original context is
-  sent. The appended ACP text also reaches a warm pooled session as part of the latest turn, so the
-  session is kept rather than restarted.
-- **`message_end`** fires when an assistant message is finalized, *before* it is persisted, and a
-  `replace` rewrites both the persisted content and the sealed parts. It is distinct from
-  `post_assistant_turn`, which runs after persistence and can only append a `note` or `continue`.
-- **`session_before_compact`** fires before Ryu drops older turns to fit the context window. A hook
-  sees what is about to be dropped. **`session_compact`** fires after the dropped turns are
-  summarized, and a `replace` rewrites the summary text before it merges back into the window.
-  Both also fire for a model-switch context handoff, where the dropped turns are everything said
-  before the switch and the summary is the handoff briefing.
-  (These fire at Ryu's own compaction sites, not Pi's. Pi auto-compacting inside its own turn loop
-  is invisible to Core.)
-- **`model_select`**, **`session_tree`**, and the three **`workflow_run_*`** phases are observation
-  only: their payload rides in `ctx.event` (`{ run_id, workflow_id, workflow_name, ... }` for the
-  workflow phases), and no directive can change what they report. `workflow_run_*` fire once per run
-  as a user understands it, not per resume or nested sub-workflow, and a run suspended at an
-  approval gate fires neither `finished` nor `failed` until it resumes and terminates.
+`context` is the context-engineering phase. It spans two structurally different planes, and a hook
+must check which field is set. The wrong directive for the plane is ignored.
+
+```mermaid
+flowchart TD
+  A["context phase fires"] --> B{"Which plane?"}
+  B -->|"OpenAI-compat, local engine, SDK"| C["ctx.messages is set"]
+  C --> D["Return rewrite with messages"]
+  B -->|ACP| E["ctx.input is one prompt string"]
+  E --> F["Return replace with text"]
+  D --> G{"Frozen prefix unchanged?"}
+  F --> G
+  G -->|Yes| H["Send rewritten context"]
+  G -->|No| I["Ignore directive, send original"]
+```
+
+| Plane | What the hook sees | Directive |
+|---|---|---|
+| OpenAI-compat, local engine, SDK | `ctx.messages`, the real message array, carried as raw JSON so multimodal content survives | `{ kind: "rewrite", messages }` replaces the whole array |
+| ACP | `ctx.input`, the window flattened into one prompt string | `{ kind: "replace", text }` |
+
+When project instructions are active, `ctx.project_instructions` contains the exact
+project-instructions block used for the current turn. A hook can repeat it without parsing the
+surrounding prompt. The field is absent when no project instruction file is available or Safe Mode
+suppresses project instructions.
+
+**Context hooks may only change the latest message.** The system prompt and every earlier turn are
+the prefix that provider prompt caches reuse. Editing them after a chat has started would make every
+later turn pay full price for the whole window. Ryu enforces this:
+
+- A `rewrite` must keep every message before the newest user message byte-for-byte identical. It
+  may change that message and anything after it.
+- An ACP `replace` must keep `ctx.input` as its exact prefix and only append to it.
+- A directive that edits the frozen prefix is ignored, and the original context is sent.
+
+The appended ACP text reaches a warm pooled session as part of the latest turn, so the session is
+kept rather than restarted.
+
+#### `message_end`
+
+`message_end` fires when an assistant message is finalized, *before* it is persisted. A `replace`
+rewrites both the persisted content and the sealed parts. It differs from `post_assistant_turn`,
+which runs after persistence and can only append a `note` or `continue`.
+
+#### Compaction phases
+
+- **`session_before_compact`** fires before Ryu drops older turns to fit the context window. A
+  hook sees what is about to be dropped.
+- **`session_compact`** fires after the dropped turns are summarized. A `replace` rewrites the
+  summary text before it merges back into the window.
+
+Both also fire for a model-switch context handoff. There, the dropped turns are everything said
+before the switch, and the summary is the handoff briefing. These phases fire at Ryu's own
+compaction sites, not Pi's. Pi auto-compacting inside its own turn loop is invisible to Core.
+
+#### Observation-only message-plane phases
+
+`model_select`, `session_tree`, and the three `workflow_run_*` phases are observation only. Their
+payload rides in `ctx.event` (`{ run_id, workflow_id, workflow_name, ... }` for the workflow
+phases), and no directive can change what they report.
+
+- `workflow_run_*` fire once per run as a user understands it, not per resume or nested
+  sub-workflow.
+- A run suspended at an approval gate fires neither `finished` nor `failed` until it resumes and
+  terminates.
 
 ### `handled` - own a turn without a model call
 
-`replace` and `inject` still run the turn; they only reshape the prompt. `{ kind: "handled", text }`
-ends it: `text` becomes the assistant reply and **no model call is made**. That is what lets a
-plugin own a slash command, answer from cache, or refuse a prompt outright without burning a model
-call. The reply is persisted like any assistant message, and first writer wins. Once one hook
-handles a turn, later hooks do not run.
+`replace` and `inject` still run the turn. They only reshape the prompt. `{ kind: "handled", text }`
+ends it: `text` becomes the assistant reply and **no model call is made**.
+
+That lets a plugin own a slash command, answer from cache, or refuse a prompt outright without
+spending a model call. The reply is persisted like any assistant message. First writer wins: once
+one hook handles a turn, later hooks do not run.
 
 ## The tool glob gate
 

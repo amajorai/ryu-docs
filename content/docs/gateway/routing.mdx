@@ -7,6 +7,8 @@ tags: ["routing", "model", "provider", "gateway", "smart-routing", "random", "st
 The router (`apps/gateway/src/router/`) decides which provider and model handles each request.
 Routing is per-attribute: an agent's chat, image, and audio calls can each go to a different provider.
 
+<Figure name="routing" />
+
 ## Provider selection
 
 Routing values identify configured provider instances, including custom provider
@@ -45,6 +47,19 @@ The router resolves each requested model id in this order (`RoutingTables::route
 4. **Built-in prefix rules** - the table above, first matching row wins, top-down.
 5. **Default provider** - `routing.default_provider`.
 
+```mermaid
+flowchart TD
+  M["Requested model id"] --> E{"Exact model_map key?"}
+  E -->|"no"| P{"model_map prefix?"}
+  P -->|"no"| A{"Ryu alias or pool namespace?"}
+  A -->|"no"| B{"Built-in prefix rule?"}
+  B -->|"no"| D["default_provider"]
+  E -->|"yes"| R["Provider chosen"]
+  P -->|"yes, longest"| R
+  A -->|"yes"| POOL["Ryu credit pool"]
+  B -->|"yes, first match"| R
+```
+
 Because steps 1 and 2 outrank the whole built-in table, a broad `model_map` prefix (for example
 `gpt-` or `gemma`) re-homes every built-in route beneath it. Map a model exactly when it must
 survive a broader prefix entry.
@@ -58,21 +73,16 @@ the model id you picked, and `x-provider` reads `ryu`.
 
 When your organization has free credit and Ryu can serve the model you picked, the request is
 paid from your free credit first. Those models carry a **Free** tag in the picker while you have
-free credit. If that capacity is briefly unavailable before any output, the request continues
-through Ryu Router instead of failing. A request the provider or a policy refuses, including a
-provider payment-required reply, is returned as an error and is not retried through Ryu Router.
+free credit. Model ids that route to your own provider keys are never affected.
+
+- If free capacity is briefly unavailable before any output, the request continues through Ryu
+  Router instead of failing.
+- A request the provider or a policy refuses, including a provider payment-required reply, is
+  returned as an error and is not retried through Ryu Router.
+
 See [Free credit](/docs/billing/credits#free-credit).
-Model ids that route to your own provider keys are never affected.
 
 ## The strategies
-
-Named provider/model pools have their own capability-advertised selection
-policies, including cost, quota, context and cache signals. Fusion and pipeline
-add bounded multi-target text execution and normal per-call charging. See
-[chat provider pools](/docs/providers/provider-pools) for the complete strategy
-list, limits and concrete judge configuration. These pool policies run after a
-model mapping selects a pool; they do not replace the model-router algorithms
-below or upstream provider routing.
 
 On top of the prefix rules, several strategies layer in, all driven by `gateway.toml`.
 
@@ -86,12 +96,27 @@ On top of the prefix rules, several strategies layer in, all driven by `gateway.
 - **Modality routing** (`routing.modality_map`) sends chat, image, speech, voice recognition, video,
   and generated music and sound effects (`audio`) to different providers and models.
 
-In Desktop, open **Gateway → Model routing** to choose the default provider, edit the fallback chain, and
-add, edit, or remove model-map rows. The request name can be an exact model id or a prefix; a blank
-provider-model override forwards the requested name unchanged. Each row action reads the latest
-routing config before writing so the other routing fields stay intact. These controls require `gateway.configure`; without it, provider, mapping, and fallback-chain
-edits are read-only. When no providers are configured on the Gateway, default-provider selection and
-**Add mapping** stay disabled until a provider is available.
+Named provider/model pools have their own capability-advertised selection policies, including
+cost, quota, context and cache signals. Fusion and pipeline add bounded multi-target text execution
+and normal per-call charging.
+
+These pool policies run after a model mapping selects a pool; they do not replace the strategies above or upstream provider routing. See
+[chat provider pools](/docs/providers/provider-pools) for the strategy list, limits and judge
+configuration.
+
+### Edit routing in Desktop
+
+Open **Gateway → Model routing** to choose the default provider, edit the fallback chain, and
+add, edit, or remove model-map rows.
+
+- The request name can be an exact model id or a prefix. A blank provider-model override forwards
+  the requested name unchanged.
+- Each row action reads the latest routing config before writing, so the other routing fields stay
+  intact.
+- These controls require `gateway.configure`. Without it, provider, mapping, and fallback-chain
+  edits are read-only.
+- When no providers are configured on the Gateway, default-provider selection and **Add mapping**
+  stay disabled until a provider is available.
 
 For requests sent to the managed fleet, **Gateway → Network → Managed request routing**
 saves this node's preferred fallback providers and extra firewall rules. Business organizations
@@ -101,17 +126,23 @@ allowing changes, and a refused save keeps your draft for retry.
 ### Credit and subscription fallback rules
 
 The **Auto-retry on another plan** card in **Gateway → Model routing** controls
-reactive retries after Core confirms a subscription cap. Enable it, optionally choose the
-**Just tell me** option (notify without retrying), and pick eligible installed plans in priority order.
-The remaining-percent threshold applies both to detecting a spent window and to
-choosing a plan with enough room. Changes save immediately.
+reactive retries after Core confirms a subscription cap:
 
-**Gateway → Model routing** also has a **Fallback when you're running low**
-section. Add ordered rules for remaining Ryu credit in USD or for a subscription window's remaining
-percentage, then choose the fallback agent or model and whether to show a notice. Rules can be
-enabled, reordered, and removed; the first matching rule wins. Credit thresholds must be non-negative
-USD amounts, while subscription thresholds must be between 0% and 100%. Threshold edits commit when you
-press Enter or leave the field, and invalid values are not saved.
+1. Enable it.
+2. Optionally choose **Just tell me** (notify without retrying).
+3. Pick eligible installed plans in priority order.
+
+The remaining-percent threshold applies both to detecting a spent window and to choosing a plan
+with enough room. Changes save immediately.
+
+**Gateway → Model routing** also has a **Fallback when you're running low** section. Add ordered
+rules for remaining Ryu credit in USD or for a subscription window's remaining percentage, then
+choose the fallback agent or model and whether to show a notice.
+
+- Rules can be enabled, reordered, and removed. The first matching rule wins.
+- Credit thresholds must be non-negative USD amounts. Subscription thresholds must be between 0%
+  and 100%.
+- Threshold edits commit when you press Enter or leave the field. Invalid values are not saved.
 
 A subscription-window rule watches one of three things, picked in its **Subscription** field:
 
@@ -123,10 +154,13 @@ A subscription-window rule watches one of three things, picked in its **Subscrip
 - **One saved account** of that provider, listed by its name.
 
 Pool and account rules read the usage Ryu already has cached, so checking them never waits on the
-provider. Per-account usage covers Claude Pro/Max, ChatGPT, OpenAI Codex and GitHub Copilot; ChatGPT
-Plan, Kiro, Kimi, Radius, Ant Ling and CLI logins report no per-account usage and are not offered as
-pool or account scopes. The **Auto-retry on another plan** card shows each plan under Ryu's own name
-for it.
+provider.
+
+- Per-account usage covers Claude Pro/Max, ChatGPT, OpenAI Codex and GitHub Copilot.
+- ChatGPT Plan, Kiro, Kimi, Radius, Ant Ling and CLI logins report no per-account usage and are not
+  offered as pool or account scopes.
+
+The **Auto-retry on another plan** card shows each plan under Ryu's own name for it.
 
 These rules handle balance or subscription usage. The [fallback chain](#the-strategies) above handles
 an unhealthy provider and is configured separately.
@@ -144,13 +178,16 @@ model or the agent itself:
 
 ## How the Gateway intercepts agent egress
 
-[Smart model routing](/docs/gateway/smart-routing) and [agent auto routing](/docs/gateway/agent-auto) decide *what* runs. A separate question is *how* the Gateway gets in
-front of an agent's model calls: the base-URL swap (`OPENAI_BASE_URL` /
-`ANTHROPIC_BASE_URL` injection), the subscription-preserving passthrough proxy for Claude Code and
-Codex, the per-agent `agent-gateway-routing` toggle, and the agents that ignore the base URL (such as
-Gemini CLI, OpenClaw, and Hermes). That is documented in full on
-[Gateway for any agent](/docs/gateway/gateway-for-any-agent). Start there to point an existing agent
-at the Gateway.
+The routers above decide *what* runs. *How* the Gateway gets in front of an agent's model calls is
+a separate question, covered on [Gateway for any agent](/docs/gateway/gateway-for-any-agent):
+
+- the base-URL swap (`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` injection);
+- the subscription-preserving passthrough proxy for Claude Code and Codex;
+- the per-agent `agent-gateway-routing` toggle;
+- the agents that ignore the base URL, such as Gemini CLI, OpenClaw, and Hermes.
+
+Start there to point an existing agent at the Gateway. The model-versus-agent split is on
+[Routing planes](/docs/gateway/routing-planes).
 
 ## The model list
 
@@ -201,15 +238,15 @@ stored in a plaintext Desktop preferences file.
 
 `gemini-` keeps the `genai` route and `gemini` account scope. Additional SDK connections
 have independent route IDs, such as `genai-groq`, and use qualified model names such as
-`groq::llama-3.3-70b-versatile`. An explicit mapping to `genai-groq` must use a Groq
-model namespace. A model belonging to another kind is rejected before an upstream call.
-Legacy mappings to `genai` are resolved to the configured kind before routing policy
-checks. Each kind has its own account pool, circuit state, and usage attribution.
+`groq::llama-3.3-70b-versatile`.
+
+- An explicit mapping to `genai-groq` must use a Groq model namespace. A model belonging to another
+  kind is rejected before an upstream call.
+- Legacy mappings to `genai` are resolved to the configured kind before routing policy checks.
+- Each kind has its own account pool, circuit state, and usage attribution.
 
 See [provider connections](/docs/gateway/provider-connections) for credential and endpoint
-configuration. Rotation and fallback can reduce upstream prompt-cache hits. Gateway
-response-cache writes are disabled for rotating account pools and routes that changed
-during fallback or budget adjustment.
+configuration, and for how account rotation and fallback affect prompt and response caching.
 
 ## Related
 

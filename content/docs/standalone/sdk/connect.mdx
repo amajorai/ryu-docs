@@ -35,12 +35,26 @@ request is sent. The SDK covers Connect's runtime routes only; account linking
 and trigger management, which use a separate management key, are not in this
 version.
 
-Tool search and execution need a Connect whose operator has configured a
-native MCP registration (or Composio bindings) or a compatibility upstream,
-and Composio execution needs a configured Composio lane. On a
-Connect without one, the call fails with `503` and a code such as
-`upstream_unconfigured` or `native_composio_unavailable`; `error.hint` says
+### Lanes the operator configures
+
+| Call | Needs |
+|---|---|
+| Skill catalog | Only a Skill catalog on the Connect, no tool or Composio lane; without one it answers `503 skills_unavailable` (see [First call with curl](/docs/standalone/sdk/connect#first-call-with-curl)) |
+| Tool search and execution | A native MCP registration (or Composio bindings) or a compatibility upstream |
+| Composio execution | A configured Composio lane |
+
+On a Connect without the lane, the call fails with `503` and a code such as
+`upstream_unconfigured` or `native_composio_unavailable`. `error.hint` says
 that the operator sets it and that another key, URL, or retry will not help.
+
+<Mermaid chart={`flowchart LR
+  App["Your code or MCP client"] -->|runtime key| C["Connect"]
+  C --> Skills["Skill catalog"]
+  C --> Native["Native MCP registration"]
+  C --> Compat["Compatibility upstream"]
+  C --> Comp["Composio lane"]
+  C --> Usage["Usage report"]
+`} />
 
 ## Configure
 
@@ -74,12 +88,15 @@ curl -sS "$RYU_CONNECT_URL/v1/skills" \
 ```
 
 The next two calls need a lane the operator configures, as described in
-[What you need](/docs/standalone/sdk/connect#what-you-need); without it they answer `503`. Search the
-tools granted to your tenant, then run one Composio action with Connect's
-native execute body. `operation` is always `execute`, `toolId` is the action
-slug, `body` holds the action's arguments, and the optional
-`expectedAccountId` refuses the call unless your tenant is bound to that
-account.
+[What you need](/docs/standalone/sdk/connect#what-you-need); without it they
+answer `503`. Search the tools granted to your tenant, then run one Composio
+action with Connect's native execute body:
+
+- `operation` is always `execute`.
+- `toolId` is the action slug.
+- `body` holds the action's arguments.
+- The optional `expectedAccountId` refuses the call unless your tenant is
+  bound to that account.
 
 ```sh
 curl -sS "$RYU_CONNECT_URL/v1/tools/search?q=slack" \
@@ -195,17 +212,21 @@ result = ryu.connect.tools.exec(
 ).data
 ```
 
-`result.ok` is false when the tool reported an error. On a Connect that
-forwards execution to a Ryu Gateway, the Gateway also answers its own
-refusals and tool failures with HTTP 200, `ok: false`, and an `error`
-message, such as a firewall denial, and leaves out `result`. Check `ok`
-before you read `result`.
+`result.ok` is false when the tool reported an error. Check `ok` before you
+read `result`. On a Connect that forwards execution to a Ryu Gateway, the
+Gateway also answers its own refusals and tool failures, such as a firewall
+denial, with HTTP 200, `ok: false`, and an `error` message, and leaves out
+`result`.
 
 On a Connect with native grants, the sample's `composio.<SLUG>` id is
-granted only when the Connect has a Composio binding for your tenant. On a Connect that has a native MCP registration but no Composio binding, `composio.<SLUG>` ids are not granted, so the call answers
-`403 tool_denied` rather than `503`. Run a qualified id that `tools.search`
-returned instead, such as a `<server>.<tool>` id from `found.data[0].id`
-(`found["data"][0]["id"]` in Python) in the search sample above.
+granted only when the Connect has a Composio binding for your tenant. On a
+Connect that has a native MCP registration but no Composio binding,
+`composio.<SLUG>` ids are not granted, so the call answers
+`403 tool_denied` rather than `503`.
+
+Run a qualified id that `tools.search` returned instead, such as a
+`<server>.<tool>` id from `found.data[0].id` (`found["data"][0]["id"]` in
+Python) in the search sample above.
 
 To read every Composio billing receipt in a window of whole UTC hours, use
 `usage.iterate()`. It sends each page's `nextCursor` back as `cursor`.
@@ -270,31 +291,31 @@ A missing URL or key gives a `RyuConfigurationError` that names
 ## Idempotency and retries
 
 No Connect route deduplicates writes, so the SDK sends no `Idempotency-Key`.
-Reads (`skills`, `tools.search`, `tools.describe`, `usage`) are retried on
-network errors, timeouts, and `5xx` responses, including
-`503 tool_unavailable`. With the default `maxRetries`, a read that keeps
-getting one is sent three times before the error is returned. The
-configuration errors `503 skills_unavailable`, `upstream_unconfigured`, and
-`upstream_invalid` are never retried, because a retry cannot configure a
-lane. `tools.exec` and `composio.execute` are **not** retried on those
-failures, because the tool may
-already have run, and a second request could run it again. Before you retry
-one yourself, check whether the first call took effect, for example in the
-usage report.
+
+| Request or error | Retried on network errors, timeouts, and `5xx` |
+|---|---|
+| Reads (`skills`, `tools.search`, `tools.describe`, `usage`) | Yes, including `503 tool_unavailable`. With the default `maxRetries`, a read that keeps getting one is sent three times before the error is returned. |
+| `503 skills_unavailable`, `upstream_unconfigured`, `upstream_invalid` | Never, because a retry cannot configure a lane |
+| `tools.exec` and `composio.execute` | **No**, because the tool may already have run, and a second request could run it again |
+
+Before you retry an execution yourself, check whether the first call took
+effect, for example in the usage report.
 
 Connect refuses a call over a binding's limit with `429 rate_limited` before
 the tool runs. The SDK retries that refusal after `Retry-After` when the wait
 is at most `maxRetryDelayMs` (30 seconds by default); otherwise it returns the
-error with `retryAfterSeconds` set. The defaults are two retries and a
-60-second timeout until response headers arrive; change them with
-`maxRetries` and `timeoutMs`.
+error with `retryAfterSeconds` set.
+
+The defaults are two retries and a 60-second timeout until response headers
+arrive; change them with `maxRetries` and `timeoutMs`.
 
 ## CLI
 
 Connect has no `ryu-services` commands, because Connect is an MCP server
-itself. Account and trigger management are not in `ryu-services` or the SDK. They
-are HTTP routes that take the tenant's separate management bearer; see
+itself. Account and trigger management are not in `ryu-services` or the SDK.
+They are HTTP routes that take the tenant's separate management bearer; see
 [Connect API trigger management](/docs/standalone/connect-api-triggers).
+
 Running the service name prints where Connect's MCP endpoint is, without the
 key:
 
@@ -311,11 +332,13 @@ neither the CLI nor the MCP server can be installed outside the Ryu repository
 
 Connect serves its own MCP server at `/mcp`, with the hosted Skills as
 resources and your tenant's granted tools. Point your MCP client there with
-the runtime key; `ryu-services mcp` has no Connect tools. `ryu.connect.mcp()`
-returns the settings, `{ type: "http", url, headers }`, without a network
-call; in Python it is a `ConnectMcpConfig` from `ryu_sdk.services.shapes`
-with every key present. It throws a `RyuConfigurationError` straight away, in
-both result modes, when Connect is not configured.
+the runtime key; `ryu-services mcp` has no Connect tools.
+
+`ryu.connect.mcp()` returns the settings, `{ type: "http", url, headers }`,
+without a network call. In Python it is a `ConnectMcpConfig` from
+`ryu_sdk.services.shapes` with every key present. It throws a
+`RyuConfigurationError` straight away, in both result modes, when Connect is
+not configured.
 
 ```json
 {

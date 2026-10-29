@@ -8,6 +8,8 @@ server. Ryu opens the provider's authorization page, keeps the resulting tokens 
 configured identity service, refreshes them when needed, and attaches a bearer token only to that
 MCP server.
 
+<Figure name="mcp" />
+
 OAuth applies to remote Streamable HTTP and legacy HTTP+SSE MCP servers. Stdio servers, direct HTTP
 tools, and long-running sidecars keep their existing API-key or process-specific authentication.
 
@@ -45,11 +47,15 @@ The `auth` object accepts no client secret, token, endpoints, redirect URI, or s
 list. Ryu discovers those values from the MCP authorization challenge, protected-resource metadata,
 and authorization-server metadata. A manifest containing an unknown auth field is rejected.
 
-Ryu requests the scopes named in the MCP server's authentication challenge. Without one, it requests
-the protected resource's published `scopes_supported` and uses the authorization server's list only
-when the resource publishes none. Outside a challenge it also requests `offline_access` when the
-authorization server lists it, so providers that issue refresh tokens only for that scope still
-return one. Reconnecting an existing connection also requests the scopes it already holds.
+Ryu chooses the scopes to request in this order:
+
+1. The scopes named in the MCP server's authentication challenge.
+2. Without a challenge, the protected resource's published `scopes_supported`.
+3. Only when the resource publishes none, the authorization server's list.
+
+Outside a challenge it also requests `offline_access` when the authorization server lists it, so
+providers that issue refresh tokens only for that scope still return one. Reconnecting an existing
+connection also requests the scopes it already holds.
 
 OAuth MCP URLs must use HTTPS. Plain HTTP is accepted only for an explicit loopback development
 server. An OAuth declaration cannot be combined with a static `Authorization` header.
@@ -58,32 +64,62 @@ server. An OAuth declaration cannot be combined with a static `Authorization` he
 
 After enabling the app or plugin, its account appears under **Marketplace → Connections**. The user
 chooses an identity profile and selects **Connect**. Ryu opens the system browser and polls the
-short-lived flow until it completes. Personal nodes use an ephemeral `127.0.0.1` callback. A remote
-node with an HTTPS `RYU_NODE_PUBLIC_URL` uses its fixed, state-bound hosted callback and publishes a
-Client ID Metadata Document from the same origin. In both modes, Core performs the code exchange on
-the node that owns the PKCE verifier. The browser never receives an access or refresh token.
+short-lived flow until it completes.
 
-Because one hosted callback serves every authorization server, a hosted connection requires the
-authorization server to return the RFC 9207 `iss` parameter matching the issuer Ryu discovered. A
-server whose metadata does not set `authorization_response_iss_parameter_supported` is refused when
-you start the connection, before any browser consent screen, with a message that hosted nodes cannot
-connect it. A response without `iss`, or with a different issuer, still fails before the authorization
-code is exchanged, whatever the server's metadata advertises. Providers that do not return `iss` can
-still be connected from a personal node, whose per-flow `127.0.0.1` callback already identifies the
-flow.
+```mermaid
+sequenceDiagram
+  participant U as Desktop
+  participant C as Core
+  participant B as Browser
+  participant A as Authorization server
+  U->>C: POST .../connect (profile_id)
+  C-->>U: authorization_url, flow_id
+  U->>B: Open authorization_url
+  B->>A: Sign in and consent
+  A->>C: Callback with code (loopback or hosted)
+  C->>A: Exchange code with PKCE verifier
+  C->>C: Store encrypted tokens
+  U->>C: Poll flow until connected
+```
 
-When standalone Passport remote mode is configured, Passport instead owns the
-PKCE verifier, hosted callback, encrypted tokens, and authenticated MCP requests.
-Core forwards authorized lifecycle operations and sends runtime requests using
-the calling agent's separate Passport credential. Configure Passport's public
-HTTPS origin and explicit MCP runtime bindings as described in
-[Passport API](/docs/standalone/passport-api#mcp-oauth-custody).
-The provider endpoint must be public HTTPS. Additional static headers must match
-operator-pinned Passport configuration. Passport refuses routing, framing,
-authentication, and session overrides. Legacy HTTP+SSE is supported when both sides
-select the SSE transport. Passport owns that stream and permits only a
-same-origin announced message endpoint. Remote failures never fall back to the
-node's retained local credentials.
+| Node | Callback |
+|---|---|
+| Personal node | An ephemeral `127.0.0.1` callback per flow |
+| Remote node with an HTTPS `RYU_NODE_PUBLIC_URL` | A fixed, state-bound hosted callback. The node also publishes a Client ID Metadata Document from the same origin |
+
+In both modes, Core performs the code exchange on the node that owns the PKCE verifier. The
+browser never receives an access or refresh token.
+
+### Hosted callbacks need the `iss` parameter
+
+One hosted callback serves every authorization server. A hosted connection therefore requires the
+authorization server to return the RFC 9207 `iss` parameter matching the issuer Ryu discovered.
+
+- A server whose metadata does not set `authorization_response_iss_parameter_supported` is refused
+  when you start the connection, before any browser consent screen. The message says hosted nodes
+  cannot connect it.
+- A response without `iss`, or with a different issuer, fails before the authorization code is
+  exchanged, whatever the server's metadata advertises.
+- Providers that do not return `iss` can still be connected from a personal node, whose per-flow
+  `127.0.0.1` callback already identifies the flow.
+
+### Passport remote mode
+
+When standalone Passport remote mode is configured, Passport owns the PKCE verifier, hosted
+callback, encrypted tokens, and authenticated MCP requests. Core forwards authorized lifecycle
+operations and sends runtime requests using the calling agent's separate Passport credential.
+
+Configure Passport's public HTTPS origin and explicit MCP runtime bindings as described in
+[Passport API](/docs/standalone/passport-api#mcp-oauth-custody). Rules in this mode:
+
+- The provider endpoint must be public HTTPS.
+- Additional static headers must match operator-pinned Passport configuration. Passport refuses
+  routing, framing, authentication, and session overrides.
+- Legacy HTTP+SSE is supported when both sides select the SSE transport. Passport owns that stream
+  and permits only a same-origin announced message endpoint.
+- Remote failures never fall back to the node's retained local credentials.
+
+### Tools and reconnects
 
 Connecting an account does not attach the server's tools to an agent. Agent tool allowlists and the
 normal Gateway capability checks remain authoritative.
@@ -137,8 +173,11 @@ provider-specific secret, so Ryu reports an unsupported-registration error.
 OAuth discovery, client registration, token, and revocation requests connect directly to the address
 Ryu resolved and screened. They do not use `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or
 operating-system proxy settings, because a proxy would resolve the hostname again outside that
-screen. A network that allows outbound HTTPS only through a proxy therefore cannot complete OAuth for
-these servers. In Passport remote mode, Passport's authenticated MCP requests also connect directly.
+screen. In Passport remote mode, Passport's authenticated MCP requests also connect directly.
+
+<Callout type="warn">
+A network that allows outbound HTTPS only through a proxy cannot complete OAuth for these servers.
+</Callout>
 
 ## Related
 

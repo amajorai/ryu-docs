@@ -17,8 +17,11 @@ test("the Develop extensions folder retains organization marketplaces in the act
   // Develop lists the extensions folder once; the folder owns its page list.
   expect(await readPages("extend/develop/meta.json")).toContain("extensions");
   const extensions = await readPages("extend/develop/extensions/meta.json");
-  const sectionStart = extensions.indexOf("---Workflows & Distribution---");
-  const sectionEnd = extensions.indexOf("---SDK---");
+  const sectionStart = extensions.indexOf("---Marketplace---");
+  const nextGroup = extensions.findIndex(
+    (entry, index) => index > sectionStart && entry.startsWith("---"),
+  );
+  const sectionEnd = nextGroup === -1 ? extensions.length : nextGroup;
   expect(sectionStart).toBeGreaterThanOrEqual(0);
   expect(sectionEnd).toBeGreaterThan(sectionStart);
   expect(extensions.slice(sectionStart + 1, sectionEnd)).toContain(

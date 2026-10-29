@@ -8,28 +8,36 @@ Core protects sensitive user data on disk so that obtaining the storage (a stole
 `crates/core/crypto` (`ryu_crypto`), provides a single `FieldCipher` plus a swappable master key
 resolved from the OS keychain.
 
-At-rest encryption of local orchestration data is part of *what runs*, so it lives in Core. The Gateway's firewall and DLP govern *what is allowed
-or shared* on egress, a separate layer. [Passport](/docs/standalone/passport) owns encryption and
-storage for standalone identity connections; Core and the Gateway retain scope and audit.
+<Figure name="encryption" />
+
+At-rest encryption of local orchestration data is part of *what runs*, so it lives in Core. The
+Gateway's firewall and DLP govern *what is allowed or shared* on egress, a separate layer.
+[Passport](/docs/standalone/passport) owns encryption and storage for standalone identity
+connections; Core and the Gateway retain scope and audit.
 
 <Callout type="warn">
-  Encryption at rest is shipped in slices and is **partial today**. Sealed now: chat message bodies
-  and conversation titles (`conversations.db`), long-term memory entries (`memory_entries`), Identity
-  Vault credential state (`identities.db`), plugin BYOK secrets (`plugin-secrets.db`), the Core
-  account vault (`secrets/accounts.json` and its legacy `secrets/auth.json` token mirror), the Pi provider /
-  ACP-agent account vault (`pi-accounts.db`), every credential in the Gateway's `gateway.toml`,
-  the Desktop account vault and license key, the API keys and tokens kept in preferences
-  (`preferences.db`), MCP server credentials (`mcp.json`), private marketplace credentials,
-  and the node's fleet enrollment credentials.
+  Encryption at rest is shipped in slices and is **partial today**.
 
-  **Not yet sealed:** saved node tokens in
-  `nodes.json` (owner-only, see [What Is Sealed](/docs/core/encryption-what-is-sealed)). User content beyond chat bodies (search indexes, embeddings,
-  Spaces, app records, media) is listed store by store under
-  [Sealed User Content](/docs/core/encryption-user-content) and
-  [Sealed App and Client Data](/docs/core/encryption-app-data). The
-  unit tests cover the cipher and every key-resolution
-  branch, and the real Windows Credential Manager has been round-tripped on one host, but a full
-  live HTTP run (POST a chat, confirm `enc:v1:` on disk, restart, read back) is not yet verified.
+  **Sealed now:**
+
+  - chat message bodies and conversation titles (`conversations.db`);
+  - long-term memory entries (`memory_entries`);
+  - Identity Vault credential state (`identities.db`) and plugin BYOK secrets (`plugin-secrets.db`);
+  - the Core account vault (`secrets/accounts.json` and its legacy `secrets/auth.json` token mirror);
+  - the Pi provider and ACP-agent account vault (`pi-accounts.db`);
+  - every credential in the Gateway's `gateway.toml`;
+  - the Desktop account vault and license key;
+  - API keys and tokens kept in preferences (`preferences.db`) and MCP server credentials (`mcp.json`);
+  - private marketplace credentials and the node's fleet enrollment credentials.
+
+  **Not yet sealed:** saved node tokens in `nodes.json` (owner-only, see
+  [What Is Sealed](/docs/core/encryption-what-is-sealed)). User content beyond chat bodies is listed
+  store by store under [Sealed User Content](/docs/core/encryption-user-content) and
+  [Sealed App and Client Data](/docs/core/encryption-app-data).
+
+  **Verification:** unit tests cover the cipher and every key-resolution branch, and the real Windows
+  Credential Manager has been round-tripped on one host. A full live HTTP run (POST a chat, confirm
+  `enc:v1:` on disk, restart, read back) is not yet verified.
 </Callout>
 
 ## The unified FieldCipher
@@ -49,17 +57,21 @@ The envelope format is identical to the one described in [Passport](/docs/standa
 enc:v1:<base64( nonce[12] || ciphertext+tag )>
 ```
 
-The `v1` version prefix lets the scheme evolve without ambiguity. The crate also provides a
-`TenantCipher` with an `enc:v2:` envelope for multi-tenant stores: a per-tenant HKDF subkey plus
-associated data naming the record and field, so ciphertext moved between rows or tenants fails to
-open. The Cloud control plane mirrors the `enc:v1:` style with AES-256-GCM.
+The `v1` version prefix lets the scheme evolve without ambiguity. The Cloud control plane mirrors
+the `enc:v1:` style with AES-256-GCM.
+
+The crate also provides a `TenantCipher` with an `enc:v2:` envelope for multi-tenant stores. It uses
+a per-tenant HKDF subkey plus associated data naming the record and field, so ciphertext moved
+between rows or tenants fails to open.
 
 ### Seal and open, with lazy upgrade
 
 `open(stored)` decrypts a value that carries the `enc:v1:` prefix. Any other value is treated as
-**legacy plaintext** and returned verbatim. Reads accept both forms, and every rewrite upgrades a
-row to ciphertext. There is no blocking migration and no schema change. A row written before
-encryption was introduced keeps reading, and the next write to it seals it.
+**legacy plaintext** and returned verbatim.
+
+Reads accept both forms, and every rewrite upgrades a row to ciphertext. There is no blocking
+migration and no schema change: a row written before encryption keeps reading, and the next write to
+it seals it.
 
 ```text
 seal("hello")  -> "enc:v1:…"        // new writes are always sealed
@@ -72,76 +84,104 @@ optional one-shot background re-encrypt sweep can use to skip rows that are alre
 
 ## Master-key resolution
 
-A single 32-byte master key backs the process-wide cipher (`global_cipher`). It is loaded once and
-cached, resolved in strict priority order. Every source works **headless** (bots, scheduler, and
+A single 32-byte master key backs the process-wide cipher (`global_cipher`). It is loaded once,
+cached, and resolved in strict priority order. Every source works **headless** (bots, scheduler, and
 channels run with no human present), so no source prompts on the default path.
 
-1. **`RYU_MASTER_KEY`** env, a base64-encoded 32-byte key. Highest priority, for
-   servers, containers, CI, or operator-controlled key injection. Never written to disk or the
-   keychain by Core.
-2. **OS keychain** (default where reachable) via the `keyring` crate: Windows Credential Manager,
-   macOS Keychain, or Linux Secret Service. Service `ryu`, account `master-key` (with a
-   `-<profile>` suffix outside the release profile, so a dev stack and a release stack never share
-   the key slot). Set `RYU_KEYCHAIN=off` to skip the keychain for headless or test runs. The key lives
-   **outside `~/.ryu`**, so a copy of the data directory alone cannot decrypt it, as long as no key
-   file in `secrets/` holds the same key (see below). Headless-safe: the OS unlocks it for the
-   logged-in or service account with no prompt.
-3. **File fallback** at `~/.ryu/secrets/master.key` (owner-only `0600` on Unix), used only when neither the
-   env var nor a working keychain is present, for example a headless Linux box with no Secret
-   Service, or when `RYU_KEYCHAIN=off`. This is the degraded level, kept so Core never fails to
-   start.
+```mermaid
+flowchart TD
+  Start["Core starts"] --> Env{"RYU_MASTER_KEY set?"}
+  Env -- yes --> UseEnv["Use the env key"]
+  Env -- no --> KC{"OS keychain reachable?"}
+  KC -- "yes, key present" --> UseKC["Use the keychain key"]
+  KC -- "yes, empty" --> Adopt["Adopt master.key or memory.key,<br/>else generate if no sealed data"]
+  Adopt --> Store["Store in keychain and read it back"]
+  KC -- "no, or RYU_KEYCHAIN=off" --> File["File fallback secrets/master.key"]
+```
 
-On first run, if the chosen source has no key but a legacy `~/.ryu/secrets/memory.key` exists, that key is
-**adopted as the master key** so existing encrypted `memory_entries` still decrypt, and it is
-promoted into the keychain. Memory, conversations, and identity state share one key and one
+1. **`RYU_MASTER_KEY`** env, a base64-encoded 32-byte key. Highest priority, for servers,
+   containers, CI, or operator-controlled key injection. Core never writes it to disk or the keychain.
+2. **OS keychain** (default where reachable) via the `keyring` crate: Windows Credential Manager,
+   macOS Keychain, or Linux Secret Service.
+   - Service `ryu`, account `master-key`, with a `-<profile>` suffix outside the release profile, so
+     a dev stack and a release stack never share the key slot.
+   - Set `RYU_KEYCHAIN=off` to skip the keychain for headless or test runs.
+   - The key lives **outside `~/.ryu`**, so a copy of the data directory alone cannot decrypt it, as
+     long as no key file in `secrets/` holds the same key (see below).
+   - The OS unlocks it for the logged-in or service account with no prompt.
+3. **File fallback** at `~/.ryu/secrets/master.key` (owner-only `0600` on Unix). Used only when
+   neither the env var nor a working keychain is present (for example a headless Linux box with no
+   Secret Service), or when `RYU_KEYCHAIN=off`. This is the degraded level, kept so Core never fails
+   to start.
+
+### Legacy memory key
+
+On first run, if the chosen source has no key but a legacy `~/.ryu/secrets/memory.key` exists, that
+key is **adopted as the master key** and promoted into the keychain. Existing encrypted
+`memory_entries` still decrypt, and memory, conversations, and identity state share one key and one
 custody path.
 
-Promotion is checked before the raw file is removed: Core reads the key back from the keychain, and
-only when it matches the legacy file byte for byte does it delete `memory.key`. A later start that
-finds an identical leftover `memory.key` next to a keychain key deletes it then. If the leftover file
-holds a *different* key, Core keeps both, refuses to start, and names the file, rather than guess
-which key protects your data. A key that cannot be read back after it was stored also stops startup
-instead of being reported as keychain custody.
+- Core reads the key back from the keychain and deletes `memory.key` only when it matches byte for
+  byte. A later start that finds an identical leftover `memory.key` next to a keychain key deletes
+  it then.
+- If the leftover file holds a *different* key, Core does not delete it. It keeps the file as a
+  retired key that still opens data sealed under it, and logs a warning naming the file.
+- A key that cannot be read back after it was stored stops startup instead of being reported as
+  keychain custody.
+
+### Copying a profile and failing closed
 
 **Copy to another profile** moves the master key only through the keychain, from the source
-profile's slot to the target's, and never copies `master.key` or `memory.key` into the new profile's
+profile's slot to the target's. It never copies `master.key` or `memory.key` into the new profile's
 folder. If the key cannot be moved that way, nothing is copied.
 
-**Fail-closed.** If the master key cannot be loaded, the stores refuse to open with an error rather
-than silently using an ephemeral key. A throwaway key would make every existing encrypted row
-unreadable and write new rows that become unreadable after the next restart. The file
-fallback generates and persists a key on first use, so this only triggers on a genuine filesystem
-failure.
+**Fail-closed.** If the master key cannot be loaded, the stores refuse to open with an error instead
+of silently using an ephemeral key. A throwaway key would make every existing encrypted row
+unreadable and write new rows that become unreadable after the next restart. The file fallback
+generates and persists a key on first use, so this only triggers on a genuine filesystem failure.
 
 ### Key check and recovery
 
-Ryu records a short fingerprint of the key that seals your data folder (a key check value, derived
-from the key and useless for decrypting anything) the first time it starts with a key that opens
-your existing sealed messages. From then on:
+Ryu records a short fingerprint of the key that seals your data folder the first time it starts
+with a key that opens your existing sealed messages. This key check value is derived from the key
+and is useless for decrypting anything. From then on, these rules apply.
 
-- **No new key over sealed data.** If the keychain entry is missing or the keychain is locked, and
-  the data folder already holds sealed data, Ryu refuses to start its stores instead of generating a
-  new key. A key file left in `secrets/` from a period without a keychain (or a legacy `memory.key`)
-  is adopted into the keychain rather than replaced. Ryu keeps that file as a recovery copy and never
-  deletes it, so while it exists the key still sits beside your data: custody is reported as
-  **file**, not keychain, on the status and transparency surfaces. `ryu-core keys status` points this
-  out; once it shows the keychain holding the same fingerprint, delete the file (after backing up
-  the key if your keychain is not backed up) to get keychain custody.
-- **Wrong key, right data.** If the key Ryu finds does not match the recorded fingerprint, it looks
-  for one that does among the keychain, the key file, the legacy memory key, and up to four
-  *retired* keys it keeps for this purpose. A match is used and the mismatched key is retired, so
-  anything sealed with it stays readable. If nothing matches, Ryu refuses to write rather than seal
-  new data under a key that cannot open the old data. A `RYU_MASTER_KEY` that does not match is
-  refused.
-- **See and fix it.** `ryu-core keys status` lists which keys are available and which stores each one
-  opens, by fingerprint only. With Core stopped, `ryu-core keys adopt --from file|keychain|env`
-  makes one of them the current key (it must open your sealed messages, unless you add
-  `--accept-unreadable` to accept that messages it cannot open stay unreadable) and retires the
-  old one;
-  `ryu-core keys retire <fingerprint>` moves a stray key into the retired set.
-- **Newer data folders.** A data folder used by a newer Ryu that older versions cannot read is
-  marked, and an older Ryu refuses to open it instead of misreading it. Export your data before
-  downgrading.
+#### No new key over sealed data
+
+If the keychain entry is missing or the keychain is locked, and the data folder already holds sealed
+data, Ryu refuses to start its stores instead of generating a new key.
+
+A `master.key` file left in `secrets/` from a period without a keychain is adopted into the keychain
+instead of replaced. Ryu keeps that file as a recovery copy and never deletes it. While it exists,
+the key still sits beside your data, so custody is reported as **file**, not keychain, on the status
+and transparency surfaces.
+
+`ryu-core keys status` points this out. Once it shows the keychain holding the same fingerprint,
+delete the file (after backing up the key if your keychain is not backed up) to get keychain custody.
+
+#### Wrong key, right data
+
+If the key Ryu finds does not match the recorded fingerprint, it looks for one that does among the
+keychain, the key file, the legacy memory key, and up to four *retired* keys it keeps for this
+purpose.
+
+- A match is used, and the mismatched key is retired, so anything sealed with it stays readable.
+- If nothing matches, Ryu refuses to write instead of sealing new data under a key that cannot open
+  the old data.
+- A `RYU_MASTER_KEY` that does not match is refused.
+
+#### Key commands
+
+| Command | Effect |
+|---|---|
+| `ryu-core keys status` | Lists which keys are available and which stores each one opens, by fingerprint only |
+| `ryu-core keys adopt --from file\|keychain\|env` | With Core stopped, makes one key current and retires the old one. The key must open your sealed messages, unless you add `--accept-unreadable` to accept that messages it cannot open stay unreadable |
+| `ryu-core keys retire <fingerprint>` | Moves a stray key into the retired set |
+
+#### Newer data folders
+
+A data folder used by a newer Ryu that older versions cannot read is marked, and an older Ryu
+refuses to open it instead of misreading it. Export your data before downgrading.
 
 <Callout type="warn">
   **Data-loss risk.** The master key is the only thing that can decrypt local chats. If the OS
@@ -151,22 +191,24 @@ your existing sealed messages. From then on:
 
   **Headless caveat (Windows).** The Credential Manager backend may not resolve under a service
   account with no loaded user profile, so a headless Core can silently land on the file fallback (the
-  "key next to data" weakness). Headless deployments should set `RYU_MASTER_KEY` explicitly rather
-  than rely on the keychain. Which path a given headless host actually takes still needs empirical
+  "key next to data" weakness).
+
+  Headless deployments should set `RYU_MASTER_KEY` explicitly instead of relying on the keychain.
+  Which path a given headless host actually takes still needs empirical
   confirmation.
 </Callout>
 
 ## Relationship to the Cloud control plane
 
-The same three data classes (content, secrets, metadata) drive the Cloud control plane, which seals
+The same three data classes (content, secrets, metadata) drive the Cloud control plane. It seals
 synced conversation content and title, integration token secrets, and channel bot secrets with a
-server-held master key under an AES-256-GCM `enc:v1:` envelope. A zero-access mode, where the
-server stores only ciphertext it cannot read, is not shipped.
+server-held master key under an AES-256-GCM `enc:v1:` envelope. A zero-access mode, where the server
+stores only ciphertext it cannot read, is not shipped.
 
 Sign-in credentials and one-time links in the Cloud database are protected too. Values the service
-must use again are sealed; values it only compares are stored as digests, so a copy of the database
-does not hold a working session token, sign-in link, or secret code. The exceptions are listed in the
-table:
+must use again are sealed. Values it only compares are stored as digests, so a copy of the database
+does not hold a working session token, sign-in link, or secret code. The table lists each store,
+including the exceptions:
 
 | Cloud store | Protection |
 |---|---|
@@ -179,8 +221,11 @@ table:
 | Request logs and analytics events | Share, transfer, relay, invite-pass, password-reset, and similar link tokens in a URL path are replaced with `:redacted` |
 
 Existing rows are converted once, shortly after a new version of the service has taken over from
-the previous one, and older values keep working until then.
-Database backups taken before that conversion still contain the old values until they expire.
+the previous one, and older values keep working until then. Database backups taken before that
+conversion still contain the old values until they expire.
+
+Cloud message content and personal data are covered on
+[Sealed App Records and Cloud Data](/docs/core/encryption-app-records#cloud-content-and-personal-data-ryu-connect-inbox).
 
 ## Store coverage
 
@@ -199,9 +244,11 @@ The per-store tables are split across six reference pages:
 
 `GET /api/encryption/status` returns which key-custody path the running process resolved and the
 coverage of each store, with live row counts where they are cheap to measure. It never returns key
-material. The desktop shows it in Gateway settings under **Encryption**. Switching the node or its
-connection credentials loads that connection's status again. If a read fails, use **Retry**;
-**Refresh** reads the current node again.
+material.
+
+The desktop shows it in Gateway settings under **Encryption**. Switching the node or its connection
+credentials loads that connection's status again. If a read fails, use **Retry**; **Refresh** reads
+the current node again.
 
 ## Related
 

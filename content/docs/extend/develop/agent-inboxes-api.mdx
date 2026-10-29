@@ -8,18 +8,33 @@ the self-hosted process, see [Standalone Ryu Mail](/docs/standalone/mail).
 
 ## Authentication
 
-The hosted API is mounted under `/api/mail`. Authenticate with a signed-in **session** for the
-current user and active organization, or an organization-scoped `x-gateway-key` for programmatic
-access. Team and personal node credentials cannot access organization-wide Mail and get `403` with
-`code: "node_not_org_scoped"`. When the service is not configured, every route except
-`GET /mail/status` returns **503**, so nothing (pods, domains, webhooks, scheduled drafts) is
-stored that could fail later; the status endpoint reports availability.
+The hosted API is mounted under `/api/mail`. Authenticate with one of:
 
-A gateway key acts for its own node. It can read and send from the organization's shared
-inboxes and its own node's agents' mail, but it can change the settings or the allow/block lists of
-only its own node's agent inboxes, and it cannot change custom domains, pods, or organization- and
-pod-wide lists. Those requests return **403**; use a signed-in session with Mail management
-permission.
+- a signed-in **session** for the current user and active organization; or
+- an organization-scoped `x-gateway-key` for programmatic access. This is what makes it an agent
+  service: an agent presents its node's gateway key and reads and sends its own mail with no
+  interactive session.
+
+Team and personal node credentials cannot access organization-wide Mail and get `403` with
+`code: "node_not_org_scoped"`.
+
+When the service is not configured, every route except `GET /mail/status` returns **503**. Nothing
+(pods, domains, webhooks, scheduled drafts) is stored that could fail later, and the status
+endpoint reports availability.
+
+### What a gateway key can do
+
+A gateway key acts for its own node.
+
+| A gateway key can | A gateway key cannot (403) |
+|---|---|
+| Read and send from the organization's shared inboxes | Change custom domains or pods |
+| Read and send its own node's agents' mail | Change organization- or pod-wide lists |
+| Change settings and allow/block lists of its own node's agent inboxes | Create or change shared inboxes, or change other nodes' agent inboxes |
+
+Use a signed-in session with Mail management permission for the refused operations.
+
+### Refusals
 
 Refusals use the shape `{ error, code, message?, suggestions?, retryAfterSeconds? }`. A `429` also
 sets the `Retry-After` header.
@@ -114,94 +129,149 @@ publish and an `expiresAt` time. Each record has a `type`, `name`, `value`, `ttl
 - **`spf`** (optional): an SPF `TXT` value. If the domain already has an SPF record, merge the
   `include:` into it rather than adding a second one.
 
-After the records are published, the service re-checks a pending domain automatically (every
-10 minutes for its first hour, then hourly), so you don't need to keep calling
-`POST /mail/domains/:id/verify`; call it to check right away. The domain becomes `verified`
-only when the mail provider confirms this domain's own DKIM records and the three `dkim` CNAMEs
-resolve at the registered name, which can take up to 72 hours while DNS propagates. Verification
-inherited from a parent domain doesn't count. Until then the domain stays `pending`, or becomes
-`failed` if the provider gives up. Only a `verified` domain can host agent addresses: claiming one on
-any other domain returns `409`. Verifying again later also catches a domain whose records were
+```mermaid
+stateDiagram-v2
+  [*] --> pending: POST /mail/domains
+  pending --> verified: provider confirms DKIM
+  pending --> failed: provider gives up
+  pending --> [*]: lapses after 7 days
+  failed --> [*]: lapses after 7 days
+  verified --> [*]: DELETE
+```
+
+### Verification
+
+After the records are published, the service re-checks a pending domain automatically: every
+10 minutes for its first hour, then hourly. Call `POST /mail/domains/:id/verify` only to check
+right away.
+
+The domain becomes `verified` only when both hold:
+
+- the mail provider confirms this domain's own DKIM records (verification inherited from a parent
+  domain doesn't count); and
+- the three `dkim` CNAMEs resolve at the registered name.
+
+This can take up to 72 hours while DNS propagates. Until then the domain stays `pending`, or becomes
+`failed` if the provider gives up. Verifying again later also catches a domain whose records were
 removed.
 
-A registration that isn't verified within 7 days lapses: it is removed along with its
+Only a `verified` domain can host agent addresses. Claiming one on any other domain returns `409`.
+
+A registration that isn't verified within 7 days lapses. It is removed along with its
 verification, and anyone who controls the domain can register it again. Verified domains don't
 lapse. Registrations made before this limit existed lapse 7 days after they were created unless
 they are verified.
 
-A domain can be registered by one account at a time. Another account can't register the same
-domain, one of its subdomains, or a domain above it, and nobody can register a subdomain of a
-domain the service operator manages, or the shared mail domain, its parents, or its subdomains. If
-the provider can't be reached, the domain is still saved as `pending` with a `verificationError`;
-verify again later. Deleting a domain also removes its verification. If the provider can't
-remove it right away, `DELETE` answers `202` with `cleanupPending: true`. The domain is gone from
-your account and no longer counts toward the limit, and the service retries the removal in the
-background. Until it finishes, registering the same domain again returns `409` saying it is still
-being removed. Try again a few minutes later.
+### Ownership and removal
+
+A domain can be registered by one account at a time:
+
+- Another account can't register the same domain, one of its subdomains, or a domain above it.
+- Nobody can register a subdomain of a domain the service operator manages, or the shared mail
+  domain, its parents, or its subdomains.
+
+If the provider can't be reached at registration, the domain is still saved as `pending` with a
+`verificationError`. Verify again later.
+
+Deleting a domain also removes its verification. If the provider can't remove it right away,
+`DELETE` answers `202` with `cleanupPending: true`. In that case:
+
+- The domain is gone from your account and no longer counts toward the limit.
+- The service retries the removal in the background.
+- Until it finishes, registering the same domain again returns `409` saying it is still being
+  removed. Try again a few minutes later.
 
 `identityManagedBy` is `ryu` once Ryu has set up the domain's verification, or `operator` for a
-domain whose verification the service operator manages. Verifying such a domain reports its
+domain whose verification the service operator manages. Verifying an `operator` domain reports its
 stored `status` and changes nothing.
 
+## Events and open tracking
+
 Mail events (`GET /mail/events` and `GET /mail/inboxes/:id/events`) are kept for 90 days after they
-are recorded, the same window a deactivated inbox's stored mail is retained, and are then removed
-automatically. Webhook delivery records (`GET /mail/webhooks/:id/deliveries`) follow the same
-90-day window from the first attempt; deliveries are retried only right after the event is
-recorded, so none is still pending when its record is removed. Messages are not affected. Keep
-your own copy of any event you need for longer, for example from webhook deliveries.
+are recorded, then removed automatically. This is the same window a deactivated inbox's stored mail
+is retained. Messages are not affected.
+
+Webhook delivery records (`GET /mail/webhooks/:id/deliveries`) follow the same 90-day window from
+the first attempt. Deliveries are retried only right after the event is recorded, so none is still
+pending when its record is removed. Keep your own copy of any event you need for longer, for
+example from webhook deliveries.
 
 `trackOpens: true` adds a one-pixel image to the HTML body when open tracking is enabled for the
-service; the first load records a `message.opened` event. Without `trackOpens: true` no pixel is
-added, and plain-text messages are never tracked: loading the pixel URL of a message that was sent
-without it still returns the image but records no open.
+service. The first load records a `message.opened` event.
 
-Every outbound recipient must satisfy the `send` policy, and every inbound sender must satisfy
-the `receive` policy. Replies must also satisfy the `reply` policy, including explicit reply
-actions when the original message has no Message-ID. Messages without a sender are rejected.
-Remote attachment URLs must use public HTTPS destinations; the service checks and pins the
-resolved address during download and limits each attachment to the send size cap.
+- Without `trackOpens: true`, no pixel is added.
+- Plain-text messages are never tracked.
+- Loading the pixel URL of a message sent without tracking still returns the image but records no
+  open.
 
 ## Addresses, policies, and headers
 
-- **Reserved names.** On the shared mail domain and on agent address hosts, role and operator
-  mailboxes such as `postmaster`, `abuse`, `admin`, `hostmaster`, `webmaster`, `security`,
-  `support`, `billing`, and `noreply`, and operator prefixes such as `admin2` or `postmaster-eu`,
-  can't be claimed by anyone, admins included: the request returns `409` with
-  `code: "address_reserved"` (`alias_reserved` for an agent address). On a verified custom domain
-  the organization owns the names, but an agent still can't claim role names such as `admin`,
-  `billing`, `support`, `ceo`, or `noreply` there; an admin can assign them with
-  `POST /mail/aliases`, and an agent's claim returns `403` with `code: "alias_admin_only"`.
-- **Permanent addresses.** Every address, once claimed, is reserved forever. It is never renamed,
-  released, or given to anyone else, including after its inbox is deleted, the plan ends, or the
-  organization is deleted. A taken or retired address, and a mailbox handle that looks like another
-  owner's (such as `acrne` for `acme`), answers `address_unavailable` with the message "That address is taken, and addresses are never reissued, so retrying it
-  cannot succeed. Choose a different name." Address checks are limited to 10 a minute and 60 an
-  hour per organization or personal account, and over that return `429` with
-  `code: "rate_limited"`.
-- **Recipients.** Each `to`, `cc`, `bcc`, and `replyTo` entry must be one mailbox, either a bare
-  address or `Name <address>`. Comma lists and groups in a single entry are rejected. Allow and
-  block lists are evaluated against the bare address, so a display name can't hide a blocked
-  destination.
-- **List entries.** An `email` entry is stored as its bare, lower-cased address, so
-  `"Name" <Person@Example.com>` is saved as `person@example.com`; a comma list or group is
-  rejected. A `domain` entry is stored without a leading `@` and matches addresses at exactly that
-  domain. Without an `entryType`, a value with no `@` is treated as a domain. Reading or deleting
-  an entry by path accepts either spelling.
-- **Authenticated inbound senders.** The `From` header can be forged, so an inbound allow-list
-  entry only matches when SES reports a DMARC `PASS` for the sender's domain and the message has
-  exactly one `From` mailbox. Mail from a domain that fails or has no DMARC policy, or with
-  duplicate `From` fields or several `From` addresses, can't satisfy an allow list; block entries
-  still apply to every claimed sender. Mail with an SES virus verdict of `FAIL` is never stored.
-  Each stored inbound message carries SES's `authentication` verdicts (`spf`, `dkim`, `dmarc`,
-  `spam`, `virus`) in the API and webhook payloads.
-- **Custom headers.** `headers` can't set addressing, MIME, or threading headers, or `Sender`,
-  `Return-Path`, `Resent-*`, `DKIM-Signature`, `Authentication-Results`, `ARC-*`, `Received-SPF`, or
-  `X-SES-*`.
+### Send, receive, and reply policies
 
-The `x-gateway-key` path is what makes this an agent service: an agent presents its node's
-gateway key and reads and sends its own mail with no interactive session. Org-shared inboxes,
-custom domains, pods, and organization- or pod-wide lists are managed from a signed-in session with
-Mail management permission.
+- Every outbound recipient must satisfy the `send` policy.
+- Every inbound sender must satisfy the `receive` policy. Messages without a sender are rejected.
+- Replies must also satisfy the `reply` policy, including explicit reply actions when the original
+  message has no Message-ID.
+- Remote attachment URLs must use public HTTPS destinations. The service checks and pins the
+  resolved address during download and limits each attachment to the send size cap.
+
+### Reserved names
+
+On the shared mail domain and on agent address hosts, nobody can claim role and operator names,
+admins included:
+
+- role mailboxes such as `postmaster`, `abuse`, `admin`, `hostmaster`, `webmaster`, `security`,
+  `support`, `billing`, and `noreply`;
+- operator prefixes such as `admin2` or `postmaster-eu`.
+
+The request returns `409` with `code: "address_reserved"` (`alias_reserved` for an agent address).
+
+On a verified custom domain the organization owns the names. An agent still can't claim role names
+such as `admin`, `billing`, `support`, `ceo`, or `noreply` there: its claim returns `403` with
+`code: "alias_admin_only"`. An admin can assign them with `POST /mail/aliases`.
+
+### Permanent addresses
+
+Every address, once claimed, is reserved forever. It is never renamed, released, or given to anyone
+else, including after its inbox is deleted, the plan ends, or the organization is deleted.
+
+A taken or retired address, and a mailbox handle that looks like another owner's (such as `acrne`
+for `acme`), answers `address_unavailable` with the message "That address is taken, and addresses
+are never reissued, so retrying it cannot succeed. Choose a different name."
+
+Address checks are limited to 10 a minute and 60 an hour per organization or personal account.
+Over that, they return `429` with `code: "rate_limited"`.
+
+### Recipients and list entries
+
+- **Recipients.** Each `to`, `cc`, `bcc`, and `replyTo` entry must be one mailbox, either a bare
+  address or `Name <address>`. Comma lists and groups in a single entry are rejected.
+- **Allow and block matching.** Lists are evaluated against the bare address, so a display name
+  can't hide a blocked destination.
+- **`email` entries.** Stored as the bare, lower-cased address, so `"Name" <Person@Example.com>` is
+  saved as `person@example.com`. A comma list or group is rejected.
+- **`domain` entries.** Stored without a leading `@`, and match addresses at exactly that domain.
+  Without an `entryType`, a value with no `@` is treated as a domain.
+
+Reading or deleting an entry by path accepts either spelling.
+
+### Authenticated inbound senders
+
+The `From` header can be forged. An inbound allow-list entry only matches when both hold:
+
+- SES reports a DMARC `PASS` for the sender's domain; and
+- the message has exactly one `From` mailbox.
+
+Mail from a domain that fails or has no DMARC policy, or with duplicate `From` fields or several
+`From` addresses, can't satisfy an allow list. Block entries still apply to every claimed sender.
+
+Mail with an SES virus verdict of `FAIL` is never stored. Each stored inbound message carries SES's
+`authentication` verdicts (`spf`, `dkim`, `dmarc`, `spam`, `virus`) in the API and webhook payloads.
+
+### Custom headers
+
+`headers` can't set addressing, MIME, or threading headers, or `Sender`, `Return-Path`,
+`Resent-*`, `DKIM-Signature`, `Authentication-Results`, `ARC-*`, `Received-SPF`, or `X-SES-*`.
 
 ## Related
 

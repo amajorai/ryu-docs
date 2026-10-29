@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import { LocalizedCard } from "@/components/localized-card";
 import { LevelBadge } from "@/components/mdx/level-badge";
-import { localizeDocsHref, versionedDocsHref } from "@/lib/docs-version";
+import { canonicalDocsHref, localizeDocsHref } from "@/lib/docs-version";
 import { DEFAULT_DOCS_LOCALE } from "@/lib/i18n";
 import { getPageByHref, source } from "@/lib/source";
 
@@ -28,7 +28,7 @@ export function DocCard({
   description?: ReactNode;
   locale?: string;
 }) {
-  const target = versionedDocsHref(href);
+  const target = canonicalDocsHref(href);
   const page = lookup(target, locale);
   const level = page?.data.level;
   const cardTitle = title ?? page?.data.title ?? target;
@@ -66,7 +66,7 @@ export function AutoCards({
 }) {
   const peers = getPageTreePeers(
     source.getPageTree(locale),
-    localizeDocsHref(versionedDocsHref(url), locale) ?? url,
+    localizeDocsHref(canonicalDocsHref(url), locale) ?? url,
   );
 
   return (

@@ -30,28 +30,30 @@ JSON request bodies are limited to 128 KiB. Storage is limited per tenant.
 
 A `429 rate_limited` response carries `Retry-After` in seconds; wait that long
 before retrying. When a publish limit is configured, every publish response,
-including its `429`, also carries the IETF `RateLimit-Policy` and `RateLimit`
-fields (draft-ietf-httpapi-ratelimit-headers-11) for the `publish` bucket:
-`RateLimit-Policy: "publish";q=<burst>;w=<seconds to refill>` and
-`RateLimit: "publish";r=<publishes left>;t=<seconds>`, where `t` is the time
-until the bucket is full again, or on a `429` the same delay as `Retry-After`.
-Operators can change both limits and configure trusted
-proxies; see [Abuse limits](/docs/standalone/notify#abuse-limits).
+including its `429`, also carries the IETF fields
+(draft-ietf-httpapi-ratelimit-headers-11) for the `publish` bucket:
 
-On Ryu-hosted Notify, a publish from an organization whose Ryu credits are
-exhausted returns `402 insufficient_credits`; add credits and retry. Reads,
-acknowledgements, archives, streams, deletes, and usage reports keep working.
-Self-hosted Notify never returns this code. See
-[Pricing](/docs/standalone/notify#pricing).
+- `RateLimit-Policy: "publish";q=<burst>;w=<seconds to refill>`
+- `RateLimit: "publish";r=<publishes left>;t=<seconds>`, where `t` is the time
+  until the bucket is full again, or on a `429` the same delay as `Retry-After`.
 
-Event `data` and activity `data` are redacted recursively before storage. A key
-is normalized by lowercasing it and removing `-` and `_`; its whole value is
-replaced with `[REDACTED]` when the normalized key ends with `token`, `secret`,
-`password`, `passwd`, `passphrase`, `apikey`, `accesskey`, `privatekey`,
-`credential`, `credentials`, `authorization`, `cookie`, `bearer`, or
-`sessionid`. So `githubToken`, `x-api-key`, `AWS_SECRET_ACCESS_KEY`, and
-`db_password` are redacted, while `maxTokens` is not. Keep credentials
-out of payloads anyway.
+Operators set both limits and trusted proxies; see
+[Abuse limits](/docs/standalone/notify#abuse-limits). On Ryu-hosted Notify, a
+publish without Ryu credits returns `402 insufficient_credits` while other
+routes keep working; see [Pricing](/docs/standalone/notify#pricing).
+
+### Payload redaction
+
+Event `data` and activity `data` are redacted recursively before storage:
+
+1. Each key is normalized by lowercasing it and removing `-` and `_`.
+2. The whole value becomes `[REDACTED]` when the normalized key ends with
+   `token`, `secret`, `password`, `passwd`, `passphrase`, `apikey`,
+   `accesskey`, `privatekey`, `credential`, `credentials`, `authorization`,
+   `cookie`, `bearer`, or `sessionid`.
+
+So `githubToken`, `x-api-key`, `AWS_SECRET_ACCESS_KEY`, and `db_password` are
+redacted, while `maxTokens` is not. Keep credentials out of payloads anyway.
 
 ## Publish an event
 
@@ -146,9 +148,21 @@ An interactive event starts with a `response` object. Reply with
 Use `POST /v1/events/:id/cancel` to cancel a still-pending interaction.
 
 Responses are single-use and tenant-scoped. The first answer, cancellation, or
-expiry that is stored wins; any later answer or cancel returns `409 conflict`
-with the stored event in `error.details.event`, and only the winning answer
+expiry that is stored wins. A later answer or cancel returns `409 conflict`
+with the stored event in `error.details.event`. Only the winning answer
 triggers a callback.
+
+```mermaid
+sequenceDiagram
+  participant P as Producer
+  participant N as Notify
+  participant R as Responder
+  P->>N: POST /v1/events with response
+  R->>N: POST /v1/events/:id/respond
+  N->>N: Store first answer (later ones get 409)
+  N->>P: POST callbackUrl (signed with a secret)
+  P->>N: GET /v1/events/:id to confirm
+```
 
 ```json
 {
@@ -174,22 +188,25 @@ with these headers:
 
 Verify the signature with a constant-time comparison and reject old timestamps.
 Before acting on an approval, read `GET /v1/events/:id` and check the stored
-response.
-`callbackSecret` requires `callbackUrl`, is stored privately, and is never
-returned by any read, stream, or delivery.
+response. `callbackSecret` requires `callbackUrl`, is stored privately, and is
+never returned by any read, stream, or delivery.
 
 Event responses include `response.callbackUrlPreview`, the callback's origin
-followed by `/…` (`null` with no callback). Display it. `response.callbackUrl`
-is still returned whole but deprecated, because the URL can carry a
-capability; a future release returns `null` for it in event reads, history,
-and stream frames. Destination deliveries set both fields to `null`.
+followed by `/…` (`null` with no callback); display it. `response.callbackUrl`
+is still returned whole but deprecated, because the URL can carry a capability.
+A future release returns `null` for it in event reads, history, and stream
+frames. Destination deliveries set both fields to `null`.
 
 ## Destinations and delivery history
 
 Create a destination with `POST /v1/destinations` using `kind: "webhook"`,
 `"ntfy"`, or `"buzzkit"`. Webhooks receive JSON with an `event` and delivery
-identifier. When a secret is configured, `X-Ryu-Notify-Signature` carries an
-`sha256=` HMAC of the request body, and the delivery also carries
+identifier.
+
+### Webhook signatures
+
+When a secret is configured, `X-Ryu-Notify-Signature` carries an `sha256=` HMAC
+of the request body. The delivery also carries
 [Standard Webhooks](https://www.standardwebhooks.com/) headers, which add
 replay protection:
 
@@ -202,69 +219,76 @@ replay protection:
 Verify `webhook-signature` with a constant-time comparison, reject timestamps
 more than a few minutes from your clock, and deduplicate on `webhook-id`. A
 Standard Webhooks library expects a `whsec_` secret: pass `whsec_` followed by
-the base64 encoding of your destination secret. `X-Ryu-Notify-Signature` is
-unchanged and signs only the body, so it has no replay protection; a verifier
-should rely on `webhook-signature` and treat a delivery without the `webhook-*`
-headers as unsigned.
+the base64 encoding of your destination secret.
 
-Custom destination `headers` cannot use `Host`, `Content-Length`, `X-Ryu-Notify-*`,
-or the three `webhook-*` names above; Notify never forwards a stored
-`webhook-*` value.
+`X-Ryu-Notify-Signature` signs only the body, so it has no replay protection.
+Rely on `webhook-signature` and treat a delivery without the `webhook-*`
+headers as unsigned. Custom destination `headers` cannot use `Host`,
+`Content-Length`, `X-Ryu-Notify-*`, or the three `webhook-*` names; Notify never
+forwards a stored `webhook-*` value.
 
-ntfy destinations receive the event body with `Title`, `Priority`, `Tags`, `Click`, and `Actions` headers. Actions use
-ntfy's `view, <label>, <url>` order, line breaks become spaces, and a value
-with non-ASCII text, such as an emoji or CJK title, is sent as an RFC 2047
-UTF-8 encoded word (`=?UTF-8?B?…?=`), which ntfy decodes. A BuzzKit
-destination is an HTTP bridge adapter. It does not implement Buzz's Nostr
-signing or workspace identity.
+### ntfy and BuzzKit destinations
+
+ntfy destinations receive the event body with `Title`, `Priority`, `Tags`,
+`Click`, and `Actions` headers:
+
+- actions use ntfy's `view, <label>, <url>` order;
+- line breaks become spaces;
+- non-ASCII text, such as an emoji or CJK title, is sent as an RFC 2047 UTF-8
+  encoded word (`=?UTF-8?B?…?=`), which ntfy decodes.
+
+A BuzzKit destination is an HTTP bridge adapter. It does not implement Buzz's
+Nostr signing or workspace identity.
+
+### Topic route headers
 
 The topic route accepts an `Actions` header as a JSON array, in ntfy's simple
 `view, <label>, <url>[, clear=true]` syntax (quote a value that contains a
 comma or semicolon), or as `action=view, label=…, url=…`. Notify actions are
 links, so ntfy `http` and `broadcast` actions return `400 invalid_request`.
 
-HTTP header values are byte strings, so send topic-route text outside Latin-1
-in `Title`, `Tags`, `Click`, or `X-Ryu-Source` as RFC 2047 encoded words:
-`=?UTF-8?B?<base64>?=` or `=?UTF-8?Q?<quoted-printable>?=`. Notify decodes
-every encoded word in those headers and drops the whitespace between adjacent
-decoded words, so `Title: =?UTF-8?B?6YOo572y?= =?UTF-8?B?5a6M5oiQ?=` stores the
-title `部署完成`.
+Send topic-route text outside Latin-1 in `Title`, `Tags`, `Click`, or
+`X-Ryu-Source` as RFC 2047 encoded words (`=?UTF-8?B?<base64>?=` or
+`=?UTF-8?Q?<quoted-printable>?=`). Notify decodes every encoded word and drops
+the whitespace between adjacent ones, so
+`Title: =?UTF-8?B?6YOo572y?= =?UTF-8?B?5a6M5oiQ?=` stores the title `部署完成`.
 
-As in ntfy, UTF-8, ISO-8859-1, and US-ASCII words are decoded. A word Notify
-cannot decode (another charset, a malformed payload, or invalid bytes) is
-stored as sent. A word that decodes to a
-control character (such as a line break; tab is allowed) or a bidirectional
-text control (U+202A to U+202E, U+2066 to U+2069) returns
-`400 invalid_request`, as do more than 64 encoded words, or a header longer
-than 8,192 characters that contains an encoded word. The decoded values still
-have the event limits, such as 256 bytes for a title.
+- UTF-8, ISO-8859-1, and US-ASCII words are decoded, as in ntfy. Another
+  charset, a malformed payload, or invalid bytes is stored as sent.
+- `400 invalid_request` is returned for a word that decodes to a control
+  character (tab is allowed) or a bidirectional control (U+202A to U+202E,
+  U+2066 to U+2069), more than 64 encoded words, or a header longer than 8,192
+  characters that contains an encoded word.
+- Decoded values keep the event limits, such as 256 bytes for a title.
+- `Actions` is never decoded, because a decoded word could change its JSON or
+  ntfy structure. Escape non-ASCII text in a JSON `Actions` header as `\uXXXX`.
 
-`Actions` is never decoded, because a decoded word could change the structure
-of the JSON or ntfy syntax around it. Escape non-ASCII text in a JSON
-`Actions` header as `\uXXXX`.
+The TypeScript and Python SDKs send a topic title, tags, or click URL outside
+Latin-1, or containing `=?`, as one UTF-8 encoded word, and send `Actions` as
+ASCII-escaped JSON.
 
-The TypeScript and Python SDKs encode a topic title, tags, or click URL with
-characters outside Latin-1, or containing `=?`, as one UTF-8 encoded word, and
-send `Actions` as ASCII-escaped JSON.
+### Delivery attempts
 
-Each new event creates at most one delivery per enabled destination. Delivery
-attempts are durable, bounded, retried with backoff, and available from
-`GET /v1/deliveries`. `POST /v1/deliveries/:id/retry` explicitly requeues a
-failed or suppressed attempt. Destination URLs and custom header values are
-never returned by list or read endpoints; read `urlPreview`, `hasSecret`, and
-`headerNames` instead.
+Each new event creates at most one delivery per enabled destination. Attempts
+are durable, bounded, retried with backoff, and listed by `GET /v1/deliveries`.
+`POST /v1/deliveries/:id/retry` requeues a failed or suppressed attempt. List
+and read endpoints never return destination URLs or custom header values; read
+`urlPreview`, `hasSecret`, and `headerNames` instead.
 
-Delivery is HTTPS-only and rechecks DNS immediately before each attempt. Every
-attempt opens a new connection pinned to the screened public addresses, and
-the certificate is checked against the destination hostname. Redirects are not
-followed, private/mapped/reserved destinations are rejected, and response
-bodies are bounded. Destination delivery also fails closed when the configured
-egress screen cannot complete.
+Delivery is HTTPS-only and screened on every attempt:
 
-A failed attempt records one of a fixed set of messages in the delivery's and
-destination's `lastError`, and `POST /v1/destinations/:id/test` returns the same
-message with status `502`. The messages are `destination unreachable` (blocked address, DNS failure, or
-connection error), `destination timed out`, `destination returned HTTP <n>`, or
+- DNS is rechecked immediately before each attempt;
+- each attempt opens a new connection pinned to the screened public addresses,
+  and the certificate is checked against the destination hostname;
+- redirects are not followed, and private, mapped, or reserved destinations are
+  rejected;
+- response bodies are bounded, and delivery fails closed when the egress screen
+  cannot complete.
+
+A failed attempt records one fixed message in the delivery's and destination's
+`lastError`, and `POST /v1/destinations/:id/test` returns it with status `502`.
+The messages are `destination unreachable` (blocked address, DNS failure, or connection error),
+`destination timed out`, `destination returned HTTP <n>`, or
 `destination response exceeded its size cap`.
 
 ## Preferences
@@ -296,16 +320,18 @@ curl -fsS "$NOTIFY_URL/v1/usage?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00
 
 `events` counts each event accepted by `POST /v1/events` or
 `POST /v1/topics/:topic`, in the hour it was accepted, for hours that start at
-or after `from` and before `to`. An idempotent replay returns the stored event
-and is not counted again. Requests refused by validation, authentication, the
-publish rate limit, or an idempotency conflict are not counted.
+or after `from` and before `to`. An idempotent replay is not counted again, nor
+is a request refused by validation, authentication, the publish rate limit, or
+an idempotency conflict.
 
 `from` and `to` are RFC 3339 timestamps with a time zone on a whole hour, with
 `to` later than `from` and at most 31 days after it; anything else returns
-`400 invalid_request`. Counts are kept for at least 400 days, separately from
-event history, so trimming old events does not change them. The response window
-is clipped to no earlier than 400 days ago and no later than the end of the
-current hour. Usage reads do not count against the publish rate limit.
+`400 invalid_request`. The response window is clipped to no earlier than 400
+days ago and no later than the end of the current hour.
+
+Counts are kept for at least 400 days, separately from event history, so
+trimming old events does not change them. Usage reads do not count against the
+publish rate limit.
 
 ## Endpoint surface
 
@@ -350,6 +376,8 @@ current hour. Usage reads do not count against the publish rate limit.
 | `GET` | `/v1/analytics` | Read bounded event aggregates |
 | `GET` | `/v1/usage` | Read accepted-event counts for whole hours |
 
+### Error format
+
 Errors include a stable `code`, safe `message`, HTTP `status`, and `requestId`
 at the top level and inside `error`. All API responses include `X-Request-ID`.
 Clients should branch on `code`, not message text.
@@ -358,17 +386,19 @@ Send `Accept: application/problem+json` to receive errors as
 [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details instead.
 The body has `type` (this page's URL with `#<code>`), `title`, `status`,
 `detail`, `instance` (the request path), `code`, and `docs`, plus `ok`,
-`message`, `requestId`, and `error` as above; only the legacy
-`type: "notify.error"` is replaced. Without that `Accept` value, errors keep
-the `application/json` envelope.
+`message`, `requestId`, and `error` as above.
 
-A path in the table above called with a method it does not serve returns
-`405 method_not_allowed` with an `Allow` header that lists the methods it
-does serve. `HEAD` works wherever `GET` does and returns the same status and
-headers without a body, and `OPTIONS` on a known path returns `204` with
-`Allow`. Both need the API key except on `/` and `/health`. An unknown path
-returns `404 not_found`. Path validation runs first, so a malformed path
-segment returns `400 invalid_request` even with a wrong method.
+Only the legacy `type: "notify.error"` is replaced. Without that `Accept`
+value, errors keep the `application/json` envelope.
+
+Method handling:
+
+- A known path called with a method it does not serve returns
+  `405 method_not_allowed`; `Allow` lists the methods it serves.
+- `HEAD` returns the status and headers of `GET` without a body. `OPTIONS` on
+  a known path returns `204` with `Allow`. Both need the API key except on `/` and `/health`.
+- An unknown path returns `404 not_found`. Path validation runs first, so a
+  malformed path segment returns `400 invalid_request` even with a wrong method.
 
 ### Error codes
 

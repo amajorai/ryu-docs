@@ -7,29 +7,23 @@ Ryu uses ACP (Agent Client Protocol) to run agents as subprocesses. Core convert
 events into the Vercel AI SDK stream format. The agent's own tool loop reads files, runs commands,
 and edits code. The tables below list each agent, its Gateway egress behavior, and how to add it.
 
+<Figure name="engines" />
+
 ## Agent routing overview
 
 ```mermaid
 flowchart TD
-  A[User sends message] --> B[Core: agent_route]
-  B --> C{Agent type?}
-  C -->|OpenAI-compat| D[Plane A: via Gateway]
-  C -->|ACP| E[Plane B: own subprocess]
-
-  D --> F[Gateway: model routing + firewall + budget]
-  F --> G[Provider]
-
-  E --> H[Spawn subprocess]
-  H --> I{Gateway egress?}
-  I -->|Base-URL injection| J[Agent reads OPENAI_BASE_URL → Gateway]
-  I -->|Passthrough proxy| K[Claude/Codex → Gateway proxy]
-  I -->|No interception| L[Gemini/OpenClaw → bypass]
-  I -->|MCP bridge| M[Tool calls → Gateway governed]
-
-  J --> G
-  K --> G
-  L --> G
-  M --> G
+  A["User sends message"] --> B["Core: agent_route"]
+  B --> C{"Agent type?"}
+  C -->|"OpenAI-compat"| GW["Gateway: routing, firewall, budget"]
+  C -->|"ACP"| H["Spawn agent subprocess"]
+  H --> I{"Chat egress"}
+  I -->|"Base-URL injection"| GW
+  I -->|"Passthrough proxy"| PX["Gateway passthrough (Claude Code, Codex)"]
+  I -->|"No redirect hook"| P["Provider"]
+  H -->|"Tool calls"| MCP["Core MCP bridge (governed)"]
+  GW --> P
+  PX --> P
 ```
 
 ## Curated agents
@@ -54,15 +48,17 @@ Gateway depends on the agent:
 
 | Mechanism | Agents | How it works |
 |---|---|---|
-| **Base-URL injection** | `ryu`, `jay-jr`, `patrol`, `pi`, BYO OpenAI-compatible agents | Core injects `OPENAI_BASE_URL` pointing at the local Gateway (`/v1`). The agent's HTTP client routes through the Gateway's firewall, budget, and audit. |
+| **Base-URL injection** | `ryu`, `jay-jr`, `patrol`, `pi`, BYO OpenAI-compatible agents | Core injects `OPENAI_BASE_URL` pointing at the local Gateway (`/v1`). The agent's HTTP client routes through the Gateway's firewall, budget, and audit. The managed Pi also gets a `models.json` pin (see [The Ryu Agent](/docs/start-here/architecture/ryu-agent#the-gateway-integration)). |
 | **Passthrough proxy** | Claude Code, Codex | The agent speaks its native wire format (Anthropic Messages / OpenAI Responses). The Gateway runs a transparent reverse proxy that applies request-side DLP, forwards the caller's subscription credentials unchanged, and streams the response through response-side DLP. |
 | **No interception** | Gemini CLI, OpenClaw, Hermes | These agents ignore `OPENAI_BASE_URL` or use their own credential system. Their chat egress bypasses the Gateway. Tool egress is still governed via the MCP bridge. |
 
 New and auto-installed routable ACP agents start with their applicable Gateway path on, plus the
-MCP bridge and the current enabled tool/skill scope. An explicit per-agent `false` preference keeps
-model egress direct; the separate bridge preference can independently withhold Ryu tools. The
-no-interception agents remain chat-routing bypasses because their provider protocol cannot be
-redirected.
+MCP bridge and the current enabled tool/skill scope.
+
+- An explicit per-agent `false` preference keeps model egress direct.
+- The separate bridge preference can independently withhold Ryu tools.
+- The no-interception agents remain chat-routing bypasses because their provider protocol cannot
+  be redirected.
 
 See [Gateway for any agent](/docs/gateway/gateway-for-any-agent) for the wiring details.
 
@@ -70,17 +66,20 @@ See [Gateway for any agent](/docs/gateway/gateway-for-any-agent) for the wiring 
 
 Beyond the curated set, Core pulls agents from the official ACP registry
 (`https://cdn.agentclientprotocol.com/registry/v1/latest`). Core fetches them and installs them on
-demand. If the registry and its local cache are unavailable, Core keeps a small
-built-in fallback catalog for the commonly advertised package-based agents, so a cold or offline
-install does not make those Store entries disappear. A later launch refreshes the full registry.
+demand.
+
+If the registry and its local cache are unavailable, Core keeps a small built-in fallback catalog
+for the commonly advertised package-based agents. A cold or offline install therefore does not
+make those Store entries disappear. A later launch refreshes the full registry.
 
 ### Curated ACP agents (no CDN entry yet)
 
-In addition to the curated agents above, Core curates agents from
-`agentclientprotocol.com/get-started/agents` that have no CDN registry entry yet, so the Store
-catalog and spawn support them. Each ships its own ACP server over a documented CLI command. All of
-them make their own provider calls (Ryu cannot inject `OPENAI_BASE_URL`), so every entry carries
-`gateway_bypass: true`.
+Core also curates agents from `agentclientprotocol.com/get-started/agents` that have no CDN
+registry entry yet, so the Store catalog and spawn support them. Each ships its own ACP server over
+a documented CLI command.
+
+All of them make their own provider calls (Ryu cannot inject `OPENAI_BASE_URL`), so every entry
+carries `gateway_bypass: true` (`apps/core/src/sidecar/adapters/acp/registry_curated.rs`).
 
 | Canonical ID | Agent | ACP command | Install hint |
 |---|---|---|---|
@@ -172,7 +171,7 @@ client shows the same list. The local entry follows the model the Gateway curren
 | Gemini CLI | Gemini 2.5 Pro, Gemini 2.5 Flash |
 | Pi | Default (configurable in the Ryu agent's Pi settings, see [Pi Engine Internals](/docs/start-here/architecture/pi-engine)) |
 | Hermes | Hermes 3 |
-| Ryu / Local | Gemma 4 E2B (default), any installed model |
+| Ryu / Local | Gemma 4 E2B (default), or the model the Gateway currently serves |
 
 ## The agents catalog
 
@@ -190,11 +189,14 @@ agent. Only `ryu`, `jay-jr`, and `patrol` are installed by default. Every other 
 
 The agent picker includes an **Auto** entry that picks the agent for each turn from your rules. It
 uses the same strategies as smart routing (`llm`, `embedding`, or `keyword`), but each rule
-targets an agent ID instead of a model ID. When Auto switches agents, the previous agent's session
-stays warm for a switch back, and the conversation history is replayed into the new agent as prior
-context. Live state inside the subprocess, such as open files and working buffers, is not
-transferred. See [Routing](/docs/gateway/agent-auto) for the
-configuration and how the different "auto" settings relate.
+targets an agent ID instead of a model ID.
+
+When Auto switches agents, the previous agent's session stays warm for a switch back. The
+conversation history is replayed into the new agent as prior context. Live state inside the
+subprocess, such as open files and working buffers, is not transferred.
+
+See [Agent Auto Routing](/docs/gateway/agent-auto) for the configuration and how the different "auto"
+settings relate.
 
 ## Related
 

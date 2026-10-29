@@ -9,21 +9,24 @@ agent whose calls take that path. Results depend on workload and configuration, 
 and answer quality on representative requests.
 
 <Callout type="warn">
-  Compression is off by default. It applies to the default OpenAI-compatible chat path when enabled.
-  Gateway routing alone does not give compression coverage for every ACP runtime or protocol, and
-  provider-native passthrough and direct-egress paths do not use this transform. Compression coverage
-  is separate from firewall and audit coverage. Check
-  [runtime routing](/docs/surfaces/desktop/engines/agent-runtimes) and test the actual request path
-  before you rely on compression.
+  Compression is off by default. When enabled, it applies to the default OpenAI-compatible chat path.
+
+  - Gateway routing alone does not give compression coverage for every ACP runtime or protocol.
+  - Provider-native passthrough and direct-egress paths do not use this transform.
+  - Compression coverage is separate from firewall and audit coverage.
+
+  Check [runtime routing](/docs/surfaces/desktop/engines/agent-runtimes) and test the actual request
+  path before you rely on compression.
 </Callout>
 
 ## Why it lives in the Gateway
 
 Compressing a request changes what is shared with the provider. That is a Gateway concern, not a
-Core one (see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)). Compression is an
-egress transform on the Gateway pipeline, applied just before the upstream provider call. The
-compression service is set by configuration, so any service that implements headroom's
-`/v1/compress` contract works.
+Core one (see [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway)).
+
+Compression is an egress transform on the Gateway pipeline, applied just before the upstream
+provider call. The compression service is set by configuration, so any service that implements
+headroom's `/v1/compress` contract works.
 
 ## Enable it
 
@@ -47,31 +50,55 @@ before going upstream, subject to `min_messages`.
 
 ## How it works
 
-- **Core** decides what runs. It manages the optional `headroom proxy` process
-  (`apps/core/src/sidecar/headroom.rs`) and, when compression is enabled, sets the Gateway's
-  compression env on spawn.
-- **Gateway** owns the *transform*: `apps/gateway/src/compression.rs` posts the
-  request messages to the compression service and swaps in the compressed result
-  before the provider call - after routing/budgets, once for the whole fallback
-  chain, so routing, caching, and budgets stay intact.
-- **Screened**: the text the compression service changed or added is scanned by the
-  inbound firewall and locked guardrails before the provider call, so the service
-  cannot add content the original request would have been refused for. A media
-  URL (such as an `image_url`) is not scanned inbound, so one the service moves
-  into message text counts as new text and is scanned there. A match
-  is refused with a 403 under the `block` and `sanitize` policies (see
-  [Security](/docs/gateway/security)).
-- **Fails open on your own Gateway**: if headroom is absent, unhealthy, slow, or
-  returns an unusable response, a desktop or self-hosted Gateway leaves the
-  original messages untouched and the call proceeds normally. This fallback does not guarantee unchanged answer quality or rule out other request failures.
-- **Fails closed on the hosted Gateway**: Ryu's hosted Gateway refuses the
-  request instead, with a 503 whose `error.code` is `screening_unavailable` and a
-  `Retry-After` header. Retry after the stated delay.
-- A service that answers `compressed: false` has declined to compress, which is
-  not a failure: every Gateway sends the original messages.
+```mermaid
+flowchart TD
+  REQ["Request after routing and budgets"] --> MIN{"At least min_messages?"}
+  MIN -->|no| SEND["Send original messages"]
+  MIN -->|yes| SVC["POST /v1/compress"]
+  SVC -->|"compressed: false"| SEND
+  SVC -->|error or timeout| CUST{"Which Gateway?"}
+  CUST -->|"desktop or self-hosted"| SEND
+  CUST -->|hosted| REFUSE["503 screening_unavailable"]
+  SVC -->|compressed| SCAN["Re-scan changed text"]
+  SCAN -->|"match under block or sanitize"| BLOCK["403 refused"]
+  SCAN -->|otherwise| UP["Provider call"]
+  SEND --> UP
+```
 
-Compression reuses the Gateway's HTTP connections across requests. The compression timeout applies to
-each request. Conversations with fewer than `min_messages` messages skip the compression service.
+### Who does what
+
+- **Core decides what runs.** It manages the optional `headroom proxy` process
+  (`apps/core/src/sidecar/headroom.rs`). When compression is enabled, it sets the Gateway's
+  compression env on spawn.
+- **Gateway owns the transform.** `apps/gateway/src/compression.rs` posts the request messages to
+  the compression service and swaps in the compressed result before the provider call.
+- **It runs once per request.** The transform runs after routing and budgets, once for the whole
+  fallback chain, so routing, caching, and budgets stay intact.
+
+### Screening the result
+
+The text the compression service changed or added is scanned by the inbound firewall and locked
+guardrails before the provider call. The service cannot add content the original request would
+have been refused for.
+
+A media URL (such as an `image_url`) is not scanned inbound. If the service moves one into message
+text, it counts as new text and is scanned there. A match is refused with a 403 under the `block`
+and `sanitize` policies (see [Security](/docs/gateway/security)).
+
+### Failure behavior
+
+- **Fails open on your own Gateway.** If headroom is absent, unhealthy, slow, or returns an unusable
+  response, a desktop or self-hosted Gateway leaves the original messages untouched and the call
+  proceeds. This fallback does not guarantee unchanged answer quality or rule out other request
+  failures.
+- **Fails closed on the hosted Gateway.** Ryu's hosted Gateway refuses the request instead, with a
+  503 whose `error.code` is `screening_unavailable` and a `Retry-After` header. Retry after the
+  stated delay.
+- **A decline is not a failure.** A service that answers `compressed: false` has declined to
+  compress, and every Gateway sends the original messages.
+
+Compression reuses the Gateway's HTTP connections across requests. The compression timeout applies
+to each request. Conversations with fewer than `min_messages` messages skip the compression service.
 
 ## Configuration
 

@@ -7,7 +7,9 @@ tags: ["sdk", "server", "http", "sse", "openapi", "workflows", "agents"]
 `createRyuServer` from `@ryuhq/sdk/server` turns the agents, workflows, and tools you built with
 the TypeScript SDK into an HTTP API. The server is one Web-standard
 `fetch(request) => Response` handler, so the same object runs on Node, Bun, Deno, Cloudflare
-Workers, Vercel, and Netlify. `ryu dev --studio` and `ryu build` both serve it; see
+Workers, Vercel, and Netlify.
+
+`ryu dev --studio` and `ryu build` both serve it; see
 [Dev studio](/docs/extend/develop/sdk/studio) and [Build and deploy](/docs/extend/develop/sdk/deploy).
 
 ```typescript
@@ -79,11 +81,14 @@ Every route is under `basePath` and returns JSON errors shaped `{ "error": { "co
 | `POST /tools/:id/execute` | Run a tool: `{ "input": {…} }`. A tool marked `needsApproval` returns 403 `approval_required` unless `allowDirectApprovalTools` is set (the dev studio allows it) |
 | `GET /traces`, `GET /traces/:runId` | Recent runs of every kind (`?kind=agent&target=support&limit=20`) and one run's full trace |
 
-Send every `POST` as `application/json` (`curl -H 'content-type: application/json' -d …`), even
-when the body is empty; any other content type returns 415, so a page on another site cannot post
-to the API without a CORS preflight. Request bodies are limited to 1 MiB. A tool that rejects its
-input returns 422. An agent run that ends in an error returns 500 with its `runId`, so you can open
-the trace.
+Request rules and status codes:
+
+- Send every `POST` as `application/json` (`curl -H 'content-type: application/json' -d …`), even
+  when the body is empty. Any other content type returns 415, so a page on another site cannot
+  post to the API without a CORS preflight.
+- Request bodies are limited to 1 MiB. A larger body returns 413.
+- A tool that rejects its input returns 422.
+- An agent run that ends in an error returns 500 with its `runId`, so you can open the trace.
 
 ### Streaming
 
@@ -110,21 +115,44 @@ event: done
 data: {"runId":"3f0c…","status":"success"}
 ```
 
-Agent streams carry the agent's own events (`text`, `tool_call`, `tool_result`,
-`approval_requested`, `auth_required`, `output_repair`, `result`, `error`, and `handoff` for
-networks). Workflow streams send one frame per chunk, named by its mode (`events`, `updates`,
-`values`), then `result` with the outcome. Every stream ends with `done`. Idle streams send a
-keep-alive comment every 15 seconds.
+- Agent streams carry the agent's own events (`text`, `tool_call`, `tool_result`,
+  `approval_requested`, `auth_required`, `output_repair`, `result`, `error`, and `handoff` for
+  networks).
+- Workflow streams send one frame per chunk, named by its mode (`events`, `updates`, `values`),
+  then `result` with the outcome.
+- Every stream ends with `done`. Idle streams send a keep-alive comment every 15 seconds.
 
 ### Tool approvals
 
 When a streamed agent calls a tool declared with `needsApproval: true`, the stream sends
 `approval_requested` with an `approvalId` and waits. Post the decision to
-`/approvals/:approvalId`. An approved call runs; a denied one returns
-`{ "error": "tool execution was not approved" }` to the model, which can carry on without it. A
-decision that does not arrive within `approvalTimeoutMs`, or a client that disconnects, counts as a
-denial. The same applies to every agent the run reaches: members of a network or supervisor and
-targets of a `handoff()`. An agent that has its own `approvalHandler` keeps using it.
+`/approvals/:approvalId`.
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant S as createRyuServer
+  participant A as Agent
+  C->>S: POST /agents/:id/stream
+  A->>S: Call needsApproval tool
+  S-->>C: event approval_requested (approvalId)
+  C->>S: POST /approvals/:approvalId
+  alt approved
+    S->>A: Run the tool
+  else denied, timed out, or disconnected
+    S->>A: tool execution was not approved
+  end
+  S-->>C: Remaining events, then done
+```
+
+- An approved call runs.
+- A denied call returns `{ "error": "tool execution was not approved" }` to the model, which can
+  carry on without it.
+- A decision that does not arrive within `approvalTimeoutMs`, or a client that disconnects, counts
+  as a denial.
+
+The same applies to every agent the run reaches: members of a network or supervisor and targets of
+a `handoff()`. An agent that has its own `approvalHandler` keeps using it.
 
 A `{ "messages": [...] }` body continues a conversation the way a new prompt would, including
 following `handoff()` tools.
@@ -135,12 +163,16 @@ following `handoff()` tools.
 ### Workflow runs and resume
 
 A workflow step that calls `suspend()` ends the run with `"status": "suspended"` and the suspended
-steps' payloads. Resume it with `POST /workflows/:id/runs/:runId/resume`. The server records each
-run's snapshot in the run store, so a resume works even when the original run object is gone (a
-different serverless invocation, or a restarted process with a persistent `runStore`). A resume
-marks the run as running in the store before it executes, so a second resume of the same run gets
-409; a resume that names a step that is not suspended also gets 409 and leaves the run suspended.
-With the default in-memory store, history lasts for the life of the process.
+steps' payloads. Resume it with `POST /workflows/:id/runs/:runId/resume`.
+
+The server records each run's snapshot in the run store. A resume works even when the original run
+object is gone (a different serverless invocation, or a restarted process with a persistent
+`runStore`). With the default in-memory store, history lasts for the life of the process.
+
+A resume marks the run as running in the store before it executes. Two cases return 409:
+
+- A second resume of the same run.
+- A resume that names a step that is not suspended. The run stays suspended.
 
 ### Persisting runs
 

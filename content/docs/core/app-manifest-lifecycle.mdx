@@ -3,16 +3,17 @@ title: "App Manifest and Lifecycle"
 description: "Reference for how Core loads, validates, installs, enables, disables, updates, and uninstalls manifest.json plugins and their sidecars"
 ---
 
-A Ryu **plugin** is a bundle described by a `manifest.json` manifest: it names the
-[Runnables](/docs/start-here/architecture/runnable-model) it ships, the permission grants it needs,
-and an optional Companion surface. Core owns the lifecycle (what runs - load, validate, install,
-enable, disable, update). The Gateway owns enforcement (what is allowed - grant validation, signing).
+A Ryu **plugin** is a bundle described by a `manifest.json` manifest. The manifest names the
+[Runnables](/docs/start-here/architecture/runnable-model) the plugin ships, the permission grants it
+needs, and an optional Companion surface.
 
-For the full manifest field schema, see [Plugin API](/docs/extend/develop/sdk/plugin-api). For the
-grant and signing model, see [Governance](/docs/gateway/governance).
+- **Core owns the lifecycle** (what runs): load, validate, install, enable, disable, update.
+- **The Gateway owns enforcement** (what is allowed): grant validation and signing. See
+  [Governance](/docs/gateway/governance).
 
-Source: `apps/core/src/plugin_manifest/` (manifest type, loader, per-kind schema) and
-`apps/core/src/plugins/` (lifecycle operations, system registry).
+The full manifest field schema is in [Plugin API](/docs/extend/develop/sdk/plugin-api). The source is
+`apps/core/src/plugin_manifest/` (manifest type, loader, per-kind schema) and `apps/core/src/plugins/`
+(lifecycle operations, system registry).
 
 Only system functionality is inseparable from Core. Ordinary first-party apps and plugins are
 official marketplace packages. Core records the marketplace signature and publisher verification at
@@ -25,10 +26,9 @@ read so older plugins keep loading (`MANIFEST_FILE_NAMES` in
 `apps/core/src/plugin_manifest/mod.rs`). A `plugin.json` that is an Agent Plugins spec file, not a
 native manifest, is skipped.
 
-The runtime loader (`PluginManifestLoader::load_runtime`) loads system manifests
-and installed package manifests from a directory resolved in this order. The
-catalog may retain a separate official index for discovery, but ordinary
-marketplace packages are not runtime-loaded from that index.
+The runtime loader (`PluginManifestLoader::load_runtime`) loads system manifests and installed
+package manifests from a directory resolved in the order below. The catalog may keep a separate
+official index for discovery, but Core does not runtime-load ordinary marketplace packages from it.
 
 | Order | Source | Notes |
 |---|---|---|
@@ -64,11 +64,12 @@ app has no records yet.
 ## Per-kind Runnable validation
 
 Every `RunnableEntry` carries a `kind` discriminant and an optional typed `config`. The loader runs
-`validate_runnable` (`crates/core/kernel-contracts/src/schema.rs`, re-exported by
-`apps/core/src/plugin_manifest/schema.rs`) on each entry and rejects the whole
-manifest if any entry fails its per-kind contract. There is no `_ =>` fallback arm, so every one of
-the eight [`RunnableKind`](/docs/start-here/architecture/runnable-model) variants is checked
-explicitly.
+`validate_runnable` on each entry and rejects the whole manifest if any entry fails its per-kind
+contract. The function lives in `crates/core/kernel-contracts/src/schema.rs` and is re-exported by
+`apps/core/src/plugin_manifest/schema.rs`.
+
+There is no `_ =>` fallback arm, so every one of the eight
+[`RunnableKind`](/docs/start-here/architecture/runnable-model) variants is checked explicitly.
 
 | Kind | Config required | Required fields |
 |---|---|---|
@@ -86,9 +87,10 @@ expected shape all produce a descriptive error that names the runnable id and ki
 
 HTTP tool Runnables can set `config.caller_agent_query` to an ASCII query-parameter name. Core then
 appends the verified calling Agent id to the tool URL for each invocation. The sidecar can use that
-identity to select an Agent-scoped session without trusting a model-supplied argument. A manifest
-cannot take ownership of a query parameter that is already present in its URL; Core rejects the
-call instead of overwriting it.
+identity to select an Agent-scoped session without trusting a model-supplied argument.
+
+A manifest cannot take ownership of a query parameter that is already present in its URL. Core
+rejects the call instead of overwriting it.
 
 ## Loader validation rules
 
@@ -97,11 +99,22 @@ violation rejects that manifest only; the others continue loading.
 
 | Rule | Behavior |
 |---|---|
-| Id format | A flat id, or a scoped `@scope/name` id with exactly one `/`. A flat id and each half of a scoped id use only `[a-zA-Z0-9.-_]`, contain no `..`, have no leading or trailing `.`, and have no leading `-`. The whole id is at most 128 bytes, and `core` is reserved. The id reaches filesystem paths, so these rules block path traversal (`validate_plugin_id` in `crates/core/kernel-contracts/src/manifest.rs`) |
+| Id format | A flat id, or a scoped `@scope/name` id with exactly one `/`. See [Plugin id rules](#plugin-id-rules) |
 | Semver | `version` must parse as semver; otherwise rejected |
 | Duplicate id | Across system and installed manifests, the first occurrence with an id wins; later duplicates are rejected |
 | `engines.ryu` pin | When present, it must parse as a semver requirement and the running Core version (`CARGO_PKG_VERSION`) must satisfy it; otherwise rejected |
 | `contributes` cross-validation | Every runnable id referenced in `contributes` must resolve to an entry in `runnables` (declare-by-id); a typo is caught at load |
+
+### Plugin id rules
+
+The id reaches filesystem paths, so `validate_plugin_id` (`crates/core/kernel-contracts/src/manifest.rs`)
+blocks path traversal. A flat id, and each half of a scoped id:
+
+- uses only ASCII letters, digits, `.`, `-`, and `_`;
+- contains no `..`;
+- has no leading or trailing `.`, and no leading `-`.
+
+The whole id is at most 128 bytes. `core` is reserved for Core-originated kernel events.
 
 ## Lifecycle operations
 
@@ -116,51 +129,81 @@ SQLite `PluginStore`. Each maps to an HTTP handler in `apps/core/src/server/mod.
 | `uninstall_app` | Applies the same disable/dependent checks, then removes the target lifecycle record and its owned scheduler jobs |
 | `update_app` | Compares semver. Refuses a downgrade (new < installed) unless `force = true`. A same-version update is a no-op. Does not re-enable a disabled plugin |
 
-Uploaded self-contained bundles follow the same loader normalization as the compiled manifest
-registry before an enabled app is reactivated. Core resolves legacy dependency aliases, hydrated
-`code_file` bodies, and the manifest's trust digest once, so an update cannot move a first-party
-sidecar to the Community grant path or leave its managed process unregistered.
+```mermaid
+stateDiagram-v2
+  [*] --> Available
+  Available --> Installed: install (lands disabled)
+  Installed --> Enabled: enable, Gateway approves grants
+  Installed --> Installed: Gateway denies or is unreachable
+  Enabled --> Installed: disable (grants cleared)
+  Enabled --> Enabled: update
+  Installed --> Installed: update (stays disabled)
+  Installed --> Available: uninstall
+  Enabled --> Available: uninstall
+```
 
-What an update does to the app's agents depends on how it is applied. Updating an uploaded bundle,
-or an update your organization's fleet applies, deactivates the old version and activates the new
-one. It keeps every app agent the new version still declares, together with the user's settings on
-it, such as its account limit, and refreshes the fields the manifest owns (name, prompt, tools and
-model) from the new version, clearing a prompt or model the new version no longer sets. Only agents
-the new version drops are removed. A Store update or a rollback doesn't reactivate the app: it keeps
-every existing agent as it is, including one the new version no longer declares, and an agent the
-new version adds is created the next time Ryu starts or the app is enabled.
+### Install and enable
 
-Disabling an app removes its agents, so enabling it again recreates them from the manifest, with its `identity_mode` and no
-account limit.
+Install always lands disabled. Enabling is the gated step:
 
-On every update path the new version's `identity_mode` is reconciled, never forced: Core applies it
-only when it narrows the agent (`managed`, then `mixed`, then `individual`), the user never changed
-the mode, and the agent isn't locked. Anything else, including any widening, is kept as a pending
-request. `GET /api/agents/:id` returns it as `app_identity.pending_mode`, next to
-`app_identity.app_mode` (the mode the app last set). Saving the agent with `identity_mode` set to the
-pending mode accepts it; `"dismiss_pending_identity_mode": true` in the same `PUT` body keeps the
-current mode. The CLI shows the request (`ryu-cli agents show`) and can dismiss it (`ryu-cli agents identity
-<id> dismiss`). The desktop app shows it in the agent editor's identity section with **Accept** and
-**Keep current**; the mobile app doesn't show it yet. The Store update, bundle update and
-rollback responses list affected agents in `agent_identity`, each with a `status` of `narrowed` or
-`pending`. A fleet update has no caller to answer, so it only logs them.
-
-Install always lands disabled. Enabling is the gated step: Core calls the Gateway's
-`/v1/grants/validate` for every grant the manifest declares and stores the result, applying no
-inline policy of its own. If the Gateway denies a grant, the plugin stays disabled. If the Gateway
-is unreachable, the enable fails closed. Enabling with an empty grant list always succeeds (nothing
-to validate). See [Governance](/docs/gateway/governance) for how grants are authorised and signed.
-
-There is no `preinstalled` manifest field and no live "installed but disabled" seed category. A
-fresh store receives lifecycle records only for `CORE_PREINSTALLED`, and those records are seeded
-enabled. Every other package is available in the Store without a record until the user explicitly
-installs it. An explicit install may still land disabled while the user reviews its grants; that is
-an actual user install, not fresh-install provisioning.
+- Core calls the Gateway's `/v1/grants/validate` for every grant the manifest declares and stores
+  the result. Core applies no inline policy of its own.
+- If the Gateway denies a grant, the plugin stays disabled.
+- If the Gateway is unreachable, the enable fails closed.
+- Enabling with an empty grant list always succeeds, because there is nothing to validate.
 
 <Callout type="info">
 If enabling a plugin fails because the Gateway is unavailable, restore the configured Gateway
 connection and retry. An unavailable policy service does not approve the requested grants.
 </Callout>
+
+There is no `preinstalled` manifest field and no "installed but disabled" seed category. A fresh
+store receives lifecycle records only for `CORE_PREINSTALLED`, and those records are seeded enabled.
+Every other package is available in the Store without a record until the user installs it. An
+explicit install can still land disabled while the user reviews its grants.
+
+### Updates and bundles
+
+Uploaded self-contained bundles go through the same loader normalization as the compiled manifest
+registry before an enabled app is reactivated. Core resolves legacy dependency aliases, hydrated
+`code_file` bodies, and the manifest's trust digest once. An update therefore cannot move a
+first-party sidecar to the Community grant path or leave its managed process unregistered.
+
+### What an update does to app agents
+
+The result depends on how the update is applied:
+
+| Update path | Effect on app agents |
+|---|---|
+| Uploaded bundle update, or an update your organization's fleet applies | Deactivates the old version and activates the new one. Keeps every agent the new version still declares, with the user's settings on it (such as its account limit). Refreshes the manifest-owned fields (name, prompt, tools, model), and clears a prompt or model the new version no longer sets. Removes only agents the new version drops |
+| Store update or rollback | Does not reactivate the app. Keeps every existing agent as it is, including one the new version no longer declares. An agent the new version adds is created the next time Ryu starts or the app is enabled |
+
+Disabling an app removes its agents. Enabling it again recreates them from the manifest, with its
+`identity_mode` and no account limit.
+
+### Identity mode on update
+
+On every update path, Core reconciles the new version's `identity_mode` and never forces it. Core
+applies it only when all of these are true:
+
+- it narrows the agent (`managed`, then `mixed`, then `individual`);
+- the user never changed the mode;
+- the agent is not locked.
+
+Anything else, including any widening, is kept as a pending request:
+
+- `GET /api/agents/:id` returns it as `app_identity.pending_mode`, next to `app_identity.app_mode`
+  (the mode the app last set).
+- Saving the agent with `identity_mode` set to the pending mode accepts it.
+  `"dismiss_pending_identity_mode": true` in the same `PUT` body keeps the current mode.
+- The CLI shows the request (`ryu-cli agents show`) and can dismiss it
+  (`ryu-cli agents identity <id> dismiss`).
+- The desktop app shows it in the agent editor's identity section with **Accept** and
+  **Keep current**. The mobile app does not show it yet.
+
+The Store update, bundle update, and rollback responses list affected agents in `agent_identity`,
+each with a `status` of `narrowed` or `pending`. A fleet update has no caller to answer, so it only
+logs them.
 
 ### Routes
 
@@ -171,50 +214,62 @@ older clients keep working.
 GET  /api/plugins                 list loaded manifests (system + user-installed)
 GET  /api/plugins/catalog         browse installable plugins from the remote registry
 POST /api/plugins/install         install by fetching manifest.json from a URL
+POST /api/plugins/install-bundle  install from a local self-contained bundle
 POST /api/plugins/reload          re-scan system manifests + the plugins dir (no restart)
 POST /api/plugins/:id/install     record as installed (disabled)
 POST /api/plugins/:id/enable      validate grants via Gateway, then enable
 POST /api/plugins/:id/disable     disable + clear approved grants
 POST /api/plugins/:id/update      update to a new manifest version
+POST /api/plugins/:id/rollback    restore the version the last update replaced
 POST /api/plugins/:id/uninstall   uninstall (see Uninstall and app data)
 GET  /api/plugins/:id/uninstall-data  list optional data the app owns
 ```
 
 ### Dry-run lifecycle plans
 
-Lifecycle operations that can change a node expose the same validation as a
-read-only plan. Plans never write the plugin store, activate or deactivate a
-runtime, remove scheduler jobs, or delete a plugin directory. They may still read
-the loaded manifest set and call the Gateway's grant-validation seam, because those
-checks are needed to report an accurate result.
+Lifecycle operations that can change a node expose the same validation as a read-only plan.
 
-Use `dryRun: true` in install and enable request bodies, `dryRun=true` on disable
-and uninstall query strings, and `dryRun: true` in an update body. The response is
-marked `dryRun: true` and uses `wouldEnable`, `wouldDisable`, `wouldRemove`, or
-`installedDependencies` fields; the requested state is not persisted. `ryu-cli` exposes the same
-contract through `ryu-cli add|enable|disable|uninstall <id> --dry-run`; add `--json` for automation.
+- Plans never write the plugin store, activate or deactivate a runtime, remove scheduler jobs, or
+  delete a plugin directory.
+- Plans may still read the loaded manifest set and call the Gateway's grant-validation seam, because
+  those checks are needed for an accurate result.
 
-An enable plan resolves the dependency closure and validates each plugin's own
-declared grants. A disable or uninstall plan reports the reverse-topological blast
-radius and applies the same mandatory, required, protected-plugin, and
-dependent checks as the live operation.
+| Operation | How to ask for a plan |
+|---|---|
+| Install, enable, update | `dryRun: true` in the request body |
+| Disable, uninstall | `dryRun=true` in the query string |
+| `ryu-cli` | `ryu-cli add\|enable\|disable\|uninstall <id> --dry-run`, plus `--json` for automation |
+
+The response is marked `dryRun: true` and uses the `wouldEnable`, `wouldDisable`, `wouldRemove`, or
+`installedDependencies` fields. The requested state is not persisted.
+
+- An enable plan resolves the dependency closure and validates each plugin's own declared grants.
+- A disable or uninstall plan reports the reverse-topological blast radius. It applies the same
+  mandatory, required, protected-plugin, and dependent checks as the live operation.
 
 ### Uninstall and app data
 
-Uninstalling always removes the package, its runtime contributions, approved grants, bundled
-skills, owned sidecar binaries, and the app's **saved secrets** (its encrypted credentials). A
-credential does not outlive the app that was trusted with it.
+Uninstalling always removes:
+
+- the package and its runtime contributions;
+- approved grants and bundled skills;
+- owned sidecar binaries;
+- the app's **saved secrets** (its encrypted credentials). A credential does not outlive the app
+  that was trusted with it.
 
 The app's key-value storage is **kept** by default, so reinstalling the app finds its saved data
 again. To delete it too, check **Also delete this app's saved data** in the Desktop confirmation,
 or send `{ "delete_storage": true }` in the `POST /api/plugins/:id/uninstall` body.
 
-`GET /api/plugins/:id/uninstall-data` lists the other optional data the app owns (settings,
-shortcuts, scheduled automations, connected accounts, Spaces, and app-declared data categories).
-Name the rows to delete in the body's `cleanup` array. App-declared categories are purged by the
-app itself, so Core asks the app to delete them **before** it stops the app. If a purge or any
-other optional cleanup fails, the uninstall still completes and the response lists the failure in
-`cleanup_errors`. A refused uninstall (protected plugin, enabled dependents) deletes nothing.
+`GET /api/plugins/:id/uninstall-data` lists the other optional data the app owns: settings,
+shortcuts, scheduled automations, connected accounts, Spaces, and app-declared data categories.
+Name the rows to delete in the body's `cleanup` array.
+
+- The app purges its own declared categories, so Core asks the app to delete them **before** it
+  stops the app.
+- If a purge or any other optional cleanup fails, the uninstall still completes. The response lists
+  the failure in `cleanup_errors`.
+- A refused uninstall (protected plugin, enabled dependents) deletes nothing.
 
 ## Trust tiers, sidecars, and activation
 

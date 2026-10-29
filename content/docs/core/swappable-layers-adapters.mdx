@@ -42,12 +42,30 @@ Most providers are a rename plus a field map, and that is expressed as JSON in t
 
 ## Adapters: when no JSON can express the shape
 
-Some provider shapes are beyond any declarative field. An async job API starts work at one endpoint
-and reads results from another. A token vocabulary needs normalizing. A request body needs a value
-that only exists per install.
+Some provider shapes are beyond any declarative field:
+
+- An async job API starts work at one endpoint and reads results from another.
+- A token vocabulary needs normalizing.
+- A request body needs a value that only exists per install.
 
 For those, a provider ships an **adapter**: JavaScript that receives the canonical arguments and
-returns the canonical result, running in the same JS sandbox as an `inline_js` plugin tool.
+returns the canonical result. It runs in the same JS sandbox as an `inline_js` plugin tool.
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant Facade as Capability facade
+  participant Adapter as Adapter (JS sandbox)
+  participant Tool as Provider tool (HTTP or MCP)
+  Agent->>Facade: web.crawl (canonical args)
+  Facade->>Adapter: input, defaults
+  Adapter->>Tool: callTool(args)
+  Tool-->>Adapter: provider result
+  Adapter->>Tool: callNamed(listed id, args)
+  Tool-->>Adapter: provider result
+  Adapter-->>Facade: canonical result
+  Facade-->>Agent: canonical result
+```
 
 ```json
 "web.crawl": {
@@ -61,9 +79,11 @@ returns the canonical result, running in the same JS sandbox as an `inline_js` p
 
 Write the body in its own file, `adapters/<verb>.js`, next to `manifest.json`. The file is a
 fragment rather than a module: it has no `import` or `export`, and a top-level `return` hands back
-the canonical result. `code_file` is the authoring form and `code` is the wire form. Ryu reads the
-file when it loads a plugin from a directory, and `bunx ryu pack <dir>` inlines it into `code`, so
-the published bundle carries the whole body inside the signed manifest.
+the canonical result.
+
+`code_file` is the authoring form and `code` is the wire form. Ryu reads the file when it loads a
+plugin from a directory. `bunx ryu pack <dir>` inlines it into `code`, so the published bundle
+carries the whole body inside the signed manifest.
 
 The adapter is handed three things:
 
@@ -78,22 +98,34 @@ transformation twice and only one runs.
 
 ### Shipping a custom adapter
 
-Start from the adapter template, which emits all of the pieces below already wired together: an
-HTTP provider tool runnable, a `provides` binding whose `adapter.code_file` is `adapters/search.js`,
-the `tool:execute` and `tool:http-egress:<host>` grants, golden cases in `cases.json`, and a
-`bun test` suite that runs them in a context with only the globals the sandbox provides:
+Start from the adapter template:
 
 ```bash
 bunx create-ryu-app my-adapter --template adapter
 ```
 
+It emits these pieces already wired together:
+
+- an HTTP provider tool runnable;
+- a `provides` binding whose `adapter.code_file` is `adapters/search.js`;
+- the `tool:execute` and `tool:http-egress:<host>` grants;
+- golden cases in `cases.json`;
+- a `bun test` suite that runs them with only the globals the sandbox provides.
+
+Then:
+
 1. Declare the provider tool the adapter calls as one of your own tools: an HTTP tool runnable, or
    a tool served by one of your `mcp_servers`. `tool` and every `adapter.tools` id must belong to
-   your plugin. Mark the `provides` entry `"selectable": true` so it can be picked. `callTool`
-   returns what that tool returns: an HTTP tool answers `{status, body}`, or the parsed body
-   itself on a 2xx when it sets `"unwrap_body": true`, and an MCP tool answers its MCP result.
-   An HTTP tool with `"fail_open": true` answers `{available: false, reason, hint}` on a 401/403
-   or an unreachable host. Read the shape your tool actually produces.
+   your plugin. Mark the `provides` entry `"selectable": true` so it can be picked.
+
+   `callTool` returns what that tool returns. Read the shape your tool actually produces:
+
+   | Tool | Result |
+   |---|---|
+   | HTTP tool | `{status, body}` |
+   | HTTP tool with `"unwrap_body": true` | The parsed body itself, on a 2xx |
+   | HTTP tool with `"fail_open": true` | `{available: false, reason, hint}` on a 401/403 or an unreachable host |
+   | MCP tool | Its MCP result |
 2. Add `"tool:execute"` to `permission_grants`. Without it the provider is still listed in the
    layer picker, but every call through the adapter is refused. An HTTP provider tool also needs
    `"tool:http-egress:<host>"` for the host in its `url`; change the two together.

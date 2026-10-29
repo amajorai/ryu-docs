@@ -28,17 +28,17 @@ an OpenAI-compatible image provider, or a cloud provider with its own queue and 
 The upstream provider defines model support. A listed provider does not mean every model in its
 catalog supports both image and video, or that output is available immediately.
 
-Generated audio (music and sound effects) is available through Fal and Replicate only, because
-their queues accept any model ID with that model's own input fields. Runway, Topaz and BFL Flux
-have fixed video schemas and reject audio jobs.
+### Gemini image generation
 
-For Gemini image generation, configure a Gemini API key in the GenAI provider and route the image
-modality to `genai` with an image model such as `gemini-3.1-flash-image`. Ryu sends the prompt to
-Google's native image endpoint and returns base64 image data through
-`POST /v1/images/generations`. One image is supported per request. The standard square,
-landscape, and portrait `size` values map to an aspect ratio; the exact pixels depend on the
-selected Gemini model. Gemini returns `b64_json` image data; a request for a hosted `url` response
-is rejected. Other GenAI chat adapters do not become image providers automatically.
+Configure a Gemini API key in the GenAI provider and route the image modality to `genai` with an
+image model such as `gemini-3.1-flash-image`. Ryu sends the prompt to Google's native image
+endpoint and returns base64 image data through `POST /v1/images/generations`.
+
+- One image is supported per request.
+- The standard square, landscape, and portrait `size` values map to an aspect ratio. The exact
+  pixels depend on the selected Gemini model.
+- Gemini returns `b64_json` image data. A request for a hosted `url` response is rejected.
+- Other GenAI chat adapters do not become image providers automatically.
 
 ## Local media
 
@@ -59,60 +59,90 @@ Cloud video is job-based because generation can take minutes:
 3. Poll the job until it succeeds or fails.
 4. Read the normalized media output and provider-specific raw result when available.
 
-The Gateway retains the submitting account, endpoint and HTTP client and maps provider status
-into one job vocabulary. Credential rejection, an unavailable proxy, rate limits or an unreadable
-poll response do not establish that the upstream job failed. The job stays nonterminal and
-`poll_blocked.message` explains the polling problem. No new generation is submitted.
+The Gateway keeps the submitting account, endpoint, and HTTP client, and maps provider status into
+one job vocabulary.
 
-Replicate supports explicit outbound proxy-pool assignments. Each prediction inherits the proxy
-used to create it. Queued-job polling keeps the actual selected client while the Gateway is
-running, including after the proxy pool's ordinary affinity entries expire or are evicted.
-An unavailable origin proxy blocks polling; it does not move the accepted job or submit the
-work again through another provider.
+```mermaid
+stateDiagram-v2
+  [*] --> queued: job accepted
+  queued --> running
+  queued --> succeeded
+  queued --> failed
+  running --> succeeded
+  running --> failed
+  queued --> queued: blocked poll sets poll_blocked
+  running --> running: blocked poll sets poll_blocked
+  succeeded --> [*]
+  failed --> [*]
+```
 
-Replicate supports multiple API keys through `providers.replicate.api_keys` or Gateway → API keys.
-New predictions rotate among eligible accounts; quota or account-credit rejection can select
-another key before acceptance. Submit and poll stay on the chosen account. Newly created video
-jobs retain an opaque account reference, so reordering configured keys does not switch the job's
-credential. Accepted queued work holds its polling credential until a genuine terminal result
-or idle expiry. This does not revoke an upstream credential or provide recovery after restart.
+Credential rejection, an unavailable proxy, rate limits, or an unreadable poll response do not
+establish that the upstream job failed. The job stays nonterminal and `poll_blocked.message`
+explains the polling problem. No new generation is submitted.
 
-Fal also supports proxy-pool assignments. Queue submission, status checks, and result fetches share
-one job binding while the Gateway is running. Job references must stay on the configured queue
-origin before Ryu attaches its credential. An accepted request with an unreadable queue response,
-missing reference, timeout, or unavailable result returns an error without resubmitting generation.
+### Replicate jobs
 
-Fal supports multiple keys through `providers.fal.api_keys` and the Gateway key editor. New queued
-work rotates accounts; quota or credit rejection can select another key before acceptance. Status
-and result requests keep the captured account, endpoint and client without consulting current
-account selection. Reordering accounts cannot retarget an accepted queued job.
+- **Keys** - multiple API keys through `providers.replicate.api_keys` or **Gateway → API keys**.
+  New predictions rotate among eligible accounts, and quota or account-credit rejection can select
+  another key before acceptance.
+- **Account binding** - submit and poll stay on the chosen account. Newly created video jobs keep
+  an opaque account reference, so reordering configured keys does not switch the job's credential.
+- **Proxy binding** - each prediction inherits the proxy used to create it. Polling keeps the
+  actual selected client while the Gateway is running, even after the proxy pool's ordinary
+  affinity entries expire or are evicted.
+- **Blocked polling** - an unavailable origin proxy blocks polling. It does not move the accepted
+  job or submit the work again through another provider.
+
+Accepted queued work holds its polling credential until a genuine terminal result or idle expiry.
+This does not revoke an upstream credential or provide recovery after restart.
+
+### Fal jobs
+
+- **Keys** - multiple keys through `providers.fal.api_keys` and the Gateway key editor. New queued
+  work rotates accounts, and quota or credit rejection can select another key before acceptance.
+- **Proxy pools** - Fal supports explicit outbound proxy-pool assignments.
+- **Job binding** - queue submission, status checks, and result fetches share one binding to the
+  captured account, endpoint, and client while the Gateway is running. Reordering accounts
+  cannot retarget an accepted queued job.
+- **Origin check** - job references must stay on the configured queue origin before Ryu attaches
+  its credential.
+- **Errors** - an accepted request with an unreadable queue response, missing reference, timeout,
+  or unavailable result returns an error without resubmitting generation.
 
 ### Topaz video enhancement
 
 The direct `topaz` provider enhances an existing video. Configure its key under
 **Gateway → API keys → Provider keys**, or use `[providers.topaz]` with `api_key`, optional
 `api_keys`, and the default `base_url = "https://api.topazlabs.com"`.
-Gateway discovers enhancement models from Topaz's public system-status endpoint.
-Its catalog may include models such as `apo-8`; the live response determines
-which models Topaz currently accepts. If discovery is unavailable, Gateway does
-not invent a fixed Topaz model list. A model mapping can still name a known
-model explicitly.
 
-Send `POST /v1/videos/generations` with `model: "apo-8"`, a `source` containing
-`container` and `external: { "provider": "s3", "presignedUrl": "https://…" }`, a
-nonempty `filters` array whose first model is `apo-8`, and an `output.resolution`
-with positive width and height. The presigned URL must resolve to a public HTTPS
-address. Topaz fetches the source from that URL; Gateway does not download it.
-Do not place an internal or long-lived source URL there. The API key, selected
-outbound proxy, and polling client remain bound to the accepted job. New jobs
+Gateway discovers enhancement models from Topaz's public system-status endpoint. Its catalog may
+include models such as `apo-8`; the live response determines which models Topaz currently accepts.
+If discovery is unavailable, Gateway does not invent a fixed model list, but a model mapping can
+still name a known model explicitly.
+
+Send `POST /v1/videos/generations` with:
+
+- `model: "apo-8"`;
+- a `source` containing `container` and
+  `external: { "provider": "s3", "presignedUrl": "https://…" }`;
+- a nonempty `filters` array whose first model is `apo-8`;
+- an `output.resolution` with positive width and height.
+
+The presigned URL must resolve to a public HTTPS address. Topaz fetches the source from that URL;
+Gateway does not download it. Do not place an internal or long-lived source URL there.
+
+The API key, selected outbound proxy, and polling client stay bound to the accepted job. New jobs
 can rotate keys after a definitive rate-limit or credit rejection.
 
 This route uses Topaz's [Express video request](https://developer.topazlabs.com/reference/video/create-express-request/create-express-video-request)
-with external storage. It does not accept local-file uploads, Topaz upload URLs,
-destination storage, or webhooks. The job is polled at
-`GET /v1/videos/generations/{id}` and returns the enhanced video's signed URL
-when complete. Save the result before Topaz's URL expires. The source and
-enhancement are processed by Topaz and may incur provider charges.
+with external storage. It does not accept local-file uploads, Topaz upload URLs, destination
+storage, or webhooks. Poll `GET /v1/videos/generations/{id}`; it returns the enhanced video's
+signed URL when complete.
+
+<Callout type="warn">
+Save the result before Topaz's URL expires. The source and enhancement are processed by Topaz and
+may incur provider charges.
+</Callout>
 
 ## Video reference inputs
 
@@ -132,11 +162,13 @@ Media values are base64 `data:` URIs (images: PNG, JPEG or WebP; an `image/jpg` 
 engine accepts inline data only. A request body may be up to 64 MiB.
 
 When the Gateway firewall is on, it scans every text field of a media request, not only the
-prompt. Base64 image, video and audio `data:` URIs are skipped as binary media. Any other `data:`
-value, such as `data:text/plain,…`, is scanned as text. For a presigned storage URL (S3, GCS,
-Azure SAS or CloudFront), the firewall scans the host and path but not the signed query string,
-so the provider can still fetch the file. A credential in the path, or in an ordinary query
-string, is still blocked or redacted.
+prompt.
+
+- Base64 image, video, and audio `data:` URIs are skipped as binary media. Any other `data:`
+  value, such as `data:text/plain,…`, is scanned as text.
+- For a presigned storage URL (S3, GCS, Azure SAS, or CloudFront), the firewall scans the host and
+  path but not the signed query string, so the provider can still fetch the file.
+- A credential in the path, or in an ordinary query string, is still blocked or redacted.
 
 How each target uses them:
 
@@ -146,10 +178,12 @@ How each target uses them:
   `provider_input` and point them at the canonical inputs with a reference: `$input_images.0`,
   `$input_images.1`, `$input_video`, `$input_audio` or `$duration_s`. For example,
   `"provider_input": { "video_url": "$input_video", "audio_url": "$input_audio" }` sends the
-  clip and the voice track under the model's own names. Each input can be referenced once. Ryu
-  refuses a canonical input that no reference uses, a reference used more than once, and a
-  reference to an input the request does not have. The correct field names come from the
-  model's documentation on the provider's site. Ryu does not check them.
+  clip and the voice track under the model's own names.
+
+  Each input can be referenced once. Ryu refuses a canonical input that no reference uses, a
+  reference used more than once, and a reference to an input the request does not have. The
+  correct field names come from the model's documentation on the provider's site; Ryu does not
+  check them.
 - **OpenRouter** video jobs go straight to the Gateway's `POST /v1/videos/generations`. Core's
   video route does not map reference inputs for OpenRouter and refuses a request that names it.
 - **Local stable-diffusion.cpp** sends `input_images` to the engine as its start frame
@@ -166,45 +200,59 @@ How each target uses them:
   | Wan2.2 I2V A14B | first and last | umt5-xxl encoder, Wan2.1 VAE |
 
   Ryu recognizes these models by the names their published GGUF files use (for example
-  `wan2.1-flf2v-14b-720p-Q4_K_M` or `Wan2.2-TI2V-5B-Q4_K_M`). Wan2.2 I2V A14B is two files that
-  the published repository keeps in `LowNoise/` and `HighNoise/` folders: install both with the
-  same quantization (the catalog saves each under its file name). Ryu refuses to select one half
-  as the local diffusion model until the other is installed. Ryu downloads the extra files from
-  a fixed repository revision and checks each one's SHA-256. These models are large and run far
-  faster on a GPU; Ryu starts the engine with CPU offload so they fit in less video memory.
+  `wan2.1-flf2v-14b-720p-Q4_K_M` or `Wan2.2-TI2V-5B-Q4_K_M`). Ryu downloads the extra files from
+  a fixed repository revision and checks each one's SHA-256.
 
-  Ryu waits up to one hour for a video that starts from frames (10 minutes for text-to-video), then
-  cancels the job and returns a timeout error, so a slow CPU-only run can fail. A model set through
-  `RYU_SD_MODEL`, or one Ryu does not recognize, loads without these extra files, so it refuses
-  frames too. Local video also refuses a source video or an audio track, because no local model
-  can use them. Use a cloud provider for those.
+  Wan2.2 I2V A14B is two files that the published repository keeps in `LowNoise/` and
+  `HighNoise/` folders. Install both with the same quantization (the catalog saves each under its
+  file name). Ryu refuses to select one half as the local diffusion model until the other is
+  installed.
 
-`provider_input` can add model-specific fields such as a negative prompt, a strength or a seed.
-It cannot set `model`, `provider`, `prompt`, `request_id`, `n`, `project_id` or the canonical
-input fields, and it cannot replace a field that is already in the request. Ryu refuses a
-request that tries.
+  These models are large and run far faster on a GPU. Ryu starts the engine with CPU offload so
+  they fit in less video memory. Ryu waits up to one hour for a video that starts from frames (10
+  minutes for text-to-video), then cancels the job and returns a timeout error, so a slow
+  CPU-only run can fail.
 
-Image requests to a cloud provider accept `provider_input` too, with the same reserved keys plus
-`input_mask`. Its fields are added to the provider request as given, without references. The
-local image engine has no model-specific fields, so it refuses an image request with
-`provider_input`.
+  A model set through `RYU_SD_MODEL`, or one Ryu does not recognize, loads without these extra
+  files, so it refuses frames too. Local video also refuses a source video or an audio track,
+  because no local model can use them. Use a cloud provider for those.
+
+### `provider_input` rules
+
+`provider_input` can add model-specific fields such as a negative prompt, a strength, or a seed.
+
+- It cannot set `model`, `provider`, `prompt`, `request_id`, `n`, `project_id`, or the canonical
+  input fields.
+- It cannot replace a field that is already in the request. Ryu refuses a request that tries.
+- Image requests to a cloud provider accept `provider_input` too, with the same reserved keys plus
+  `input_mask`. Its fields are added to the provider request as given, without references.
+- The local image engine has no model-specific fields, so it refuses an image request with
+  `provider_input`.
+
 Image generation requests are limited to 24 MiB, a smaller limit than video and audio jobs,
 because reference images travel inline in the request.
 
 ## Generated audio
 
 Music and sound effects are a separate job-based modality, `audio`. Speech from text stays on the
-speech route. Submit `{ "model", "prompt", ... }` with the model's own input fields to
-`POST /v1/audio/generations`, then poll `GET /v1/audio/generations/{id}` until the job succeeds.
-The finished job returns the generated audio in `data: [{ "url" }]`. Core's audio route also
-accepts `kind` (`music` or `sfx`, kept as a label only), `duration_s` and the reference inputs
-above. They reach the model through `provider_input` references, for example
+speech route.
+
+1. Submit `{ "model", "prompt", ... }` with the model's own input fields to
+   `POST /v1/audio/generations`.
+2. Poll `GET /v1/audio/generations/{id}` until the job succeeds.
+3. Read the generated audio from `data: [{ "url" }]`.
+
+Core's audio route also accepts `kind` (`music` or `sfx`, kept as a label only), `duration_s`, and
+the reference inputs above. They reach the model through `provider_input` references, for example
 `{ "seconds_total": "$duration_s" }`.
 
-There is no local music or sound-effect engine. Audio requests need a cloud provider (`fal` or
-`replicate`) configured in the Gateway, and Ryu refuses them otherwise. Audio jobs are billed from
-the provider's reported compute time when it reports one. Otherwise they are billed at the flat
-video rate and marked as an estimate.
+There is no local music or sound-effect engine. Audio requests need `fal` or `replicate`
+configured in the Gateway, and Ryu refuses them otherwise. Only those two queues accept any model
+ID with that model's own input fields; Runway, Topaz, and BFL Flux have fixed video schemas and
+reject audio jobs.
+
+Audio jobs are billed from the provider's reported compute time when it reports one. Otherwise they
+are billed at the flat video rate and marked as an estimate.
 
 ## Public request surfaces
 
@@ -219,10 +267,11 @@ video rate and marked as an estimate.
 | Local video generation | Core video route |
 | Cloud audio generation | Core audio route |
 
-Per-agent image, video and audio slots (`x-ryu-slot-audio-provider` and
+Per-agent image, video, and audio slots (`x-ryu-slot-audio-provider` and
 `x-ryu-slot-audio-model` for audio) can override the node's modality mapping. The provider and
 model remain subject to the Gateway's normal authentication, routing, budget, and audit path.
-Inbound data-loss prevention for image, video and audio scans the prompt and every other text
+
+Inbound data-loss prevention for image, video, and audio scans the prompt and every other text
 field in the request, including fields added through `provider_input`. Inline `data:` media is
 not scanned as text.
 
@@ -239,17 +288,28 @@ This section covers the engines, their limits, and where image data goes.
 | AI Resize, **On this device** | Ryu's local stable-diffusion.cpp engine and the selected local diffusion model | Stay on the device |
 | AI Resize, **Gateway model** | The image provider and model configured in Gateway routing | Sent to that provider |
 
+### Browser-local models
+
 Segmentation and background removal model IDs can be changed in the editor's **Models** panel. IDs
-must identify Transformers.js-compatible models for the matching task. Model files download from the
-Hugging Face Hub on first use and are cached by the browser profile. The local runtime uses the
-browser's WebAssembly CPU backend. Segmentation uses labeled segmentation models and does not need a
-separate promptable SAM service.
+must identify Transformers.js-compatible models for the matching task.
+
+- Model files download from the Hugging Face Hub on first use and are cached by the browser
+  profile.
+- The local runtime uses the browser's WebAssembly CPU backend.
+- Segmentation uses labeled segmentation models and does not need a separate promptable SAM
+  service.
+
+### AI Resize
 
 Ryu provisions stable-diffusion.cpp and the default SDXL model during setup on supported platforms.
 The editor builds the outpaint canvas and mask locally, then runs image-to-image inference on the
-device. Local dimensions align to SDXL's 64-pixel grid; Gateway dimensions follow the image-route
-size hint. With **Gateway model**, upstream image-input support, provider data handling, and possible
+device.
+
+Local dimensions align to SDXL's 64-pixel grid; Gateway dimensions follow the image-route size
+hint. With **Gateway model**, upstream image-input support, provider data handling, and possible
 charges depend on the selected provider and model.
+
+### Limits
 
 | Limit | Value |
 |---|---|

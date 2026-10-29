@@ -3,7 +3,15 @@ title: "Tool Execution Governance"
 description: "Reference for how the Gateway governs tool use, covering the tool_search meta-tool, the buffered tool loop, the x-ryu-tools allowlist, POST /v1/exec/tool, and exec budgets and audit."
 ---
 
-The Gateway is the governance front for tool use. It decides *what is allowed, measured, and audited*; Core decides *what runs* (search ranking and the actual tool execution). The Gateway-side surfaces are the `tool_search` meta-tool injected into chat requests, the buffered tool-call loop, and `POST /v1/exec/tool` for direct programmatic execution.
+The Gateway is the governance front for tool use. It decides *what is allowed, measured, and audited*; Core decides *what runs* (search ranking and the actual tool execution).
+
+<Figure name="tools" />
+
+The Gateway-side surfaces are:
+
+- the `tool_search` meta-tool injected into chat requests;
+- the buffered tool-call loop;
+- `POST /v1/exec/tool` for direct programmatic execution.
 
 The Core-side catalog it queries and the programmatic-tool-calling sandbox it forwards to have
 their own pages:
@@ -61,17 +69,25 @@ The parameters the model sees:
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `query` | string | required | Natural-language description of the capability needed |
-| `kind` | enum `mcp` `builtin` `composio` `app` `any` | `any` | Filter by tool source plane |
+| `kind` | enum `mcp` `builtin` `composio` `app` `core-api` `command` `skill` `ext-api` `any` | `any` | Filter by tool source plane. `skill` returns only Agent Skills; `ext-api` returns only tools derived from an installed app's OpenAPI document |
 | `limit` | integer (1-25) | `8` | Max results |
 
-When the model calls `tool_search`, Core's unified catalog uses the default Needle 3 selector to
-put relevant tools and Agent Skills first, then the Gateway describes the top hits and injects
-their full tool definitions into the request so the model can call them on the next round. The
-result the model receives is a compact descriptor list (`id`, `name`, `description`). Needle 3 is
-only a discovery/ranking aid: the model still makes the final tool choice, while the Gateway and
-Core enforce authorization and execution.
+When the model calls `tool_search`, three steps follow.
 
-Catalog ids remain canonical dotted ids for search results, allowlists, audit, and Core dispatch. At the OpenAI-compatible function boundary, Composio action ids use legal `composio__<action>` aliases because dots are not valid function-name characters; the Gateway reverses that alias before authorization, billing, and dispatch. The catalog id and the function alias therefore describe the same action without changing the governance key.
+1. Core's unified catalog uses the default Needle 3 selector to put relevant tools and Agent Skills
+   first.
+2. The Gateway describes the top hits and injects their full tool definitions into the request, so
+   the model can call them on the next round.
+3. The model receives a compact descriptor list (`id`, `name`, `description`, `kind`).
+
+Needle 3 is only a discovery and ranking aid. The model still makes the final tool choice, while
+the Gateway and Core enforce authorization and execution. A `skill` row is instruction text, not a
+function: the model loads it with `skills.load` instead of calling its id.
+
+Catalog ids remain canonical dotted ids for search results, allowlists, audit, and Core dispatch.
+At the OpenAI-compatible function boundary, Composio action ids use legal `composio__<action>`
+aliases, because dots are not valid function-name characters. The Gateway reverses that alias
+before authorization, billing, and dispatch, so the governance key does not change.
 
 ### Query provider usage from an agent
 
@@ -82,11 +98,16 @@ The Core catalog includes three read-only tools for quota-aware agents and monit
   `{ "provider": "claude-pro-max", "model": "claude-sonnet-4" }`.
 - `usage.providers` lists the provider IDs that have a supported normalized usage reader.
 
-Their results include account-wide and matching model-scoped windows with `usedPercent`,
-`remainingPercent`, the reported `window` (`5h`, `7d`, or another provider period), and
-`resetsAt` in RFC 3339 UTC. BYOK providers that expose a prepaid balance return it in the
-read-only meter rows. Window and meter values include stable `targetId` selectors. An unavailable
-or unsupported provider is returned as `available: false` with a structured `reason`; it is never represented as a guessed zero.
+Their results include account-wide and matching model-scoped windows with:
+
+- `usedPercent` and `remainingPercent`;
+- the reported `window` (`5h`, `7d`, or another provider period);
+- `resetsAt` in RFC 3339 UTC;
+- stable `targetId` selectors on window and meter values.
+
+BYOK providers that expose a prepaid balance return it in the read-only meter rows. An unavailable
+or unsupported provider is returned as `available: false` with a structured `reason`; it is never
+represented as a guessed zero.
 
 The Gateway still gates these tools by the normal fully-qualified allowlist and audits the call.
 Core resolves the active account or API key server-side; credentials never enter the tool
@@ -132,17 +153,27 @@ The unified loop is gated so plain chat keeps its fast streaming path with no ad
 | `x-ryu-tools` | `tool_actions` / `tools_header_present` | CSV of fully-qualified tool ids = the egress allowlist. Its literal presence is the trigger for the unified loop |
 | `x-ryu-tool-search: on` | `tool_search_requested` | Explicit opt-in to the buffered search loop |
 
-A bare Composio agent that carries only the legacy `x-ryu-composio-actions` header keeps its fast streaming path and the legacy Composio loop, never the unified loop. Core's ACP forwarder never sets `x-ryu-tool-search`, so there is no double surface on ACP egress.
-In that legacy loop, a request's action header may only narrow the operator-configured Composio
-actions. Naming an unconfigured action or `*` in a header cannot grant it.
+Core's ACP forwarder never sets `x-ryu-tool-search`, so there is no double surface on ACP egress.
 
-When the Gateway is connected to Core, the legacy Composio loop executes through Core's governed
-tool dispatcher. The owner's connection access level and the agent's approvals still apply when
-a request omits tool-discovery headers. Core refusal or unavailability does not fall back to direct
-provider execution, and Core settles the execution receipt once. On a shared node, a legacy request
-without a verified owning conversation is denied; an account selector does not establish caller
-authority. Use Core's native chat and tool flow for connected-account actions. A standalone Gateway
-without a Core catalog continues to use its configured Composio action allowlist and provider account.
+#### Legacy Composio loop
+
+A bare Composio agent that carries only the legacy `x-ryu-composio-actions` header keeps its fast
+streaming path and the legacy Composio loop, never the unified loop. A request's action header may
+only narrow the operator-configured Composio actions. Naming an unconfigured action or `*` in a
+header cannot grant it.
+
+When the Gateway is connected to Core, the legacy loop executes through Core's governed tool
+dispatcher:
+
+- The owner's connection access level and the agent's approvals still apply when a request omits
+  tool-discovery headers.
+- Core refusal or unavailability does not fall back to direct provider execution, and Core settles
+  the execution receipt once.
+- On a shared node, a legacy request without a verified owning conversation is denied. An account
+  selector does not establish caller authority.
+
+Use Core's native chat and tool flow for connected-account actions. A standalone Gateway without a
+Core catalog continues to use its configured Composio action allowlist and provider account.
 
 ## The allowlist: fully-qualified ids only
 
@@ -214,7 +245,11 @@ Tool and code execution carry their own governance, separate from model-call spe
 Tool execution on both planes is therefore allowlist-gated and emits exec-budget and exec-audit records.
 
 <Callout type="warn">
-  This page governs *tool* egress. An ACP agent's own in-subprocess LLM provider calls (for agents that expose no base-URL hook) still bypass the Gateway. This surface does not govern that chat egress; see [Routing planes](/docs/gateway/routing-planes). The `execute`/`resume` exec kinds forward to Core's PTC endpoints; see [Programmatic tool calling](/docs/core/programmatic-tool-calling) for that side.
+  This page governs *tool* egress. An ACP agent's own in-subprocess LLM provider calls (for agents
+  that expose no base-URL hook) still bypass the Gateway; see [Routing planes](/docs/gateway/routing-planes).
+
+  The `execute`/`resume` exec kinds forward to Core's PTC endpoints; see
+  [Programmatic tool calling](/docs/core/programmatic-tool-calling) for that side.
 </Callout>
 
 ## Related

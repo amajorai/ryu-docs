@@ -141,15 +141,7 @@ describe("per-folder /llms/{path}.txt indexes", () => {
           const page = Number(target.searchParams.get("page") ?? "1");
           expect(page).toBeLessThanOrEqual(pageCounts.get(index[1]) ?? 0);
         } else if (!endpoints.has(target.pathname)) {
-          // Sidebar link items in meta.json use the unversioned /docs/<slug> route, which the
-          // docs route also serves; resolve it against the versioned page URL.
-          const versioned = docsPath(
-            ...target.pathname.replace(/^\/docs\/?/u, "").split("/"),
-          );
-          expect(
-            pageUrls.has(target.pathname) || pageUrls.has(versioned),
-            target.pathname,
-          ).toBe(true);
+          expect(pageUrls.has(target.pathname), target.pathname).toBe(true);
         }
       }
     }

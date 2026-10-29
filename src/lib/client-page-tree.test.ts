@@ -3,7 +3,10 @@ import { flattenTree, type Root } from "fumadocs-core/page-tree";
 import { getLayoutTabs } from "fumadocs-ui/layouts/shared";
 import { createElement } from "react";
 
-import { compactPageTreeForClient } from "@/lib/client-page-tree";
+import {
+  compactPageTreeForClient,
+  withoutGroupPrefix,
+} from "@/lib/client-page-tree";
 import { source } from "@/lib/source";
 
 const methodLabel = createElement("span", null, "GET");
@@ -40,7 +43,11 @@ function syntheticTree(): Root {
             description: undefined,
             icon: undefined,
           },
-          { $id: "content/docs/start-here/---api---", type: "separator" },
+          {
+            $id: "content/docs/start-here/---api---",
+            type: "separator",
+            name: "api",
+          },
           {
             $id: "content/docs/start-here/get-health.mdx",
             $ref: "start-here/get-health.mdx",
@@ -132,10 +139,17 @@ describe("compactPageTreeForClient", () => {
     expect(folder.index?.description).toBe("What Ryu is");
     expect(folder.children.map((node) => node.type)).toEqual([
       "page",
-      "separator",
-      "page",
+      "folder",
     ]);
-    const health = folder.children[2];
+    const group = folder.children[1];
+    if (group?.type !== "folder") {
+      throw new Error("expected the separator to become a group");
+    }
+    expect(group.name).toBe("api");
+    expect(group.collapsible).toBe(true);
+    // Groups start open; Fumadocs treats a missing defaultOpen as open.
+    expect(group.defaultOpen).toBeUndefined();
+    const health = group.children[0];
     expect(health?.type === "page" ? health.url : null).toBe(
       "/docs/start-here/get-health",
     );
@@ -172,5 +186,19 @@ describe("compactPageTreeForClient", () => {
     expect(JSON.stringify(compact).length).toBeLessThan(
       JSON.stringify(tree).length,
     );
+  });
+
+  test("drops a group's name from the front of its page labels", () => {
+    expect(withoutGroupPrefix("Workflow Loops and Fan-Out", "Workflows")).toBe(
+      "Loops and Fan-Out",
+    );
+    expect(withoutGroupPrefix("Secret Vault Engines", "Secret Vault")).toBe(
+      "Engines",
+    );
+    expect(withoutGroupPrefix("Encryption at Rest", "Encryption")).toBe(
+      "Encryption at Rest",
+    );
+    expect(withoutGroupPrefix("Workflows", "Workflows")).toBe("Workflows");
+    expect(withoutGroupPrefix("Workflowing", "Workflows")).toBe("Workflowing");
   });
 });

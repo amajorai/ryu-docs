@@ -6,8 +6,9 @@ tags: ["mail", "api", "standalone"]
 
 This reference covers the Ryu Mail HTTP API, for self-hosted Mail and for
 hosted organization Mail where the two differ. The standalone Mail service
-keeps the `/api/mail/*` route spelling used by the Companion UI. Protected routes use the standalone Mail bearer. Inbound
-mail uses a per-inbox HMAC secret instead.
+keeps the `/api/mail/*` route spelling used by the Companion UI. Protected
+routes use the standalone Mail bearer. Inbound mail uses a per-inbox HMAC
+secret instead.
 
 The canonical contract version is `v1` (also returned as `apiVersion` by the
 status endpoint). Hosted organization Mail and the self-host sidecar keep the
@@ -121,20 +122,36 @@ includes at most **Read & send**; choose `mail:manage` explicitly on a fine-grai
   apply.
 - An inbox's `webhookUrl` is returned only to a key with `mail:manage` whose principal holds
   `mail.manage`.
-- Each inbox records which credential created it. Every inbox reply (reads, lists, creates,
-  agent-inbox replays, updates and address changes) carries `createdWith`, which holds `via` (`session`, `api_key`, `oauth` for a hosted MCP app, or `gateway_key` for
-  a node) and the matching ID (`apiKeyId`, `serviceAccountId`, `oauthClientId` or
-  `gatewayCredentialId`). It holds IDs only, never a key or token, and is `null` for inboxes
-  created before Ryu recorded it. Only callers who may manage Mail see `createdWith`. Those are a key
-  with `mail:manage` whose principal holds `mail.manage`, a member with `mail.manage`, or a
-  personal account's owner. `mail:read` keys, members without `mail.manage`, hosted MCP apps and
-  node gateway keys do not, so a node never learns the organization's key or app IDs. `createdBy` is
-  the member the credential acted for (`null` for a service-account key or a node).
+- Each inbox records which credential created it. See
+  [which credential created an inbox](#which-credential-created-an-inbox).
 - An inbox created with a key or a hosted MCP app adds a `mail.inbox.create` entry to the
   organization's audit log, with the same IDs and the new address.
 - A missing scope returns `403` with `code: "insufficient_scope"` and the scope in
   `requiredScope`. A missing permission returns `403` with `code: "forbidden"`. A key that is not
   valid returns `401`. Platform admin routes accept only a signed-in session.
+
+### Which credential created an inbox
+
+Every inbox reply (reads, lists, creates, agent-inbox replays, updates and
+address changes) carries `createdWith`. It holds IDs only, never a key or
+token, and is `null` for inboxes created before Ryu recorded it. Its `via`
+field names the kind of credential, and the matching ID field is set:
+
+| `via` | Credential | Matching ID |
+|---|---|---|
+| `session` | A signed-in session | None |
+| `api_key` | A Ryu API key | `apiKeyId`, plus `serviceAccountId` for a service-account key |
+| `oauth` | A hosted MCP app | `oauthClientId` |
+| `gateway_key` | A node | `gatewayCredentialId` |
+
+Only callers who may manage Mail see `createdWith`. Those are a key with
+`mail:manage` whose principal holds `mail.manage`, a member with
+`mail.manage`, or a personal account's owner. `mail:read` keys, members without `mail.manage`, hosted MCP
+apps and node gateway keys do not, so a node never learns the organization's
+key or app IDs.
+
+`createdBy` is the member the credential acted for (`null` for a
+service-account key or a node).
 
 ## Sends and retries
 
@@ -145,12 +162,14 @@ a different request returns `409`. The API accepts at most 50 recipients and
 8 MiB of decoded attachments (`413` above that), in a JSON body of up to 12 MiB.
 
 Custom `headers` cannot set the sender, recipients, threading, or MIME
-structure. `From`, `Sender`, `To`, `Cc`, `Bcc`, `Reply-To`, `Return-Path`,
-`Message-ID`, `Date`, `Subject`, `In-Reply-To`, `References`, `Received`,
-`MIME-Version`, `Content-*`, and `Resent-*` return `400`; use the typed fields
-instead. At most 64 custom headers are accepted. Allow and block lists match the
-parsed address, so a display name such as `Friend <a@example.com>` is checked
-as `a@example.com`.
+structure. At most 64 custom headers are accepted.
+
+- `From`, `Sender`, `To`, `Cc`, `Bcc`, `Reply-To`, `Return-Path`,
+  `Message-ID`, `Date`, `Subject`, `In-Reply-To`, `References`, `Received`,
+  `MIME-Version`, `Content-*`, and `Resent-*` return `400`. Use the typed
+  fields instead.
+- Allow and block lists match the parsed address, so a display name such as
+  `Friend <a@example.com>` is checked as `a@example.com`.
 
 `trackOpens: true` adds a pixel only when `RYU_MAIL_PUBLIC_URL` (HTTPS) and
 `RYU_MAIL_TRACKING_ENABLED=1` are configured; otherwise the HTML goes out
@@ -183,11 +202,29 @@ it again with a new `sendAt`, or send it with the draft send route.
 
 A draft moves to `sending` while the scheduler or
 `POST /api/mail/inboxes/:id/drafts/:draft_id/send` hands it to the transport, so
-only one of them delivers it. Sending or editing a draft that is `sending` or
-`sent` returns `409`. A refused send makes the draft editable again. When the
-outcome is unknown, for example a keyed send whose transport result is
-unresolved or a restart during the send, the draft stays `sending` so it is
-never delivered twice; check the sent message and delete the draft.
+only one of them delivers it.
+
+```mermaid
+stateDiagram-v2
+  [*] --> draft
+  draft --> scheduled: save with sendAt
+  draft --> sending: send route
+  scheduled --> sending: sendAt fires or send route
+  failed --> scheduled: save with a new sendAt
+  failed --> sending: send route
+  sending --> sent: transport accepts
+  sending --> failed: scheduled send cannot be sent
+  sending --> sending: outcome unknown
+```
+
+A send that is refused returns the draft to the state it was claimed from
+(`draft`, `scheduled`, or `failed`).
+
+- Sending or editing a draft that is `sending` or `sent` returns `409`.
+- A refused send makes the draft editable again.
+- When the outcome is unknown, for example a keyed send whose transport result
+  is unresolved or a restart during the send, the draft stays `sending` so it
+  is never delivered twice. Check the sent message and delete the draft.
 
 ## Errors
 
@@ -226,10 +263,12 @@ A realtime socket answers a malformed or oversized subscription filter with a
 
 The create and rotate-secret responses return `inbound_secret` once. List and
 get inbox responses omit it. Treat the secret as sensitive and store it only in
-the provider webhook configuration or another protected secret store. Webhook
-signing secrets follow the same rule: the create response and a `rotateSecret`
-update return `secret`, and other responses return `null`. Mail stores these
-secrets encrypted; see
+the provider webhook configuration or another protected secret store.
+
+Webhook signing secrets follow the same rule. The create response and a
+`rotateSecret` update return `secret`, and other responses return `null`.
+
+Mail stores these secrets encrypted. See
 [sealing stored secrets](/docs/standalone/mail#sealing-stored-secrets).
 
 The compatibility fields `created_at`, `inbox_id`, and

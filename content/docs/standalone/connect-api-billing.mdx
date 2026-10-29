@@ -27,38 +27,68 @@ Every execution response says what the call costs. `/v1/composio`,
 | `ledgerRefId` | The ledger reference of the charge (`composio:<transactionId>`), or `null` |
 
 A call to a registered MCP server costs nothing. A call that fails before a
-billing receipt exists costs nothing. These fields describe a call made to
-Connect directly. When Ryu Core makes the call, the Ryu Gateway charges it at
-call time as a Composio tool call, and Connect's settlement then skips it; for a
-toolkit Connect serves natively, that Gateway charge uses the Composio own-app
-rate and add-ons, not the native price these fields report.
+billing receipt exists costs nothing.
+
+These fields describe a call made to Connect directly. When Ryu Core makes the
+call, the Ryu Gateway charges it at call time as a Composio tool call, and
+Connect's settlement then skips it. For a toolkit Connect serves natively, that
+Gateway charge uses the Composio own-app rate and add-ons, not the native price
+these fields report.
+
+### Cap one call
 
 Send `x-ryu-max-cost-micro-usd: <micro-USD>` to cap one call, the same header
-the Ryu Gateway accepts. On a Ryu-hosted Connect a call whose estimate is above
-it is refused before it runs with `402` and `code: "max_cost_exceeded"`. A
-Composio call is estimated without any premium charge, which is only known
-afterwards: a premium charge is still charged in full and the response says
-`exceededMaxCost: true`. Until Connect has seen a tenant's first Composio
-receipt it does not know whether the tenant uses its own auth app, so the
-maximum is checked against the cheapest auth source's price while the credit
-hold uses the Composio-managed price. A value that is not a non-negative whole number is
-`400` with `code: "invalid_request"`. Over MCP, send the header on the HTTP
-request that carries `tools/call`.
+the Ryu Gateway accepts. Over MCP, send the header on the HTTP request that
+carries `tools/call`.
+
+- On a Ryu-hosted Connect, a call whose estimate is above the cap is refused
+  before it runs with `402` and `code: "max_cost_exceeded"`.
+- A Composio call is estimated without any premium charge, which is only known
+  afterwards. A premium charge is still charged in full and the response says
+  `exceededMaxCost: true`.
+- Until Connect has seen a tenant's first Composio receipt, it does not know
+  whether the tenant uses its own auth app. The cap is checked against the
+  cheapest auth source's price, while the credit hold uses the
+  Composio-managed price.
+- A value that is not a non-negative whole number is `400` with
+  `code: "invalid_request"`.
+
+### Credit holds
 
 A Ryu-hosted Connect also holds each call's estimate against the
-organization's remaining credit before it runs, counting calls that ran since
-Ryu last charged the organization and calls still running. A call that does
-not fit gets `402` with `code: "insufficient_credits"`. The hold applies to
-self-serve Connect keys. A tenant the operator binds for Ryu Core, whose calls
-the Ryu Gateway charges as they run, is refused only once the organization has
-no credits left. An organization Ryu does not bill for hosted services is never
-refused or charged.
+organization's remaining credit before it runs. The hold counts calls that ran
+since Ryu last charged the organization and calls still running. A call that
+does not fit gets `402` with `code: "insufficient_credits"`.
+
+| Caller | Credit check |
+|---|---|
+| Self-serve Connect keys | The hold applies to every call |
+| A tenant the operator binds for Ryu Core (the Ryu Gateway charges its calls as they run) | Refused only once the organization has no credits left |
+| An organization Ryu does not bill for hosted services | Never refused or charged |
+
+```mermaid
+flowchart TD
+  C["Execution call"] --> O{"Organization out of credit?"}
+  O -->|yes| O1["402 insufficient_credits"]
+  O -->|no| M{"Estimate above x-ryu-max-cost-micro-usd?"}
+  M -->|yes| M1["402 max_cost_exceeded"]
+  M -->|no| H{"Estimate fits remaining credit?"}
+  H -->|no| H1["402 insufficient_credits"]
+  H -->|yes| R["Tool runs"]
+  R --> F["Response with cost fields"]
+```
 
 Both `402` refusals carry the same detail fields as the Ryu Gateway's tool
-refusals: `estimate_micro_usd`, plus `balance_micro_usd` (what was left to
-spend) when known, `max_cost_micro_usd` when you sent a maximum, and
-`top_up_url` when the deployment names a page for adding credit. Over MCP they
-are in `_meta["com.ryuhq/refusal"]` beside `code`.
+refusals:
+
+- `estimate_micro_usd`;
+- `balance_micro_usd` (what was left to spend), when known;
+- `max_cost_micro_usd`, when you sent a maximum;
+- `top_up_url`, when the deployment names a page for adding credit.
+
+Over MCP they are in `_meta["com.ryuhq/refusal"]` beside `code`.
+
+## Check the balance
 
 `GET /v1/balance` reports what the tenant can spend before it calls:
 
@@ -75,11 +105,11 @@ are in `_meta["com.ryuhq/refusal"]` beside `code`.
 
 ## Safe retries with Idempotency-Key
 
-Send `Idempotency-Key: <label>` (at most 128 characters) on `/v1/composio`,
-`/v1/composio/execute`, `/v1/exec/tool`, or the HTTP request that carries an MCP
-`tools/call`, to make a retry safe. Labels belong to your tenant, and each
-label is tied to the route and the request body; the order of JSON fields does
-not matter.
+Send `Idempotency-Key: <label>` (at most 128 characters) to make a retry safe
+on `/v1/composio`, `/v1/composio/execute`, `/v1/exec/tool`, or the HTTP request
+that carries an MCP `tools/call`. Labels belong to your tenant. Each label is
+tied to the route and the request body; the order of JSON fields does not
+matter.
 
 - The first call with a label runs, and Connect keeps its answer for 24 hours.
 - A retry with the same label and body gets that answer back with the header
@@ -110,28 +140,42 @@ code in `_meta["com.ryuhq/refusal"]`.
 
 ## Billing receipts and metering
 
+Composio executions pause with `503` and `code: "metering_unavailable"` when
+Connect cannot account for a receipt. Over MCP the refusal is an `isError`
+result with that code in `_meta["com.ryuhq/refusal"]`. A refused call never
+reaches Composio, so it is safe to retry later.
+
+### A receipt Connect cannot store
+
 If Connect cannot store a call's billing receipt, for example because its disk
 is full, that call still returns its result and receipt. Connect keeps the
-receipt and refuses further Composio executions on every path with `503` and
-`code: "metering_unavailable"` until it is stored; over MCP the refusal is an
-`isError` result with that code in `_meta["com.ryuhq/refusal"]`. A refused
-call never reaches Composio, so it is safe to retry later. Once the receipt is
-stored, execution resumes and the receipt appears in the usage report.
+receipt and refuses further Composio executions on every path until it is
+stored. Once the receipt is stored, execution resumes and the receipt appears
+in the usage report.
+
+### A receipt Composio has not returned yet
 
 If Connect cannot read a call's billing receipt from Composio yet, the call
 still returns its result, without a receipt. Connect keeps the call's log ID and
 reads the receipt again before the tenant's next execution and before its usage
-report, so the receipt appears in `GET /v1/usage` once Composio answers, stamped
-with the time it was read. While 256 of a tenant's receipts are still unread
-because Composio cannot be reached, its executions are refused with `503` and
-`code: "metering_unavailable"` until one is read. Other tenants are unaffected.
+report. The receipt appears in `GET /v1/usage` once Composio answers, stamped
+with the time it was read.
 
-A receipt that can never be read, because Composio has no such log or its
-billing details cannot be verified, or one still unread after 24 hours, is no
-longer retried and no longer counts toward that limit. The first page of
-`GET /v1/usage` lists it under `unresolved` as `{ transactionId, at, reason }`,
-where `at` is the call's time and `reason` is `unverifiable` or `expired`.
-These entries have no usage and are not priced.
+While 256 of a tenant's receipts are still unread because Composio cannot be
+reached, its executions are refused until one is read. Other tenants are
+unaffected.
+
+### A receipt that can never be read
+
+A receipt is no longer retried, and no longer counts toward that limit, when:
+
+- Composio has no such log;
+- its billing details cannot be verified;
+- it is still unread after 24 hours.
+
+The first page of `GET /v1/usage` lists it under `unresolved` as
+`{ transactionId, at, reason }`, where `at` is the call's time and `reason` is
+`unverifiable` or `expired`. These entries have no usage and are not priced.
 
 <Cards>
   <DocCard href="/docs/standalone/connect-api" />

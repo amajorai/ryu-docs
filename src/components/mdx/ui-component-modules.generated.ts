@@ -114,6 +114,8 @@ export const UI_COMPONENT_MODULE_LOADERS = {
     import("@ryu/ui/components/contributions-graph"),
   "components/motion/action-swap-roll": async () =>
     import("@ryu/ui/components/motion/action-swap-roll"),
+  "components/motion/adaptive-stepper": async () =>
+    import("@ryu/ui/components/motion/adaptive-stepper"),
   "components/apple-hello-effect": async () =>
     import("@ryu/ui/components/apple-hello-effect"),
   "components/motion/button/index": async () =>
@@ -125,6 +127,8 @@ export const UI_COMPONENT_MODULE_LOADERS = {
   "components/icon-swap": async () => import("@ryu/ui/components/icon-swap"),
   "components/motion/input": async () =>
     import("@ryu/ui/components/motion/input"),
+  "components/motion/liquid": async () =>
+    import("@ryu/ui/components/motion/liquid"),
   "components/motion/loader": async () =>
     import("@ryu/ui/components/motion/loader"),
   "components/morph-icon": async () => import("@ryu/ui/components/morph-icon"),

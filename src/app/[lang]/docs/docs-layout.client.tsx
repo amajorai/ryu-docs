@@ -10,7 +10,6 @@ import {
   useSidebar,
 } from "fumadocs-ui/layouts/glass/slots/sidebar";
 import { getLayoutTabs, type LayoutTab } from "fumadocs-ui/layouts/shared";
-import { ExternalLink } from "lucide-react";
 import {
   type ComponentProps,
   type CSSProperties,
@@ -25,7 +24,6 @@ import {
 import { realmTabTitle } from "@/components/realm-alpha-badge";
 import { SiteHeader } from "@/components/site-header";
 import { docsSegmentsFromPathname } from "@/lib/docs-version";
-import { MAIN_SITE_TAB } from "@/lib/layout.shared";
 
 import styles from "./docs-layout.module.css";
 
@@ -43,7 +41,7 @@ interface RootTabStyle extends CSSProperties {
 /*
  * Per-root theming, matching the official Fumadocs docs site.
  *
- * Each root ("/docs/<version>/<segment>") owns an accent color defined as a CSS variable
+ * Each root ("/docs/<segment>") owns an accent color defined as a CSS variable
  * "--<segment>-color" in global.css. We tint the root selector icon with it, and
  * a "data-docs-root" wrapper switches "--color-fd-primary" so the whole layout
  * (sidebar, content, TOC) takes on that root's color while you are inside it.
@@ -132,8 +130,8 @@ export function DocsLayoutClient({
   const pathname = useDocsNavigationPathname();
   const activeRoot = rootSegment(pathname);
   const tabs = useMemo<LayoutTab[]>(
-    () => [
-      ...getLayoutTabs(props.tree, {
+    () =>
+      getLayoutTabs(props.tree, {
         transform(option, node) {
           const segment = rootSegment(option.url);
           const accent: RootTabStyle = {
@@ -154,17 +152,6 @@ export function DocsLayoutClient({
           };
         },
       }),
-      {
-        ...MAIN_SITE_TAB,
-        icon: (
-          <div
-            className={`${styles.icon} ${styles.mainSite} flex size-5 shrink-0 items-center justify-center rounded-md p-0.5 [&_svg]:size-4 max-md:size-9 max-md:p-1.5 max-md:[&_svg]:size-5`}
-          >
-            <ExternalLink />
-          </div>
-        ),
-      },
-    ],
     [props.tree],
   );
 

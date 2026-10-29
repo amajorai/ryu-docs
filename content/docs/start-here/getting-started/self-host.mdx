@@ -16,12 +16,23 @@ managed inference, and Web/Mobile account surfaces are separate products.
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/amajorai/ryu?quickstart=1)
 
 The button creates a codespace from the repo's [`.devcontainer/`](https://github.com/amajorai/ryu/tree/main/.devcontainer)
-configuration. It installs the published, checksum-verified release binaries and the same
-release's web app bundle rather than building the `Dockerfile`, starts Core in the
-background, and opens the Ryu web app in a new browser tab once Core is ready. You do not
-type any commands or sign in to a Ryu account. The web app talks only to the Core running
-in your codespace, as that Core's owner. The codespace requests 2 CPUs, 8 GB of memory, and
-32 GB of storage.
+configuration. You do not type any commands or sign in to a Ryu account. The codespace:
+
+1. Installs the published, checksum-verified release binaries and the same release's web app
+   bundle. It does not build the `Dockerfile`.
+2. Starts Core in the background.
+3. Opens the Ryu web app in a new browser tab once Core is ready.
+
+The web app talks only to the Core running in your codespace, as that Core's owner. The codespace
+requests 2 CPUs, 8 GB of memory, and 32 GB of storage.
+
+```mermaid
+flowchart LR
+  B["Browser tab"] -->|"port 7990 (private)"| W["Ryu web app"]
+  W --> C["Core (port 7980)"]
+  C --> G["Gateway (loopback 7981)"]
+  G --> P["Your provider"]
+```
 
 If the tab does not open (for example, because your browser blocked the pop-up), open the
 **Ryu** port from the **Ports** panel, or use the link printed in the terminal. To use the
@@ -37,13 +48,13 @@ your work. This applies to Core releases after v0.4.0; v0.4.0 and earlier ignore
 and download the local model stack (several GB) on first start.
 
 <Callout type="info">
-  Chat needs a provider key. Enter it on
-  the codespace create page, or add it as a personal
+  Chat needs a provider key. Enter it on the codespace create page, or add it as a personal
   [Codespaces secret](https://docs.github.com/en/codespaces/managing-your-codespaces/managing-your-account-specific-secrets-for-github-codespaces)
-  with access to `amajorai/ryu` (rebuild the codespace after adding it). `OPENAI_API_KEY`
-  works on its own. For another OpenAI-compatible provider, set `RYU_DEFAULT_LLM_API_KEY`
-  (your provider key), `RYU_DEFAULT_LLM_BASE_URL` (its OpenAI-compatible base URL), and
-  `RYU_DEFAULT_LLM_MODEL` together.
+  with access to `amajorai/ryu` (rebuild the codespace after adding it).
+
+  `OPENAI_API_KEY` works on its own. For another OpenAI-compatible provider, set
+  `RYU_DEFAULT_LLM_API_KEY` (your provider key), `RYU_DEFAULT_LLM_BASE_URL` (its
+  OpenAI-compatible base URL), and `RYU_DEFAULT_LLM_MODEL` together.
 </Callout>
 
 <Callout type="warn">
@@ -68,8 +79,9 @@ provider-native runtimes and external tools need separate checks.
 
 <Callout type="warn">
   Local onboarding attempts model and runtime downloads. Size RAM, disk, and GPU capacity for
-  the selected model; a fixed instance size does not guarantee readiness. For provider-backed
-  inference, configure and test the model route and credentials. Setting a provider key alone
+  the selected model; a fixed instance size does not guarantee readiness.
+
+  For provider-backed inference, configure and test the model route and credentials. Setting a provider key alone
   does not prove that local downloads are skipped. See [Local model setup](/docs/learn/cookbook/chat-with-a-local-model).
 </Callout>
 
@@ -78,8 +90,13 @@ The templates live at the repo root (`render.yaml`, `railway.json`, `fly.toml`, 
 
 ## Docker
 
-The whole stack is one image. To run Core and Gateway as two separate services, set the four
-Gateway keys (Compose refuses to start without them) and start the stack:
+The whole stack is one image. You can run it as two Compose services or as a single Core
+container. The single image is the simplest self-hosted server shape.
+
+### Two-service topology
+
+To run Core and Gateway as two separate services, set the four Gateway keys (Compose refuses to
+start without them) and start the stack:
 
 ```bash
 git clone https://github.com/amajorai/ryu
@@ -95,28 +112,46 @@ That publishes Core on `http://localhost:7980` and keeps model state in a named 
 Gateway listens on port 7981 inside the Compose network only; it is not published to the
 host. Point any OpenAI-compatible client at Core's `POST /v1/chat/completions`.
 
-The two-service file is an advanced topology. Core reaches Gateway at `http://gateway:7981`
-(`RYU_GATEWAY_MANAGED=0` with `RYU_GATEWAY_URL`). Put provider keys on the Gateway service,
-or give Gateway an engine URL it can reach from its own container. Core's private loopback
-engine is not reachable through another container's `127.0.0.1`. The single-image path below
-is the simplest self-hosted server shape.
+```mermaid
+flowchart LR
+  CL["OpenAI-compatible client"] -->|"localhost:7980"| C["core service"]
+  C -->|"http://gateway:7981"| G["gateway service"]
+  G --> P["Provider or engine URL"]
+  C --- V[("Named volume")]
+```
 
-The four keys must be different random values:
-`GATEWAY_MASTER_KEY` for administration, `GATEWAY_RELAY_KEY` for agent inference,
-`GATEWAY_CORE_RELAY_KEY` for Core's trusted forwarding, and
-`GATEWAY_CORE_PROOF_KEY` for Core-signed agent identity. Do not reuse one value
-across these roles. `RYU_IDENTITY_ROOT` is optional: set it to the base64 of
-32 or more random bytes (for example `openssl rand -base64 32`) to keep end-user
-hashes stable across restarts. A self-hosted Gateway never sends a Ryu-derived
-identifier to your providers.
+The two-service file is an advanced topology:
 
-The split Gateway sets `RYU_GATEWAY_FLEET=1` because Core reaches it from
-another container. That setting only hardens exposure: Gateway refuses to start
-with authentication off, never trusts a `127.0.0.1` caller as the local
-operator, and refuses `/passthrough/*` with `403`. It does not turn your stack
-into a hosted Ryu Gateway, so apart from that hardening the
+- Core reaches Gateway at `http://gateway:7981` (`RYU_GATEWAY_MANAGED=0` with `RYU_GATEWAY_URL`).
+- Put provider keys on the Gateway service, or give Gateway an engine URL it can reach from its own
+  container. Core's private loopback engine is not reachable through another container's
+  `127.0.0.1`.
+
+The four keys must be different random values. Do not reuse one value across these roles.
+
+| Key | Role |
+|---|---|
+| `GATEWAY_MASTER_KEY` | Administration |
+| `GATEWAY_RELAY_KEY` | Agent inference |
+| `GATEWAY_CORE_RELAY_KEY` | Core's trusted forwarding |
+| `GATEWAY_CORE_PROOF_KEY` | Core-signed agent identity |
+
+`RYU_IDENTITY_ROOT` is optional. Set it to the base64 of 32 or more random bytes (for example
+`openssl rand -base64 32`) to keep end-user hashes stable across restarts. A self-hosted Gateway
+never sends a Ryu-derived identifier to your providers.
+
+The split Gateway sets `RYU_GATEWAY_FLEET=1` because Core reaches it from another container. That
+setting only hardens exposure:
+
+- Gateway refuses to start with authentication off.
+- Gateway never trusts a `127.0.0.1` caller as the local operator.
+- Gateway refuses `/passthrough/*` with `403`.
+
+It does not turn your stack into a hosted Ryu Gateway. Apart from that hardening, the
 [hosted Gateway restrictions](/docs/gateway/managed-data-plane#hosted-gateway-restrictions)
 and the Ryu platform policy do not apply to it.
+
+### Single image (Core only)
 
 To run only Core (it manages Gateway as a loopback sidecar):
 
@@ -133,9 +168,11 @@ docker run --read-only --cap-drop=ALL \
 Keep the Docker socket, host PID/network namespaces, host devices, and host
 filesystem out of the container. The image already runs as UID `10001`; the
 explicit flags above preserve that boundary when the command is copied into a
-deployment script. For agent code that needs stronger isolation, use the
-default `wasmtime` [sandbox](/docs/core/sandbox) or a rootless container/microVM backend
-rather than mounting host paths into an execution container.
+deployment script.
+
+For agent code that needs stronger isolation, use the default `wasmtime`
+[sandbox](/docs/core/sandbox) or a rootless container/microVM backend rather than mounting host
+paths into an execution container.
 
 ## Fly.io
 

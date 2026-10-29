@@ -5,10 +5,9 @@ import { z } from "zod";
 import { hasLocalizedDocsContent } from "@/lib/canonical-docs";
 import type { CatalogAttributes } from "@/lib/catalog";
 import {
-  DOCS_VERSION,
+  canonicalDocsHref,
   docsPath,
   stripDocsVersion,
-  versionedDocsHref,
 } from "@/lib/docs-version";
 import { DEFAULT_DOCS_LOCALE, i18n } from "@/lib/i18n";
 import { siteConfig } from "@/lib/metadata";
@@ -50,7 +49,7 @@ export function getPageByHref(
   href: string,
   locale: string = DEFAULT_DOCS_LOCALE,
 ) {
-  const result = source.getPageByHref(versionedDocsHref(href), {
+  const result = source.getPageByHref(canonicalDocsHref(href), {
     language: locale,
   });
   if (!result) {
@@ -66,9 +65,7 @@ export function getPageByHref(
 }
 
 export function generateDocsParams() {
-  return source
-    .generateParams("slug", "lang")
-    .map(({ slug, lang }) => ({ lang, slug: [DOCS_VERSION, ...slug] }));
+  return source.generateParams("slug", "lang");
 }
 
 // Generated API pages and deep localized copies repeat large schema/navigation
@@ -85,14 +82,14 @@ export function generateDocsPrerenderParams() {
     if (page?.data._openapi) {
       return false;
     }
-    return param.lang === DEFAULT_DOCS_LOCALE || param.slug.length <= 2;
+    return param.lang === DEFAULT_DOCS_LOCALE || param.slug.length <= 1;
   });
 }
 
 export function getPageImage(page: DocsPage) {
   const locale =
     page.locale && page.locale !== i18n.defaultLanguage ? [page.locale] : [];
-  const segments = [...locale, DOCS_VERSION, ...page.slugs, "image-v4.png"];
+  const segments = [...locale, ...page.slugs, "image-v4.png"];
 
   return {
     segments,

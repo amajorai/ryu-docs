@@ -11,7 +11,23 @@ authorization for sidecars that run saved work later.
 
 `permission_grants` are scope strings the plugin declares (for example `mcp.tools`, `model.chat`,
 `memory.read`). They are declarations only. On `enable`, Core calls the Gateway's
-`POST /v1/grants/validate` with the declared grants (`apps/gateway/src/api/governance.rs`):
+`POST /v1/grants/validate` with the declared grants (`apps/gateway/src/api/governance.rs`).
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Core
+  participant Gateway
+  Client->>Core: POST /api/plugins/:id/enable
+  Core->>Gateway: POST /v1/grants/validate
+  alt all approved
+    Gateway-->>Core: all_approved true
+    Core-->>Client: enabled, grants stored
+  else denied or unreachable
+    Gateway-->>Core: denied list, or no answer
+    Core-->>Client: stays disabled
+  end
+```
 
 ```json
 // request
@@ -85,27 +101,58 @@ work (`apps/core/src/catalog_source/sources.rs`):
 
 ## Deferred execution authorization
 
-Native sidecars that retain recurring work can declare `authorization:defer` in
-both their permission grants and sidecar host API grants. The authenticated host
-RPC methods `authorization.issue` and `authorization.check` keep user permissions
-separate from the app's own capability grants.
+Native sidecars that retain recurring work can declare `authorization:defer` in both their
+permission grants and sidecar host API grants. The authenticated host RPC methods
+`authorization.issue` and `authorization.check` keep user permissions separate from the app's own
+capability grants.
 
-Core supplies a short-lived principal proof in the trusted
-`x-ryu-caller-principal-proof` header on a verified proxied request. Caller-supplied
-copies of this header are discarded. On an unbound local node, the request must
-also carry the active node-owner bearer; a user JWT alone grants no local owner authority.
-`authorization.issue` accepts that `proof`, an app-declared `permission`, and a
-`resource`, checks the caller's current access, and returns an opaque execution
-proof. Store that proof with the work item. Before every deferred execution, call
-`authorization.check` with the execution proof and the same permission and resource.
-Its response must contain `allowed: true` and the expected user and organization.
+### Principal proof
 
-Execution proofs are bound to the app, node, organization, user, permission, and
-resource. They grant no broader access and contain no user session credentials.
-Each check resolves current organization and team membership and applies current
-resource ACLs. Missing proofs, removed access, unavailable authorization, and
-changed bindings must stop execution. Reauthorize saved work after an owner-token
-rotation or when migrating work that has no execution proof.
+Core supplies a short-lived principal proof in the trusted `x-ryu-caller-principal-proof` header
+on a verified proxied request. Caller-supplied copies of this header are discarded.
+
+On an unbound local node, the request must also carry the active node-owner bearer. A user JWT
+alone grants no local owner authority.
+
+### Issue and check
+
+1. Call `authorization.issue` with that `proof`, an app-declared `permission`, and a
+   `resource`. It checks the caller's current access and returns an opaque
+   execution proof.
+2. Store the execution proof with the work item.
+3. Before every deferred execution, call `authorization.check` with the execution proof and the
+   same permission and resource.
+4. Run the work only when the response contains `allowed: true` and the expected user and
+   organization.
+
+```mermaid
+sequenceDiagram
+  participant Core
+  participant Sidecar
+  Core->>Sidecar: Request with principal proof header
+  Sidecar->>Core: authorization.issue(proof, permission, resource)
+  Core-->>Sidecar: Execution proof
+  Note over Sidecar: Store proof with the work item
+  Sidecar->>Core: authorization.check(execution proof, permission, resource)
+  Core-->>Sidecar: allowed, user, organization
+  Note over Sidecar: Run only when allowed is true
+```
+
+### Proof scope
+
+Execution proofs are bound to the app, node, organization, user, permission, and resource. They
+grant no broader access and contain no user session credentials.
+
+Each check resolves current organization and team membership and applies current resource ACLs.
+These conditions must stop execution:
+
+- a missing proof;
+- removed access;
+- unavailable authorization;
+- changed bindings.
+
+Reauthorize saved work after an owner-token rotation, or when migrating work that has no execution
+proof.
 
 ## Related
 

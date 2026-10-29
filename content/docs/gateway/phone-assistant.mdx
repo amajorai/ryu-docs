@@ -8,6 +8,24 @@ calls routed to a Twilio number, place calls from a verified caller ID, speak wi
 transcript with a short summary in the Core conversation. The Ryu mobile app is the control panel;
 Gateway and Core carry the call when the app is closed.
 
+<Figure name="messaging" />
+
+```mermaid
+sequenceDiagram
+  participant Caller
+  participant Carrier as Carrier forwarding
+  participant Twilio as Twilio number
+  participant Gateway
+  participant Core as Core agent
+  Caller->>Carrier: Call your number
+  Carrier->>Twilio: Forward unanswered call
+  Twilio->>Gateway: Voice webhook
+  Gateway->>Gateway: Verify callback, check trusted callers and line limit
+  Gateway->>Core: Open voice session (one-use ticket)
+  Core-->>Caller: Speak through Gateway and Twilio
+  Core->>Core: Save transcript and summary
+```
+
 ## What you need
 
 - A Gateway operator who has configured the Twilio account for voice calls and exposed the Gateway
@@ -23,15 +41,20 @@ Gateway and Core carry the call when the app is closed.
   in Twilio Console to stop number charges.
 </Callout>
 
-Ryu does not take over the phone's carrier audio. To keep your existing number, configure your
-carrier to forward unanswered calls to the Twilio number shown in Ryu. You can keep answering calls
-normally; the forwarded leg reaches the assistant when the carrier's forwarding rule fires. Carrier
-settings and forwarding codes vary by provider and country. Porting the existing number is another
-option, but is not required for unanswered-call handling.
+### Keep your existing number
 
-Twilio requires caller-ID verification before it will place outbound calls using a non-Twilio
-number. Ryu starts the verification call and shows the code to enter when Twilio calls you. That
-verification authorizes outbound caller ID; inbound calls still need forwarding or number porting.
+Ryu does not take over the phone's carrier audio. To keep your existing number, configure your
+carrier to forward unanswered calls to the Twilio number shown in Ryu. You keep answering calls
+normally, and the forwarded leg reaches the assistant when the carrier's forwarding rule fires.
+
+Carrier settings and forwarding codes vary by provider and country. Porting the existing number is
+another option, but unanswered-call handling does not require it.
+
+### Verify your caller ID
+
+Twilio requires caller-ID verification before it places outbound calls from a non-Twilio number.
+Ryu starts the verification call and shows the code to enter when Twilio calls you. Verification
+covers outbound caller ID only. Inbound calls still need forwarding or number porting.
 
 ## Connect a line
 
@@ -89,38 +112,57 @@ and call controls are restricted to the node owner.
 Anyone who dials the Twilio number, or reaches it through forwarding, can reach the line's
 assistant. Caller ID can be spoofed, so a caller is not the owner just because of the number they
 call from. Each line in **Phone assistant** in Ryu Mobile has two controls for this, saved with
-**Save call settings**:
+**Save call settings**.
 
-- **Trusted callers.** The E.164 numbers allowed to reach the assistant, one per line, up to 100
-  (`allowed_callers` on the line in `gateway.toml`, or `allowedCallers` through the Gateway
-  configuration API). When the list has numbers, calls from any other number are rejected before
-  the assistant answers, and listed callers get the line's full Core agent.
-- **Simultaneous calls.** Each line accepts at most two calls at once by default, or a limit from 1
-  to 20 (`max_concurrent_calls` / `maxConcurrentCalls`). Further inbound calls get a busy signal
-  before any speech, model, or voice work starts, which bounds the cost of a call flood. Outbound
-  calls count toward the same limit from the moment Ryu asks Twilio to place them: when the line is
-  full, Ryu refuses the call without placing it, so it does not ring or incur Twilio call charges.
-  The Gateway answers that refusal with `503`, a temporary condition to retry later, not with the
-  `400` it uses for invalid input such as an unverified caller ID. A call that ends without being
-  answered frees its place on the line, and a Gateway restart keeps the places of calls that may
-  still be ringing.
+| Control | `gateway.toml` / configuration API | Limits |
+|---|---|---|
+| **Trusted callers** | `allowed_callers` / `allowedCallers` | E.164 numbers, one per line, up to 100 |
+| **Simultaneous calls** | `max_concurrent_calls` / `maxConcurrentCalls` | 1 to 20, default 2 |
+
+### Trusted callers
+
+When the list has numbers, calls from any other number are rejected before the assistant answers.
+Listed callers get the line's full Core agent.
+
+### Simultaneous calls
+
+The limit counts inbound and outbound calls together:
+
+- Further inbound calls get a busy signal before any speech, model, or voice work starts. This
+  bounds the cost of a call flood.
+- Outbound calls count from the moment Ryu asks Twilio to place them. When the line is full, Ryu
+  refuses the call without placing it, so it does not ring or incur Twilio call charges.
+- The Gateway answers that refusal with `503`, a temporary condition to retry later. It uses `400`
+  for invalid input such as an unverified caller ID.
+- A call that ends without being answered frees its place. A Gateway restart keeps the places of
+  calls that may still be ringing.
+
+### Unverified callers
 
 When the trusted-caller list is empty, every caller is accepted as an unverified caller. Gateway
-marks the call as untrusted when it opens the Core voice session, and Core enforces a restricted
+marks the call as untrusted when it opens the Core voice session. Core then enforces a restricted
 tool profile on every turn of that call, checked when a tool runs rather than only by what the
-model is shown. The profile is an allowlist that keeps at most one tool, a desktop notification to
-the owner (`notify.desktop`), and only where the line's agent may already run it. The assistant can
-still take a message without tools: the call transcript and summary are saved to the conversation
-as usual.
+model is shown.
 
-Everything else is unavailable to an unverified caller, including tools added later: memory, mail
-and messages, contacts, calendar, files, shell, browser, payments, connected accounts, and MCP or
-plugin tools. Gateway does not offer tool search or the operator's always-on tools on these calls,
-and Core rechecks the profile when Gateway runs a tool for them. Core also leaves the owner's
-memory, personal profile, and skills out of the conversation. If the line's agent runs its own
-tools in a separate agent process, Core answers unverified callers with the default model and the
-agent's instructions instead, because it cannot limit that process's tools. Outbound calls you place keep the agent's normal tools.
+The profile is an allowlist with at most one tool, a desktop notification to the owner
+(`notify.desktop`), and only where the line's agent may already run it. The assistant can still
+take a message without tools, because the transcript and summary are saved as usual.
+
+For an unverified caller:
+
+- Everything else is unavailable, including tools added later. That covers memory, mail and
+  messages, contacts, calendar, files, shell, browser, payments, connected accounts, and MCP or
+  plugin tools.
+- Gateway does not offer tool search or the operator's always-on tools, and Core rechecks the
+  profile when Gateway runs a tool for the call.
+- Core leaves the owner's memory, personal profile, and skills out of the conversation.
+- If the line's agent runs its own tools in a separate agent process, Core answers with the default
+  model and the agent's instructions instead, because it cannot limit that process's tools.
+
+Outbound calls you place keep the agent's normal tools.
+
+### Provider limits and recording
 
 Number availability, caller-ID verification, and forwarding behavior depend on Twilio and the local
-carrier. Ryu stores the call transcript and generated summary in the Core conversation; the Gateway
+carrier. Ryu stores the call transcript and generated summary in the Core conversation. The Gateway
 does not store a call-audio recording. Let callers know they are speaking with an AI assistant.

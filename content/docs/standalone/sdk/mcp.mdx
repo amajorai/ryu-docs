@@ -6,10 +6,10 @@ tags: ["sdk", "mcp", "standalone"]
 
 `ryu-services mcp` runs a stdio MCP server named `ryu-services`. It
 registers the tools of every service whose environment variables are set,
-and nothing for the rest, so an agent sees only what you configured. By
-default it registers only the read-only tools; pass `--allow-writes` to add
-the tools that write, send, charge, or delete. The
-tools call `@ryuhq/services`, so they keep its idempotency keys, retries,
+and nothing for the rest, so an agent sees only what you configured.
+
+By default it registers only the read-only tools; pass `--allow-writes` to
+add the tools that write, send, charge, or delete. The tools call `@ryuhq/services`, so they keep its idempotency keys, retries,
 and error codes.
 
 <Callout type="info">
@@ -18,7 +18,9 @@ and error codes.
 
 The server ships in `@ryuhq/services-cli`, which is not on npm yet. Until it
 is, run the same server through `ryu-cli`, whose `services` command arrives in a Ryu
-release after 0.4.0 (until then neither the CLI nor the MCP server can be installed outside the Ryu repository): use
+release after 0.4.0 (until then neither the CLI nor the MCP server can be installed outside the Ryu repository).
+
+With `ryu-cli`, use
 `"command": "ryu-cli"` and put `services` first in `args`, as in
 `"args": ["services", "mcp", "--services", "notify,box"]`. The entries below
 name `ryu-services`, the binary `@ryuhq/services-cli` installs once it is
@@ -83,60 +85,96 @@ the `ryu-cli` entry and command line itself.
 | `--timeout <ms>` | Per-attempt timeout for every tool call. |
 | `--max-retries <n>` | Retries after the first attempt (default 2). |
 
+## Which tools it registers
+
+A service's tools are registered only when `--services` picks it (or is not
+passed) and its variables are set. `--allow-writes` decides whether the write
+tools join the read-only ones.
+
+```mermaid
+flowchart TD
+  A{"In --services, or no --services given?"} -->|No| N["Not registered"]
+  A -->|Yes| B{"Its variables set?"}
+  B -->|No| C{"messaging_status or hosted mail_status?"}
+  C -->|Yes| S["Status tool only, sent with no key"]
+  C -->|No| N
+  B -->|Yes| D{"--allow-writes?"}
+  D -->|No| R["Read-only tools"]
+  D -->|Yes| W["Read-only and write tools"]
+```
+
 Standard output carries only JSON-RPC. At startup the server writes one line
 to standard error naming the mode (read-only, or writes allowed) and how many
 tools it registered. A service that is not configured is
 skipped with one line on standard error.
 
-Two read-only tools are the exception: `messaging_status` and `mail_status`
-call status routes that need no key, so the server registers them even when
-Messaging or Mail is not configured, and they then send no key or
-organization. `messaging_status` uses `RYU_API_URL`, or the SDK's default
-control-plane origin when it is unset.
-
-`mail_status` is registered this way
-only for hosted Mail: with `RYU_MAIL_URL` unset or on the control-plane
-origin. A self-hosted `RYU_MAIL_URL` without `RYU_MAIL_API_KEY` registers no
-Mail tools, because a self-hosted server answers its status route only with
-its token. With `RYU_MAIL_URL` on the control-plane origin and no key, the
-skip reason asks for `RYU_API_KEY` or `RYU_MAIL_GATEWAY_KEY` (hosted Mail
-keys), never the self-hosted `RYU_MAIL_API_KEY`. `--services` still limits
-them, so `--services notify` registers neither. Both report the deployment's configuration, not whether your key or
-organization may use the service. A service that is set only by a
+A service that is set only by a
 built-in default, such as Gateway's local URL, counts as not configured; set
 `RYU_GATEWAY_URL` or `RYU_GATEWAY_TOKEN` to expose the Gateway tools.
 
+### Status tools without a key
+
+Two read-only tools are the exception: `messaging_status` and `mail_status`
+call status routes that need no key, so the server registers them even when
+Messaging or Mail is not configured, and they then send no key or
+organization.
+
+Both report the deployment's configuration, not whether your key or
+organization may use the service. `--services` still limits
+them, so `--services notify` registers neither.
+
+- `messaging_status` uses `RYU_API_URL`, or the SDK's default
+  control-plane origin when it is unset.
+- `mail_status` is registered this way
+  only for hosted Mail: with `RYU_MAIL_URL` unset or on the control-plane
+  origin. With `RYU_MAIL_URL` on the control-plane origin and no key, the
+  skip reason asks for `RYU_API_KEY` or `RYU_MAIL_GATEWAY_KEY` (hosted Mail
+  keys), never the self-hosted `RYU_MAIL_API_KEY`.
+- A self-hosted `RYU_MAIL_URL` without `RYU_MAIL_API_KEY` registers no
+  Mail tools, because a self-hosted server answers its status route only with
+  its token.
+
 To apply the same rule in your own MCP server or tool host, call
 `credentialFreeRyuTools(ryu, service)` from `@ryuhq/services/tools` (Python
-`credential_free_ryu_tools(ryu, service)` from `ryu_sdk.services.tools`). It
-returns the read-only, credential-free tools of a service that is not
-configured but whose status route `ryu` can reach without a key, and an empty
+`credential_free_ryu_tools(ryu, service)` from `ryu_sdk.services.tools`).
+
+It returns the read-only, credential-free tools of a service that is not
+configured but whose status route `ryu` can reach without a key. It returns an empty
 list when the service is configured or that route needs a key.
 
+### What the model is told
+
 Most hosts never show standard error to the model, so the server also sends
-the same facts as `instructions` in its `initialize` result: the mode in effect
-(and how many write tools `--allow-writes` would add), the services it
-registered, each skipped service with the environment variables it needs
-(for Connect, which has no tools here, where to point an MCP client instead:
-`$RYU_CONNECT_URL/mcp` with `Authorization: Bearer $RYU_CONNECT_API_KEY`), and
-a pointer to `ryu-services doctor`. With nothing configured, the model sees
+the same facts as `instructions` in its `initialize` result:
+
+- the mode in effect, and how many write tools `--allow-writes` would add;
+- the services it registered;
+- each skipped service with the environment variables it needs
+  (for Connect, which has no tools here, where to point an MCP client instead:
+  `$RYU_CONNECT_URL/mcp` with `Authorization: Bearer $RYU_CONNECT_API_KEY`);
+- a pointer to `ryu-services doctor`.
+
+With nothing configured, the model sees
 only `messaging_status` and `mail_status` (unless `--services` leaves them
 out) and an explanation of what to set for the other tools. The
 instructions name variables, never their values.
 
 ## Results and errors
 
-A successful tool returns `{ data, meta }` as structured content and as JSON
-text. Every tool declares that shape as its MCP `outputSchema` in
-`tools/list`, with `data` typed per tool (a Box, a page of events, a Site)
-and open to fields a service adds later, so a client can validate the
-result or generate types from it. A failed one is a tool error carrying
-`RyuError.toJSON()`, with its `code`, `status`, and `requestId`; it never
-contains a key. Arguments that do
-not match a tool's input schema come back the same way, as
-`{ error: { code: "invalid_arguments", details: { issues } } }`, without a
-request. A tool error is not checked against the `outputSchema`.
-Cancelling a tool call from the client aborts the request it started.
+- **Success.** A successful tool returns `{ data, meta }` as structured content and as JSON
+  text. Every tool declares that shape as its MCP `outputSchema` in
+  `tools/list`, with `data` typed per tool (a Box, a page of events, a Site)
+  and open to fields a service adds later, so a client can validate the
+  result or generate types from it.
+- **Failure.** A failed tool returns a tool error carrying
+  `RyuError.toJSON()`, with its `code`, `status`, and `requestId`; it never
+  contains a key. A tool error is not checked against the `outputSchema`.
+- **Bad arguments.** Arguments that do
+  not match a tool's input schema come back the same way, as
+  `{ error: { code: "invalid_arguments", details: { issues } } }`, without a
+  request.
+- **Cancel.** Cancelling a tool call from the client aborts the request it started.
+
 Every tool declares the four MCP hints: read-only, destructive, idempotent,
 and open world. Hosts should ask before running a tool that is not read-only.
 
@@ -144,7 +182,9 @@ and open world. Hosts should ask before running a tool that is not read-only.
 Read-only does not mean the tool stays inside Ryu. `passport_fetch` is
 read-only and open world: it sends a `GET` with the stored login to any path
 or query on a connection's domain, and hosts that prompt only for writes run
-it without asking. Tools such as `mail_get_message`,
+it without asking.
+
+Tools such as `mail_get_message`,
 `messaging_get_message`, and `box_read_file` return text written by other
 people, which can carry instructions aimed at the model. If the same agent
 reads untrusted mail, messages, or files, leave Passport out with
@@ -152,17 +192,20 @@ reads untrusted mail, messages, or files, leave Passport out with
 ask before `passport_fetch`.
 </Callout>
 
-`box_create`, `managed_agents_create_session`, and
-`managed_agents_send_message` take an optional `idempotencyKey`, so a call the
-model retries never creates a second Box, session, or message.
-`notify_request_approval` takes one too, but a retry with the same key gets
-`409 idempotency_conflict` instead of the first answer, because each call
-sets a new deadline. Read the first request with `notify_get_event` or
-`notify_list_events` instead.
-`managed_agents_list_events` returns 50 events per page by default, and at
-most 100 when it waits for the turn to end. `box_read_file` returns
-`{ path, content, truncated, totalChars }`, cut to `maxChars` characters
-(default 20,000).
+### Keys and limits
+
+- `box_create`, `managed_agents_create_session`, and
+  `managed_agents_send_message` take an optional `idempotencyKey`, so a call the
+  model retries never creates a second Box, session, or message.
+- `notify_request_approval` takes one too, but a retry with the same key gets
+  `409 idempotency_conflict` instead of the first answer, because each call
+  sets a new deadline. Read the first request with `notify_get_event` or
+  `notify_list_events` instead.
+- `managed_agents_list_events` returns 50 events per page by default. When it
+  waits for the turn to end, it stops after `maxEvents` events (default 100).
+- `box_read_file` returns
+  `{ path, content, truncated, totalChars }`, cut to `maxChars` characters
+  (default 20,000).
 
 ## Tools
 

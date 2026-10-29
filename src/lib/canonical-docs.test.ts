@@ -27,7 +27,7 @@ test("fallback locale pages point to the English canonical and stay out of the s
   const metadata = await generateDocsMetadata({
     params: Promise.resolve({
       lang: "es",
-      slug: ["0.4.0", "start-here", "getting-started"],
+      slug: ["start-here", "getting-started"],
     }),
   });
   expect(metadata.alternates?.canonical).toBe(english?.url);
@@ -35,21 +35,19 @@ test("fallback locale pages point to the English canonical and stay out of the s
   expect(metadata.openGraph?.url).toBe(english?.url);
 
   const translatedMetadata = await generateDocsMetadata({
-    params: Promise.resolve({ lang: "es", slug: ["0.4.0", "start-here"] }),
+    params: Promise.resolve({ lang: "es", slug: ["start-here"] }),
   });
   expect(translatedMetadata.alternates?.canonical).toBe(translated?.url);
   expect(translatedMetadata.alternates?.languages?.es).toBe(translated?.url);
 
   const urls = new Set(sitemap().map((entry) => entry.url));
   expect(
-    urls.has("https://docs.ryuhq.com/docs/0.4.0/start-here/getting-started"),
+    urls.has("https://docs.ryuhq.com/docs/start-here/getting-started"),
   ).toBe(true);
   expect(
-    urls.has("https://docs.ryuhq.com/es/docs/0.4.0/start-here/getting-started"),
+    urls.has("https://docs.ryuhq.com/es/docs/start-here/getting-started"),
   ).toBe(false);
-  expect(urls.has("https://docs.ryuhq.com/es/docs/0.4.0/start-here")).toBe(
-    true,
-  );
+  expect(urls.has("https://docs.ryuhq.com/es/docs/start-here")).toBe(true);
   expect(
     [...urls].some((url) => url.startsWith("https://docs.ryuhq.com/fr/")),
   ).toBe(false);

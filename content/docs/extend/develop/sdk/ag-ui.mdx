@@ -39,8 +39,10 @@ Bun.serve({ port: 8787, fetch: (request) => handler(request) });
 Point the frontend's generic AG-UI HTTP agent (for example CopilotKit's `HttpAgent`) at that
 URL. Inference and tools still run through the agent's own Ryu node, as in any SDK agent.
 
-The handler does not authenticate callers. Anyone who can reach the route can run the agent with
-its node credentials and answer its approvals, so mount it behind your app's own authentication.
+<Callout type="warn">
+  The handler does not authenticate callers. Anyone who can reach the route can run the agent with
+  its node credentials and answer its approvals, so mount it behind your app's own authentication.
+</Callout>
 
 ## Event mapping
 
@@ -63,7 +65,25 @@ produced, so a client can replace its transcript in one step.
 ## Approvals and resuming
 
 When a tool marked `needsApproval`, or a Core permission request on a `sessionId` agent, needs a
-decision, the handler keeps the run paused in memory and ends the response:
+decision, the handler keeps the run paused in memory and ends the response.
+
+```mermaid
+sequenceDiagram
+  participant C as AG-UI client
+  participant H as toAgUiHandler
+  participant A as Agent run
+  C->>H: POST RunAgentInput
+  H->>A: Start run
+  A-->>H: approval_requested
+  H-->>C: CUSTOM on_interrupt, RUN_FINISHED (interrupt)
+  Note over H,A: Run paused in memory
+  C->>H: POST same thread with resume
+  H->>A: Approve or deny
+  A-->>H: Remaining events
+  H-->>C: Stream continues in new response
+```
+
+The interrupt events look like this:
 
 ```json
 { "type": "CUSTOM", "name": "on_interrupt",
@@ -97,11 +117,16 @@ payload can be:
 
 Unrecognized payloads always deny, so a typo can never approve a tool.
 
-Paused runs live in the handler's process. Unless resumed within `interruptTimeoutMs` (default
-10 minutes), the tool is denied and the run finishes in the background. A resume that matches no
-paused run gets `RUN_ERROR` with `code: "interrupt_not_found"`. If the agent already has an
-`approvalHandler`, that handler decides and no interrupt is raised. If the client disconnects
-while a run is streaming, the handler stops the run and denies any approval it is waiting on.
+Paused runs live in the handler's process:
+
+- **Timeout.** Unless resumed within `interruptTimeoutMs` (default 10 minutes), the tool is denied
+  and the run finishes in the background.
+- **No match.** A resume that matches no paused run gets `RUN_ERROR` with
+  `code: "interrupt_not_found"`.
+- **Existing handler.** If the agent already has an `approvalHandler`, that handler decides and no
+  interrupt is raised.
+- **Disconnect.** If the client disconnects while a run is streaming, the handler stops the run and
+  denies any approval it is waiting on.
 
 An `auth_required` interrupt ends the run, because the tool needs an account connection first.
 Once the user has connected the account, resume it like an approval (same thread, with the

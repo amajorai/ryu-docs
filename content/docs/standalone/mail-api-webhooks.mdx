@@ -31,15 +31,31 @@ curl -sS "https://mail.example.com/api/mail/inbound/$INBOX_ID" \
   --data-binary @message.eml
 ```
 
-Mail refuses a timestamp more than five minutes from its own clock, so keep the
-relay's clock synchronized. It keeps the SHA-256 of every accepted timestamped
-delivery for 24 hours, so a captured request cannot be replayed, even after the
-message it stored is deleted. A replay is answered `200` with
-`"duplicate": true` and stores nothing. Mail records a delivery in the same
-step that stores its message, so resending the same signed request after an
-error or a dropped connection is safe while its timestamp is in the window: it
-is stored if the first attempt was not, and answered as a duplicate if it was.
-Signing the same message again with a new timestamp is a new delivery.
+```mermaid
+flowchart TD
+  Req["Timestamped POST /api/mail/inbound/:id"] --> Clock{"Timestamp within 5 minutes?"}
+  Clock -->|no| Refuse["Refuse"]
+  Clock -->|yes| Sig{"Signature valid?"}
+  Sig -->|no| Refuse
+  Sig -->|yes| Seen{"Delivery seen in last 24 hours?"}
+  Seen -->|yes| Dup["200, duplicate: true"]
+  Seen -->|no| Store["Store message and record delivery"]
+```
+
+### Clock window and replays
+
+- Mail refuses a timestamp more than five minutes from its own clock, so keep
+  the relay's clock synchronized.
+- It keeps the SHA-256 of every accepted timestamped delivery for 24 hours, so
+  a captured request cannot be replayed, even after the message it stored is
+  deleted. A replay is answered `200` with `"duplicate": true` and stores
+  nothing.
+- Signing the same message again with a new timestamp is a new delivery.
+
+Mail records a delivery in the same step that stores its message. Resending
+the same signed request after an error or a dropped connection is therefore
+safe while its timestamp is in the window. It is stored if the first attempt
+was not, and answered as a duplicate if it was.
 
 The route accepts raw MIME up to 25 MiB. Create an inbox or rotate its secret
 through the protected API, then place that secret in the mail provider's
@@ -50,36 +66,46 @@ reserialize the MIME body before calculating the signature.
 
 Without `X-Ryu-Timestamp`, Mail still accepts the older form: `X-Ryu-Signature`
 over the raw body alone. That signature never expires, so keep such requests
-out of logs. Mail answers a re-delivery of a stored message with the same
-`Message-ID` or identical raw bytes with `"duplicate": true` and raises no
-second event, but once that message is deleted a captured body-only request
-can store it again.
+out of logs.
 
-When your relay sends timestamps, set `require_timestamp: true` on the inbox
-(on `POST /api/mail/inboxes` or `PATCH /api/mail/inboxes/:id`;
-`requireTimestamp` is also accepted). Mail then refuses body-only deliveries
-with `401`. Inbox responses include `require_timestamp`. A request that carries
-`X-Ryu-Timestamp` must use the timestamped signature; Mail never falls back to
-the body-only check for it.
+Mail answers a re-delivery of a stored message with the same `Message-ID` or
+identical raw bytes with `"duplicate": true` and raises no second event. Once
+that message is deleted, though, a captured body-only request can store it
+again.
+
+When your relay sends timestamps, set `require_timestamp: true` on the inbox,
+on `POST /api/mail/inboxes` or `PATCH /api/mail/inboxes/:id`
+(`requireTimestamp` is also accepted).
+
+- Mail then refuses body-only deliveries with `401`.
+- Inbox responses include `require_timestamp`.
+- A request that carries `X-Ryu-Timestamp` must use the timestamped signature.
+  Mail never falls back to the body-only check for it.
 
 ## Outbound event webhooks
 
 Create a webhook with `event_types` such as `message.received`, `message.sent`,
 `message.delivered`, `message.bounced`, `message.complained`,
-`message.rejected`, or `message.opened`. Omitting `event_types` subscribes to
-the sidecar's standard event set; an explicit empty list returns `400`.
-`inbox_ids` and `pod_ids` narrow delivery; `addInboxIds`, `removeInboxIds`,
-`addPodIds`, and `removePodIds` update those scopes without replacing the whole
-list. The camelCase spellings `eventTypes`, `inboxIds`, and `podIds` are also
+`message.rejected`, or `message.opened`.
+
+| Field | Behavior |
+|---|---|
+| `event_types` | Omitted subscribes to the sidecar's standard event set. An explicit empty list returns `400` |
+| `inbox_ids`, `pod_ids` | Narrow delivery to those inboxes or pods |
+| `addInboxIds`, `removeInboxIds`, `addPodIds`, `removePodIds` | Update those scopes without replacing the whole list |
+
+The camelCase spellings `eventTypes`, `inboxIds`, and `podIds` are also
 accepted.
 
 Custom header values are accepted on create and update, but only their names
-are returned later. Use `removeHeaders` with
-the headers endpoint to remove values atomically. A custom header cannot use a
-name Mail sets itself (`webhook-id`, `webhook-timestamp`, `webhook-signature`,
-the `svix-*` equivalents, `host`, `cookie`, or `content-length`). Destinations
-must be public HTTPS endpoints; loopback, private, link-local, metadata, and
-internal DNS targets are rejected.
+are returned later.
+
+- Use `removeHeaders` with the headers endpoint to remove values atomically.
+- A custom header cannot use a name Mail sets itself (`webhook-id`,
+  `webhook-timestamp`, `webhook-signature`, the `svix-*` equivalents, `host`,
+  `cookie`, or `content-length`).
+- Destinations must be public HTTPS endpoints. Loopback, private, link-local,
+  metadata, and internal DNS targets are rejected.
 
 List directions follow the AgentMail vocabulary: `send`, `receive`, and
 `reply`, each with an `allow` or `block` list. The hosted API also accepts the
@@ -97,12 +123,13 @@ Each delivery is a JSON envelope:
 }
 ```
 
-`data.message.id` is the id `GET /api/mail/messages/:id` reads, and
-`message_id` is the RFC `Message-ID`. A `message.received` delivery includes the
-full text and HTML body, so point webhooks only at endpoints you trust.
-`message.sent` carries a `send` object with the recipients and ids, and a
-scheduled draft that could not be sent arrives as `message.rejected` with
-`draft` and `reason`.
+- `data.message.id` is the id `GET /api/mail/messages/:id` reads, and
+  `message_id` is the RFC `Message-ID`.
+- A `message.received` delivery includes the full text and HTML body, so point
+  webhooks only at endpoints you trust.
+- `message.sent` carries a `send` object with the recipients and ids.
+- A scheduled draft that could not be sent arrives as `message.rejected` with
+  `draft` and `reason`.
 
 ### Verifying deliveries
 
@@ -117,11 +144,14 @@ webhook-signature: v1,<base64>
 ```
 
 It repeats the same values as `svix-id`, `svix-timestamp`, and
-`svix-signature`. The signature is a base64 HMAC-SHA256 over
-`<webhook-id>.<webhook-timestamp>.<raw body>`. Its key is the base64-decoded
-part of the secret after `whsec_`. Reject deliveries whose timestamp is far
-from your clock; the libraries allow five minutes by default. Webhook responses
-include `signature_scheme`.
+`svix-signature`.
+
+- The signature is a base64 HMAC-SHA256 over
+  `<webhook-id>.<webhook-timestamp>.<raw body>`.
+- Its key is the base64-decoded part of the secret after `whsec_`.
+- Reject deliveries whose timestamp is far from your clock. The libraries allow
+  five minutes by default.
+- Webhook responses include `signature_scheme`.
 
 Mail makes up to three delivery attempts with sub-second backoff and records
 each attempt. Treat `event_id` as the idempotency key at the consumer.
@@ -129,11 +159,12 @@ each attempt. Treat `event_id` as the idempotency key at the consumer.
 ### Webhooks created by earlier versions
 
 A webhook created before Standard Webhooks signing reports
-`signature_scheme: "legacy"` and keeps working without changes. Its
-`svix-signature` is still keyed with the UTF-8 bytes of the whole `whsec_…`
-secret, prefix included, as earlier versions signed it. Its `webhook-signature`
-already uses the Standard Webhooks key, so a Standard Webhooks library can
-verify the `webhook-*` headers with the existing secret.
+`signature_scheme: "legacy"` and keeps working without changes.
+
+- Its `svix-signature` is still keyed with the UTF-8 bytes of the whole
+  `whsec_…` secret, prefix included, as earlier versions signed it.
+- Its `webhook-signature` already uses the Standard Webhooks key, so a Standard
+  Webhooks library can verify the `webhook-*` headers with the existing secret.
 
 A Svix SDK checks the `svix-*` headers first. Rotate the secret before you
 switch to one: `PATCH /api/mail/webhooks/:id` with `{"rotateSecret": true}`

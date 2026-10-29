@@ -21,6 +21,23 @@ send with every call.
 - Connect never moves to another endpoint after one it sent the call to unless
   you allowed it, and every move is listed in the answer.
 
+```mermaid
+flowchart TD
+  A["POST /v1/capabilities/:job/call"] --> B{"policy.sort set?"}
+  B -->|"no"| R1["400 routing_policy_required"]
+  B -->|"yes"| C["Catalog candidates for the job"]
+  C --> D["Pass over unverified, unpriced, disallowed or over-ceiling"]
+  D --> E{"Any eligible?"}
+  E -->|"no"| R2["Refused, nothing sent"]
+  E -->|"yes"| F["Order by cheapest or reliable"]
+  F --> G["Send to next candidate"]
+  G --> H{"Served?"}
+  H -->|"yes"| I["Answer with route and charge"]
+  H -->|"no"| J{"overflow next and attempts left?"}
+  J -->|"yes"| G
+  J -->|"no"| K["Answer with outcome and route"]
+```
+
 ## Jobs and candidates
 
 `GET /v1/capabilities` lists the jobs Connect can route, the input each one
@@ -49,10 +66,12 @@ A candidate's `reason` says why it cannot be chosen.
 
 A deployment may also list endpoints that **Treg** serves, each with the
 per-call price agreed for it. They are candidates like any other, with
-`provider` and `servedBy` set to `treg`. They run through Ryu Gateway, which
-refuses the call when its estimate is above the listed price. If Treg then
-reports a higher cost, that cost is charged and the difference is disclosed
-as `overranMicroUsd` (see [Money](#money)).
+`provider` and `servedBy` set to `treg`.
+
+Treg-served endpoints run through Ryu Gateway, which refuses the call when its
+estimate is above the listed price. If Treg then reports a higher cost, that
+cost is charged and the difference is disclosed as `overranMicroUsd` (see
+[Money](#money)).
 
 ## Make a routed call
 
@@ -71,7 +90,7 @@ The `policy` object takes these fields.
 | Field | Values | Default |
 |---|---|---|
 | `sort` | `cheapest` (lowest verified per-call price first) or `reliable` (best success rate over the last seven days first, from at least five calls) | Required |
-| `providers` | A list of provider ids to allow: vendor ids such as `brave` or `tavily`, and `treg` for Treg-served endpoints | All |
+| `providers` | A list of 1 to 16 provider ids to allow: vendor ids such as `brave` or `tavily`, and `treg` for Treg-served endpoints | All |
 | `overflow` | `none`, or `next` to let a refused, rate-limited or failed call move to the next candidate, and to let a call on Ryu's key move to another of Ryu's accounts for the same vendor | `none` |
 | `onMiss` | `return`, or `next` to also move on when a vendor answers with no results (needs `overflow: "next"` and a ceiling) | `return` |
 | `maxAttempts` | 1 to 3 candidates sent to in one call (above 1 needs `overflow: "next"`) | 1, or 3 with `overflow: "next"` |
@@ -172,12 +191,13 @@ Routing never changes what an endpoint costs or adds a fee.
 - On your own key, Ryu charges nothing.
 - A Treg-served endpoint is charged by Ryu Gateway to your organization. The
   Gateway refuses it before it runs when its estimate is above the listed
-  price or the ceiling. The cost Treg reports afterwards is charged in full,
-  even when it is higher, because that is what Treg bills; the excess is
-  disclosed as `overranMicroUsd` on the attempt, on `route.chosen` and on
-  `route` (total), and in `x-ryu-route-overran-micro-usd`. It counts against
-  what is left of the ceiling for any later attempt, but it can take one
-  Treg-served attempt past `maxCostMicroUsd`.
+  price or the ceiling.
+- The cost Treg reports afterwards is charged in full, even when it is higher,
+  because that is what Treg bills. The excess is disclosed as
+  `overranMicroUsd` on the attempt, on `route.chosen` and on `route` (total),
+  and in `x-ryu-route-overran-micro-usd`.
+- That excess counts against what is left of the ceiling for any later
+  attempt, but it can take one Treg-served attempt past `maxCostMicroUsd`.
 - Each attempt is charged under its own call id, so a retry never charges it
   twice. With `onMiss: "next"`, every vendor that answered is charged, which
   is why a ceiling is required.
@@ -268,11 +288,13 @@ curl -X POST https://connect.example/v1/capabilities/web.search/arena \
 ```
 
 Each attempt's outcome (served, missed, failed, and which endpoint was the
-fastest to serve) is recorded as arena evidence, and each call is also counted
-in the endpoint's [reliability](/docs/standalone/connect-api-catalog) like any
-other call. `GET /v1/capabilities/<job>/arena` is the leaderboard: every
-candidate with its arena record over the last 30 days, best served rate first;
-the job's listing carries the same `arena` record per candidate. You can
+fastest to serve) is recorded as arena evidence. Each call is also counted in
+the endpoint's [reliability](/docs/standalone/connect-api-catalog) like any
+other call.
+
+`GET /v1/capabilities/<job>/arena` is the leaderboard: every candidate with its
+arena record over the last 30 days, best served rate first. The job's listing
+carries the same `arena` record per candidate. You can
 [review](/docs/standalone/connect-api-reviews) each result by its `ryuCallId`.
 
 `POST /v1/capabilities/<job>/arena/plan` takes the same body and shows what

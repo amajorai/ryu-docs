@@ -45,37 +45,49 @@ except RyuError as error:
     print(error.service, error.status, error.code, error.request_id)
 ```
 
-In Python the fields are snake_case (`retry_after_seconds`, `request_id`,
-`rate_limit`, `auth_challenge`, `idempotency_key`), every class below is an
-exception class with the same name, and `error.to_dict()` returns the same
-camelCase object as `toJSON()`, so logs from both SDKs line up. A
-`RyuError` keeps every field through `pickle` and `copy`, so it reaches you
-intact from a process pool or a task queue worker. A request body that JSON
-cannot hold fails before anything is sent, as `RyuInvalidRequestError` with
-the code `invalid_request_body`; `datetime` and `date` values are sent as ISO
-8601 strings. A header value that `fetch` would refuse (a character outside
-Latin-1, or a carriage return, line feed or NUL) also fails before anything is
-sent, with the code `invalid_request_header`; other Latin-1 text is sent as
-Latin-1 bytes.
+With `new Ryu({ result: "object" })`, the same `RyuError` arrives as `error`
+in `{ data, error, meta }` instead of being thrown:
 
-Both SDKs refuse an id that would change which route a request reaches before
-anything is sent: an empty id, `.` or `..` in a path (for example
-`ryu.box.previews.delete("b", "..")`) is a `RyuInvalidRequestError` with the
-code `invalid_id` and `status` `0`. If you use `@ryuhq/client` directly, the
-same refusal is a `RyuPathIdError` (Box, Notify and Mail), a `MessagingError`
-or a `ManagedAgentsError`, each with the code `invalid_id` and `status` `0`.
-To check a path yourself before building a request, `@ryuhq/client` exports
-the scan both TypeScript packages run (`@ryuhq/services` runs it on every
-request): `isSafeRequestPath("/v1/boxes/b/previews/..")` returns `false`. Pass
-the request path, such as `/v1/boxes/b?x=1`, not a full URL. A trailing slash
-counts as an empty segment, so `/v1/boxes/` returns `false` too. Both SDKs read at most 64 KiB of an error response's body.
+- A failed `ryu.webhooks.verify()` resolves to `{ data, error, meta }` with a
+  `RyuWebhookVerificationError` as `error`.
+- Iterators and streams throw in both modes.
+- The standalone verifiers from `@ryuhq/services/webhooks` always throw.
 
-With `new Ryu({ result: "object" })` the same `RyuError` arrives as `error`
-in `{ data, error, meta }` instead of being thrown. So does a failed
-`ryu.webhooks.verify()`. In object mode it resolves to `{ data, error, meta }`
-with a `RyuWebhookVerificationError` as `error`. Iterators and streams throw
-it in both modes, and the standalone verifiers from
-`@ryuhq/services/webhooks` always throw.
+## Python differences
+
+- Fields are snake_case: `retry_after_seconds`, `request_id`, `rate_limit`,
+  `auth_challenge`, `idempotency_key`.
+- Every class below is an exception class with the same name.
+- `error.to_dict()` returns the same camelCase object as `toJSON()`, so logs
+  from both SDKs line up.
+- A `RyuError` keeps every field through `pickle` and `copy`, so it reaches
+  you intact from a process pool or a task queue worker.
+- A request body that JSON cannot hold fails before anything is sent, as
+  `RyuInvalidRequestError` with the code `invalid_request_body`. `datetime`
+  and `date` values are sent as ISO 8601 strings.
+- A header value that `fetch` would refuse (a character outside Latin-1, or a
+  carriage return, line feed or NUL) fails before anything is sent, with the
+  code `invalid_request_header`. Other Latin-1 text is sent as Latin-1 bytes.
+
+## Unsafe ids
+
+Before sending, both SDKs refuse an id that would change which route a
+request reaches. An empty id, or `.` or `..` in a path (for example
+`ryu.box.previews.delete("b", "..")`), is a `RyuInvalidRequestError` with the
+code `invalid_id` and `status` `0`.
+
+If you use `@ryuhq/client` directly, the same refusal is a `RyuPathIdError`
+(Box, Notify and Mail), a `MessagingError` or a `ManagedAgentsError`, each with
+the code `invalid_id` and `status` `0`.
+
+To check a path yourself, `@ryuhq/client` exports the scan both TypeScript
+packages run (`@ryuhq/services` runs it on every request):
+
+- `isSafeRequestPath("/v1/boxes/b/previews/..")` returns `false`.
+- Pass the request path, such as `/v1/boxes/b?x=1`, not a full URL.
+- A trailing slash counts as an empty segment, so `/v1/boxes/` returns `false`.
+
+Both SDKs read at most 64 KiB of an error response's body.
 
 ## Fields
 
@@ -85,7 +97,7 @@ it in both modes, and the standalone verifiers from
 | `status` | The HTTP status. `0` when no response arrived: configuration, connection, timeout, or abort. |
 | `message` | The service's human-readable message, followed by ` Hint: ` and the hint when the error has one. See [Messages end with the hint](/docs/standalone/sdk/errors#messages-end-with-the-hint). |
 | `service` | Which namespace failed, such as `notify` or `managedAgents`. |
-| `requestId` | `X-Request-ID`, or the request id in the body; `null` when the service sends neither. Quote it when you contact support. The Ryu control plane (Mail, Messaging, Managed Agents) sends `X-Request-ID` on every response. A direct HTTP call that sends its own `X-Request-ID` of up to 128 characters, starting with a letter or digit and made of letters, digits, `.`, `_`, `:` or `-`, gets the same value back. An id that starts with `req_` is replaced with a new one, because that prefix is reserved for ids the server assigns. Managed Agents always assigns its own id. |
+| `requestId` | `X-Request-ID`, or the request id in the body; `null` when the service sends neither. Quote it when you contact support. See [Request ids](/docs/standalone/sdk/errors#request-ids). |
 | `retryable` | Whether repeating the same request could succeed. The SDK already retried when that was safe. |
 | `retryAfterSeconds` | The wait the server asked for, from `Retry-After` or a body hint. |
 | `rateLimit` | The parsed `RateLimit` and `RateLimit-Policy` headers, when sent. |
@@ -98,14 +110,26 @@ it in both modes, and the standalone verifiers from
 | `idempotencyKey` | The `Idempotency-Key` the request carried, if any. |
 | `attempts` | How many HTTP attempts the call made. |
 
+### Request ids
+
+The Ryu control plane (Mail, Messaging, Managed Agents) sends `X-Request-ID`
+on every response. A direct HTTP call can send its own id, except to Managed
+Agents, which always assigns its own:
+
+- An `X-Request-ID` of up to 128 characters, starting with a letter or digit
+  and made of letters, digits, `.`, `_`, `:` or `-`, comes back unchanged.
+- An id that starts with `req_` is replaced with a new one, because that
+  prefix is reserved for ids the server assigns.
+
 ### Default hints
 
 When the service sent no `hint`, the SDK fills in a default for the cases
-below. A default hint never contains a key, a path, or a query string. One
-case replaces a hint the service did send: when the error's problem `type`
+below. A default hint never contains a key, a path, or a query string.
+
+One case replaces a hint the service did send. When the error's problem `type`
 (or its `docs` link) names a different service's standalone API page, the
-reply came from that other service, so its own hint and docs link, which name
-its settings, are replaced as well.
+reply came from that other service. Its own hint and docs link, which name its
+settings, are replaced as well.
 
 | Failure | Default `hint` |
 |---|---|
@@ -118,33 +142,43 @@ its settings, are replaced as well.
 | Connect `503` for a lane the operator has not configured | The Connect has no tool lane, MCP upstream, Composio lane or skill catalog configured (codes `upstream_unconfigured`, `upstream_invalid`, `mcp_unconfigured`, `native_composio_unavailable`, `skills_unavailable`). The hint names the setting the operator sets where Connect runs; for `upstream_unconfigured` it names the native settings first (`RYU_CONNECT_MCP_SERVERS` or `RYU_CONNECT_COMPOSIO_BINDINGS`), then the single-tenant compatibility-mode ones (`RYU_CONNECT_CORE_URL` for search, `RYU_CONNECT_GATEWAY_URL` for execution), and says that another key or URL, or a retry, will not help. |
 | `429` after failed authentication | The service blocks an address for a while after repeated failed authentication, and refuses even a correct key until the block ends. Wait for the `Retry-After` delay, then fix the key before you retry. The Notify service does this; its message says "Too many failed authentication attempts". |
 
-A missing configuration value gives a `RyuConfigurationError` whose hint
-names every variable to set and the `new Ryu()` option for each. A URL variable that is not an absolute `http` or `https` URL gives a
-`RyuConfigurationError` with code `invalid_url` that names the variable but
-not its value. When the value has no scheme, such as `127.0.0.1:8021` or
-`localhost:8021`, its hint says to add one, for example
-`http://127.0.0.1:8021`. The value must spell `http://` or `https://` in
-full, so `http:127.0.0.1:8021` and `http:/127.0.0.1:8021` are rejected too.
+Configuration errors get hints too:
+
+- A missing value gives a `RyuConfigurationError` whose hint names every
+  variable to set and the `new Ryu()` option for each.
+- A URL variable that is not an absolute `http` or `https` URL gives a
+  `RyuConfigurationError` with code `invalid_url`. It names the variable but
+  not its value.
+- When the value has no scheme, such as `127.0.0.1:8021` or `localhost:8021`,
+  the hint says to add one, for example `http://127.0.0.1:8021`.
+- The value must spell `http://` or `https://` in full, so
+  `http:127.0.0.1:8021` and `http:/127.0.0.1:8021` are rejected too.
 
 `knownServerHint(service, status, message, problem?)` (Python
 `known_server_hint(service, status, message, problem=None)`) returns the
 default hint and docs link for the server replies above, or `null` (`None`).
 `problem` holds the error body's `code`, `docs` and `type`, which the
-wrong-service and Connect hints read. The message alone covers the Notify
-backoff `429` and the self-hosted Mail server's `email transport is not
-configured`.
+wrong-service and Connect hints read.
+
+The message alone covers the Notify backoff `429` and the self-hosted Mail
+server's `email transport is not configured`.
 
 ### Messages end with the hint
 
-When an error has a hint, `error.message` (and so `String(error)`, a log line,
-or an uncaught-error trace) ends with ` Hint: ` and the hint, so the message
-alone says what to do next. In Python, `str(error)` and `error.message` do the
-same. A period is added first when the message does not already end a
-sentence. The hint is not added again when the message already ends with
-it. Only the `hint` field is added, never the `docs` field, the URL, headers,
-or a key, though a hint's own text can link to a docs page. `error.code` and
-`error.hint` are unchanged. `hint` is read-only in both SDKs; for another hint, make a copy with `withRyuErrorFields(error, { hint })`
-(Python `with_ryu_error_fields(error, hint=...)`), which rebuilds the message.
+When an error has a hint, `error.message` ends with ` Hint: ` and the hint, so
+the message alone says what to do next. That includes `String(error)`, a log
+line, and an uncaught-error trace. In Python, `str(error)` and `error.message`
+do the same.
+
+- A period is added first when the message does not already end a sentence.
+- The hint is not added again when the message already ends with it.
+- Only the `hint` field is added, never the `docs` field, the URL, headers, or
+  a key, though a hint's own text can link to a docs page.
+- `error.code` and `error.hint` are unchanged.
+
+`hint` is read-only in both SDKs. For another hint, make a copy with
+`withRyuErrorFields(error, { hint })` (Python
+`with_ryu_error_fields(error, hint=...)`), which rebuilds the message.
 Import it from `@ryuhq/services/errors` (Python `ryu_sdk.services.errors`); the
 package root does not export it.
 
@@ -190,6 +224,15 @@ is safe to log.
 Each failure is a subclass of `RyuError`, chosen from the status and code.
 `isRyuError(value)` also recognizes errors from another copy of the package.
 
+```mermaid
+flowchart LR
+  Call["Request sent"] --> R{"Response?"}
+  R -->|"none"| N["Connection, timeout or abort error"]
+  R -->|"redirect"| D["RyuRedirectError"]
+  R -->|"2xx, bad body"| V["RyuResponseValidationError"]
+  R -->|"4xx or 5xx"| S["Class from status and code"]
+```
+
 | Class | When | Default code |
 |---|---|---|
 | `RyuConfigurationError` | A URL or key is missing or invalid, or a key was passed in a browser. | `configuration_error` |
@@ -211,26 +254,31 @@ Each failure is a subclass of `RyuError`, chosen from the status and code.
 | `RyuWebhookVerificationError` | A webhook delivery failed verification. | `webhook_invalid_signature` and the other `webhook_` codes |
 | `RyuError` | Anything else, such as an unlisted `4xx`. | the status default |
 
-Status defaults follow Ryu's problem details: `400 bad_request`,
-`401 unauthenticated`, `403 forbidden`, `404 not_found`,
-`405 method_not_allowed`, `409 conflict`, `410 gone`, `413 payload_too_large`,
-`415 unsupported_media_type`, `422 unprocessable_content`, `429 rate_limited`,
-`500 internal_error`, `502 bad_gateway`, `503 service_unavailable`, and
-`504 gateway_timeout`, with `client_error` and `server_error` for the rest.
+Status defaults follow Ryu's problem details:
+
+- `400 bad_request`, `401 unauthenticated`, `403 forbidden`, `404 not_found`,
+  `405 method_not_allowed`, `409 conflict`, `410 gone`,
+  `413 payload_too_large`, `415 unsupported_media_type`,
+  `422 unprocessable_content`, and `429 rate_limited`;
+- `500 internal_error`, `502 bad_gateway`, `503 service_unavailable`, and
+  `504 gateway_timeout`;
+- `client_error` and `server_error` for the rest.
 
 ## Where the fields come from
 
 The SDK reads each service's error body once and maps it to the same fields.
-You do not need to know the shapes, but they explain what `envelope` says.
+The body shapes explain what `envelope` says.
 
 Unless a call sets its own `Accept`, the SDK sends
 `Accept: application/problem+json, application/json;q=0.9, */*;q=0.8`.
 Services that negotiate RFC 9457 then answer errors as problem details, and
-`envelope` is `problem+json`; the others, and older servers, keep the body
-below. Problem details from Notify, Box, Connect, Passport, and Sites keep
-their service's own members (`code`, `requestId`, a nested `error` with
-`details` or `fields`), so `code`, `requestId`, and `details` come out the
-same either way, and `docs` links the code's documentation.
+`envelope` is `problem+json`. The others, and older servers, keep the body
+below.
+
+Problem details from Notify, Box, Connect, Passport, and Sites keep their
+service's own members (`code`, `requestId`, a nested `error` with `details` or
+`fields`). So `code`, `requestId`, and `details` come out the same either way,
+and `docs` links the code's documentation.
 
 | Service | Error body without problem details | `code` from | `requestId` from |
 |---|---|---|---|
@@ -254,13 +302,17 @@ service sends; start with [Managed Agents](/docs/standalone/sdk/managed-agents#e
 The SDK retries a failure only when repeating the request is safe; see
 [Retries and idempotency](/docs/standalone/sdk/retries-and-idempotency). These
 codes are never retried, because waiting does not change them:
-`quota_exceeded`, `insufficient_credits`, `spend_limit_reached`,
-`managed_agents_disabled`, `feature_disabled`, `not_configured`,
-`metering_unavailable`, `outcome_unknown`, `provider_refused`, `too_many_streams`,
-`stream_limit_reached`, `address_change_cooldown`, `backend_disabled`,
-`secrets_unavailable`, `driver_not_safe`, `upstream_unconfigured`,
-`upstream_invalid`, `skills_unavailable`, and
-`idempotency_key_resource_deleted`. Any `402` is final too.
+
+- quota and billing: `quota_exceeded`, `insufficient_credits`,
+  `spend_limit_reached`, and any `402`;
+- a feature that is off or not configured: `managed_agents_disabled`, `feature_disabled`,
+  `not_configured`, `metering_unavailable`;
+- deployment configuration: `backend_disabled`, `secrets_unavailable`,
+  `driver_not_safe`, `upstream_unconfigured`, `upstream_invalid`,
+  `skills_unavailable`;
+- stream limits: `too_many_streams`, `stream_limit_reached`;
+- others: `outcome_unknown`, `provider_refused`, `address_change_cooldown`,
+  `idempotency_key_resource_deleted`.
 
 When the SDK gives up, `error.attempts` says how many requests it sent, and
 `error.retryAfterSeconds` keeps the wait the server asked for, so you can
@@ -286,12 +338,8 @@ data, error, meta = ryu.notify.publish({"title": "Hello"})
 # error.details == {"missing": ["RYU_NOTIFY_API_KEY"]}
 ```
 
-Box and Notify default to their hosted origins, `https://box.ryuhq.com` and
-`https://notify.ryuhq.com`, and need only a key, which Ryu provisions in early
-access. Connect, Passport, and Sites have no default URL, so they always need
-one. Managed Agents and Messaging default to `https://api.ryuhq.com`; hosted
-Mail uses that host with a node gateway key or a `ryu_` key that has Mail
-scopes. Gateway defaults to the local `http://127.0.0.1:7981`.
+[Configure](/docs/standalone/sdk#configure) lists each service's variables
+and default URL.
 
 ## Read next
 

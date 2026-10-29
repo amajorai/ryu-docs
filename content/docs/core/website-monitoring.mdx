@@ -31,12 +31,19 @@ flowchart LR
 ```
 
 A check alerts on a **transition** into an alert state, not on every interval that it stays in
-that state. A provider reset watch saves its first successful snapshot without an
-alert. Later it detects a selected usage window dropping to near zero, a configured minimum usage
-drop, a reset boundary passing with a refill, or a selected API-credit balance increasing. This
-also catches provider-initiated resets that happen before the old `resetsAt` timestamp. Detection
-latency is bounded by the monitor interval; reset watches default to five minutes and cannot poll
-more often than once per minute.
+that state.
+
+A provider reset watch saves its first successful snapshot without an alert. Later checks alert when
+they detect any of these:
+
+- a selected usage window dropping to near zero;
+- a usage drop of at least the configured minimum;
+- a reset boundary passing with a refill;
+- a selected API-credit balance increasing.
+
+This also catches provider-initiated resets that happen before the old `resetsAt` timestamp.
+Detection latency is bounded by the monitor interval. Reset watches default to five minutes and
+cannot poll more often than once per minute.
 
 ## Check types
 
@@ -51,11 +58,15 @@ more often than once per minute.
 | `stock` | Availability by phrase | `in_stock_pattern`, `is_regex`, `alert_when_in_stock` | `in_stock` / `out_of_stock` |
 | `provider_usage_reset` | Selected provider usage windows or credit meter values | `provider_id`, `account_id` (optional), `target_ids`, `minimum_drop_percent` | The provider, the account that was read, and the selected normalized values and reset timestamps |
 
-`provider_id` comes from the live `usage.providers` catalog. `target_ids` come from the provider's
-current usage snapshot; windows and meter values each have a stable `targetId`. The monitor calls
-the same read-only `usage.query` reader as Core's agent tools, so credentials remain inside Core.
-Unsupported, expired, rate-limited, and not-logged-in states stay visible as check errors and do
-not replace the last successful baseline.
+How a `provider_usage_reset` check reads usage:
+
+- `provider_id` comes from the live `usage.providers` catalog.
+- `target_ids` come from the provider's current usage snapshot. Windows and meter values each have a
+  stable `targetId`.
+- The monitor calls the same read-only `usage.query` reader as Core's agent tools, so credentials
+  remain inside Core.
+- Unsupported, expired, rate-limited, and not-logged-in states stay visible as check errors. They do
+  not replace the last successful baseline.
 
 ### Account scope
 
@@ -71,8 +82,10 @@ not replace the last successful baseline.
 
 A baseline is compared only when both its provider and its account identifier match the current
 reading. Snapshots written before account scoping carry no account identifier, so those monitors
-record a fresh baseline on their first check. Snapshots and alerts store identifiers only, never
-account names, which can be email addresses; alert titles stay `<monitor name> reset detected`.
+record a fresh baseline on their first check.
+
+Snapshots and alerts store identifiers only, never account names, which can be email addresses.
+Alert titles stay `<monitor name> reset detected`.
 
 Per-account readings cover Claude Pro/Max, ChatGPT, OpenAI Codex, and GitHub Copilot. ChatGPT plan,
 Kiro, Kimi, Radius, Ant Ling, and agent CLI logins report no per-account usage, so watches for them
@@ -134,10 +147,17 @@ back the engine (`apps-store/monitors/backend/src/store.rs`):
 Mobile push tokens are not stored here. Core keeps them in its notification store and registers them
 at `/api/notifications/push-tokens`.
 
-Each snapshot carries a `CheckStatus` of `ok` (checked, no alert), `triggered` (an alert condition
-was met), or `error` (the check could not complete). For `content_diff`, the comparison baseline is
-the SHA-256 `content_hash` of the normalized text, not the `value`. The monitor row also keeps a
-rollup (`last_check_at`, `last_status`, `last_value`) updated after each check.
+Each snapshot carries a `CheckStatus` value:
+
+| `CheckStatus` | Meaning |
+|---|---|
+| `ok` | Checked, no alert |
+| `triggered` | An alert condition was met |
+| `error` | The check could not complete |
+
+For `content_diff`, the comparison baseline is the SHA-256 `content_hash` of the normalized text, not
+the `value`. The monitor row also keeps a rollup (`last_check_at`, `last_status`, `last_value`)
+updated after each check.
 
 ## Notification fan-out
 
@@ -159,19 +179,40 @@ targets.
 ## Scheduler tie-in
 
 A monitor does not run its own loop. The Monitors app lists every monitor as a scheduled job
-through the generic `jobs.list` capability, and Core keeps one `app_job` per monitor, so monitors
-ride the same tick loop as workflows and agents (see
-[App-owned jobs](/docs/core/scheduler#app-owned-jobs)). Each job is named `monitor: <name>`. The
-interval string maps to a scheduler schedule: a humantime duration (`5m`, `1h`) becomes an `every`
-schedule, otherwise it is treated as a cron expression, and a monitor with no interval checks every
-five minutes. Core raises an `every` interval shorter than one minute to one minute. Disabling a
-monitor disables (keeps) the job; deleting a monitor removes its snapshots and alerts, and Core
-removes the job on its next reconcile, within about 30 seconds.
+through the generic `jobs.list` capability. Core keeps one `app_job` per monitor, named
+`monitor: <name>`, so monitors ride the same tick loop as workflows and agents (see
+[App-owned jobs](/docs/core/scheduler#app-owned-jobs)).
 
-When the job fires, Core calls the app's `jobs.run` capability, which runs one check exactly like
-**Run now**. While the Monitors app is disabled, its jobs are kept but skipped. A monitor created
-before app jobs keeps its job id (`monitor-<id>`) and its run history. See
-[Scheduler](/docs/core/scheduler) for the tick loop itself.
+```mermaid
+sequenceDiagram
+  participant S as Core scheduler
+  participant M as Monitors app
+  S->>M: jobs.list
+  M-->>S: One job per monitor
+  S->>M: jobs.run (job fires)
+  M->>M: Run one check, like Run now
+  M-->>S: Status
+```
+
+The interval string maps to a scheduler schedule:
+
+| `interval` | Schedule |
+|---|---|
+| A humantime duration (`5m`, `1h`) | An `every` schedule. Core raises an interval shorter than one minute to one minute |
+| Anything else | A cron expression |
+| Empty | Every five minutes |
+
+Job lifecycle:
+
+- When the job fires, Core calls the app's `jobs.run` capability, which runs one check exactly like
+  **Run now**.
+- Disabling a monitor disables (keeps) the job.
+- Deleting a monitor removes its snapshots and alerts. Core removes the job on its next reconcile,
+  within about 30 seconds.
+- While the Monitors app is disabled, its jobs are kept but skipped.
+- A monitor created before app jobs keeps its job id (`monitor-<id>`) and its run history.
+
+See [Scheduler](/docs/core/scheduler) for the tick loop itself.
 
 ## Routes
 
@@ -192,6 +233,11 @@ All routes are under `/api/monitors`, the app's `public_mount` (`apps-store/moni
 | `POST /api/monitors/alerts/:id/ack` | Acknowledge an alert |
 | `GET /api/monitors/usage/providers` | List provider IDs with a supported normalized usage reader |
 | `POST /api/monitors/usage/query` | Read one provider's current usage windows and credit meters, for the active account or an optional `account_id` |
+
+Core also calls four capability-only routes: `POST /api/monitors/list` (`jobs.list`),
+`POST /api/monitors/run` (`jobs.run`), and `POST /api/monitors/data/count` and
+`POST /api/monitors/data/purge` (`data.count` and `data.purge`, behind the Danger Zone row). They stay
+out of the OpenAPI document, so they never become agent tools.
 
 ## Caveats
 

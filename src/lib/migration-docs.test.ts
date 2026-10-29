@@ -29,7 +29,9 @@ test("migration guides expose the supported migration boundaries", async () => {
   // reference tables.
   expect(startHere.filter((page) => page.startsWith("---"))).toEqual([
     "---Getting Started---",
-    "---Architecture---",
+    "---Why Ryu---",
+    "---System Design---",
+    "---Agents and Engines---",
     "---Migration---",
     "---Reference---",
   ]);

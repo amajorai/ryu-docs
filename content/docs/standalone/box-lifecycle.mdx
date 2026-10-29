@@ -21,24 +21,53 @@ restart, and keeps lifecycle events after a Box is deleted.
 | `error` | Provisioning or execution needs recovery | `ready`, `stopped`, `deleted` |
 | `deleted` | The driver resource is destroyed; the audit row remains | none |
 
+The diagram shows the main paths between states. The table lists every allowed
+move, including the moves to `error` and `deleted` the diagram leaves out.
+
+```mermaid
+stateDiagram-v2
+  [*] --> provisioning
+  provisioning --> ready
+  ready --> running: command
+  running --> ready: last command ends
+  ready --> stopping
+  running --> stopping
+  stopping --> stopped
+  stopped --> provisioning: resume
+  stopped --> ready: resume
+  provisioning --> error
+  error --> ready
+  error --> stopped
+  stopped --> deleted
+  deleted --> [*]
+```
+
+### Errors
+
 When a Box enters `error`, for example after a failed setup step or expiry, the
 local service stops its machine if one exists and keeps its disk, so `resume`
 brings it back. The Box keeps `error` and its original `lastError` even if that
-stop fails, and its running time stops counting until it resumes.
+stop fails. Its running time stops counting until it resumes.
+
+### Disk watchdog
 
 A local service that runs the disk watchdog also stops a Box whose disk use
 exceeds its size's storage allowance. It records `box.storage_exceeded` and sets
-`lastError`. The Box can be resumed to delete files during one cleanup window,
-one watchdog interval from the first resume, and `lastError` shows the deadline.
-Stopping and resuming does not extend the window. A Box still over when it ends
-is stopped at the next check, and resume then answers `429 quota_exceeded`;
-delete the Box to free the space. While it is over, fork and snapshot answer
-`429 quota_exceeded` too.
+`lastError`.
+
+- The Box can be resumed to delete files during one cleanup window, one
+  watchdog interval from the first resume. `lastError` shows the deadline.
+- Stopping and resuming does not extend the window.
+- A Box still over when the window ends is stopped at the next check, and
+  resume then answers `429 quota_exceeded`. Delete the Box to free the space.
+- While it is over, fork and snapshot answer `429 quota_exceeded` too.
 
 ## Create, run, and stop
 
 Creation emits `box.provisioning`. A local driver waits for the workspace to be
-ready before returning the created resource. On Ryu-hosted Box, where a Box
+ready before returning the created resource.
+
+On Ryu-hosted Box, where a Box
 gets its own virtual machine or a sandboxed slot on a shared overflow host,
 create, stop, and resume answer `202` at once and the Box moves through
 `provisioning` or `stopping` in the background; poll `GET /v1/boxes/:id`. See
@@ -65,16 +94,19 @@ curl -fsS -X POST "${BOX_API_BASE}/boxes/$BOX_ID/resume" \
 ```
 
 Commands use an argv array internally, keep `cwd` inside the workspace, and
-bound combined stdout and stderr to 1 MiB. A Box runs up to 16 foreground and
-background commands at the same time, all in the same workspace. The service
-does not serialize them: callers that need one command at a time, such as Git
-operations or package installs from several workers, must serialize that work
-themselves.
+bound combined stdout and stderr to 1 MiB.
 
-`409 box_busy` means the Box cannot take the request right now. A 17th
-concurrent command gets it, as does a command sent while the Box is stopping,
-resuming, or being deleted. Stop, resume, and delete also return it while a
-foreground command is still running.
+A Box runs up to 16 foreground and background commands at the same time, all
+in the same workspace. The service does not serialize them. Callers that need
+one command at a time, such as Git operations or package installs from several
+workers, must serialize that work themselves.
+
+`409 box_busy` means the Box cannot take the request right now. It is returned
+for:
+
+- a 17th concurrent command;
+- a command sent while the Box is stopping, resuming, or being deleted;
+- stop, resume, or delete while a foreground command is still running.
 
 ## Park and resume
 
@@ -106,9 +138,11 @@ the node went offline or its credits ran out, it parks the Box with reason
 A Box created with `"desktop": true` starts its virtual desktop and browser
 with the workspace, and starts them again on every resume.
 `GET /v1/boxes/:id` reports `desktop.ready` once the screen accepts streams and
-actions, and the current number of viewers under `desktop.viewers`. Parking, stopping, or
-deleting the Box closes every stream with WebSocket code `1001`, and a billing
-suspension closes them within about a minute. See [Desktop](/docs/standalone/box-api#desktop).
+actions, and the current number of viewers under `desktop.viewers`.
+
+Parking, stopping, or deleting the Box closes every stream with WebSocket code
+`1001`, and a billing suspension closes them within about a minute. See
+[Desktop](/docs/standalone/box-api#desktop).
 
 ## Fork and expiry
 
@@ -127,6 +161,18 @@ during an admitted command.
 `claude-code`, or `opencode`. A worker claims it through
 `POST /v1/boxes/:id/prompts/:run/claim`, runs the work inside or against the
 Box, and reports `completed` or `failed` through the matching `complete` route.
+
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant S as Box service
+  participant W as Worker
+  C->>S: POST /v1/boxes/:id/prompt
+  W->>S: POST .../prompts/:run/claim
+  W->>W: Run the work in or against the Box
+  W->>S: POST .../prompts/:run/complete
+  C->>S: GET /v1/boxes/:id/prompts/:run
+```
 
 With `"execution": "managed"`, the service installs and runs the provider's CLI
 inside the Box itself. A managed run moves from `queued` to `running`, and ends
@@ -161,37 +207,43 @@ Keep the Box and Notify bearer credentials separate.
 ## Usage report
 
 `GET /v1/usage?from=<ISO>&to=<ISO>` returns one line per Box that existed or ran
-in the window. `seconds` and `resourceUnitSeconds` count running time only: they
-stop when a Box is stopped or enters `error`, and restart when it resumes. A Box
-deleted inside the window still appears, counted up to its deletion. A fork
-counts from its own creation. Snapshots are not Boxes and have no line.
-
-`billableSeconds` is the running time Box compute is charged on: each start or
-resume counts at least 5 minutes, then whole minutes. A waived start
-(`billing.minimumWaived` is `true`) counts whole minutes only. The minimum is
-counted in the window where the running interval started, so an interval that
-spans two windows is never charged twice. `totals.billableSeconds` is the sum
-over the lines.
-
-`stateBytes` is the size of the Box's newest saved state, the work kept while a
-Box is stopped, and `stateByteSeconds` is those bytes multiplied by the seconds
-they were kept in the window. Saved state and snapshots are the storage that is
-charged, above the storage your organization includes. A Box that keeps no saved
-state outside itself reports `0` for both.
-
-`storageSeconds` (time the Box existed) and `storageAllowanceGib` (the disk size
-of its size) are kept for older clients. Storage is not charged on either.
-
-`snapshots` lists each snapshot that existed in the window: `sizeBytes`, its
-image size measured when it was taken, and `storageSeconds`, the time it existed
-in the window, counted up to its deletion. Storage stops when `DELETE` answers.
-A fork's private image is not listed or charged as a snapshot. If a snapshot's
-size could not be measured yet, the report returns `503 driver_unavailable`
-instead of counting it as 0 bytes; retry it shortly.
+in the window. A Box deleted inside the window still appears, counted up to its
+deletion. A fork counts from its own creation. Snapshots are not Boxes and have
+no line.
 
 Without `from`, the report covers the 30 days before `to`, which defaults to
 now. A window longer than 31 days, or one whose `from` is after `to`, returns
 `400 invalid_request`.
+
+### Box line fields
+
+| Field | Meaning |
+|---|---|
+| `seconds`, `resourceUnitSeconds` | Running time only. They stop when a Box is stopped or enters `error`, and restart when it resumes |
+| `billableSeconds` | The running time Box compute is charged on. Each start or resume counts at least 5 minutes, then whole minutes. A waived start (`billing.minimumWaived` is `true`) counts whole minutes only |
+| `stateBytes` | Size of the Box's newest saved state, the work kept while a Box is stopped |
+| `stateByteSeconds` | `stateBytes` multiplied by the seconds they were kept in the window |
+| `storageSeconds`, `storageAllowanceGib` | Time the Box existed, and the disk size of its size. Kept for older clients; storage is not charged on either |
+
+The per-start minimum is counted in the window where the running interval
+started, so an interval that spans two windows is never charged twice.
+`totals.billableSeconds` is the sum over the lines.
+
+Saved state and snapshots are the storage that is charged, above the storage
+your organization includes. A Box that keeps no saved state outside itself
+reports `0` for `stateBytes` and `stateByteSeconds`.
+
+### Snapshot fields
+
+`snapshots` lists each snapshot that existed in the window:
+
+- `sizeBytes` - its image size, measured when it was taken;
+- `storageSeconds` - the time it existed in the window, counted up to its
+  deletion. Storage stops when `DELETE` answers.
+
+A fork's private image is not listed or charged as a snapshot. If a snapshot's
+size could not be measured yet, the report returns `503 driver_unavailable`
+instead of counting it as 0 bytes. Retry it shortly.
 
 ```json
 {
@@ -238,21 +290,24 @@ state, even at the limit.
 
 ## Billing and security
 
-Ryu-hosted Box billing, the Core sandbox heartbeat path, and connected-provider
-billing are on [Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing).
-A self-hosted Box is never billed by Ryu. When a Ryu-hosted organization runs out
-of credits, Ryu stops its running Boxes and refuses new work with
-`402 insufficient_credits`. See [Idempotency and errors](/docs/standalone/box-api#idempotency-and-errors)
-for the routes that still work.
+Ryu-hosted Box billing, the Core sandbox heartbeat path, connected-provider
+billing, and what happens when credits run out are on
+[Ryu capacity pricing](/docs/standalone/box#ryu-capacity-pricing). See
+[Idempotency and errors](/docs/standalone/box-api#idempotency-and-errors) for
+the routes that still work after a `402 insufficient_credits`.
 
-Keep the service behind TLS and a Ryu-authenticated network boundary. Keep the
-Docker socket private, allowlist images with `RYU_BOX_ALLOWED_IMAGES`, and
-leave network access off unless a Box needs egress. Treat SSH, artifact, and
-snapshot URLs as secrets. Set `RYU_BOX_STREAM_ORIGINS` to the origins your
-desktop viewers use and `RYU_BOX_PUBLIC_URL` to the service's public `https`
-address (see [Desktop](/docs/standalone/box-api#desktop)). A
-self-hosted service runs desktop Boxes from `RYU_BOX_DESKTOP_IMAGE`, which must
-also be in `RYU_BOX_ALLOWED_IMAGES`.
+To secure a Box service:
+
+- Keep the service behind TLS and a Ryu-authenticated network boundary.
+- Keep the Docker socket private, and allowlist images with
+  `RYU_BOX_ALLOWED_IMAGES`.
+- Leave network access off unless a Box needs egress.
+- Treat SSH, artifact, and snapshot URLs as secrets.
+- Set `RYU_BOX_STREAM_ORIGINS` to the origins your desktop viewers use and
+  `RYU_BOX_PUBLIC_URL` to the service's public `https` address (see
+  [Desktop](/docs/standalone/box-api#desktop)).
+- A self-hosted service runs desktop Boxes from `RYU_BOX_DESKTOP_IMAGE`, which
+  must also be in `RYU_BOX_ALLOWED_IMAGES`.
 
 <Cards>
   <DocCard href="/docs/standalone/box-api" />

@@ -13,16 +13,19 @@ On first launch Core installs a local stack in the background so chat works with
 blocks chat.
 
 1. The llama.cpp binary.
-2. The GGUF models served by llama.cpp, which need the binary from step 1: the bundled chat model
-   and its vision adapter, the nomic embedding model, the reranker, the classifier, and the
-   speech-processing model. The chat model is Gemma 4 E2B; a node whose RAM can't hold it (it needs
-   about 5 GB) gets Gemma 3 1B instead, and Core logs why. Set
-   `RYU_LOCAL_CHAT_MODEL_ID` to choose your own.
+2. The GGUF models served by llama.cpp, which need the binary from step 1:
+   - the bundled chat model and its vision adapter;
+   - the nomic embedding model, the reranker, the classifier, and the speech-processing model.
+
+   The chat model is Gemma 4 E2B. A node whose RAM cannot hold it (it needs about 5 GB) gets
+   Gemma 3 1B instead, and Core logs why. Set `RYU_LOCAL_CHAT_MODEL_ID` to choose your own.
 3. The whisper.cpp voice engine and its `ggml-base.en.bin` model.
 4. The parakeet speech model, the Silero VAD model, OuteTTS, and Kokoro text-to-speech.
-5. The `sdcpp` engine and the default image model that fits the node (Qwen Image 2.1, about 11 GB,
-   when it fits; otherwise the lighter SDXL base, about 2.8 GB; otherwise none, with a setup
-   warning), on platforms with a prebuilt server (Windows x64, macOS arm64, Linux x86_64).
+5. The `sdcpp` engine and the default image model that fits the node, on platforms with a
+   prebuilt server (Windows x64, macOS arm64, Linux x86_64):
+   - Qwen Image 2.1 (about 11 GB) when it fits;
+   - otherwise the lighter SDXL base (about 2.8 GB);
+   - otherwise none, with a setup warning.
 
 Onboarding owns every default model download. Engines such as `llamacpp-embed` only serve the file,
 so an engine that auto-starts does not download the same model a second time. Voice, text-to-speech,
@@ -33,17 +36,35 @@ and image engines are downloaded but stay opt-in to run.
 Every sidecar implements one trait with `start`, `stop`, `health_check`, and `uninstall`. The
 `SidecarManager` orchestrates them.
 
+```mermaid
+stateDiagram-v2
+  [*] --> Downloaded: download and verify SHA-256
+  Downloaded --> Installed: extract and install atomically
+  Installed --> Running: boot order or on demand
+  Running --> Running: health check on an interval
+  Running --> Stopped: stop or update
+  Stopped --> Running: start or restart
+  Running --> Exited: process exits on its own
+  Exited --> Running: next request wakes it, or manual restart
+  Installed --> [*]: uninstall
+```
+
 - **Download and verify** - the download manager fetches the right asset for your platform, verifies
   its SHA-256, retries with backoff, extracts archives, and installs atomically.
-- **Storage** - inference engines go to `~/.ryu/engines/<group>/<engine>/` (for example
-  `engines/chat/llamacpp/` or `engines/image/sdcpp/`), small tools to `~/.ryu/bin/`, model weights
-  to `~/.ryu/models/<modality>/`, and service state to `~/.ryu/services/<name>/`. Installed versions
-  are tracked in `~/.ryu/state/versions.json` so an up-to-date binary is not re-downloaded. See
+- **Storage** - files go to fixed folders in the data directory. See
   [What's in the data folder](/docs/surfaces/desktop/user-guide/data-and-storage#whats-in-the-data-folder).
+  - Inference engines: `~/.ryu/engines/<group>/<engine>/` (for example `engines/chat/llamacpp/` or
+    `engines/image/sdcpp/`).
+  - Small tools: `~/.ryu/bin/`.
+  - Model weights: `~/.ryu/models/<modality>/`.
+  - Service state: `~/.ryu/services/<name>/`.
+  - Installed versions: `~/.ryu/state/versions.json`, so an up-to-date binary is not re-downloaded.
 - **Startup order** - a defined boot sequence starts the installed sidecars. Voice engines are
   not in the startup order; they start on demand.
 - **Health** - each sidecar is health-checked on an interval. Health is observable but Core does not
-  auto-restart on degradation.
+  auto-restart on degradation. A sidecar whose process exits on its own is not restarted in a loop.
+  A wake-eligible sidecar restarts on the next request. Any other one can be restarted with
+  `POST /api/sidecar/:name/restart` (see the routes below).
 
 ## Managing sidecars
 
@@ -51,6 +72,7 @@ Every sidecar implements one trait with `start`, `stop`, `health_check`, and `un
 |---|---|
 | Install progress for all sidecars | `GET /api/catalog` |
 | Full install status | `GET /api/setup/status` |
+| Install status of one sidecar | `GET /api/setup/status/:name` |
 | Install a sidecar | `POST /api/setup/:name/install` |
 | Uninstall a sidecar | `POST /api/setup/:name/uninstall` |
 | Uninstall and delete its Ryu-owned data (for example its model store) | `POST /api/setup/:name/uninstall-with-data` |
@@ -62,13 +84,16 @@ Installation and removal routes accept `dryRun=true` as a query parameter. A pre
 node support, current installed state, and whether data would be removed without downloading,
 changing install status, stopping a process, or deleting files.
 
+### Updates
+
 An update is a forced install (`force=true`). Before replacing files, Core stops every running
-sidecar that shares them: updating llama.cpp or its embedding engine stops the whole llama.cpp
-family (`llamacpp`, `llamacpp-embed`, `llamacpp-rerank`, `llamacpp-classify`, `llamacpp-speech`,
-and `outetts`). The sidecars it stopped are started again afterwards, whether or not the update
-succeeded. Only one install or update of a sidecar runs at a time. A second request while one is in
-progress is refused with an "already being installed" error, so wait for the first to finish before
-trying again.
+sidecar that shares them. Updating llama.cpp or its embedding engine stops the whole llama.cpp
+family: `llamacpp`, `llamacpp-embed`, `llamacpp-rerank`, `llamacpp-classify`, `llamacpp-speech`,
+and `outetts`.
+
+The sidecars Core stopped start again afterwards, whether or not the update succeeded. Only one
+install or update of a sidecar runs at a time. A second request while one is in progress is refused
+with an "already being installed" error, so wait for the first to finish before trying again.
 
 ## Per-engine resource usage
 
@@ -90,10 +115,11 @@ sidecar (`apps/core/src/sidecar/mod.rs`). Each field is omitted when absent.
 | `cpu_percent` | CPU usage as a percentage of one core |
 
 The desktop shows these on the **Engines & models** page of the expanded node selector, grouped by
-modality (`apps/desktop/src/components/shell/NodeSelector.tsx`). Engines that adopt an external server, run
-serverless, or run in-process report no `pid` and render running-but-usage-omitted. Chat rows are
-status-only there: swapping Chat is a Store action, not a sidecar start/stop, so the panel shows only
-the active Chat, not the installed-but-idle alternatives.
+modality (`apps/desktop/src/components/shell/NodeSelector.tsx`). Engines that adopt an external
+server, run serverless, or run in-process report no `pid`. They show as running with no usage.
+
+Chat rows are status-only there. Swapping Chat is a Store action, not a sidecar start or stop, so
+the panel shows only the active Chat, not the installed-but-idle alternatives.
 
 <Callout type="warn">
 `cpu_percent` uses `sysinfo`'s per-core convention, so a busy multi-threaded engine can read above

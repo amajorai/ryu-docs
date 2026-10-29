@@ -9,31 +9,76 @@ file and the install, enable, update, and uninstall operations, see
 
 ## Manifest-declared managed sidecars
 
-A manifest can declare `sidecars[]` - long-running child processes Core owns end-to-end (download or
-provision, spawn, health-check, stop). This is the **app to sidecar bridge**: a capability sidecar
-(Ghost, Shadow, an Audio engine) can be a fully manifest-defined app instead of hardcoded Rust, and a
-third-party app can ship its own process. Infrastructure sidecars (llama.cpp, the Gateway,
-embeddings) stay part of Core and cannot be declared here. The type is `SidecarSpec` in
-`crates/core/kernel-contracts/src/schema.rs`; the generic driver is `ManifestSidecar`
-(`apps/core/src/sidecar/manifest_sidecar.rs`). The manifest field itself is documented in
-[Bundle Runnables with manifest.json](/docs/extend/develop/extensions/managed-sidecar).
+A manifest can declare `sidecars[]`. Each entry is a long-running child process that Core owns end
+to end: it downloads or provisions the process, spawns it, health-checks it, and stops it.
 
-Each `SidecarSpec` carries a `name` (unique within the plugin), a `process`, a `port`, and a
-`health_path` (default `/health`). The table below shows how Core obtains the process for each kind.
+This is the **app to sidecar bridge**. A capability sidecar (Ghost, Shadow, an Audio engine) can be
+a fully manifest-defined app instead of hardcoded Rust, and a third-party app can ship its own
+process. Infrastructure sidecars (llama.cpp, the Gateway, embeddings) stay part of Core and cannot
+be declared here.
 
-A sidecar's routes are proxied through the ext-proxy at `/api/ext/<plugin>/<route>`. For an
-**interactive** route (a live stream the panel drives, like the Virtual Desktop), a sidecar can
-declare a WebSocket route served at `/api/ext/ws/<plugin>/<route>`. See
-[Sidecar WebSocket routes](/docs/extend/develop/extensions/sidecar-websocket-routes).
-The ext-proxy answers 404 for a path that contains an encoded tab, line feed or carriage return,
-and for an HTTP request with no query string whose path ends in a space or control character.
-The sidecar would otherwise receive a different path from the one Core matched.
+- The type is `SidecarSpec` in `crates/core/kernel-contracts/src/schema.rs`.
+- The generic driver is `ManifestSidecar` in `apps/core/src/sidecar/manifest_sidecar.rs`.
+- The manifest field is documented in
+  [Bundle Runnables with manifest.json](/docs/extend/develop/extensions/managed-sidecar).
+
+```mermaid
+flowchart TD
+  A["Plugin enabled or woken"] --> B{"may_run_sidecar"}
+  B -- refused --> X["Sidecar not started"]
+  B -- allowed --> C["Obtain process (binary, python, local, node)"]
+  C --> D{"Port bind-probe"}
+  D -- collision --> X
+  D -- free --> E["Spawn with env and data dirs"]
+  E --> F["Registered in SidecarManager"]
+  F --> G["Health check on health_path"]
+  F --> H["Routes via /api/ext/plugin/route"]
+```
+
+### Spec fields
+
+| Field | Meaning |
+|---|---|
+| `name` | Unique within the plugin |
+| `process` | How Core obtains the program (see the next table) |
+| `port` | The port the sidecar serves on |
+| `health_path` | Health-check path, default `/health` |
+
+### Process kinds
 
 | `process.kind` | How Core runs it |
 |---|---|
-| `binary` | Fetches the executable (or a `tar.gz`/`tar.bz2`/`zip` archive) via the shared `DownloadCenter` - streaming `.part` + resume + SHA-256 verify - into a version-namespaced `bin/<version>/` dir inside the plugin's package folder (`~/.ryu/plugins/<dir>/bin/<version>/`), extracts if archived (whole tree so sibling libraries stay co-located), makes it executable, then spawns it with the declared `args` + `env` |
-| `python` | Reuses the external-runtime provisioner (venv + pip + assets), then spawns `python -m <entry>` |
-| `local` | Spawns `command` (or the program its `command_env` override names). For a first-party app, a release build installs the matching release asset on first enable or wake: `<command>-<os>-<arch>` (`.exe` on Windows), verified against its sibling `.sha256`. On a platform listed in `bundles`, it installs `<command>-<os>-<arch>.tar.gz` instead. That archive is verified against its `.sha256` and extracted safely: entries that leave the bundle root, links that resolve outside it, and special files are all refused. Symlinks and executable bits are kept, and the install is swapped into place atomically. Core then spawns the declared `entrypoint` inside the bundle. |
+| `binary` | Downloads the executable or a `tar.gz`/`tar.bz2`/`zip` archive, then spawns it with the declared `args` and `env` |
+| `python` | Reuses the external-runtime provisioner (venv, pip, assets), then spawns `python -m <entry>` |
+| `local` | Spawns `command`, or the program its `command_env` override names |
+| `node` | Runs the plugin's JavaScript backend under `bun` (preferred) or `node` through Core's embedded bootstrap |
+
+The shared `DownloadCenter` handles each `binary` download, as follows.
+
+- It streams to a `.part` file, resumes, and verifies SHA-256.
+- It lands in a version-namespaced `bin/<version>/` folder inside the plugin's package folder
+  (`~/.ryu/plugins/<dir>/bin/<version>/`).
+- An archive is extracted as a whole tree, so sibling libraries stay together. The program is then
+  made executable.
+
+A `node` sidecar loads the declared `entry` module and calls its exported `activate(context)`. The
+entry bundle rides in the manifest's `backend_code` payload and is checked against
+`backend_sha256` at spawn. This kind is gated by the experimental plugin runtime setting (see
+[Plugin Runtime](/docs/extend/develop/extensions/plugin-runtime)).
+
+### Local release assets and bundles
+
+For a first-party app, a release build installs the matching release asset for a `local` sidecar on
+first enable or wake:
+
+- By default it installs `<command>-<os>-<arch>` (`.exe` on Windows), verified against its sibling
+  `.sha256`.
+- On a platform listed in `bundles`, it installs `<command>-<os>-<arch>.tar.gz` instead, verified
+  against its `.sha256`.
+- Extraction refuses entries that leave the bundle root, links that resolve outside it, and special
+  files. Symlinks and executable bits are kept.
+- The install is swapped into place atomically. Core then spawns the declared `entrypoint` inside
+  the bundle.
 
 A `local` bundle is for programs that cannot ship as one executable file, such as a macOS `.app`.
 Platforms not listed in `bundles` keep the single-file asset:
@@ -53,50 +98,91 @@ segments. Core downloads the bundle itself, so macOS sets no quarantine attribut
 executables inside still need a valid code signature, and an ad-hoc signature is enough on Apple
 silicon.
 
-The URL must be `https` and is screened by the SSRF egress check at download time. Without a
-`sha256` an already-present artifact is trusted (idempotent skip); with one, a mismatch re-fetches
-(fail closed).
+### Download integrity
 
-**The `sidecar:process` grant gates it.** Downloading and spawning an arbitrary process is a broader
-surface than the manifest metadata path, so `may_run_sidecar` (`manifest_sidecar.rs`) fails closed - a
-Core-tier plugin is auto-allowed, and a Community-tier plugin must hold the Gateway-approved
-`sidecar:process` grant, read from the plugin's *approved* grants (post-Gateway validation), never its
-declared, unvalidated `permission_grants`. For the Python flavor this one grant also stands in for
-`runtime:external`, since binary execution is the broader surface.
+- The URL must be `https`. The SSRF egress check screens it at download time.
+- Without a `sha256`, an artifact that is already present is trusted (idempotent skip).
+- With a `sha256`, a mismatch re-fetches (fail closed).
 
-Once permitted, the sidecar is registered under the namespaced key `<plugin_id>/<name>` into the live
-`SidecarManager`, so it rides the same managed lifecycle - health monitor, resource sampler,
-`/api/sidecar/status`, graceful stop - as any built-in.
+### The `sidecar:process` grant
 
-Each spawn also decides the sidecar's OS isolation: off by default, or `audit`/`enforce` when the
-node turns on the [sidecar OS sandbox](/docs/security/plugin-isolation#optional-os-sandbox-for-sidecars)
-or the manifest's optional `sidecars[].sandbox.mode` asks for it. Each `/api/sidecar/status` row
-for an app sidecar carries a `sandbox` object (`mode`, `backend`, `enforced`, `fs_restricted`,
-and a `detail` when Core fell back) recorded at its last start.
+Downloading and spawning an arbitrary process is a broader surface than manifest metadata, so
+`may_run_sidecar` (`manifest_sidecar.rs`) fails closed:
 
-Before spawning, the manager claims the declared `port` with a `TcpListener` bind-probe, which rejects
-a collision with a built-in (e.g. llama.cpp on 8080) or another plugin. A collision is *refused*, not
-reallocated: the sidecar does not start, and the port stays with whoever holds it. There is no port
-registry in v1, so the plugin author is responsible for choosing a free port - see
-[Pick a Sidecar Port](/docs/extend/develop/extensions/sidecar-ports) for the ranges that are safe to pick
-from, and for `port_env`, which is how the spawned process learns the port it should bind (Core
-profile-shifts it, so it is not always the number in the manifest).
+- A Core-tier plugin is auto-allowed.
+- A Community-tier plugin must hold the Gateway-approved `sidecar:process` grant. Core reads it from
+  the plugin's *approved* grants (after Gateway validation), never from its declared, unvalidated
+  `permission_grants`.
+- For the `python` kind, this one grant also stands in for `runtime:external`, because binary
+  execution is the broader surface.
 
-Every sidecar also receives the data-folder layout in its environment: `RYU_DIR`, its own
-`RYU_PLUGIN_DATA_DIR` (`<data folder>/plugin-data/<dir>`, created before the spawn and deleted by the
-**App files** uninstall option), `RYU_MODELS_DIR`, and default `HF_HOME` / `TORCH_HOME` under
-`models/`. A `local` or `python` sidecar's declared `env` may use the `${RYU_DIR}`,
-`${RYU_PLUGIN_DATA_DIR}`, `${RYU_MODELS_DIR}`, `${RYU_PLUGIN_DIR}`, and (Python only)
-`${RYU_RUNTIME_DIR}` tokens. See
-[Where a sidecar keeps its data](/docs/extend/develop/extensions/managed-sidecar#where-a-sidecar-keeps-its-data).
+See [App Trust Tiers](/docs/core/app-trust-tiers) for the tiers.
+
+### Managed lifecycle
+
+Once permitted, the sidecar is registered in the live `SidecarManager` under the namespaced key
+`<plugin_id>/<name>`. It then gets the same lifecycle as a built-in: health monitor, resource
+sampler, `/api/sidecar/status`, and graceful stop.
+
+Each spawn also decides the sidecar's OS isolation. It is off by default, or `audit`/`enforce` when
+the node turns on the
+[sidecar OS sandbox](/docs/security/plugin-isolation#optional-os-sandbox-for-sidecars) or the
+manifest's optional `sidecars[].sandbox.mode` asks for it.
+
+Each `/api/sidecar/status` row for an app sidecar carries a `sandbox` object recorded at its last
+start, with `mode`, `backend`, `enforced`, `fs_restricted`, and a `detail` when Core fell back.
 
 <Callout type="warn">
-Manifest sidecars are **not** in the `SidecarManager` startup order, so nothing restarts them after a
-Core restart on their own. `reconcile_plugin_sidecars` (spawned from `main.rs` next to the
-`onStartup` fire) is the required boot step: it re-registers and starts every enabled plugin's
-declared sidecar. A manifest sidecar is always optional (`is_required` is false), so a plugin process failing
-to start never aborts Core boot.
+Manifest sidecars are **not** in the `SidecarManager` startup order, so nothing restarts them on
+its own after a Core restart. `reconcile_plugin_sidecars` is the required boot step: it re-registers
+and starts every enabled plugin's declared sidecar.
+
+Core runs it at boot right after the `onStartup` activation pass
+(`apps/core/src/boot/state_wiring.rs`). A manifest sidecar is always optional (`is_required` is
+false), so a plugin process that fails to start never aborts Core boot.
 </Callout>
+
+### Ports
+
+Before spawning, the manager claims the declared `port` with a `TcpListener` bind-probe. The probe
+rejects a collision with a built-in (for example llama.cpp on 8080) or another plugin.
+
+- A collision is *refused*, not reallocated. The sidecar does not start, and the port stays with
+  whoever holds it.
+- There is no port registry in v1, so the plugin author must choose a free port.
+- Core profile-shifts the port, so it is not always the number in the manifest. The spawned process
+  learns the real port through `port_env`.
+
+[Pick a Sidecar Port](/docs/extend/develop/extensions/sidecar-ports) lists the safe ranges and
+explains `port_env`.
+
+### Environment and data folder
+
+Every sidecar receives the data-folder layout in its environment:
+
+| Variable | Value |
+|---|---|
+| `RYU_DIR` | The data folder |
+| `RYU_PLUGIN_DATA_DIR` | `<data folder>/plugin-data/<dir>`, created before the spawn and deleted by the **App files** uninstall option |
+| `RYU_MODELS_DIR` | The shared models folder |
+| `HF_HOME`, `TORCH_HOME` | Defaults under `models/` |
+
+A `local` or `python` sidecar's declared `env` may use the `${RYU_DIR}`, `${RYU_PLUGIN_DATA_DIR}`,
+`${RYU_MODELS_DIR}`, and `${RYU_PLUGIN_DIR}` tokens. `${RYU_RUNTIME_DIR}` is for Python only. See
+[Where a sidecar keeps its data](/docs/extend/develop/extensions/managed-sidecar#where-a-sidecar-keeps-its-data).
+
+### Routes through the ext-proxy
+
+A sidecar's routes are proxied through the ext-proxy at `/api/ext/<plugin>/<route>`. For an
+**interactive** route (a live stream the panel drives, like the Virtual Desktop), a sidecar can
+declare a WebSocket route served at `/api/ext/ws/<plugin>/<route>`. See
+[Sidecar WebSocket routes](/docs/extend/develop/extensions/sidecar-websocket-routes).
+
+The ext-proxy answers 404 in two cases where the sidecar would otherwise receive a different path
+from the one Core matched:
+
+- a path that contains an encoded tab, line feed, or carriage return;
+- an HTTP request with no query string whose path ends in a space or control character.
 
 ## Activation events
 
@@ -113,12 +199,25 @@ means eager activation: every existing manifest keeps activating on enable, so t
 | `onCapabilityCall` | Fired the first time a lazy provider sidecar is woken by a capability-broker call |
 | `onRunnable:<id>` | Accepted and gated; nothing fires it yet |
 
-When an event fires, `fire_activation_event` (`apps/core/src/server/mod.rs`) records it in a
-process-global monotonic set (`FIRED_ACTIVATION_EVENTS` in `apps/core/src/runnable/mod.rs`) and runs
-every installed-and-enabled plugin through `RunnableRegistry::register_active` against the new
-snapshot. Eager plugins activate unconditionally; a gated plugin activates only once one of its
-declared events has fired. The driver is idempotent and best-effort: a per-runnable failure is
-logged, never fatal.
+When an event fires, `fire_activation_event` (`apps/core/src/server/mod.rs`) does two things:
+
+1. It records the event in a process-global, monotonic set (`FIRED_ACTIVATION_EVENTS` in
+   `apps/core/src/runnable/mod.rs`). Events only accumulate during a process lifetime.
+2. It runs every installed and enabled plugin through `RunnableRegistry::register_active` against
+   the new snapshot.
+
+Eager plugins activate unconditionally. A gated plugin activates only once one of its declared
+events has fired. The driver is idempotent and best-effort: a per-runnable failure is logged, never
+fatal.
+
+```mermaid
+flowchart LR
+  A["Event fires (onStartup, onChat, ...)"] --> B["Add to FIRED_ACTIVATION_EVENTS"]
+  B --> C["register_active for each enabled plugin"]
+  C --> D{"Eager, or a declared event fired?"}
+  D -- yes --> E["Plugin activates"]
+  D -- no --> F["Stays dormant"]
+```
 
 <Callout type="warn">
 `onChat` does not fire for turns that start outside the HTTP chat entry, such as the voice loop.
@@ -128,15 +227,18 @@ plugin.
 
 ## Sidecar credential references
 
-A sidecar can explicitly declare `env:NAME` values in its process environment. At sidecar start,
-Core resolves those names using the plugin's allowed credential namespace, first from the Core
-process environment and then from that plugin's encrypted node secret store. Missing or
-unauthorized references are omitted. Ordinary values and supported path placeholders keep their
-existing behavior. Core's reserved runtime authentication values are applied afterwards. The child
-does not inherit Core's ambient credential environment.
+A sidecar can declare `env:NAME` values in its process environment. At sidecar start, Core resolves
+each name within the plugin's allowed credential namespace:
 
-After editing credentials in plugin settings, disable and re-enable the plugin to restart its
-sidecar with the new values. Provider credentials belong to the process that calls the provider;
+1. from the Core process environment;
+2. then from that plugin's encrypted node secret store.
+
+Missing or unauthorized references are omitted. Ordinary values and supported path placeholders
+behave as usual. Core applies its reserved runtime authentication values afterwards. The child does
+not inherit Core's ambient credential environment.
+
+After you edit credentials in plugin settings, disable and re-enable the plugin. This restarts its
+sidecar with the new values. Provider credentials belong to the process that calls the provider, and
 HTTP tools cannot send them over plaintext connections.
 
 ## Related

@@ -3,9 +3,9 @@ import styles from "./proof.module.css";
 
 const evidence = {
   articleModified: "2026-08-17T04:54:40.000Z",
-  canonical: "https://docs.ryuhq.com/docs/0.1.15/apps",
+  canonical: "https://docs.ryuhq.com/docs/apps",
   lastUpdated: "Last updated on 8/17/2026",
-  page: "http://127.0.0.1:4000/docs/0.1.15/apps",
+  page: "http://127.0.0.1:4000/docs/apps",
   sitemapLastmod: "2026-08-17T04:54:40.000Z",
 };
 

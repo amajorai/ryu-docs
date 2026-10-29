@@ -120,13 +120,32 @@ These are registered globally (`src/components/mdx.tsx`); use them, do not impor
 - `<Cards>` + `<DocCard href="/docs/…" />` - a curated card grid (auto-pulls title/description).
 - `<DocCard href title description />` - override the auto-pulled text when needed.
 - `<AutoCards url="/docs/…" />` - list every child page of a folder index.
-- `<Mermaid chart={`…`} />` or a ```mermaid fenced block - diagrams for concept pages.
+- `<Mermaid chart={`…`} />` or a ```mermaid fenced block - diagrams for concept pages. Use one
+  wherever a flow, lifecycle, request path or set of relationships is easier to see than to read.
+- `<Figure name="…" />` - an Anatomy-style isometric drawing with no text in it, from
+  `scripts/figures/docs/<name>.mjs` (built with the vendored kit in `scripts/figures/vendor/anatomy`).
+  Run `bun run generate:figures` after adding or changing one, and preview it with
+  `node scripts/figures/preview.mjs <out-dir> <name>`. Figures are decorative: the prose next to
+  them must carry the meaning, so never put information only in a figure.
 - `<TryInRyu page="chat" />` - an "Open in Ryu" deep-link CTA for user-facing how-tos. Valid
   `page` keys mirror the desktop deep-link surfaces (chat, agents, models, skills, tools, spaces,
   workflows, monitors, marketplace, settings, channels, engines, store, …). An unknown key just
   renders an inert link, so it never breaks the build.
 - Standard markdown tables, fenced code blocks (with a language), `<Steps>` from Fumadocs for
   numbered tutorials when helpful.
+
+## Paragraphs and scanning
+
+- Keep a paragraph to one idea and about three sentences (roughly 400 characters at most). Split a
+  longer one, or turn parallel facts into a list or a table.
+- Lead with the point. Cut restatements of the title, of the previous paragraph, or of a page you
+  can link to.
+
+## Sidebar groups
+
+Each realm's `meta.json` lists its pages under `---Group---` separators. The sidebar renders every
+group as a collapsible folder that opens when the reader is on one of its pages, so keep groups
+small (about eight pages at most) and named for what the reader is trying to do.
 
 ## Linking
 

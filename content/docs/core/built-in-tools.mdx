@@ -4,11 +4,25 @@ description: "Every tool server that ships with Ryu: reserved built-ins, swappab
 ---
 
 Core ships **built-in tool servers** that need no registration. Each tool has a fully-qualified id
-such as `<server>.<tool>` or `spider.crawl`. The id is also the
-allowlist key: you grant it, test it, and call it with that id.
+such as `<server>.<tool>` or `spider.crawl`. The id is also the allowlist key: you grant it, test
+it, and call it with that id.
 
-See [MCP registry](/docs/core/mcp-registry) for server registration and the per-agent allowlist.
-See [Unified tool catalog](/docs/core/unified-tool-catalog) for search and execution governance.
+<Figure name="tools" />
+
+See [MCP registry](/docs/core/mcp-registry) for server registration and the per-agent allowlist,
+and [Unified tool catalog](/docs/core/unified-tool-catalog) for search and execution governance.
+
+```mermaid
+flowchart LR
+  ID["Tool id server.tool"] --> A{"Allowed for this agent?"}
+  A -- no --> X["Refused"]
+  A -- yes --> K{"Which server?"}
+  K --> R["Reserved built-in: name-matched arm in Core"]
+  K --> F["Capability facade: bound provider"]
+  K --> S["Sidecar or key-backed server"]
+  K --> C["composio. prefix: hosted catalog"]
+  K --> P["app or core-api kind"]
+```
 
 ## Reserved built-in servers
 
@@ -49,14 +63,18 @@ canonical URL host exactly matches that connection; malformed URLs cannot select
 
 ### Provider usage results
 
-`usage.current` takes no arguments and reads the provider and model currently selected in Ryu.
-`usage.query` accepts `{ "provider": "...", "model": "...", "account_id": "..." }`; `model` and
-`account_id` are optional. Use the provider id from Ryu's provider catalog, or an ACP id such as
-`acp:claude` when the agent's own CLI subscription should be inspected.
-`usage.providers` takes no arguments and lists the provider IDs with a current Core usage adapter.
-Each provider also lists its saved accounts by opaque `accountId`, with `active`, `kind`, and
-`needsReauth`, and reports `capabilities.accountUsage` when each saved account can report its own
-usage.
+| Tool | Arguments | Returns |
+|---|---|---|
+| `usage.current` | None | Usage for the provider and model currently selected in Ryu |
+| `usage.query` | `{ "provider": "...", "model": "...", "account_id": "..." }`; `model` and `account_id` are optional | Usage for that provider, model, and account |
+| `usage.providers` | None | Provider IDs with a current Core usage adapter, each with its saved accounts |
+
+For `usage.query`, use the provider id from Ryu's provider catalog, or an ACP id such as
+`acp:claude` to inspect the agent's own CLI subscription.
+
+`usage.providers` lists each provider's saved accounts by opaque `accountId`, with `active`, `kind`,
+and `needsReauth`. It reports `capabilities.accountUsage` when each saved account can report its
+own usage.
 
 #### Reading one saved account
 
@@ -80,12 +98,16 @@ Account names, which are often email addresses, are never returned to the agent.
 cached briefly, so repeated calls within a few minutes return the same reading with
 `cached: true` and its `observedAt` time.
 
-The result keeps account-wide windows and matching model-scoped windows separate. Each window
-contains `usedPercent`, `remainingPercent`, `window` (for example `5h` or `7d`),
-`windowSeconds`, and `resetsAt` as an RFC 3339 UTC timestamp. Providers that expose prepaid API
-balances return those in `meters.values`. Every selectable window and meter value has a stable
-`targetId` for reset monitors and other cross-check consumers. A missing or unsupported provider returns
-`available: false` with a `reason` rather than a guessed zero.
+#### Result shape
+
+The result keeps account-wide windows and matching model-scoped windows separate.
+
+- Each window contains `usedPercent`, `remainingPercent`, `window` (for example `5h` or `7d`),
+  `windowSeconds`, and `resetsAt` as an RFC 3339 UTC timestamp.
+- Providers that expose prepaid API balances return those in `meters.values`.
+- Every selectable window and meter value has a stable `targetId` for reset monitors and other
+  cross-check consumers.
+- A missing or unsupported provider returns `available: false` with a `reason`, not a guessed zero.
 
 ```json
 {
@@ -123,29 +145,32 @@ The behaviour of `ui.render`, `consent`, `tasks`, and the other tools that rende
 
 ## Swappable capability facades
 
-The four swappable layers reserve a server name each. The tool **names stay the same**; which
-provider serves them is selected in the layer picker. The capability catalog answers whether a
-layer can actually serve a call today.
+Each [swappable layer](/docs/core/swappable-layers) reserves a server name. The tool **names stay
+the same**, and the layer picker selects which provider serves them. A verb is listed only when its
+capability resolves over the enabled providers and the bound provider declares that verb.
 
 | Server | Tools | What the verbs do |
 |---|---|---|
-| `web` | `web.search`, `web.extract`, `web.crawl` | Search, extract, and crawl. The provider is selected in the layer picker |
-| `browser` | `browser.navigate`, `browser.snapshot`, `browser.tabs`, `browser.click`, `browser.type`, `browser.screenshot`, `browser.scroll` | Drive a real browser (local Chromium or a cloud browser provider) |
+| `web` | `web.search`, `web.extract`, `web.crawl` | Search, extract, and crawl |
+| `browser` | `browser.navigate`, `browser.snapshot`, `browser.tabs`, `browser.context`, `browser.click`, `browser.click_at`, `browser.hover`, `browser.drag`, `browser.type`, `browser.key`, `browser.scroll`, `browser.screenshot`, `browser.annotate`, `browser.clear_annotations` | Drive a real browser (local Chromium or a cloud browser provider) |
 | `computer` | `computer.capture`, `computer.click`, `computer.type`, `computer.key`, `computer.scroll`, `computer.focus_app` | Screen perception and input control through the selected desktop-control provider |
 | `memory` | `memory.search`, `memory.store`, `memory.context`, `memory.sync`, `memory.forget` | Durable fact memory. The built-in store is always available; `context` and `sync` are opt-in bridges |
+| `decision` | `decision.predict`, `decision.predict_multimodal` | Ask a typed decision model a choice, score, or boolean question. See [Decision Models](/docs/core/decision-models) |
+| `verify` | `verify.claim`, `verify.scopes` | Check a claim against a source of truth and return a verdict, and list the sources it can check |
 
 <Callout type="info">
   The facade verbs are provider-neutral because a declarative provider tool cannot branch between
-  routes. So the contract keeps one stable verb per capability and the bound provider fills in the
-  rest. The `browser.tabs` / `browser.navigate` ids are how you learn a `tab_id` to re-point; other
-  browser verbs accept an optional `tab_id` (omit for the active tab) but never invent one.
+  routes, so the contract keeps one stable verb per capability. `browser.tabs` and
+  `browser.navigate` are how you learn a `tab_id` to re-point. Other browser verbs accept an
+  optional `tab_id` (omit it for the active tab) but never invent one.
 </Callout>
 
 ### Provider slots and availability
 
-Each facade is a provider slot. The agent sees stable capability verbs, and a provider supplies the
-implementation behind them. The current host-owned slots are `web.search`, `web.extract`, `web.crawl`, `browser.control`,
-`computer.control`, and `memory`; other provider types remain ordinary plugin or app contributions.
+Each facade is a provider slot: the agent sees stable capability verbs, and a provider supplies the
+implementation. The host-owned slots are `web.search`, `web.extract`, `web.crawl`,
+`browser.control`, `computer.control`, `memory`, `decision.typed`, and `verify.claim`. Other
+provider types remain ordinary plugin or app contributions.
 
 Ryu keeps three states separate:
 
@@ -156,9 +181,10 @@ Ryu keeps three states separate:
 | Provider slot | A generic capability seam that a plugin may implement; it is not a promise that a remote service, sidecar, credential, or device is present. |
 
 The capability catalog reports enabled providers, installable-but-disabled providers, the current
-bound provider, and whether a provider serves verbs or a brokered route. A row being discoverable
-does not grant access, and a provider being available does not bypass its manifest permissions,
-agent allowlist, approval mode, or external service requirements.
+bound provider, and whether a provider serves verbs or a brokered route.
+
+A discoverable row does not grant access. An available provider does not bypass its manifest
+permissions, the agent allowlist, the approval mode, or external service requirements.
 
 ## Sidecar- and key-backed built-ins
 
@@ -185,18 +211,26 @@ The `agent_inbox` tools act only on the calling agent's own address. Their behav
 
 ### Spaces access
 
-The Spaces provider derives the target agent and user from the host conversation; an agent cannot
-choose another agent id to mutate. It can list and search only Spaces it can read, and it can create
-pages or files only in a Space it owns. A shared/system Space can be used as an artifact destination
-when the operation explicitly allows it, but it cannot be renamed by an agent.
+The Spaces provider derives the target agent and user from the host conversation, so an agent cannot
+choose another agent id to mutate.
 
-`search` and `list_documents` take an optional `space_id`. Without one they read the Spaces attached
-to the calling agent (the Spaces it may read, set in the agent's access settings), skipping any the
-caller can no longer read. With one attached Space the result has the same shape as an explicit call.
-With several, `list_documents` returns one listing per Space and `search` returns the closest matches
-across them, each tagged with its `space_id`. An agent with no attached Space must pass `space_id`.
-This lets an agent search the knowledge it was given without needing `list_spaces`, which lists every
-Space the caller can read.
+- It can list and search only Spaces it can read.
+- It can create pages or files only in a Space it owns.
+- A shared or system Space can be an artifact destination when the operation explicitly allows it,
+  but an agent cannot rename it.
+
+`search` and `list_documents` take an optional `space_id`. Without one, they read the Spaces
+attached to the calling agent (set in the agent's access settings), skipping any the caller can no
+longer read:
+
+| Attached Spaces | Result |
+|---|---|
+| None | The agent must pass `space_id` |
+| One | The same shape as an explicit call |
+| Several | `list_documents` returns one listing per Space; `search` returns the closest matches across them, each tagged with its `space_id` |
+
+This lets an agent search the knowledge it was given without `list_spaces`, which lists every Space
+the caller can read.
 
 ## App and core-api tools
 
@@ -209,10 +243,13 @@ Two further `kind`s join the built-ins in the catalog without being reserved ser
 
 ## Allowlisting by id
 
-Because the id is `<server>.<tool>`, an allowlist entry of `exa` grants every Exa tool while
-`exa.search` grants just one. Two paths match the fully-qualified id only, with no bare-name or
-server fallback: Composio (`composio.<slug>`) and `app.`-namespaced app tools. This stops a broad
-server-name entry from reaching a tool the author did not intend. See [MCP registry](/docs/core/mcp-registry#the-per-agent-allowlist).
+Because the id is `<server>.<tool>`, an allowlist entry of `exa` grants every Exa tool, while
+`exa.search` grants just one.
+
+Two paths match the fully-qualified id only, with no bare-name or server fallback: Composio
+(`composio.<slug>`) and `app.`-namespaced app tools. This stops a broad server-name entry from
+reaching a tool the author did not intend. See
+[MCP registry](/docs/core/mcp-registry#the-per-agent-allowlist).
 
 ## Related
 

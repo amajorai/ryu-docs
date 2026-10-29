@@ -16,16 +16,19 @@ manifest that carries a hook is described in
 [Bundle Runnables with manifest.json](/docs/extend/develop/extensions/plugin-json-manifest).
 
 <Callout type="warn">
-  The Core sandbox layer is live-verified: the `plugin_host::tests::live_*` tests run the shipped
-  double-check, goal, and advisor fixture hooks in the real JS sandbox, round-trip
-  `host.sideModel` / `host.storage` through the capability bridge, and assert the correct directives.
-  The **desktop** side is compile-checked only. The `data-plugin_note` banner render, the `continue`
-  multi-turn streamed render, and the end-to-end double-check / goal flow through a running desktop
-  are not yet live-verified. Beyond `post_assistant_turn`, a `pre_user_turn` boundary and a set of
-  Claude-Code-style phases (`session_start`, `pre_tool_use`, `post_tool_use`, `subagent_stop`,
-  `session_end`, `notification`) also exist, but their maturity varies - see
-  [Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases). There is no
-  per-token hook.
+  **Maturity.**
+
+  - **Core sandbox - live-verified.** The `plugin_host::tests::live_*` tests run the shipped
+    double-check, goal, and advisor fixture hooks in the real JS sandbox, round-trip
+    `host.sideModel` / `host.storage` through the capability bridge, and assert the directives.
+  - **Desktop - compile-checked only.** The `data-plugin_note` banner render, the `continue`
+    multi-turn streamed render, and the end-to-end double-check / goal flow through a running
+    desktop are not yet live-verified.
+  - **Other phases - maturity varies.** A `pre_user_turn` boundary and Claude-Code-style phases
+    (`session_start`, `pre_tool_use`, `post_tool_use`, `subagent_stop`, `session_end`,
+    `notification`) also exist; see
+    [Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases). There is no
+    per-token hook.
 </Callout>
 
 ## What a turn hook is
@@ -42,10 +45,11 @@ A turn hook is server-side logic that runs at a chat turn boundary. You declare 
 ```
 
 The primary chat boundary is `post_assistant_turn` (the constant `ON_POST_ASSISTANT_TURN` in
-`plugin_host/mod.rs`). Additional phases are available at the message, tool, session, and workflow
-seams; their maturity and directive support are listed in [Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle).
-The post-assistant hook runs after the assistant turn has streamed and persisted, so it can review the
-answer the user just received and decide what happens next.
+`plugin_host/mod.rs`). It runs after the assistant turn has streamed and persisted, so it can review
+the answer the user just received and decide what happens next.
+
+Additional phases are available at the message, tool, session, and workflow seams; their maturity
+and directive support are listed in [Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle).
 
 Each hook body runs in a fresh sandbox with exactly two globals in scope, the way a Worker body has
 only its message in scope. There is no module system, no captured closure, and no filesystem or
@@ -89,23 +93,34 @@ exposes calls for agents, Spaces, preferences, and navigation, each behind its o
 can span callers and contain command or error details. An administrator must permit `usage:audit`
 and approve it for the app. Adding the declaration to a manifest does not upgrade existing approvals.
 
+#### Storage limits
+
 Storage is namespaced per plugin (`namespace` defaults to `"default"`), so one plugin can never read
-another plugin's keys. Values are limited to 1 MiB, each plugin has a 16 MiB/10,000-key durable
-quota, and key listings are bounded to 10,000 entries. Oversized or control-character identifiers
-are rejected before SQLite is touched.
+another plugin's keys.
 
-`host.notify` cannot select another user, address an arbitrary device,
-or bypass the notification store. Keep it for actionable, user-visible events such as "the last
-agent finished" and let the normal notification settings decide where that event is delivered. The
-call is bounded and grant-gated; an unavailable store, missing active user, denied grant, or invalid
-payload is a failure, not a silent success.
+- A value is at most 1 MiB.
+- Each plugin has a 16 MiB / 10,000-key durable quota.
+- Key listings are bounded to 10,000 entries.
+- Oversized or control-character identifiers are rejected before SQLite is touched.
 
-The bridge is the native capability seam for the hook runtime. Desktop, web, extension, mobile, CLI,
-TUI, and hardware-facing clients may expose different host adapters, but they do not receive authority
-just because a capability is discoverable. The host advertises what is available on that surface, then
-applies the declared grant and caller policy at invocation time. Unsupported surfaces should hide or
-disable a contribution while keeping it installable and inspectable; a missing permission must fail
-closed.
+#### Notifications
+
+`host.notify` cannot select another user, address an arbitrary device, or bypass the notification
+store. Keep it for actionable, user-visible events such as "the last agent finished", and let the
+normal notification settings decide where that event is delivered.
+
+The call is bounded and grant-gated. An unavailable store, missing active user, denied grant, or
+invalid payload is a failure, not a silent success.
+
+#### Host adapters per surface
+
+The bridge is the native capability seam for the hook runtime. Desktop, web, extension, mobile,
+CLI, TUI, and hardware-facing clients may expose different host adapters. A capability being
+discoverable does not grant authority.
+
+The host advertises what is available on that surface, then applies the declared grant and caller
+policy at invocation time. Unsupported surfaces should hide or disable a contribution while keeping
+it installable and inspectable; a missing permission must fail closed.
 
 ### Subscription usage in hooks
 
@@ -138,32 +153,36 @@ closed.
   }
   ```
 
-  This form never includes account names, because they are often email addresses. It is cache-only,
-  so a hook never waits on the provider: an account with no recent reading has state `pending`, and
-  Ryu reads it in the background for a later turn. An unknown `account_id` returns
-  `{ accounts: [], error: "account_not_found" }`; Ryu never substitutes another account. Only the node
-  owner and admins can use this form, so handle a rejected call and fall back to `{ agent_id }` or
-  `{ kind: "none" }`.
+  This form never includes account names, because they are often email addresses. It is
+  cache-only, so a hook never waits on the provider. An account with no recent reading has state
+  `pending`, and Ryu reads it in the background for a later turn.
+
+  An unknown `account_id` returns `{ accounts: [], error: "account_not_found" }`; Ryu never
+  substitutes another account. Only the node owner and admins can use this form, so handle a
+  rejected call and fall back to `{ agent_id }` or `{ kind: "none" }`.
 
 `host.subscriptions.list` and `host.subscriptions.usage` are the labelled inventory that
 [Desktop companion apps](/docs/extend/develop/extensions/desktop-companion-runtime#subscription-accounts-and-usage)
-use through `window.ryu.subscriptions`, with the same arguments, results, and `subscriptions:read`
-consent (**See your subscription accounts**). They answer only when the turn's caller is the node
-owner or an admin. `list` is cached by default; `usage: "refresh"` and `subscriptions.usage` may read
-the provider, so avoid them on every turn. Ryu limits how often one plugin can trigger a live read of
-the same account.
+use through `window.ryu.subscriptions`. They take the same arguments, return the same results, and
+use the same `subscriptions:read` consent (**See your subscription accounts**).
+
+- They answer only when the turn's caller is the node owner or an admin.
+- `list` is cached by default. `usage: "refresh"` and `subscriptions.usage` may read the provider,
+  so avoid them on every turn.
+- Ryu limits how often one plugin can trigger a live read of the same account.
 
 Per-account usage covers Claude Pro/Max, ChatGPT, OpenAI Codex, and GitHub Copilot. ChatGPT plan,
-Kiro, Kimi, Radius, Ant Ling, and CLI logins report no per-account usage: their accounts have state
+Kiro, Kimi, Radius, Ant Ling, and CLI logins report no per-account usage; their accounts have state
 `unsupported`. Older Ryu hosts do not have `host.subscriptions`, and an unknown host method rejects
 the call, so check for it before use.
 
 <Callout type="warn">
-  Gating returns an error, it does not silently pass. An ungranted capability call (or an unknown
+  Gating returns an error; it does not silently pass. An ungranted capability call (or an unknown
   `host.*` method) rejects the awaited call with `is_error: true` and a message like
-  `capability 'hook:side-model' not granted`. A plugin can catch that error. The fail-open to a no-op
-  directive happens one level up: an **uncaught** throw, like any other hook error, degrades the whole
-  hook to `{ kind: "none" }`, so a misbehaving plugin can never block or break a chat turn.
+  `capability 'hook:side-model' not granted`. A plugin can catch that error.
+
+  The fail-open happens one level up. An **uncaught** throw, like any other hook error, degrades
+  the whole hook to `{ kind: "none" }`, so a misbehaving plugin can never block or break a turn.
 </Callout>
 
 ## The directive contract
@@ -183,17 +202,23 @@ fail-open: a plugin cannot block a turn.
 
 ### Cross-platform authoring
 
-Hook bodies are platform-neutral fragments. They are not shell commands and do not receive a
-working-directory-dependent path: Core invokes the `code_file` body in its sandbox with only `ctx`
-and `host` available. Do not add `bash`/PowerShell/`cmd` wrappers, Node/Bun/Deno imports, `process`
-or filesystem access, or hard-coded home and temporary paths. Use the grant-gated host API for
-effects; if a plugin needs a file, process, or OS integration, put that work in an app sidecar and
-expose a typed capability. See [Keep hook bodies cross-platform](/docs/extend/develop/extensions/hooks-authoring#keep-hook-bodies-cross-platform)
+Hook bodies are platform-neutral fragments, not shell commands. Core invokes the `code_file` body
+in its sandbox with only `ctx` and `host` available, and no working-directory-dependent path. Do not
+add:
+
+- `bash`, PowerShell, or `cmd` wrappers;
+- Node, Bun, or Deno imports;
+- `process` or filesystem access;
+- hard-coded home or temporary paths.
+
+Use the grant-gated host API for effects. If a plugin needs a file, process, or OS integration, put
+that work in an app sidecar and expose a typed capability. See
+[Keep hook bodies cross-platform](/docs/extend/develop/extensions/hooks-authoring#keep-hook-bodies-cross-platform)
 for the source and `code_file` rules.
 
-Hooks can also run at session, tool, sub-agent, and notification phases. See
-[Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases) for the phase table, the extra directives, the
-process-global dispatcher, and the `tools` glob gate.
+[Turn hook phases](/docs/extend/develop/extensions/plugin-runtime-phases) covers the session, tool,
+sub-agent, and notification phases, their extra directives, the process-global dispatcher, and the
+`tools` glob gate.
 
 ## Where it runs (Core vs Gateway)
 
@@ -203,11 +228,14 @@ A turn hook decides *what runs next*, which is a Core concern, so the runtime li
 feature use. The sandbox grants capabilities; the Gateway governs every model call.
 
 The chat path wires hooks in at `run_chat_with_hooks` (`apps/core/src/server/mod.rs`). After the
-assistant turn streams and persists, `dispatch_turn_hooks` collects every enabled `post_assistant_turn`
-hook, runs each one, and applies the directives in plugin order: a `note` is emitted as a
-`data-plugin_note` frame, a `continue` rebuilds the request from the persisted transcript and loops.
-When no plugin contributes a hook (the common case) or the sandbox backend is absent, the inner stream
-is returned unwrapped, so the hot path has no extra work.
+assistant turn streams and persists, `dispatch_turn_hooks` collects every enabled
+`post_assistant_turn` hook, runs each one, and applies the directives in plugin order:
+
+- a `note` is emitted as a `data-plugin_note` frame;
+- a `continue` rebuilds the request from the persisted transcript and loops.
+
+When no plugin contributes a hook (the common case) or the sandbox backend is absent, the inner
+stream is returned unwrapped, so the hot path has no extra work.
 
 ```mermaid
 flowchart TD
@@ -279,10 +307,12 @@ self-contained, with no captured variables or imports, because it runs in a fres
 
 ## Not a turn hook: compression
 
-Gateway-side message compression (headroom) is a related plugin mechanism but a different one. It is a
-`policy` runnable read by the Gateway egress transform, not a `post_assistant_turn` hook, and it never
-enters the Core sandbox. Reach for a turn hook when you need to react to a finished turn from Core;
-reach for a compression policy when you need to transform requests on the way out through the Gateway.
+Gateway-side message compression (headroom) is a different plugin mechanism. It is a `policy`
+runnable read by the Gateway egress transform, not a `post_assistant_turn` hook, and it never enters
+the Core sandbox.
+
+- Use a turn hook to react to a finished turn from Core.
+- Use a compression policy to transform requests on the way out through the Gateway.
 
 Turn hooks are the **sandboxed** half of what a plugin can contribute. A plugin that also ships a
 sidecar or an MCP server runs that part with Ryu's own privileges, under a different set of rules.

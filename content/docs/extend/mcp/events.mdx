@@ -3,9 +3,23 @@ title: "MCP Events"
 description: "Subscribe to authenticated Ryu thread run-status webhooks over MCP."
 ---
 
-Ryu Core supports the webhook delivery subset of [OpenAI MCP Events](https://developers.openai.com/plugins/build/mcp-events) on authenticated direct and hosted node endpoints. MCP Events is an application-change webhook API; it is separate from MCP's `subscriptions/listen` notification stream.
+Ryu Core supports the webhook delivery subset of [OpenAI MCP Events](https://developers.openai.com/plugins/build/mcp-events) on authenticated direct and hosted node endpoints. MCP Events is an application-change webhook API. It is separate from MCP's `subscriptions/listen` notification stream.
 
 The endpoint uses MCP protocol `2026-07-28`. `server/discover` advertises the `events` capability, and `events/list`, `events/subscribe`, and `events/unsubscribe` run on the same `/mcp/<agent-id>` endpoint as tools.
+
+```mermaid
+sequenceDiagram
+  participant Host as MCP host
+  participant Core as Ryu Core
+  participant Receiver as Callback receiver
+  Host->>Core: events/subscribe (thread_id, callback URL, whsec_ secret)
+  Core->>Receiver: signed verification challenge
+  Receiver-->>Core: echo challenge
+  Core-->>Host: subscription id, refreshBefore
+  Note over Core: thread run status changes
+  Core->>Core: re-check caller can read the thread
+  Core->>Receiver: signed event delivery (up to 3 attempts)
+```
 
 ## Available event
 
@@ -15,9 +29,9 @@ Ryu exposes one event.
 |---|---|---|
 | `thread.run_status_changed` | `thread_id`, the exact thread to monitor | `thread_id` and `status` (`running`, `completed`, `failed`, or `interrupted`) |
 
-Core lists this event only for an MCP principal whose allowlist grants a `threads.*` tool. It checks that the caller can read the selected thread when subscribing and before every delivery. If access is revoked, Core removes the subscription and stops sending updates.
+Core lists this event only for an MCP principal whose allowlist grants a `threads.*` tool. It checks that the caller can read the selected thread when subscribing and before every delivery. If access is revoked, Core removes the subscription and stops sending updates. Subscription state is encrypted at rest.
 
-Every delivery uses this envelope. The stable `eventId` stays the same for all retry attempts; the `timestamp` and signature are fresh for each attempt.
+Every delivery uses this envelope. The stable `eventId` stays the same for all retry attempts. The `timestamp` and signature are fresh for each attempt.
 
 ```json
 {
@@ -60,13 +74,32 @@ Return the same `challenge` in a successful JSON response. Core activates the su
 
 ## Delivery and limits
 
-- Callback URLs must be public HTTPS. Core resolves and checks the destination at connection time, pins the validated address, blocks private/local IPs, and does not follow redirects.
-- Each delivery contains one event object, is signed with Standard Webhooks headers, and is limited to 256 KiB. Verify `webhook-signature` as `v1,<base64>` over `webhook-id.webhook-timestamp.<exact request body>` using the decoded `whsec_` key. `webhook-id` is the stable event ID; `webhook-timestamp` changes on retries. Core also sends `X-MCP-Subscription-Id`.
-- Event data contains only the thread ID and status; it does not include the thread title or transcript.
+### Callback destination
+
+- Callback URLs must be public HTTPS.
+- Core resolves and checks the destination at connection time, pins the validated address, blocks private/local IPs, and does not follow redirects.
+
+### Signing and payload
+
+- Each delivery contains one event object, is signed with Standard Webhooks headers, and is limited to 256 KiB.
+- Verify `webhook-signature` as `v1,<base64>` over `webhook-id.webhook-timestamp.<exact request body>` using the decoded `whsec_` key.
+- `webhook-id` is the stable event ID. `webhook-timestamp` changes on retries. Core also sends `X-MCP-Subscription-Id`.
+- Event data contains only the thread ID and status. It does not include the thread title or transcript.
+
+### Retries and persistence
+
 - Transient failures receive up to three attempts with a fresh signing timestamp and the same event ID. HTTP 410 and 413 responses are not retried.
 - Subscriptions persist across Core restarts. Run-status events are not replayable: Ryu returns `cursor: null`, and changes during downtime are missed.
-- A missing `ttlMs` receives a seven-day lifetime. Core grants no more than 90 days. `ttlMs: null` requests a non-expiring subscription, but on a shared node the caller's verified identity or delegation expiry is always the upper bound; refresh with a new authorized request to continue delivery.
-- Refresh an expiring subscription by calling `events/subscribe` again with the same event, filter, and callback URL. A changed signing secret replaces the stored key; Core signs with both keys during a five-minute rotation window.
-- `events/unsubscribe` is idempotent and uses the original event name, filter, and callback URL.
+
+### Lifetime, refresh, and unsubscribe
+
+| Case | Behavior |
+|---|---|
+| `ttlMs` missing | Seven-day lifetime |
+| `ttlMs` set | Granted up to 90 days |
+| `ttlMs: null` | Requests a non-expiring subscription. On a shared node the caller's verified identity or delegation expiry is always the upper bound; refresh with a new authorized request to continue delivery. |
+| Refresh | Call `events/subscribe` again with the same event, filter, and callback URL. |
+| New signing secret | Replaces the stored key. Core signs with both keys during a five-minute rotation window. |
+| `events/unsubscribe` | Idempotent. Uses the original event name, filter, and callback URL. |
 
 The anonymous public website and documentation MCP servers are read-only and do not expose event subscriptions. For node and hosted credentials, see [MCP security](/docs/extend/mcp/security) and [MCP quickstart](/docs/extend/mcp/quickstart).

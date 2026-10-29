@@ -33,7 +33,8 @@ never change where your secrets go.
 ## Relay tools
 
 Register a tool with `PUT /v1/relay/tools/:id`. The id is 1 to 64 characters
-from lowercase letters, digits, `_` and `-`. Send the secrets in the same
+from lowercase letters, digits, `_` and `-`, and starts with a letter or digit.
+`tools`, `vendors` and `credentials` are reserved. Send the secrets in the same
 request; Connect encrypts them at rest and never returns them.
 
 ```sh
@@ -71,8 +72,9 @@ and nothing is saved. Any other failure saves the tool with verdict `unknown`.
 A tool without a probe is saved `unchecked`.
 
 Changing `baseUrl` or any binding moves where the secrets go, so that request
-must send `secrets` again; without them it returns `400` with
+must send `secrets` again. Without them it returns `400` with
 `code: "secrets_required"`. Renaming or describing a tool keeps its secrets.
+
 `GET /v1/relay/tools` and `GET /v1/relay/tools/:id` list and describe your
 tools with secret names but never values. `DELETE /v1/relay/tools/:id` removes
 a tool and its secrets.
@@ -126,9 +128,10 @@ The answer is sandboxed:
 Every request first resolves the host. If any of its addresses is private,
 loopback, link-local or otherwise reserved, the call is refused with
 `502 upstream_blocked`. The connection then uses only the addresses that
-passed the check, so a DNS answer that changes between the check and the
-connection cannot send it somewhere else. `502 upstream_unreachable` and
-`504 upstream_timeout` (30 seconds) never include upstream detail.
+passed the check, so a DNS answer that changes in between cannot redirect it.
+
+`502 upstream_unreachable` and `504 upstream_timeout` (30 seconds) never
+include upstream detail.
 
 Each answer carries `x-ryu-call-id`, `x-ryu-credential-rung` and
 `x-ryu-metered`. A relay tool always answers `tenant` and `false`.
@@ -154,12 +157,12 @@ Connect checks a pasted key with one cheap call before saving it.
 | `tavily` | One basic search with one result | One credit |
 | `exa` | One instant search with one result | One search at Exa's price |
 
-A check that costs money runs only when the request sets
-`"allowPaidProbe": true`. Otherwise the key is saved with verdict `unchecked`.
-If the vendor refuses the key (401 or 403), the request returns `422
-credential_invalid` and the key is not saved. Any other failure saves it with
-verdict `unknown`. GitHub reports when a token expires, and Connect records
-that date.
+- A check that costs money runs only when the request sets
+  `"allowPaidProbe": true`. Otherwise the key is saved with verdict `unchecked`.
+- If the vendor refuses the key (401 or 403), the request returns
+  `422 credential_invalid` and the key is not saved.
+- Any other failure saves it with verdict `unknown`.
+- GitHub reports when a token expires, and Connect records that date.
 
 `GET /v1/credentials/vendors` lists the stored keys with a non-secret
 fingerprint, their verdict and expiry, and the built-in vendors with their
@@ -184,6 +187,21 @@ For each vendor call, Connect takes the first of these that applies.
    verified with a per-call price. The call is metered at that price and
    discloses it. GitHub never has this rung: its answers depend on whose
    token is used, so every GitHub call needs your own key.
+
+```mermaid
+flowchart TD
+  A["Vendor call"] --> B{"Active team key?"}
+  B -->|"yes"| T["Use team key (not metered)"]
+  B -->|"no"| C{"Active organization key?"}
+  C -->|"yes"| O["Use organization key (not metered)"]
+  C -->|"no"| E{"A stored key not working?"}
+  E -->|"yes"| X["403 credential_invalid"]
+  E -->|"no"| D{"Ryu has a key?"}
+  D -->|"no"| Q["403 credential_required"]
+  D -->|"yes"| F{"Verified per-call price?"}
+  F -->|"yes"| R["Use Ryu's key (metered)"]
+  F -->|"no"| P["403 operator_price_unverified"]
+```
 
 Calls on your own key (rungs 1 and 2) are never metered by Ryu. These rules
 protect you.
@@ -230,28 +248,36 @@ A call paid with Ryu's key adds these headers.
 | `x-ryu-overflow-from`, `x-ryu-overflow-reason` | With overflow: the account your call left and why (`rate_limited`, `out_of_credit`, `key_rejected`, `breaker_open`, `breaker_probing`, `quota_exhausted`, `saturated`, or `upstream_rate_limited` when the vendor answered 429 on it) |
 | `x-ryu-smoothing-wait-ms` | How long the call waited for the account's rate limit, when it waited |
 
-It is charged only when the vendor answers 2xx, including when Connect then
-refuses to pass the answer on (too large, compressed, not text, or a content
-type the relay does not carry), because the vendor ran the call. A timeout or
-an unreachable vendor is not charged. Before the call it is checked and held
-against your balance like any other metered Connect call (`402
-insufficient_credits`, or `402 max_cost_exceeded` under
-`x-ryu-max-cost-micro-usd`). It appears in the
-[usage report](/docs/standalone/connect-api-usage) as a line with
-`"source": "vendor"` and its `endpoint`. Ryu bills it as a Connect vendor call
-at the lower of the price you were shown and the catalog price.
+How a call on Ryu's key is charged:
+
+- It is charged only when the vendor answers 2xx. That includes an answer
+  Connect then refuses to pass on (too large, compressed, not text, or a
+  content type the relay does not carry), because the vendor ran the call.
+- A timeout or an unreachable vendor is not charged.
+- Before the call it is checked and held against your balance like any other
+  metered Connect call (`402 insufficient_credits`, or `402 max_cost_exceeded`
+  under `x-ryu-max-cost-micro-usd`).
+- It appears in the [usage report](/docs/standalone/connect-api-usage) as a
+  line with `"source": "vendor"` and its `endpoint`.
+- Ryu bills it as a Connect vendor call at the lower of the price you were
+  shown and the catalog price.
 
 ## Ryu's accounts and overflow
 
 Ryu can hold several accounts with a vendor. Your tenant is assigned one of
 them and stays on it while it is healthy. Each account has its own rate limit
-and call allowance, and Connect pauses an account when the vendor says it is
-rate limited (429, for the time in the vendor's `Retry-After`), out of credit
-(402) or refuses its key (401), or after several failed calls in a row (5xx,
-timeouts or an unreachable vendor). An HTML error page, such as a firewall
-page, does not pause an account. A short burst of calls is spread out rather
-than refused: a call may wait briefly (a quarter of a second by default) for
-the account's rate limit.
+and call allowance.
+
+Connect pauses an account when:
+
+- the vendor says it is rate limited (429, for the time in the vendor's
+  `Retry-After`);
+- the vendor says it is out of credit (402) or refuses its key (401);
+- several calls in a row fail (5xx, timeouts or an unreachable vendor).
+
+An HTML error page, such as a firewall page, does not pause an account. A short
+burst of calls is spread out rather than refused: a call may wait briefly (a
+quarter of a second by default) for the account's rate limit.
 
 When your account cannot take a call, Connect does not move you to another
 account unless you ask. By default the call is refused before anything is sent
@@ -265,15 +291,18 @@ Both carry a `Retry-After` header and a body with `retryAfterSeconds`,
 `accounts` (each account's status, with `available` for one that could serve
 now), `overflow` (`requested` and `available`) and `providers`.
 
-To let another Ryu account serve the call, send `x-ryu-overflow: operator`.
-The call then goes to the next account that can take it, including after the
-vendor answers 429 on the first one (at most three accounts per call). Every
-Ryu account charges the same catalog price, the call is charged once whichever
-account served it, and a vendor 429 is never charged. The answer says which
-account served it and which one it left (headers above). `x-ryu-overflow: any`
-would also allow Treg where it serves the endpoint. Connect does not serve
-Treg, so a refusal lists it as `not_served`. `none`, the default, keeps your
-call on your account. Any other value returns `400 invalid_request`.
+To let another Ryu account serve the call, send `x-ryu-overflow`.
+
+| Value | Effect |
+|---|---|
+| `none` (default) | Keeps your call on your account. |
+| `operator` | The call goes to the next account that can take it, including after the vendor answers 429 on the first one (at most three accounts per call). |
+| `any` | Would also allow Treg where it serves the endpoint. Connect does not serve Treg, so a refusal lists it as `not_served`. |
+| anything else | `400 invalid_request` |
+
+With overflow, every Ryu account charges the same catalog price and the call is
+charged once, whichever account served it. A vendor 429 is never charged. The
+answer says which account served it and which one it left (headers above).
 
 `GET /v1/credentials/vendors` shows `operatorAccounts`, the number of Ryu
 accounts available for each vendor.
@@ -281,10 +310,13 @@ accounts available for each vendor.
 ## Credential checks
 
 Connect re-checks stored keys and relay tools that have a probe on a schedule
-every six hours, using only free checks. A paid check never runs on a schedule. A key the vendor now refuses is marked `invalid`, and calls on
-it are refused as described above until you save a working one. A vendor
-outage marks it `unknown` and never disables it. When the deployment is
-connected to Ryu Notify (`RYU_CONNECT_NOTIFY_URL` and
+every six hours, using only free checks. A paid check never runs on a schedule.
+
+- A key the vendor now refuses is marked `invalid`. Calls on it are refused as
+  described above until you save a working one.
+- A vendor outage marks it `unknown` and never disables it.
+
+When the deployment is connected to Ryu Notify (`RYU_CONNECT_NOTIFY_URL` and
 `RYU_CONNECT_NOTIFY_TOKEN`), its operator is alerted once when a key becomes
 invalid, and once a day while the vendor says a key expires within seven days.
 
@@ -306,14 +338,17 @@ To have Connect choose the vendor for a job under a policy you send, use a
 [routed capability call](/docs/standalone/connect-api-routing) instead; vendor
 calls always use the vendor you name.
 
-Add `x-ryu-response: stream` or `spool`, or `Prefer: respond-async`, to any
-call; the routes for tasks and spooled answers are in
-[async tasks, streamed and spooled answers](/docs/standalone/connect-api-tasks#routes).
-Label any call with [builder tags](/docs/standalone/connect-api-tags) in
-`x-ryu-tags`. A file a vendor needs by URL can be
-[hosted by Connect](/docs/standalone/connect-api-media#reference-media), and
-objects you create on Ryu's key stay
-[yours](/docs/standalone/connect-api-media#vendor-resources-on-ryus-key).
+Related options for any call:
+
+- Add `x-ryu-response: stream` or `spool`, or `Prefer: respond-async`. The
+  routes for tasks and spooled answers are in
+  [async tasks, streamed and spooled answers](/docs/standalone/connect-api-tasks#routes).
+- Label the call with [builder tags](/docs/standalone/connect-api-tags) in
+  `x-ryu-tags`.
+- A file a vendor needs by URL can be
+  [hosted by Connect](/docs/standalone/connect-api-media#reference-media).
+- Objects you create on Ryu's key stay
+  [yours](/docs/standalone/connect-api-media#vendor-resources-on-ryus-key).
 
 <Cards>
   <DocCard href="/docs/standalone/connect-api" />

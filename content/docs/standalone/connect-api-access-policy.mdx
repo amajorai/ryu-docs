@@ -70,11 +70,18 @@ Both answer:
 
 Scopes are the ones your request names (both by default), narrowed to what
 your OAuth grant holds and what your organization role allows. A viewer gets
-no token. Ryu refuses a token for an organization you are not a member of
-(`403`), a team you are not in (`403`), an organization without credit
-(`402`, there is no free starter credit), and an organization whose Connect
-access Ryu set up directly (`409`). A brand-new organization's first token
-works within about a minute, once Connect has learned the tenant.
+no token.
+
+Ryu refuses a token in these cases:
+
+| Status | When |
+|---|---|
+| `403` | You are not a member of the organization, or not in the named team |
+| `402` | The organization has no credit (there is no free starter credit) |
+| `409` | Ryu set up the organization's Connect access directly |
+
+A brand-new organization's first token works within about a minute, once
+Connect has learned the tenant.
 
 Ryu publishes the public key that signs tokens at
 `GET $RYU_API/api/connect-tokens/jwks`.
@@ -93,7 +100,24 @@ saving vendor keys keep needing the tenant's management bearer.
 ## Tool policy
 
 Connect applies three kinds of rules to every tool search, describe and call
-on every surface: REST, `/mcp`, and the meta tools on `/mcp/meta`.
+on every surface: REST, `/mcp`, and the meta tools on `/mcp/meta`. For each
+tool call it checks them in this order, and URL rules then guard each upstream
+request the call makes:
+
+```mermaid
+flowchart TD
+  C["Tool call"] --> R{"Retired?"}
+  R -->|yes| R1["410 tool_retired"]
+  R -->|no| D{"Tool deny rule?"}
+  D -->|yes| D1["403 tool_denied_by_policy"]
+  D -->|no| P{"Preview and not pinned?"}
+  P -->|yes| P1["403 tool_preview_not_pinned"]
+  P -->|no| V{"Pinned version differs?"}
+  V -->|yes| V1["409 tool_version_mismatch"]
+  V -->|no| U{"URL deny rule on upstream?"}
+  U -->|yes| U1["403 url_denied_by_policy"]
+  U -->|no| OK["Request sent"]
+```
 
 ### Lifecycle
 
@@ -130,18 +154,27 @@ organization or one team:
 | Tool | An exact tool ID, or a prefix ending in `*`, such as `composio.SLACK_*` | Hidden from search and describe; calls refused with `403 tool_denied_by_policy` before any credit is held |
 | URL | A host (`api.github.com`, or `*.example.com` for its subdomains only), optionally a path glob (`/repos/*`, `*` matches anything including `/`) and methods | The upstream request is refused with `403 url_denied_by_policy` before it leaves Connect |
 
-Each refusal names the rule (`rule: "dny_…"`). A path glob is matched against
-the path as sent and percent-decoded, so an encoded spelling of a denied path
-is denied too. On `api.github.com`, which resolves owner and repository names
-in any letter case, the rule and the request path are compared case-insensitively,
-so `/repos/acme/secret*` also denies `/repos/ACME/Secret/issues`. Elsewhere a
-path glob matches its exact case. Rules match spellings, not resources: a
-vendor alias such as GitHub's `/repositories/<id>/...` needs its own rule.
+Each refusal names the rule (`rule: "dny_…"`).
+
+How path globs match:
+
+- A path glob is matched against the path as sent and percent-decoded, so an
+  encoded spelling of a denied path is denied too.
+- On `api.github.com`, which resolves owner and repository names in any letter
+  case, the rule and the request path are compared case-insensitively. So
+  `/repos/acme/secret*` also denies `/repos/ACME/Secret/issues`.
+- Elsewhere a path glob matches its exact case.
+- Rules match spellings, not resources. A vendor alias such as GitHub's
+  `/repositories/<id>/...` needs its own rule.
+
 URL rules apply wherever Connect builds the upstream request:
-toolkits Connect serves itself (every request an action makes),
-[relay tools and built-in vendors](/docs/standalone/connect-api-relay)
-(checked before the credential ladder, and again on every redirect). Composio
-makes its own upstream requests, so only tool rules apply to Composio tools.
+
+- toolkits Connect serves itself (every request an action makes);
+- [relay tools and built-in vendors](/docs/standalone/connect-api-relay),
+  checked before the credential ladder and again on every redirect.
+
+Composio makes its own upstream requests, so only tool rules apply to Composio
+tools.
 
 Team rules and team pins apply to calls made with an access token issued for
 that team. Console keys carry no team, so only organization-wide rules apply
@@ -177,9 +210,14 @@ curl -X PUT "$RYU_API/api/control-plane/orgs/<organizationId>/connect-policy" \
 
 The `PUT` replaces the whole policy. Send the `revision` you read: if someone
 changed the policy since, the write is refused with `409` and nothing changes.
-New rules get an ID (`dny_…`). Up to 200 pins and 200 rules; a rule names a
-tool or a host, not both, and a path or methods only with a host; teams must
-be teams of the organization. Changes reach Connect within about a minute.
+New rules get an ID (`dny_…`). Changes reach Connect within about a minute.
+
+Limits on a policy:
+
+- up to 200 pins and 200 rules;
+- a rule names a tool or a host, not both;
+- a rule names a path or methods only with a host;
+- teams must be teams of the organization.
 
 If Connect cannot reach Ryu, it keeps applying the last policy it received:
 an outage never lifts a deny rule or a retirement. Until it has received a

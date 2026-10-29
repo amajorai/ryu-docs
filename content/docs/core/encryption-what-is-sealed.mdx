@@ -3,12 +3,23 @@ title: "What Is Sealed"
 description: "Reference for the credentials, chat content, and configuration that Core, the Gateway, apps, and clients seal on disk today, store by store"
 ---
 
-This page lists the stores that hold secrets and chat content and says which fields are sealed. For the cipher and key custody, see [Encryption at Rest](/docs/core/encryption-at-rest). Search indexes, Spaces, and other user content are on [Sealed User Content](/docs/core/encryption-user-content).
+This page lists the stores that hold secrets and chat content and says which fields are sealed.
 
-Metadata stays plaintext so lists, ordering, and routing keep working. Ids, roles, timestamps,
-model selection, and token counts are never sealed. Only content and secrets are
-encrypted, and only in the stores below. Databases live in the data folder's `db/` directory;
-`accounts.json`, `auth.json`, `plugin-secrets.db`, and `pi-accounts.db` live in `secrets/`.
+- For the cipher and key custody, see [Encryption at Rest](/docs/core/encryption-at-rest).
+- Search indexes, Spaces, and other user content are on
+  [Sealed User Content](/docs/core/encryption-user-content).
+- Browser, Gateway, desktop, node credential, and backup stores, and how the Gateway, apps, and
+  clients get their keys, are on
+  [Sealed Gateway, Node, and Client Credentials](/docs/core/encryption-credential-files).
+
+Only content and secrets are encrypted, and only in the stores below. Metadata stays plaintext so
+lists, ordering, and routing keep working: ids, roles, timestamps, model selection, and token
+counts are never sealed.
+
+Databases live in the data folder's `db/` directory. `accounts.json`, `auth.json`,
+`plugin-secrets.db`, and `pi-accounts.db` live in `secrets/`.
+
+## Chat, memory, and identity
 
 | Store | Sealed now? | Field(s) | Where |
 |---|---|---|---|
@@ -16,35 +27,94 @@ encrypted, and only in the stores below. Databases live in the data folder's `db
 | `conversations.db` `memory_entries` | Yes | entry text (`nonce` + `ciphertext` blob columns) | `server/memory.rs` (refit onto the unified master key) |
 | `identities.db` connections (embedded compatibility) | Yes | credential `encrypted_state` | `ryu-vault` store and manual source |
 | Passport tenant stores | Yes | credential `encrypted_state` | `apps/passport` and `ryu-vault` (see [Passport](/docs/standalone/passport)) |
-| Notify `events.db` (standalone Notify service) | Yes, for credentials | each destination's URL, signing secret, and custom header values; each interactive event's callback URL and callback secret | AES-256-GCM with the key you supply in `RYU_NOTIFY_SECRETS_KEY`, which Notify never writes to disk. Notify does not start without it; values an older build stored in plaintext are encrypted when it starts (see [Notify](/docs/standalone/notify)). Event titles, bodies, recipients and data stay readable |
-| Box `boxes.db` (standalone Box service) | No, except secrets | the text of every prompt sent to a box and box event payloads | only values stored through the secrets API are encrypted; prompts and events stay readable |
+
+## Core credentials and settings
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
 | `plugin-secrets.db` | Yes | `(plugin_id, key)` secret value (`nonce` + `ciphertext` blob columns) | `plugin_secrets/mod.rs` (BYOK `env:` fallback) |
 | `accounts.json` | Yes | account bearer tokens, and account email, display name and avatar URL (see Signed-in accounts on [Sealed User Content](/docs/core/encryption-user-content)); user ids stay readable | `auth/mod.rs` (sealed with the Core master key) |
 | `secrets/auth.json` | Yes | legacy active-account token mirror | `auth/mod.rs` (sealed `token` envelope; retained for older clients) |
 | `pi-accounts.db` | Yes | per-account Pi provider / ACP-agent credential (`nonce` + `ciphertext` blob columns) | `pi_config/accounts.rs` (multi-account vault; the active account is reflected into Pi's own files as described in the next row) |
-| Managed Pi `auth.json` and `models.json` (the Pi agent folder) | API keys and Ryu tokens: not stored there. Subscription sign-ins: no | provider API keys, custom provider keys, the Ryu node token Pi presents to Ryu's local provider routes, the managed fleet token, and plugin provider tokens | the files hold only a `${…}` reference; the value stays sealed in `pi-accounts.db` or in Ryu's memory and reaches Pi in its environment when Ryu starts it, so Pi and the commands it runs can read it. Keys an older build wrote in plaintext are moved into `pi-accounts.db` and replaced when Ryu starts or next starts Pi, and saving a key without a working key store is refused. Subscription sign-ins (GitHub Copilot, ChatGPT through Pi, Kimi, and others Pi refreshes itself) stay plaintext in `auth.json`, because Pi reads and rewrites them; the folder is owner-only (`0700`) and the files `0600` |
+| `preferences.db` | Yes, for credentials | the values of API keys and tokens (`hf-token`, `composio-api-key`, `openrouter-api-key`, the learning engine's reward-model key, SMTP password, …) | sealed as `enc:v1:`; a credential an older build stored in plaintext is sealed when Core starts and the old database pages are purged. Reading one through the preferences API returns `••••••`, and saving that placeholder back keeps the stored key. Ordinary settings, the diagnostics endpoint URL, and personalization text stay plaintext |
+| `notify.db` alert delivery and push tokens | Yes, for credentials | the node's alert delivery settings (webhook URLs, Telegram bot tokens, Expo push tokens, alert email recipients) and each registered device push token | sealed as `enc:v1:`; push tokens are looked up by a SHA-256 digest. Values an older build stored in plaintext are sealed when Core starts and the old database pages are purged. The alert settings API returns `••••••` for each credential, and saving that placeholder back keeps the stored value. Without a key, alert targets and push tokens are not saved. Inbox notification titles and bodies are not encrypted |
+
+## Agent runtime sign-ins
+
+Some of these files are read and rewritten by the runtime itself, so Ryu cannot seal them. Each row
+says how the file is protected instead.
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Managed Pi `auth.json` and `models.json` (the Pi agent folder) | API keys and Ryu tokens: not stored there. Subscription sign-ins: no | provider API keys, custom provider keys, the Ryu node token Pi presents to Ryu's local provider routes, the managed fleet token, and plugin provider tokens | see [Managed Pi files](#managed-pi-files) |
 | Per-conversation Pi account copies (`account-sessions/` in the Pi agent folder) | No, short-lived | the access token of a pinned subscription account | written only while that conversation's Pi runs and removed when the last Pi using it exits (and at startup after a crash). The refresh token is never copied. A pinned API-key account is passed in Pi's environment, and the copied provider list keeps no other provider's literal key; copies an older version left with keys in them are deleted at startup and regenerated without them |
 | Codex sign-in copy (`runtimes/codex-home/auth.json`) | No | your ChatGPT sign-in for Codex, copied from your own `~/.codex/auth.json` | Codex reads and refreshes this file itself, so it stays plaintext, owner-only (`0600`), written without a moment at looser permissions, and left out of backups. Older builds also kept a never-refreshed backup copy (`auth.json.ryu-safety-backup`); it is deleted |
 | Kiro sign-in folders (`secrets/native-accounts/kiro/`) | No | the Kiro CLI's own sign-in tokens for each connected account | the Kiro CLI keeps them in its own files, so Ryu cannot seal them. Each account folder is owner-only (`0700`), left out of backups, and deleted when you remove the account |
 | Pi background shell record (`ryu-background-shells.json`) | Redacted, not encrypted | background commands the agent started | keeps only a redacted, shortened preview of each command (API-key variables, auth headers, bearer values, and passwords in URLs become `[redacted]`), owner-only (`0600`). The redaction is pattern-based, so avoid putting secrets in commands |
-| `preferences.db` | Yes, for credentials | the values of API keys and tokens (`hf-token`, `composio-api-key`, `openrouter-api-key`, the learning engine's reward-model key, SMTP password, …) | sealed as `enc:v1:`; a credential an older build stored in plaintext is sealed when Core starts and the old database pages are purged. Reading one through the preferences API returns `••••••`, and saving that placeholder back keeps the stored key. Ordinary settings, the diagnostics endpoint URL, and personalization text stay plaintext |
+| MCP bridge sign-in (`mcp-auth.json`) | No | the bridge's Ryu account session | the standalone MCP bridge runs without Core and cannot reach the master key; the file is owner-only (`0600`) in the owner-only `secrets/` folder |
+
+### Managed Pi files
+
+- The files hold only a `${…}` reference. The value stays sealed in `pi-accounts.db` or in Ryu's
+  memory and reaches Pi in its environment when Ryu starts it, so Pi and the commands it runs can
+  read it.
+- Keys an older build wrote in plaintext are moved into `pi-accounts.db` and replaced when Ryu
+  starts or next starts Pi. Saving a key without a working key store is refused.
+- Subscription sign-ins (GitHub Copilot, ChatGPT through Pi, Kimi, and others Pi refreshes itself)
+  stay plaintext in `auth.json`, because Pi reads and rewrites them. The folder is owner-only
+  (`0700`) and the files `0600`.
+
+## Configuration files
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
 | `mcp.json` (your MCP servers) | Yes | every request header and environment value of each server, such as `Authorization` headers and API-key variables | each value is sealed as `enc:v1:`; server names, commands, and URLs stay readable, and a value written as a `secret:NAME` vault reference is left as written. Values you paste or import in plaintext are sealed the next time Ryu writes the file or starts. A value that cannot be decrypted is not sent to the server |
 | `catalog-sources.json` (custom marketplaces) | Yes | a private marketplace's bearer token and header values | sealed as `enc:v1:`; a value that is only a `${ENV_VAR}` reference stays as written. An older plaintext file is sealed when it loads, and a value that cannot be decrypted is never sent |
+| Workflow definitions (`state/workflows/`, script workflows, older version snapshots, and the local version history in `files/source-history`) | Yes | each webhook trigger's signing secret, each channel step's Telegram bot token and Slack, Discord, or webhook URL, and each webhook step's target URL | sealed as `enc:v1:`, and the whole file is also sealed. See [Workflow secrets](#workflow-secrets) |
+
+### Workflow secrets
+
+- The whole definition file is sealed as described on
+  [Sealed User Content](/docs/core/encryption-user-content). A definition an older build saved in
+  plaintext is sealed when Core starts.
+- Older version history is imported into the encrypted version history, checked, and then deleted
+  (see [Version history import](/docs/core/encryption-files-and-gateway#version-history-import)).
+- Backups made by an older build may still hold these values in plaintext. Rotate any bot token,
+  webhook URL, or signing secret that was saved by an older build.
+- The workflow editor shows a saved bot token or channel webhook URL as `••••••`, and saving that
+  placeholder back keeps the stored value.
+- A trigger's signing secret stays visible in the editor for one workflow at a time to people who
+  can view it, because the sender has to be configured with it. The workflow list, saved versions,
+  restore previews, and the chat workflow builder show it as `••••••`.
+- The chat workflow builder never sees a bot token or channel webhook URL.
+
+## Fleet and networking
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
 | Fleet enrollment files (`fleet-identity.json`, `fleet-enrolled-node.json`, `fleet-enrollment-pending.json`) | Yes | the whole file: the node's fleet credential, its signing and encryption private keys, the enrollment token, and the organization's control and relay credentials | sealed as `enc:v1:`; a plaintext file from an older build is sealed the next time it is read. Without a key, enrollment fails instead of writing these in plaintext |
 | `relay.json` (Ryu Relay webhook routing) | Yes | the whole file (the relay routing token) | sealed as `enc:v1:`; left out of backups. Without a key it is not saved and the relay issues it again on the next connection |
 | Tailscale mesh auth key | Not stored | the auth key you provide | kept in memory until the node enrolls; `tailscale up` reads it from an owner-only file that exists only while that command runs. A key file left by an older build is removed at startup |
 | Tailscale and OpenTunnel node identities (`tailscaled.state`, OpenTunnel's `tunnel.json`) | No | each tunnel's private keys and token | written and read by the tunnel programs themselves, so Ryu cannot seal them. They are kept in owner-only folders and left out of backups so a restore does not copy this node's network identity |
-| MCP bridge sign-in (`mcp-auth.json`) | No | the bridge's Ryu account session | the standalone MCP bridge runs without Core and cannot reach the master key; the file is owner-only (`0600`) in the owner-only `secrets/` folder |
-| Workflow definitions (`state/workflows/`, script workflows, older version snapshots, and the local version history in `files/source-history`) | Yes | each webhook trigger's signing secret, each channel step's Telegram bot token and Slack, Discord, or webhook URL, and each webhook step's target URL | sealed as `enc:v1:`, and the whole file is also sealed (see Workflow definitions under Core sync and state stores below). A definition an older build saved in plaintext is sealed when Core starts. Older version history is imported into the encrypted version history, checked, and then deleted (see the version history row under Core files, history and runtime residue below). Backups made by an older build may still hold these values in plaintext, so rotate any bot token, webhook URL, or signing secret that was saved by an older build. The workflow editor shows a saved bot token or channel webhook URL as `••••••`, and saving that placeholder back keeps the stored value. A trigger's signing secret stays visible in the editor for one workflow at a time to people who can view it, because the sender has to be configured with it; the workflow list, saved versions, restore previews, and the chat workflow builder show it as `••••••` too, and the chat workflow builder never sees a bot token or channel webhook URL |
-| `notify.db` alert delivery and push tokens | Yes, for credentials | the node's alert delivery settings (webhook URLs, Telegram bot tokens, Expo push tokens, alert email recipients) and each registered device push token | sealed as `enc:v1:`; push tokens are looked up by a SHA-256 digest. Values an older build stored in plaintext are sealed when Core starts and the old database pages are purged. The alert settings API returns `••••••` for each credential, and saving that placeholder back keeps the stored value. Without a key, alert targets and push tokens are not saved. Inbox notification titles and bodies are not encrypted |
+
+## Apps
+
+Values sealed as `encp:v1:` use the app's own key (see
+[App credentials](/docs/core/encryption-credential-files#app-credentials)).
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
 | Monitors app (`monitors.db`) | Yes, for credentials | each monitor's Telegram bot token, webhook URL, and Expo push token | sealed as `encp:v1:` with the app's own key (see [App credentials](/docs/core/encryption-credential-files#app-credentials)); a value an older version stored in plaintext is sealed when the app starts. The app's API returns `••••••` for each, with the webhook's host for display and an opaque reference to the stored credential; saving the placeholder back with that reference keeps that credential, even after other targets are removed or reordered. Email recipients and the rest of a monitor stay readable |
 | Social app (`social.db`) | Yes, for credentials | the Bluesky app password and Threads access token you save | sealed as `encp:v1:` with the app's own key; a value an older version stored in plaintext is sealed when the app starts. Credentials passed in the environment are never written. Everything else in `social.db` stays readable: inbox messages from other people (DMs and mentions), drafts, templates, post text and publishing errors |
 | Dashboards app (`dashboards.db`) | Yes, for credentials | each HTTP widget's request header values (for example an API key) | sealed as `encp:v1:` with the app's own key; older plaintext values are sealed when the app starts. The app shows header names with `••••••` values (also in a device dashboard's configuration), and saving the placeholder back keeps the stored value only while the widget's URL stays on the same scheme, host and port; pointing the widget somewhere else requires entering the header again |
 | Token Table app (`token-table.db`) | Hashed, not encrypted | each player's viewer token | stored as a SHA-256 digest, so the database alone cannot be used to take a seat; tokens an older version stored are hashed when the app starts |
 
-Browser, Gateway, desktop, node credential, and backup stores, and how the Gateway, apps, and
-clients get their keys, are on
-[Sealed Gateway, Node, and Client Credentials](/docs/core/encryption-credential-files).
+## Standalone services
+
+| Store | Sealed now? | Field(s) | Where |
+|---|---|---|---|
+| Notify `events.db` (standalone Notify service) | Yes, for credentials | each destination's URL, signing secret, and custom header values; each interactive event's callback URL and callback secret | AES-256-GCM with the key you supply in `RYU_NOTIFY_SECRETS_KEY`, which Notify never writes to disk. Notify does not start without it; values an older build stored in plaintext are encrypted when it starts (see [Notify](/docs/standalone/notify)). Event titles, bodies, recipients and data stay readable |
+| Box `boxes.db` (standalone Box service) | No, except secrets | the text of every prompt sent to a box and box event payloads | only values stored through the secrets API are encrypted; prompts and events stay readable |
 
 ## Related
 

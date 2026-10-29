@@ -11,17 +11,35 @@ own process.
 
 Passport is not a browser engine, and it does not give credentials to a model.
 Its API returns profile and connection metadata only. Credential state is
-sealed before storage. Only a governed runtime with an explicit identity-read
-path can use it.
+sealed before storage, and only a governed runtime with an explicit
+identity-read path can use it.
+
+<Figure name="passport" />
 
 <Callout type="warn">
 Hosted Ryu Passport is in **early access**. Ryu enables it one organization at
-a time, and it is not open for new organizations yet. Its source and builds are
-not published in the public Ryu repository, as crates, or as a binary or
-container image, so the self-hosting steps on this page apply only to an
-early-access source checkout. The agent passport and identity vault built into
+a time, and it is not open for new organizations yet.
+
+Its source and builds are not published in the public Ryu repository, as
+crates, or as a binary or container image, so the self-hosting steps on this
+page apply only to an early-access source checkout. The agent passport and identity vault built into
 Ryu Core are separate and keep working.
 </Callout>
+
+Every management and runtime request passes the failed-authentication backoff
+and the bearer-token check before it reaches the caller's tenant store.
+
+```mermaid
+flowchart LR
+  Admin["Administration token"] --> P["Passport (HTTP)"]
+  Runtime["Runtime grant"] --> P
+  Core["Core (remote mode)"] -->|"sweep, metadata"| P
+  P --> Throttle["Failed-auth backoff"]
+  Throttle --> Auth["Token to tenant"]
+  Auth --> Store["Tenant SQLite store"]
+  Store --> Sealed["Sealed credential state"]
+  Health["Health loop"] --> Store
+```
 
 ## Start Passport
 
@@ -39,12 +57,16 @@ cargo run --manifest-path apps/passport/Cargo.toml
 
 The default bind is `127.0.0.1:8093`. Set `RYU_PASSPORT_HOSTNAME` and
 `RYU_PASSPORT_PORT` only when the service has an authenticated network boundary
-and TLS in front of it. On a non-loopback bind, Passport refuses to start unless
-every administration and runtime token is at least 32 characters long with at
-least eight distinct characters; generate tokens with `openssl rand -base64 32`.
-Passport backs off client addresses that keep presenting unknown bearer tokens
-(see [Failed authentication backoff](/docs/standalone/passport#failed-authentication-backoff)).
-Keep a request rate limit at the TLS proxy in front of it as well.
+and TLS in front of it.
+
+On a non-loopback bind, Passport refuses to start unless every administration
+and runtime token is at least 32 characters long with at least eight distinct
+characters. Generate tokens with `openssl rand -base64 32`.
+
+Passport also backs off client addresses that keep presenting unknown bearer
+tokens (see
+[Failed authentication backoff](/docs/standalone/passport#failed-authentication-backoff)),
+but keep a request rate limit at the TLS proxy in front of it as well.
 
 | Variable | Purpose |
 |---|---|
@@ -65,42 +87,69 @@ minimal grant that may only read through one profile's connections is
 `[{"token":"…","tenantId":"demo","profileIds":["personal"]}]`. The
 [fetch guide](/docs/standalone/passport-fetch-api) and
 [MCP guide](/docs/standalone/passport-mcp-api) describe `allowedMethods` and
-`mcpBindings`. When `RYU_PRODUCT_DASHBOARD_URL` is unset or empty, `GET /`
-returns a short JSON description with the service name, version, and the
-`/health` path. Set it to your own console or landing page to redirect browsers
-there instead; Ryu's hosted deployment sets it to the Ryu dashboard.
+`mcpBindings`.
+
+When `RYU_PRODUCT_DASHBOARD_URL` is unset or empty, `GET /` returns a short
+JSON description with the service name, version, and the `/health` path. Set it
+to your own console or landing page to redirect browsers there instead. Ryu's
+hosted deployment sets it to the Ryu dashboard.
 
 ### Failed authentication backoff
 
 Management and runtime routes count bearer tokens that match no configured
-administration token or runtime grant. A client address that presents 30 of
-them within a minute is blocked for a minute, and each further block for that
-address doubles, up to 15 minutes. While blocked, the address gets
-`429 Too Many Requests` with a `Retry-After` header in seconds, and Passport
-refuses the request before comparing its token, so even a valid token from that
-address waits. Requests without a bearer token, and valid tokens sent to a
-route they are not allowed to use, are not counted. Health, the redirect, and
-the public MCP OAuth callback and client-metadata routes are never blocked.
-IPv6 clients are grouped by their `/64`. The counts live in process memory and
-reset on restart, so the backoff slows online guessing but does not replace
-long random tokens.
+administration token or runtime grant. With the defaults:
+
+- A client address that presents 30 unknown tokens within a minute is blocked
+  for a minute.
+- Each further block for that address doubles, up to 15 minutes.
+- While blocked, the address gets `429 Too Many Requests` with a `Retry-After`
+  header in seconds. Passport refuses the request before comparing its token,
+  so even a valid token from that address waits.
+- IPv6 clients are grouped by their `/64`.
+
+Requests without a bearer token, and valid tokens sent to a route they are not
+allowed to use, are not counted. Health, the redirect, and the public MCP OAuth
+callback and client-metadata routes are never blocked.
+
+The counts live in process memory and reset on restart. The backoff slows
+online guessing, but it does not replace long random tokens.
+
+```mermaid
+flowchart TD
+  Req["Request with bearer token"] --> Blocked{"Address blocked?"}
+  Blocked -->|yes| R429["429 with Retry-After"]
+  Blocked -->|no| Known{"Token known?"}
+  Known -->|yes| Route["Handle request"]
+  Known -->|no| Count["Count failure"]
+  Count --> Limit{"Limit reached in window?"}
+  Limit -->|yes| Block["Block address, doubling up to max"]
+  Limit -->|no| Reject["Reject request"]
+  Block --> Reject
+```
+
+#### Clients behind a reverse proxy
 
 The client address is the TCP peer, and `X-Forwarded-For` is ignored by
 default. Behind a reverse proxy, every request arrives from the proxy, so one
-client retrying a stale token could block every client. Add the proxy's address
-or network to `RYU_PASSPORT_TRUSTED_PROXIES`, for example `127.0.0.1` for a
-proxy on the same host or `172.16.0.0/12` for a Docker bridge network. Passport
-then uses the nearest `X-Forwarded-For` hop that is not itself a trusted proxy,
-and ignores anything further left, because the client wrote it. List only
-proxies that append the connecting address to `X-Forwarded-For` or overwrite
-it. An invalid entry or setting stops startup, and Passport logs one warning
-when `X-Forwarded-For` arrives from a peer that is not trusted.
+client retrying a stale token could block every client.
+
+Add the proxy's address or network to `RYU_PASSPORT_TRUSTED_PROXIES`, for
+example `127.0.0.1` for a proxy on the same host or `172.16.0.0/12` for a
+Docker bridge network. Passport then uses the nearest `X-Forwarded-For` hop
+that is not itself a trusted proxy. It ignores anything further left, because
+the client wrote it.
+
+List only proxies that append the connecting address to `X-Forwarded-For` or
+overwrite it. An invalid entry or setting stops startup. Passport logs one
+warning when `X-Forwarded-For` arrives from a peer that is not trusted.
 
 ### Master-key custody
 
 Passport takes its master key from `RYU_MASTER_KEY` or, when available, the OS
-keychain. It refuses to start, or to run `--import-vault`, when neither is
-available, instead of generating a `master.key` file inside the data directory.
+keychain. When neither is available, it refuses to start or to run
+`--import-vault`, instead of generating a `master.key` file inside the data
+directory.
+
 A key file stored beside the tenant stores means any copy or backup of that
 directory can decrypt them. If you accept that trade-off, for example on a
 disposable test host, set `RYU_PASSPORT_ALLOW_FILE_KEY=1`. Passport then logs a
@@ -115,22 +164,27 @@ ids.
 
 All tenants in one process share the master key, but each sealed value is bound
 to the tenant and connection it was written for. Passport derives a separate
-encryption key for each tenant from the master key. The encryption also
-authenticates the tenant id, the connection id, its profile, and the domain the
-credentials are sent to. For MCP OAuth tokens it authenticates the owner,
-profile, plugin, server, resource, and issuer. Sealed state copied into another
-tenant's store or another connection, or left in a row whose domain was edited,
-does not decrypt. Passport refuses to use it and the
-[fetch route](/docs/standalone/passport-fetch-api) returns `409` asking for the
-state to be imported again. A tenant database moved into another tenant's
-directory stops startup.
+encryption key for each tenant from the master key, and the encryption also
+authenticates:
+
+- for connection state, the tenant id, the connection id, its profile, and the
+  domain the credentials are sent to;
+- for MCP OAuth tokens, the owner, profile, plugin, server, resource, and
+  issuer.
+
+Sealed state copied into another tenant's store or another connection, or left
+in a row whose domain was edited, does not decrypt. Passport refuses to use it,
+and the [fetch route](/docs/standalone/passport-fetch-api) returns `409` asking
+for the state to be imported again. A tenant database moved into another
+tenant's directory stops startup.
 
 Passport never accepts credential state in the earlier, unbound format while it
 runs. A tenant store with any such value refuses to start until an operator
-converts it, because anything the store records about its own conversion could
-be erased by the same person who plants a value. The tenant id is part of every
-binding: keep it stable, because a store does not open under a different tenant
-id.
+converts it. Anything the store records about its own conversion could be
+erased by the same person who plants a value.
+
+The tenant id is part of every binding. Keep it stable, because a store does
+not open under a different tenant id.
 
 ### Upgrade an existing tenant store
 
@@ -144,21 +198,27 @@ ryu-passport --migrate-legacy-state --tenant demo
 ```
 
 The command re-encrypts every stored value with its binding in one transaction
-and records the conversion. A value it cannot open, or one that is not encrypted
-at all, is never converted. It is cleared, its connection returns to
-`NEEDS_AUTH` (or reconnect for MCP OAuth), and the command logs the connection
-id, so one damaged row does not keep the tenant from starting. If no value opens
-at all, the master key is almost certainly wrong, and the command changes
-nothing. Running it again on a converted store does nothing. An earlier Passport
-release cannot read a converted store, so keep a backup from before the upgrade
-if you might downgrade.
+and records the conversion. It handles damaged values like this:
 
+- A value it cannot open, or one that is not encrypted at all, is never
+  converted. It is cleared, its connection returns to `NEEDS_AUTH` (or
+  reconnect for MCP OAuth), and the command logs the connection id, so one
+  damaged row does not keep the tenant from starting.
+- If no value opens at all, the master key is almost certainly wrong, and the
+  command changes nothing.
+- Running it again on a converted store does nothing.
+
+An earlier Passport release cannot read a converted store, so keep a backup
+from before the upgrade if you might downgrade.
+
+<Callout type="warn">
 Run the conversion only right after an upgrade. If Passport later reports
-unconverted state in a store you already converted, someone changed the store:
-do not run the command, because it would accept whatever was planted. Restore a
+unconverted state in a store you already converted, someone changed the store.
+Do not run the command, because it would accept whatever was planted. Restore a
 trusted backup or import the source vault again instead. The command also
 refuses a store that still holds converted values but has lost its conversion
 record.
+</Callout>
 
 The binding stops sealed state from being moved. It does not make the data
 directory safe to expose:
@@ -183,18 +243,23 @@ limited to the Passport service and its operators.
 Passport provides an offline `--import-vault SOURCE_DB --tenant TENANT_ID`
 command. Run it before starting the destination tenant, with the source vault's
 matching master key and the destination Passport data directory configured.
-The command takes a consistent SQLite snapshot, preserves connection IDs,
-verifies and reseals stored credentials, and refuses to overwrite a tenant
-store. The source is retained for recovery. A wrong encryption key prevents
-publication of the imported store. The import binds every credential to the
-destination tenant as it copies it, so the tenant starts without a separate
-conversion. It is all or nothing: a credential that does not open with the key,
-or one that is not encrypted at all, stops the import before anything is
-published. The source must be a Core vault or a store from an earlier Passport
-release; a converted Passport store is refused.
+
+The import:
+
+- takes a consistent SQLite snapshot and keeps the source for recovery;
+- preserves connection IDs;
+- verifies and reseals stored credentials, binding each one to the destination
+  tenant, so the tenant starts without a separate conversion;
+- refuses to overwrite an existing tenant store;
+- is all or nothing. A wrong encryption key, a credential that does not open
+  with the key, or one that is not encrypted at all stops the import before
+  anything is published.
+
+The source must be a Core vault or a store from an earlier Passport release. A
+converted Passport store is refused.
 
 After import, configure runtime credentials and the Core Passport handoff.
-This does not migrate every Core identity consumer automatically. Retain the
+Import does not migrate every Core identity consumer automatically. Keep the
 source backup until the required consumers have switched; reverting to it will
 not include later Passport writes.
 
@@ -215,26 +280,21 @@ not proof that the provider still accepts that state.
 
 ## Core in remote mode
 
-When Core is configured to use Passport, its existing identity-health scheduler
-job requests a sweep of the configured Passport tenant with the administration
-credential. A rejected or unavailable remote sweep fails the job. It does not
-check Core's older local store instead. Passport also runs its own periodic
-health loop, so Core does not need to stay running.
-
 Passport can run beside Core, Connect, or another agent runtime. The owning
 runtime decides when an identity read is allowed and how that read is audited;
 Passport remains the durable identity store.
 
-Core's domain-based connection-needed signal also reads Passport metadata when
-remote mode is configured. A missing login requests human action; an unavailable
-identity service pauses the action instead of consulting an older local vault.
-This signal does not export credential state or start a login automatically.
+When Core is configured to use Passport, Core changes in three places:
 
-For tools that only consult login state, Core uses the calling agent's Passport
-runtime credential and bound profile order. It does not decrypt a local copy
-just to check availability. Missing runtime configuration or a failed metadata
-lookup pauses the action. Credential-consuming calls require the Passport
-execution adapter; this metadata path never returns credential material.
+| Core path | Remote-mode behavior |
+|---|---|
+| Identity-health scheduler job | Requests a sweep of the configured Passport tenant with the administration credential. A rejected or unavailable sweep fails the job; it does not fall back to Core's older local store. |
+| Domain-based connection-needed signal | Reads Passport metadata. A missing login requests human action; an unavailable identity service pauses the action instead of consulting an older local vault. It does not export credential state or start a login. |
+| Tools that only consult login state | Use the calling agent's Passport runtime credential and bound profile order, without decrypting a local copy. Missing runtime configuration or a failed lookup pauses the action. |
+
+Passport also runs its own periodic health loop, so Core does not need to stay
+running. Credential-consuming calls require the Passport execution adapter; the
+metadata path never returns credential material.
 
 ## Pricing
 
@@ -249,21 +309,28 @@ spending the plan's included credit pool first.
 A connection-month is one stored credential kept for 30 days, so a credential
 kept for half of that counts as half a connection-month. Upstream fetches are
 authenticated fetches and runtime MCP calls that got a response from the
-provider. The free amounts reset at the start of each calendar month (UTC). The
-[usage report](/docs/standalone/passport-api#usage-report) shows exactly what is
-counted.
+provider. The free amounts reset at the start of each calendar month (UTC).
 
-A self-hosted Passport is never billed by Ryu. It serves the same usage report,
-but nothing reads it for billing unless the tenant runs on Ryu's hosted service.
+The [usage report](/docs/standalone/passport-api#usage-report) shows exactly
+what is counted. A self-hosted Passport serves the same report but is never
+billed by Ryu.
 
-When an organization runs out of Ryu credits, a Ryu-hosted Passport refuses its
+### When credits run out
+
+When an organization runs out of Ryu credits, a Ryu-hosted Passport refuses
 upstream calls and new connections with `402` and
-`"code": "insufficient_credits"`. That covers authenticated fetches, runtime MCP calls,
-creating connections, and starting or completing an MCP OAuth connection, for
-administration and runtime tokens alike. Listing, reading, and deleting
-connections, the usage report, and health checks keep working, so you can review
-and clean up. Calls are accepted again shortly after credits are added. If
-Passport cannot reach Ryu's billing service, it keeps serving, and after 15
+`"code": "insufficient_credits"`, for administration and runtime tokens alike.
+That covers:
+
+- authenticated fetches and runtime MCP calls;
+- creating connections;
+- starting or completing an MCP OAuth connection.
+
+Listing, reading, and deleting connections, the usage report, and health checks
+keep working, so you can review and clean up. Calls are accepted again shortly
+after credits are added.
+
+If Passport cannot reach Ryu's billing service, it keeps serving, and after 15
 minutes it stops refusing until it hears back. A self-hosted Passport never
 refuses calls for credits.
 

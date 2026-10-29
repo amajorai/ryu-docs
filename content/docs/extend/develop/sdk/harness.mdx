@@ -12,6 +12,29 @@ Desktop, a web app, `ryu-cli`, a messaging adapter, or another TypeScript proces
 same run. Core executes the run. Gateway policy governs models, tools, budgets, and network
 access.
 
+A run starts as `running`, or as `pending` when it is queued behind an active run, and ends in one
+terminal status:
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: "queued (enqueue)"
+  [*] --> running
+  pending --> running
+  pending --> canceled
+  pending --> failed: "restart, owned session"
+  running --> awaiting_approval
+  awaiting_approval --> running
+  running --> completed
+  running --> failed
+  running --> canceled
+  running --> interrupted
+  awaiting_approval --> interrupted
+  completed --> [*]
+  failed --> [*]
+  canceled --> [*]
+  interrupted --> [*]
+```
+
 ## Install
 
 ```bash
@@ -109,11 +132,17 @@ for await (const event of client.harness.events(started.run.id, cursor)) {
 }
 ```
 
-Core stores the event journal durably and encrypts it at rest. The stream records the accepted
-input as a digest and a bounded message count. It then emits text deltas, tool lifecycle metadata,
-tool-result digests, approval requests, checkpoints, and terminal outcomes, with the same event
-vocabulary on every transport. User content and tool payloads are not copied into this projection.
-Hashes stand in for tool arguments and results.
+Core stores the event journal durably and encrypts it at rest. The stream uses the same event
+vocabulary on every transport:
+
+- the accepted input, as a digest and a bounded message count;
+- text deltas;
+- tool lifecycle metadata and tool-result digests;
+- approval requests and checkpoints;
+- terminal outcomes.
+
+User content and tool payloads are not copied into this projection. Hashes stand in for tool
+arguments and results.
 
 ## Resume with a new attempt
 
@@ -129,7 +158,7 @@ const retry = await client.harness.startRun(
 
 The new run has an incremented `attempt` and a `parentRunId`. Core rejects a resume id from another
 session. If Core restarts while a run is `running` or `awaiting_approval`, it appends a terminal
-`run_interrupted` event before it serves the session again. A client never waits on a stale live
+`run_interrupted` event before it serves the session again, so a client never waits on a stale live
 cursor.
 
 ## Send a message while a run is active
@@ -168,10 +197,11 @@ A queued run's first event is `run_queued`; `run_started` and `input_accepted` f
 dispatched. With no active run, every strategy starts the run immediately. Cancel a queued run
 with `client.harness.cancel(runId)`; it ends as `run_canceled` without affecting the active run.
 
-The queue is durable: queued runs survive a node restart. After a restart, runs queued in a
-session that belongs to a signed-in person or organization end as `run_failed` because they can
-only run with their author's credentials; submit them again. Runs in sessions without an owner
-continue automatically.
+The queue is durable, so queued runs survive a node restart. After a restart:
+
+- runs queued in a session that belongs to a signed-in person or organization end as `run_failed`,
+  because they can only run with their author's credentials. Submit them again.
+- runs in sessions without an owner continue automatically.
 
 The SDK `Agent` accepts the same option for `sessionId` runs:
 
@@ -204,12 +234,19 @@ id the user chose:
 await client.harness.resolvePermission(event.approvalId, selectedOptionId);
 ```
 
-Omitting the option id rejects the request. An SDK `Agent` can resolve the same boundary through
-`approvalHandler`. Return `true` to select the first allow option, `false` to reject, or a specific
-runtime option id. If no handler is configured, the agent yields the approval event and leaves the
-run in `awaiting_approval` so another UI can resolve it. The SDK also exposes
-`agent.resolvePermission(requestId, optionId)` and `agent.streamRun(runId, after)` when the
-approval UI lives outside the agent loop.
+Omitting the option id rejects the request.
+
+An SDK `Agent` can resolve the same boundary through its `approvalHandler` option.
+
+| Handler returns | Effect |
+|---|---|
+| `true` | Selects the first allow option |
+| `false` | Rejects |
+| A runtime option id | Selects that option |
+
+If no handler is configured, the agent yields the approval event and leaves the run in
+`awaiting_approval` so another UI can resolve it. When the approval UI lives outside the agent
+loop, use `agent.resolvePermission(requestId, optionId)` and `agent.streamRun(runId, after)`.
 
 ## Execution profiles
 
@@ -225,9 +262,11 @@ A supplied `cwd` must be an existing directory. Profile fields never bypass Core
 
 <Callout type="warn">
   Core rejects `remote` and `cloud` profiles with an error. They never fall back to local
-  execution. On `local` and `worktree`, `network`, `sandbox`, and `approval` must be `inherit`.
-  The client types accept other values (`denied`, `gateway_only`, `allow`, `workspace`, `strict`,
-  `on_risk`, `always`, and `never`), but Core rejects them, so a caller never assumes a control was enforced
+  execution.
+
+  On `local` and `worktree`, `network`, `sandbox`, and `approval` must be `inherit`. The client
+  types accept other values (`denied`, `gateway_only`, `allow`, `workspace`, `strict`, `on_risk`,
+  `always`, and `never`), but Core rejects them, so a caller never assumes a control was enforced
   when the runtime does not expose it.
 </Callout>
 

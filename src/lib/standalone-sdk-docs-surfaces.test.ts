@@ -303,40 +303,46 @@ describe("standalone SDK docs guard: surfaces and navigation", () => {
     expect(sdkMeta.pages).toEqual([
       "index",
       "choose-an-sdk",
+      "---Core concepts---",
       "errors",
       "retries-and-idempotency",
       "pagination",
       "webhooks",
-      "---Quickstarts---",
+      "---Managed Agents---",
       "managed-agents",
       "managed-agents-tool-approvals",
       "managed-agents-cli-mcp",
+      "---Mail---",
       "mail",
       "mail-resources",
       "mail-errors",
       "mail-cli-mcp",
+      "---Notify---",
       "notify",
       "notify-errors",
       "notify-cli-mcp",
+      "---Box---",
       "box",
       "box-errors",
       "box-cli-mcp",
+      "---Gateway, Connect and Passport---",
       "gateway",
       "connect",
       "passport",
+      "---Sites---",
       "sites",
       "sites-errors",
       "sites-cli-mcp",
+      "---Messaging---",
       "messaging",
       "messaging-errors",
       "messaging-cli-mcp",
-      "---Frameworks---",
-      "frameworks",
-      "---Tools---",
+      "---Tools and frameworks---",
       "cli",
       "mcp",
       "mcp-hosted-mail",
       "agent-tools",
+      "frameworks",
       "openapi",
       "reference",
     ]);
@@ -355,11 +361,11 @@ describe("standalone SDK docs guard: surfaces and navigation", () => {
           entry: join(folder, entry),
           exists: Boolean(asPage ?? asFolder),
         }).toEqual({ entry: join(folder, entry), exists: true });
-        listed.add(join(folder, `${entry}.mdx`));
+        listed.add(join(folder, `${entry}.mdx`).replaceAll("\\", "/"));
         // A listed folder's index.mdx is its own page (the generated API
         // reference folders under reference/ rely on this).
         if (asFolder) {
-          listed.add(join(folder, entry, "index.mdx"));
+          listed.add(join(folder, entry, "index.mdx").replaceAll("\\", "/"));
         }
       }
     }

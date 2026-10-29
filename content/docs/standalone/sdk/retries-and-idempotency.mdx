@@ -19,9 +19,12 @@ The `ryu-sdk` Python package is not yet published to PyPI, so the Python client 
 
 ## What is retried
 
-A request is replay-safe when its method is `GET`, `HEAD`, `OPTIONS`, `PUT`,
-or `DELETE`, or it carries an `Idempotency-Key` on one of the routes listed
-below, and its body can be sent again. A streamed body can never be resent.
+A request is replay-safe when both hold:
+
+- its method is `GET`, `HEAD`, `OPTIONS`, `PUT`, or `DELETE`, or it carries an
+  `Idempotency-Key` on one of the [routes listed below](#idempotency-keys), and
+- its body can be sent again. A streamed body can never be resent.
+
 A few writes are never replayed although their method is idempotent; a `429`
 that names a wait is the only failure they are retried on:
 
@@ -41,12 +44,31 @@ that names a wait is the only failure they are retried on:
 | Any `402`, any other `4xx`, and the [final codes](/docs/standalone/sdk/errors#retryable-and-final-codes) | Never. |
 | Server-sent event streams | Never by the SDK; the stream readers reconnect on their own. |
 
+```mermaid
+flowchart TD
+  Failed["Attempt failed"] --> Final{"402 or a final code?"}
+  Final -->|"yes"| Raise["Raise the error"]
+  Final -->|"no"| Kind{"Failure"}
+  Kind -->|"429"| Hint{"Wait named?"}
+  Hint -->|"yes"| Wait["Retry after the named wait"]
+  Hint -->|"no"| Raise
+  Kind -->|"network, timeout, 408, 425, 500, 502, 503, 504"| Safe{"Replay-safe?"}
+  Kind -->|"409 idempotency_in_progress"| Safe
+  Safe -->|"yes"| Backoff["Retry after the delay"]
+  Safe -->|"no"| Raise
+  Kind -->|"any other 4xx"| Raise
+```
+
 Between attempts the SDK waits for the first of these that applies:
-`Retry-After`, the `RateLimit` reset when no requests remain, a wait named in
-the body, or an exponential backoff of 0.5, 1, 2, 4, then 8 seconds at most,
-with random jitter. When a service asks for a longer wait than
-`maxRetryDelayMs` (30 seconds by default), the SDK stops and raises the error
-with `retryAfterSeconds` set.
+
+1. `Retry-After`.
+2. The `RateLimit` reset when no requests remain.
+3. A wait named in the body.
+4. An exponential backoff of 0.5, 1, 2, 4, then 8 seconds at most, with random
+   jitter.
+
+When a service asks for a longer wait than `maxRetryDelayMs` (30 seconds by
+default), the SDK stops and raises the error with `retryAfterSeconds` set.
 
 ```ts tab="Node"
 import { Ryu } from "@ryuhq/services";
@@ -81,13 +103,17 @@ seconds.
 
 For each route below, the SDK adds an `Idempotency-Key` (a UUID) when the
 request has none, fixes it before the first attempt, and reuses it on every
-retry. `meta.idempotencyKey` and `meta.replayed` describe the call's
-idempotent write, even when reads followed it: the key it sent, and `true`
-when the service answered with the stored result of an earlier request. The
-SDK reads the `Idempotent-Replayed` header, or the service's body marker:
-Notify's `idempotent` field, and Box's `type: "box.existing"` on a replayed
-create or fork. Set `autoIdempotency: false` to stop adding keys; a key you pass
+retry. Set `autoIdempotency: false` to stop adding keys; a key you pass
 yourself is still sent.
+
+`meta.idempotencyKey` and `meta.replayed` describe the call's idempotent write,
+even when reads followed it:
+
+- `meta.idempotencyKey` is the key it sent.
+- `meta.replayed` is `true` when the service answered with the stored result of
+  an earlier request. The SDK reads the `Idempotent-Replayed` header, or the
+  service's body marker: Notify's `idempotent` field, and Box's
+  `type: "box.existing"` on a replayed create or fork.
 
 Ryu Messaging is the exception on both counts: it
 replays a stored result without marking it, so `meta.replayed` stays `false`,
@@ -127,21 +153,31 @@ lists what the SDK retries.
 | `POST` | `/v1/boxes` | Required | [Box](/docs/standalone/sdk/box) |
 | `POST` | `/v1/boxes/{id}/fork` | Required | [Box](/docs/standalone/sdk/box) |
 
+### Passport connections
+
 Passport deduplicates `POST /v1/connections` only in builds that advertise
 `features.idempotency_keys` in `GET /v1/capabilities`. The SDK reads that
-before a create, remembers the answer per `Ryu` instance and base URL for five
-minutes, and generates a key and retries the create only when the flag is
-`true`; when it is missing, `false`, or the read failed, the SDK adds no key
-of its own and never retries. A key you supply is always sent. After a
-rollback to a build without the flag, keyed retries can continue until the
-remembered answer expires
+before a create and remembers the answer per `Ryu` instance and base URL for
+five minutes.
+
+- When the flag is `true`, the SDK generates a key and retries the create.
+- When it is missing, `false`, or the read failed, the SDK adds no key of its
+  own and never retries.
+- A key you supply is always sent.
+
+After a rollback to a build without the flag, keyed retries can continue until
+the remembered answer expires
 ([details](/docs/standalone/sdk/passport#idempotency-and-retries)).
+
+### Services without deduplication
 
 Gateway, Connect, Sites, and every other Passport route deduplicate no
 writes, so their `POST` requests are never retried after a network error, a
 timeout, or a `5xx`. A Connect tool execution, or a Passport connection
 created on an older Passport and retried by your own code, can run twice;
 each quickstart says what to check first.
+
+### Choose your own key
 
 To choose the key, bind it to one call with `.with()`. Use something stable
 from your own data, such as an order or deploy id, so a retry after a crash

@@ -9,7 +9,7 @@ Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
   writable: true,
 });
 
-let nextPathname = "/en/docs/0.4.0/surfaces/desktop/bot";
+let nextPathname = "/en/docs/surfaces/desktop/bot";
 mock.module("next/navigation", () => ({
   usePathname: () => nextPathname,
   useParams: () => ({ lang: "en" }),
@@ -44,13 +44,13 @@ function pageTree(prefix = ""): Root {
         index: {
           type: "page",
           name: "Introduction",
-          url: `${prefix}/docs/0.4.0/start`,
+          url: `${prefix}/docs/start`,
         },
         children: [
           {
             type: "page",
             name: "Introduction",
-            url: `${prefix}/docs/0.4.0/start`,
+            url: `${prefix}/docs/start`,
           },
         ],
       },
@@ -61,7 +61,7 @@ function pageTree(prefix = ""): Root {
         index: {
           type: "page",
           name: "Surfaces",
-          url: `${prefix}/docs/0.4.0/surfaces`,
+          url: `${prefix}/docs/surfaces`,
         },
         children: [
           {
@@ -71,20 +71,20 @@ function pageTree(prefix = ""): Root {
             index: {
               type: "page",
               name: "Agent",
-              url: `${prefix}/docs/0.4.0/surfaces/desktop`,
+              url: `${prefix}/docs/surfaces/desktop`,
             },
             children: [
               {
                 type: "page",
                 name: "Desktop Bot",
-                url: `${prefix}/docs/0.4.0/surfaces/desktop/bot`,
+                url: `${prefix}/docs/surfaces/desktop/bot`,
               },
             ],
           },
           {
             type: "page",
             name: "CLI parity",
-            url: `${prefix}/docs/0.4.0/surfaces/cli/parity`,
+            url: `${prefix}/docs/surfaces/cli/parity`,
           },
         ],
       },
@@ -125,7 +125,7 @@ test("rewritten English SSR hydrates the same real sidebar root and follows navi
   const tree = pageTree();
   for (const surface of ["desktop/bot", "cli/parity"]) {
     const selectedRoot = surface === "desktop/bot" ? "Desktop App" : "Surfaces";
-    nextPathname = `/en/docs/0.4.0/surfaces/${surface}`;
+    nextPathname = `/en/docs/surfaces/${surface}`;
     const serverMarkup = renderToString(<Sidebar tree={tree} />);
     expect(serverMarkup).toContain(
       `<h2>${selectedRoot}</h2><p>${selectedRoot}</p>`,
@@ -135,7 +135,7 @@ test("rewritten English SSR hydrates the same real sidebar root and follows navi
     const container = document.createElement("div");
     container.innerHTML = serverMarkup;
     document.body.append(container);
-    nextPathname = `/docs/0.4.0/surfaces/${surface}`;
+    nextPathname = `/docs/surfaces/${surface}`;
     const recoverableErrors: unknown[] = [];
     const hydrated = hydrateRoot(container, <Sidebar tree={tree} />, {
       onRecoverableError: (error) => recoverableErrors.push(error),
@@ -147,7 +147,7 @@ test("rewritten English SSR hydrates the same real sidebar root and follows navi
       expect(recoverableErrors).toEqual([]);
       expect(container.innerHTML).toBe(serverMarkup);
 
-      nextPathname = "/docs/0.4.0/start";
+      nextPathname = "/docs/start";
       await act(async () => hydrated.render(<Sidebar tree={tree} />));
       expect(container.querySelector("h2")?.textContent).toBe("Start Here");
       expect(container.querySelector("p")?.textContent).toBe("Start Here");
@@ -158,19 +158,17 @@ test("rewritten English SSR hydrates the same real sidebar root and follows navi
   }
 });
 
-test("visible locale and versionless aliases select the real localized tree", () => {
+test("a visible locale selects the real localized tree", () => {
   for (const locale of ["ar", "fr"]) {
     const tree = pageTree(`/${locale}`);
     nextPathname = `/${locale}/docs/surfaces/cli/parity`;
-    const alias = renderToString(<Sidebar tree={tree} />);
-    nextPathname = `/${locale}/docs/0.4.0/surfaces/cli/parity`;
-    expect(renderToString(<Sidebar tree={tree} />)).toBe(alias);
-    expect(alias).toContain("<h2>Surfaces</h2><p>Surfaces</p>");
-    expect(alias).toContain(`/${locale}/docs/0.4.0/surfaces/cli/parity`);
+    const markup = renderToString(<Sidebar tree={tree} />);
+    expect(markup).toContain("<h2>Surfaces</h2><p>Surfaces</p>");
+    expect(markup).toContain(`/${locale}/docs/surfaces/cli/parity`);
   }
   nextPathname = "/en/docs/surfaces/desktop/bot";
   expect(renderToString(<Sidebar tree={pageTree()} />)).toContain(
-    "/docs/0.4.0/surfaces/desktop/bot",
+    "/docs/surfaces/desktop/bot",
   );
 });
 

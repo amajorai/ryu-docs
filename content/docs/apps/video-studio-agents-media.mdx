@@ -6,26 +6,24 @@ tags: ["Apps", "Video Studio"]
 
 This reference lists the media, caption, assisted-edit, and export routes and
 tool names that agents use on a [Video Studio](/docs/apps/video-studio) project.
-Every route is under `/api/video-studio`; on this page, `…` stands for that
+Every route is under `/api/video-studio`. On this page, `…` stands for that
 prefix. Permissions, timeline operations, and the Gateway budget boundary are in
 [agent access](/docs/apps/video-studio-agents).
 
 ## Import and inspect media
 
-`POST /api/video-studio/assets/import` imports one local absolute file path,
-HTTPS URL, or bounded base64 payload. The sidecar probes the source, copies it
-into app-owned storage, and returns its validated metadata before timeline
-placement. URL imports reject local and private hosts and follow only a small
-number of validated HTTPS redirects.
+| Route | Purpose |
+| --- | --- |
+| `POST …/assets/import` | Import one local absolute file path, HTTPS URL, or bounded base64 payload. |
+| `GET …/assets/{id}/inspect` | Return one asset's source metadata, saved transcript, completed analysis, and generated thumbnail. Pass `thumbnail=0` to skip the thumbnail. |
+| `GET …/assets/{id}/scopes?time=...` | Measure a source frame's normalized luma, chroma, saturation, hue, and black and white clipping. Add `detail=full` for histogram, RGB parade, and vectorscope arrays. |
 
-`GET /api/video-studio/assets/{id}/inspect` returns one asset's source
-metadata, saved transcript, completed analysis, and generated thumbnail. Pass
-`thumbnail=0` to skip the thumbnail.
+An import probes the source, copies it into app-owned storage, and returns its
+validated metadata before timeline placement. URL imports reject local and
+private hosts and follow only a small number of validated HTTPS redirects.
 
-`GET /api/video-studio/assets/{id}/scopes?time=...` measures a source frame's
-normalized luma, chroma, saturation, hue, and black and white clipping, the
-same read as **Inspect color** in the library. It does not alter the asset or
-timeline. Add `detail=full` for histogram, RGB parade, and vectorscope arrays.
+The source scopes route gives the same read as **Inspect color** in the
+library. It does not alter the asset or the timeline.
 
 ## Media, analysis, and search
 
@@ -63,11 +61,15 @@ a Space the same way transcript indexes do.
 ## Assisted edits for agents
 
 The editing tools in [timeline editing](/docs/apps/video-studio-editing) are
-also available as Video Studio operations. Project edit operations need the
-editing permission and the current project `revision`; they return the saved
-project and reject a stale revision so the agent can reload and try again. Plan
-operations need only the viewing permission. They are read-only: they return
-the current `revision` with their findings and never change the project.
+also available as Video Studio operations. The tables mark each one as an edit
+or a plan:
+
+- **Edit** operations need the editing permission and the current project
+  `revision`. They return the saved project and reject a stale revision, so the
+  agent can reload and try again.
+- **Plan** operations need only the viewing permission. They are read-only:
+  they return the current `revision` with their findings and never change the
+  project.
 
 | Tool | Route | Kind | Purpose |
 | --- | --- | --- | --- |
@@ -102,50 +104,96 @@ Nesting, templates, AutoCut, and script assembly are available the same way:
 | `video_studio_shorts` | `POST …/projects/{id}/shorts` | Edit | Create one vertical short project per highlight, optionally queuing exports. |
 | `video_studio_script_assemble` | `POST …/projects/{id}/script-assemble` | Edit | Place narrated script scenes, their visuals, and captions; narration goes on a free, audible track. Optional `music` adds a ducked local soundtrack bed and `avatar` a lip-synced presenter per scene. |
 
-Use plans before edits:
+### Plan, then edit
 
-1. **J/L cuts:** call the split-edit plan, review each proposal's `kind`,
-   `offset`, `reason`, and `confidence`, then send the accepted keys and offsets
-   with the plan's `revision` to the batch split-edit route. Offsets are
-   clamped to source media; compare `applied` with what you sent. The plan only
-   covers cuts between linked audio and video, and detaching creates new link
-   groups (and so new cut keys). For camera clips with embedded audio, detach
-   first with the detach-audio route (or the batch route with `detachAudio` and
-   no proposals), then plan, then apply with the plan's revision.
-2. **Fillers and dead air:** call the filler or dead-air plan, drop any range
-   you want to keep, and send the rest as `ranges` with the current `revision`
-   to `POST …/projects/{id}/remove-words`.
-3. **Highlights:** call the highlights plan, then add a range marker through
-   `POST …/projects/{id}/markers`, or duplicate the project and
-   remove the time outside the chosen candidate with `remove-words`.
+Call a plan before the matching edit. Each plan returns the `revision` it read.
 
-Trim and split-edit requests are frame-quantized and stop at source limits and
+```mermaid
+flowchart LR
+  A["Plan route (view)"] --> B["Review findings"]
+  B --> C["Drop what to keep"]
+  C --> D["Edit route with the plan's revision"]
+  D --> E{"Revision current?"}
+  E -- Yes --> F["Saved project"]
+  E -- No --> A
+```
+
+1. **J/L cuts.** Call the split-edit plan and review each proposal's `kind`,
+   `offset`, `reason`, and `confidence`. Send the accepted keys and offsets,
+   with the plan's `revision`, to the batch split-edit route. Offsets are
+   clamped to source media, so compare `applied` with what you sent.
+2. **J/L cuts on camera audio.** The plan covers only cuts between linked audio
+   and video, and detaching creates new link groups (and so new cut keys). For
+   camera clips with embedded audio, detach first with the detach-audio route
+   (or the batch route with `detachAudio` and no proposals). Then plan, and
+   apply with the plan's revision.
+3. **Fillers and dead air.** Call the filler or dead-air plan and drop any range
+   you want to keep. Send the rest as `ranges`, with the current `revision`, to
+   `POST …/projects/{id}/remove-words`.
+4. **Highlights.** Call the highlights plan. Then add a range marker through
+   `POST …/projects/{id}/markers`, or duplicate the project and remove the time
+   outside the chosen candidate with `remove-words`.
+
+Trim and split-edit requests are frame-quantized. They stop at source limits and
 neighboring clips instead of failing, so check the returned `applied` or
-`appliedOffset` value. Snapping to beats skips edits that cannot reach a beat. Freeze frames
-and reverse render media on your node and share the same media-operation limits
-as other renders.
+`appliedOffset` value. Snapping to beats skips edits that cannot reach a beat.
+
+Freeze frames and reverse render media on your node and share the same
+media-operation limits as other renders.
 
 ## Export and delivery
 
-`POST …/projects/{id}/render` exports the saved timeline. An
-empty body exports the whole timeline with the project's settings; otherwise
-send any of `range` (`start`, `end`), `audioOnly`, `codec`, `overrides` (any
-export setting, such as the format, rate control, output size, transparency, or
-publish preset), `outputResolution` (`720p`, `1080p`, `2k`, or `4k`; scales the
-canvas's short side to that height and keeps its aspect, and cannot be combined
-with an explicit output width and height), and `saveAsAsset`. Poll `GET /api/video-studio/renders/{id}`,
-read the file in chunks from `GET /api/video-studio/renders/{id}/data`, and
-cancel with `POST /api/video-studio/renders/{id}/cancel`. Exports that need an
-encoder the node lacks are refused before any work starts. See
-[export](/docs/apps/video-studio-export) for the formats and limits.
+`POST …/projects/{id}/render` exports the saved timeline. An empty body exports
+the whole timeline with the project's settings. Otherwise send any of these
+fields:
 
-`GET …/projects/{id}/interchange?format=fcpxml` (or `xmeml`,
-or `otio`) returns Final Cut XML, Premiere XML, or OpenTimelineIO JSON, and `GET …/projects/{id}/package`
-returns the production package, whose credits list media sources and the
-licenses of any online fonts the project uses, the same as
-`GET …/projects/{id}/credits` and the archive. `GET …/projects/{id}/package-archive` (or
-`package?media=1`) builds a self-contained ZIP with the package and every
-referenced media file; read it in chunks with
-`GET /api/video-studio/package-archive-data?id=…&offset=…`. To import one,
-`POST …/package-archive-imports` with its size, send base64 chunks to
-`…/package-archive-import-chunks`, then `POST …/package-archive-import-finish`.
+| Field | Meaning |
+| --- | --- |
+| `revision` | Refuse the export unless this is the current revision. |
+| `range` | `start` and `end` of the part to export, in timeline seconds. |
+| `audioOnly` | Export audio only (WAV, MP3, or AAC). |
+| `codec` | The export codec. |
+| `overrides` | Any export setting, such as the format, rate control, output size, transparency, or publish preset. |
+| `outputResolution` | `720p`, `1080p`, `2k`, or `4k`. Scales the canvas's short side to that height and keeps its aspect. Cannot be combined with an explicit output width and height. |
+| `saveAsAsset` | Add the result to the media library. |
+
+Exports that need an encoder the node lacks are refused before any work starts,
+and scene approval gates are enforced. See [export](/docs/apps/video-studio-export) for the formats and limits.
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant VS as Video Studio sidecar
+  Agent->>VS: POST projects/{id}/render
+  VS-->>Agent: Render job id
+  loop Until the job finishes
+    Agent->>VS: GET renders/{id}
+  end
+  Agent->>VS: GET renders/{id}/data (chunks)
+  Note over Agent,VS: POST renders/{id}/cancel stops a running job
+```
+
+| Route | Purpose |
+| --- | --- |
+| `GET …/renders/{id}` | Poll the render job. |
+| `GET …/renders/{id}/data` | Read the finished file in chunks. |
+| `POST …/renders/{id}/cancel` | Cancel the render. |
+
+### Handoff files and packages
+
+| Route | Returns |
+| --- | --- |
+| `GET …/projects/{id}/interchange?format=fcpxml` | Final Cut XML. Use `format=xmeml` for Premiere XML or `format=otio` for OpenTimelineIO JSON. |
+| `GET …/projects/{id}/package` | The production package. |
+| `GET …/projects/{id}/credits` | The project's credits. |
+| `GET …/projects/{id}/package-archive` (or `package?media=1`) | A self-contained ZIP with the package and every referenced media file. |
+| `GET …/package-archive-data?id=…&offset=…` | The archive, read in chunks. |
+
+The package's credits list media sources and the licenses of any online fonts
+the project uses. The credits route and the archive carry the same list.
+
+To import an archive:
+
+1. `POST …/package-archive-imports` with its size.
+2. Send base64 chunks with `POST …/package-archive-import-chunks`.
+3. Finish with `POST …/package-archive-import-finish`.

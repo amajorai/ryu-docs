@@ -5,8 +5,19 @@ tags: ["Providers", "OpenRouter", "Models"]
 ---
 
 OpenRouter is a hosted model router with a live catalog of many upstream model families. Ryu
-registers it as a Gateway provider. It keeps model choice on
-one OpenAI-compatible route while OpenRouter selects or exposes the upstream model family.
+registers it as a Gateway provider. It keeps model choice on one OpenAI-compatible route while
+OpenRouter selects or exposes the upstream model family.
+
+```mermaid
+flowchart LR
+  A["Agent or SDK"] --> G["Gateway"]
+  G --> R{"openrouter/ model ID?"}
+  R -->|yes| P["Fallback and budget policy"]
+  P --> Z["Add required privacy policy"]
+  Z --> O["OpenRouter"]
+  O --> U["Upstream provider"]
+  R -->|no| D["Default provider resolution"]
+```
 
 ## Model IDs
 
@@ -43,43 +54,66 @@ supports only the operations in its own output modality. Browse
 
 ### Model discovery
 
-Gateway model discovery lists OpenRouter's full catalog, not only text models. Non-chat entries
-carry a `modality` field: `image`, `tts`, `stt`, `video`, `embedding`, or `rerank`. Models that
-produce text, including models that also produce images or audio, remain chat models. Agent and
-provider model pickers list only chat models, so a speech, video, or embedding model cannot be
-selected as an agent's chat model.
+Gateway model discovery lists OpenRouter's full catalog, not only text models.
+
+- Non-chat entries carry a `modality` field: `image`, `tts`, `stt`, `video`, `embedding`, or
+  `rerank`.
+- Models that produce text, including models that also produce images or audio, remain chat
+  models.
+- Agent and provider model pickers list only chat models, so a speech, video, or embedding model
+  cannot be selected as an agent's chat model.
 
 ### Images
 
+```mermaid
+flowchart TD
+  R["POST /v1/images/generations"] --> M{"Carries messages?"}
+  M -->|yes| C["Chat image output, data[].url data URLs"]
+  M -->|"no, prompt"| I["Images API"]
+  I -->|"model not served"| C
+  I -->|served| B["data[].b64_json with media_type"]
+```
+
 A request with a `prompt` goes to OpenRouter's Images API and returns OpenAI-shaped
-`data[].b64_json` with `data[].media_type`. Options such as `size`, `aspect_ratio`, `quality`,
-`n`, and `seed` pass through to OpenRouter. Images are always returned inline, so a
-`response_format` of `url` is ignored. The Ryu desktop app and SDK use `media_type` to label
-each image, for example as WebP or JPEG. If the Images API does not serve the selected model, the
-request falls back to chat image output. A request that carries `messages` uses chat image output
-directly and returns `data[].url` data URLs.
+`data[].b64_json` with `data[].media_type`.
+
+- Options such as `size`, `aspect_ratio`, `quality`, `n`, and `seed` pass through to OpenRouter.
+- Images are always returned inline, so a `response_format` of `url` is ignored.
+- The Ryu desktop app and SDK use `media_type` to label each image, for example as WebP or JPEG.
+- If the Images API does not serve the selected model, the request falls back to chat image
+  output.
+
+A request that carries `messages` uses chat image output directly and returns `data[].url` data
+URLs.
 
 ### Speech and audio generation
 
 Speech models such as ElevenLabs use OpenRouter's Speech API. Pass the model's native `voice`.
-OpenRouter returns `mp3` (the default) or `pcm`. A request for `wav`, `opus`, `aac`, or `flac`
-receives MP3 audio, and the response `Content-Type` is `audio/mpeg`. The Speech API response does
-not include a cost, so Gateway reads the cost from OpenRouter's generation record after the audio
-arrives. If that record is still unavailable after a few seconds of retries, the request is
-billed at the Gateway's per-call speech rate.
+
+- OpenRouter returns `mp3` (the default) or `pcm`. A request for `wav`, `opus`, `aac`, or `flac`
+  receives MP3 audio, and the response `Content-Type` is `audio/mpeg`.
+- The Speech API response does not include a cost, so Gateway reads the cost from OpenRouter's
+  generation record after the audio arrives. If that record is still unavailable after a few
+  seconds of retries, the request is billed at the Gateway's per-call speech rate.
 
 Chat models that output audio, such as music-generation models, use OpenRouter's streamed chat
 audio. Gateway recognizes these models from OpenRouter's catalog, which it loads on the first
 speech request and refreshes hourly. To use chat audio with another model, add
 `"modalities": ["text", "audio"]` to the request body.
 
-`POST /v1/audio/speech` always takes its text from a non-empty string `input`. For chat audio,
-`input` becomes the user message and `instructions` becomes the system message. Both fields pass
-through the Gateway's inbound firewall and guardrails. A request that includes `messages` is
-rejected; use chat completions for a conversation. `voice` and `response_format` become the chat
-`audio` options. An omitted `response_format` requests MP3, as for speech models. `pcm` is sent
-as `pcm16`, and `aac` is served as MP3. Gateway collects the stream and returns one audio file.
-The response body contains only the audio bytes; a model's text transcript is not returned.
+`POST /v1/audio/speech` always takes its text from a non-empty string `input`. For chat audio:
+
+| Speech field | Becomes |
+|---|---|
+| `input` | The user message |
+| `instructions` | The system message |
+| `voice`, `response_format` | The chat `audio` options. Omitted `response_format` requests MP3; `pcm` is sent as `pcm16`; `aac` is served as MP3 |
+
+Both text fields pass through the Gateway's inbound firewall and guardrails. A request that
+includes `messages` is rejected; use chat completions for a conversation.
+
+Gateway collects the stream and returns one audio file. The response body contains only the audio
+bytes; a model's text transcript is not returned.
 
 `/v1/audio/speech` returns at most 8 MiB of audio. A larger result fails after it has been
 generated and charged, so request a compressed format such as MP3 for long music or speech.
@@ -87,10 +121,11 @@ generated and charged, so request a compressed format such as MP3 for long music
 ### Transcription
 
 Audio is sent to OpenRouter as base64 `input_audio`. Its format comes from the request's
-`format` field or the uploaded file's extension, and defaults to `wav`. `language`,
-`temperature`, `timestamp_granularities`, `diarize`, and `keyterms` pass through. OpenRouter
-returns JSON only, so a `text`, `srt`, or `vtt` `response_format` returns the JSON transcript
-with its `text` field.
+`format` field or the uploaded file's extension, and defaults to `wav`.
+
+- `language`, `temperature`, `timestamp_granularities`, `diarize`, and `keyterms` pass through.
+- OpenRouter returns JSON only, so a `text`, `srt`, or `vtt` `response_format` returns the JSON
+  transcript with its `text` field.
 
 ### Video
 
@@ -98,11 +133,13 @@ Video generation is job-based. Request fields such as `duration`, `resolution`, 
 `size`, `generate_audio`, `seed`, `frame_images`, and `input_references` pass through to
 OpenRouter. Each request produces one video.
 
-The polling account and connection stay bound to the accepted job. A completed video hosted on a
-third-party HTTPS URL is returned as that URL. A video that is only available from OpenRouter's
-authenticated content endpoint is downloaded and returned as a `data:video/...` URL, so the
-OpenRouter key never reaches the client. Such a video larger than 48 MiB fails the job instead of
-being truncated, and the failed job is not charged.
+The polling account and connection stay bound to the accepted job. How a completed video is
+returned depends on where it is hosted:
+
+- A video on a third-party HTTPS URL is returned as that URL.
+- A video only available from OpenRouter's authenticated content endpoint is downloaded and
+  returned as a `data:video/...` URL, so the OpenRouter key never reaches the client. Such a video
+  larger than 48 MiB fails the job instead of being truncated, and the failed job is not charged.
 
 The reported OpenRouter cost is used for credit accounting when OpenRouter returns it.
 
@@ -117,21 +154,33 @@ The reported OpenRouter cost is used for credit accounting when OpenRouter retur
 Every OpenRouter request carries a required privacy policy. See
 [Required privacy policy](#required-privacy-policy).
 
-Gateway inference requests to OpenRouter include app attribution headers. They list Ryu in
-OpenRouter's rankings and marketplace. Ryu sends `HTTP-Referer: https://ryuhq.com`,
-`X-OpenRouter-Title: Ryu`, and `X-OpenRouter-Categories: personal-agent`. It also sends the legacy
-`X-Title` header for compatibility. These headers identify the app and do not change the request
-body or OpenRouter response cache key.
+### App attribution headers
+
+Gateway inference requests to OpenRouter include app attribution headers that list Ryu in
+OpenRouter's rankings and marketplace. They identify the app and do not change the request body or
+OpenRouter response cache key.
+
+| Header | Default value |
+|---|---|
+| `HTTP-Referer` | `https://ryuhq.com` (from `site_url`) |
+| `X-OpenRouter-Title` and legacy `X-Title` | `Ryu` (from `site_name`) |
+| `X-OpenRouter-Categories` | `personal-agent` |
+
+`site_url` and `site_name` are keys of `[providers.openrouter]`. An operator who blanks both sends
+no app identity: no referer, titles, or categories.
 
 ## Managed request routing options
 
 Open **Gateway → Network → Managed request routing** in a Business organization to configure
-OpenRouter requests that pass through Ryu Gateway. The controls use OpenRouter's provider routing
-fields directly, and the provider picker loads OpenRouter's public provider catalog. You can still
-enter a custom provider slug if it is missing from the catalog. The advanced JSON editor exposes the
-complete `provider` object so newer OpenRouter fields remain available before the typed controls are
-updated. The control plane resolves this entitlement for each organization; stale saved values are
-ignored when the organization is no longer on Business.
+OpenRouter requests that pass through Ryu Gateway. The control plane resolves this entitlement for
+each organization; stale saved values are ignored when the organization is no longer on Business.
+
+The controls use OpenRouter's provider routing fields directly:
+
+- The provider picker loads OpenRouter's public provider catalog. You can still enter a custom
+  provider slug if it is missing from the catalog.
+- The advanced JSON editor exposes the complete `provider` object, so newer OpenRouter fields
+  remain available before the typed controls are updated.
 
 The settings cover:
 
@@ -145,8 +194,9 @@ The settings cover:
 Leaving provider order and sort unset keeps OpenRouter's default provider health routing. A sort or
 explicit order changes its normal load balancing, so leave provider fallbacks on when availability is
 the priority. The [uptime optimization guide](https://openrouter.ai/docs/guides/best-practices/uptime-optimization)
-explains how OpenRouter uses provider health information. For example, sorting by throughput while
-keeping provider failover enabled corresponds to:
+explains how OpenRouter uses provider health information.
+
+For example, sorting by throughput while keeping provider failover enabled corresponds to:
 
 ```json
 {
@@ -160,13 +210,16 @@ keeping provider failover enabled corresponds to:
 Gateway sets `provider.data_collection: "deny"` and `provider.zdr: true` on every OpenRouter
 request and for every Ryu plan, with Ryu-managed and BYOK keys alike. These settings exclude
 data-collecting providers and require endpoints that meet OpenRouter's Zero Data Retention (ZDR)
-policy. Caller requests and saved configuration cannot disable them. Other advanced routing
-controls keep their existing plan requirements. Billing uses the actual reported provider cost
-without an additional Ryu ZDR fee.
+policy.
+
+- Caller requests and saved configuration cannot disable them.
+- Other advanced routing controls keep their existing plan requirements.
+- Billing uses the actual reported provider cost without an additional Ryu ZDR fee.
 
 ZDR covers provider inference endpoints. It does not cover tools or plugins; see
-[Composio billing and privacy](/docs/billing/credits#composio-usage-and-zero-data-retention). See
-OpenRouter's [data collection guide](https://openrouter.ai/docs/guides/privacy/data-collection),
+[Composio billing and privacy](/docs/billing/credits#composio-usage-and-zero-data-retention).
+
+See OpenRouter's [data collection guide](https://openrouter.ai/docs/guides/privacy/data-collection),
 [ZDR guide](https://openrouter.ai/docs/guides/features/zdr), and
 [provider routing reference](https://openrouter.ai/docs/guides/routing/provider-selection) for the
 current behavior and request fields.

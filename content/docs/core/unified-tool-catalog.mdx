@@ -3,17 +3,35 @@ title: "Unified Tool Catalog"
 description: "Reference for Core's cross-server tool search and describe routes, tool kinds, rankers, Composio search, and tool-result wrapping on both chat planes"
 ---
 
-The unified tool catalog gives Core one search over every capability it can reach: MCP (Model Context Protocol) servers, built-in
-tool servers, plugin tools, Composio actions, and Agent Skills. It is not a second registry. Search ranks
-tool and skill descriptors with a swappable ranker. Describe returns a tool's argument schema. Both operations are
-available as HTTP routes and meta-tools on both chat planes.
+The unified tool catalog gives Core one search over every capability it can reach: MCP (Model
+Context Protocol) servers, built-in tool servers, plugin tools, Composio actions, and Agent Skills.
+It is not a second registry.
+
+- **Search** ranks tool and skill descriptors with a swappable ranker.
+- **Describe** returns a tool's argument schema.
+- Both are available as HTTP routes and as meta-tools on both chat planes.
 
 Discovering *what tools exist* and ranking them is orchestration, so it lives in Core. The
-allowlist verdict, budget, and audit on execution are Gateway concerns. See
-[Gateway tools](/docs/gateway/tools) for the execution governance and
-[MCP registry](/docs/core/mcp-registry) for how servers and built-ins register in the first place.
+allowlist verdict, budget, and audit on execution are Gateway concerns; see
+[Gateway tools](/docs/gateway/tools). For how servers and built-ins register, see
+[MCP registry](/docs/core/mcp-registry).
 
 Source: `apps/core/src/sidecar/mcp/catalog.rs`, `apps/core/src/sidecar/mcp/composio.rs`.
+
+<Figure name="tools" />
+
+```mermaid
+flowchart LR
+  Reg["MCP registry, plugin tools, skills"] --> Cat["Unified catalog"]
+  Comp["Composio (when a key is set)"] --> Cat
+  Cat --> Rank["ToolRanker"]
+  Rank --> Filter["Optional agent filter"]
+  Filter --> Res["Search results"]
+  Res --> Call["Tool call"]
+  Call --> Gate{"Allowlist check"}
+  Gate -- allowed --> Exec["Execute, wrap result"]
+  Gate -- denied --> Refuse["Refused"]
+```
 
 ## Tool kinds
 
@@ -95,16 +113,19 @@ defaulting to the local Needle 3 selector.
 | `Bm25` | Lexical BM25 over id, name, description, and arg names; an exact id or name match is boosted to sort first | none |
 | `Semantic` | Embeds the query and each candidate via the registry embedder, ranks by cosine similarity | BM25 ordering when the embedder is unreachable or the query is empty |
 
-The ranker is one pref key (`RANKER_PREF_KEY`), like the catalog source selector. Needle 3 is the
-default with no setup, and its platform runtime plus
-`needle3.cact` weights are fetched lazily through Core's verified DownloadCenter. If it cannot
-load, search remains available through BM25. Needle 2 remains an explicit rollback preference.
-The semantic ranker likewise degrades to BM25 rather than erroring when no embedder is reachable.
+The ranker is one pref key (`RANKER_PREF_KEY`, in `crates/core/tool-registry/src/lib.rs`), like
+the catalog source selector:
+
+- Needle 3 is the default with no setup. Its platform runtime and `needle3.cact` weights are
+  fetched lazily through Core's verified DownloadCenter. If it cannot load, search stays available
+  through BM25.
+- Needle 2 remains an explicit rollback preference.
+- The semantic ranker degrades to BM25 rather than erroring when no embedder is reachable.
 
 The ranker only chooses discovery order. It never grants, executes, or audits a capability. The
-Gateway still decides whether a selected tool may run, and Core still owns the actual tool/skill
-dispatch. Agent Skills are represented as loadable capability rows; the model uses `skills.load`
-for the selected skill rather than calling the skill id as a function.
+Gateway still decides whether a selected tool may run, and Core still owns the actual dispatch.
+Agent Skills appear as loadable rows; the model calls `skills.load` for a selected skill rather
+than calling the skill id as a function.
 
 **Skill search shares this ranker.** `skills.search` runs each candidate skill through the same
 ranking pass as tools, so one preference governs both surfaces. The injected skill index is not
@@ -112,14 +133,19 @@ shared; it stays query-independent. See [Skills catalog](/docs/core/skills-catal
 
 ### The `agent` filter narrows, it does not gate
 
-Passing `?agent=` retains only descriptors that match that agent's allowlist, using the same
-match logic as the execution gate (`ToolDescriptor::matches_allowlist`): an MCP, built-in, or app
-tool matches on the fully-qualified id, the bare tool name, or the server segment; a Composio tool
-matches on the fully-qualified id only. A newly created agent has no executable tool grants until
-its card is configured; selecting every tool is an explicit opt-in. The handler over-fetches before
-narrowing so allowed tools ranked below the top `limit` are not lost to truncation. This is a view
-filter for UIs, not the security boundary: search is open, and execution is allowlist-gated on the
-call path.
+Passing `?agent=` retains only descriptors that match that agent's allowlist. It uses the same
+match logic as the execution gate (`ToolDescriptor::matches_allowlist`):
+
+- An MCP, built-in, or app tool matches on the fully-qualified id, the bare tool name, or the server
+  segment.
+- A Composio tool matches on the fully-qualified id only.
+
+A newly created agent has no executable tool grants until its card is configured; selecting every
+tool is an explicit opt-in. The handler over-fetches before narrowing, so allowed tools ranked
+below the top `limit` are not lost to truncation.
+
+This is a view filter for UIs, not the security boundary. Search is open, and execution is
+allowlist-gated on the call path.
 
 ## Describe
 
@@ -137,9 +163,8 @@ fully resolved and the raw `parameters` JSON schema when available.
 ## Composio is searchable, not listed
 
 Composio actions are never returned by the registry's `list_all_tools`, so they do not bloat the
-default tool set. They are pulled into `search` live and capped at 50 per query, only when a
-Composio key is configured (`composio::is_configured`) and the `kind` filter includes Composio.
-See `apps/core/src/sidecar/mcp/composio.rs`.
+default tool set. Search pulls them in live, capped at 50 per query, only when a Composio key is
+configured (`composio::is_configured`) and the `kind` filter includes Composio.
 
 - A search result for a Composio action has id `composio.<slug>`.
 - `describe` on a `composio.*` id returns a `shallow: true` result with a single freeform
@@ -167,25 +192,34 @@ so behavior stays consistent across engines:
 
 The bridge offers `tool_search` and `describe` even when an agent's static allowlist is empty:
 discovery is open, but executing any tool the search surfaced still passes through
-`McpRegistry::call_tool`'s allowlist check. Search is not a grant. See
-[Programmatic tool calling](/docs/core/programmatic-tool-calling) for `execute` and `resume`, and
+`McpRegistry::call_tool`'s allowlist check. Search is not a grant.
+
+See [Programmatic tool calling](/docs/core/programmatic-tool-calling) for `execute` and `resume`, and
 [Gateway tools](/docs/gateway/tools) for the exec-budget and exec-audit applied on the call path.
 
+### Organization-scoped registry tools
+
 On an organization-bound node, Core asks the control plane which registry tools apply to its
-Gateway key with `GET /api/registry/gateway/tools` (`apps/core/src/sidecar/control_plane.rs`,
-served by the control plane's registry router). The `X-Team-Id` and
-`X-Project-Id` headers narrow the scope, but they cannot widen the presenting key. A team key can
-resolve only its team and the projects in that team. A personal key cannot select a team or project
-with these headers. An organization key may select an organization-owned team or project. A request
-outside the key's scope gets `403`.
+Gateway key with `GET /api/registry/gateway/tools` (`apps/core/src/sidecar/control_plane.rs`). The
+`X-Team-Id` and `X-Project-Id` headers narrow the scope, but they cannot widen the presenting key.
+
+| Key | What the headers can select |
+|---|---|
+| Team key | Only its team and the projects in that team |
+| Personal key | No team or project |
+| Organization key | An organization-owned team or project |
+
+A request outside the key's scope gets `403`.
 
 ## Untrusted tool-result wrapping
 
 A tool result is untrusted input. A malicious MCP server or a poisoned web page can return text that
 impersonates the chat transcript (`<|im_start|>system ...`) or smuggles new instructions to steer a
-high-privilege model. Core neutralizes tool results on its own seams before they re-enter the model,
-mirroring the Gateway's [openai-compat tool loop](/docs/gateway/agent-hardening#untrusted-content-wrapping-tool-results).
-The shared-shape helper lives in `apps/core/src/sidecar/untrusted.rs`.
+high-privilege model.
+
+Core neutralizes tool results on its own seams before they re-enter the model, mirroring the
+Gateway's [openai-compat tool loop](/docs/gateway/agent-hardening#untrusted-content-wrapping-tool-results).
+The shared helper lives in `apps/core/src/sidecar/untrusted.rs`.
 
 Two operations run on a result:
 
@@ -210,18 +244,23 @@ output is affected, never user text.
 ## Tool-result size bound
 
 Every tool result is re-sent to the model on each later turn of the session, so one oversized result
-is paid for many times. At the ACP/MCP bridge and in the chat tool loop, an external tool result longer than 100,000 characters
-(about 28k tokens) is cut to that length. Ryu keeps the first and last halves and puts a marker
-between them that states how many characters were left out. The head and the tail are kept because
-long outputs put what matters at both ends: a listing's header comes first, and a command's error
-and exit summary come last. Results under the limit pass through unchanged. The `tool_search` and
-`describe` envelopes are never cut, because clients parse them as JSON.
+is paid for many times. At the ACP/MCP bridge and in the chat tool loop, an external tool result
+longer than 100,000 characters (about 28k tokens) is cut to that length
+(`MAX_TOOL_RESULT_CHARS` in `apps/core/src/sidecar/adapters/mcp_bridge/result_bound.rs`).
 
-Inline images are handled before that cut. When a JSON tool result carries a base64 image (an object
-with `encoding: "base64"` and an `image/*` `mime`, such as a browser screenshot or the screenshot in a
-page-context bundle), the base64 string is replaced with a short note that gives the image type and
-size. This path carries text only, so the model could not read those characters anyway, and a single
-screenshot could fill the whole limit. Other fields in the result, such as the URL and title, are kept.
+- Ryu keeps the first and last halves and puts a marker between them that states how many
+  characters were left out. Long outputs put what matters at both ends: a listing's header comes
+  first, and a command's error and exit summary come last.
+- Results under the limit pass through unchanged.
+- The `tool_search` and `describe` envelopes are never cut, because clients parse them as JSON.
+
+Inline images are handled before that cut. When a JSON tool result carries a base64 image (an
+object with `encoding: "base64"` and an `image/*` `mime`, such as a browser screenshot or the
+screenshot in a page-context bundle), the base64 string is replaced with a short note that gives
+the image type and size. Other fields, such as the URL and title, are kept.
+
+This path carries text only, so the model could not read those characters anyway, and one
+screenshot could fill the whole limit.
 
 ## Related
 

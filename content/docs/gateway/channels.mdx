@@ -8,21 +8,29 @@ listeners; each inbound message is normalized and routed to a Core agent or team
 Discord, Slack, or BlueBubbles user talks to the same agent you use in Desktop, with the
 same memory, tools, and Gateway governance on the path.
 
+<Figure name="channels" />
+
 Channels are configured in **Gateway settings**, not on a Core node. They belong to your account
 and, when an organization is active, are stored and served within that organization.
 
-Current members can see channels shared with their active organization. Creating an organization
-channel requires the `channel.manage` permission. A creator can edit a shared channel while they
-remain a member; editing another member's channel also requires `channel.manage`.
-Credentials remain write-only and are never returned to Desktop in
-cleartext. Deleting a channel is a separate `channel.delete` action and does not delete its shared
-Core conversation history.
-Leaving or being removed from an organization also removes access to channels you created there.
-Live channel-status streams recheck access before updates and close when membership is no longer
-valid. Personal channels remain accessible to their creator.
+## Who can see and change a channel
 
-Hosted channel bots require an active managed Pro, Max, Teams, or Business plan. A Major Pass
-only grants supported paid Marketplace app access and cannot enable hosted channel users.
+| Action | Who |
+|---|---|
+| See channels shared with the active organization | Current members |
+| Create an organization channel | Members with `channel.manage` |
+| Edit a shared channel | Its creator while they remain a member, or members with `channel.manage` |
+| Delete a channel | Members with `channel.delete` (a separate action) |
+| Use a personal channel | Its creator |
+
+- Credentials are write-only and are never returned to Desktop in cleartext.
+- Deleting a channel does not delete its shared Core conversation history.
+- Leaving or being removed from an organization also removes access to channels you created there.
+- Live channel-status streams recheck access before updates and close when membership is no longer
+  valid.
+
+Hosted channel bots require an active managed Pro, Max, Teams, or Business plan. A Major Pass only
+grants supported paid Marketplace app access and cannot enable hosted channel users.
 
 ## What each platform can do
 
@@ -94,15 +102,6 @@ current channel adapters.
 Phone calls through Twilio, including how each call's conversation and voice ticket are bound,
 are covered on [Phone Assistant](/docs/gateway/phone-assistant#call-conversations).
 
-<Callout type="info">
-  Telegram uses long polling by default and can switch to an authenticated webhook. Slack uses
-  Socket Mode, while Discord keeps an identified Gateway WebSocket with heartbeats and an online
-  presence. BlueBubbles receives webhook events from the Mac server and sends through its REST API.
-  Ryu's liveness dot reports the adapter's control-plane heartbeat for all four. Webhook callbacks
-  are claimed by their provider event id before acknowledgement; duplicate or in-flight deliveries
-  do not create a second turn.
-</Callout>
-
 ## How a bot turn works
 
 Each platform has an adapter that owns only its transport and platform verbs. The access gate, media
@@ -111,6 +110,13 @@ contract.
 
 When the channel is bound to an agent or a group, the adapter routes the turn through Core's session
 seam rather than a one-shot Gateway-pipeline call.
+
+<Callout type="info">
+  Telegram uses long polling by default and can switch to an authenticated webhook. Slack uses
+  Socket Mode, while Discord keeps an identified Gateway WebSocket with heartbeats and an online
+  presence. BlueBubbles receives webhook events from the Mac server and sends through its REST API.
+  Ryu's liveness dot reports the adapter's control-plane heartbeat for all four.
+</Callout>
 
 ```mermaid
 flowchart LR
@@ -124,10 +130,8 @@ flowchart LR
 ```
 
 1. The platform delivers a message to the channel's adapter. Webhook deliveries are authenticated
-   before parsing and durably claimed by a bounded provider-delivery ledger. Telegram uses
-   `update_id`, WhatsApp uses its `wamid`, OpenWA uses its message/delivery id, and BlueBubbles
-   uses its message `guid`. A callback that cannot be accepted returns a retryable failure instead
-   of acknowledging work that was never queued.
+   before parsing and durably claimed by their provider event id. A callback that cannot be
+   accepted returns a retryable failure instead of acknowledging work that was never queued.
 2. The adapter normalizes it and POSTs to `POST <core_url>/api/channels/run` with the channel's
    `agent_id` xor `team_id`. Store-backed channel records add their own channel identity to the
    platform chat id, so two bot records never accidentally share a transcript. Each sender keeps a
@@ -139,8 +143,8 @@ flowchart LR
    path.
 5. The reply is sent back via the platform's send API.
 
-Outbound retries, the 30-day delivery ledger, and the `idempotencyKey` replay that
-`POST /api/channels/run` uses are described in
+The provider event ids, outbound retries, the 30-day delivery ledger, and the `idempotencyKey`
+replay that `POST /api/channels/run` uses are described in
 [Delivery retries and duplicate webhooks](/docs/gateway/channel-controls#delivery-retries-and-duplicate-webhooks).
 
 A channel with neither `agent_id` nor `team_id` falls back to the legacy Gateway pipeline path (a
@@ -158,53 +162,84 @@ stable shared session. You can continue the same conversation from Desktop chat 
 from the channel, with the same history and agent context. Different bot records remain separate
 even when they listen to the same platform.
 
-A node only loads the channel credentials its own scope allows. An organization node runs the
-organization's shared channels. A team node runs the shared channels that have no team, plus its
-own team's channels; it never receives another team's bots. A personal node runs only channels
-bound to that node, never the organization's shared or team channels.
+### Which nodes load a channel
+
+Channel credentials are delivered only to nodes enrolled with organization-level authority. Run
+shared organization bots on an organization-level node.
+
+- An organization-level node runs the organization's shared channels plus the channels bound to
+  that node.
+- A node enrolled for a single team or for one member's personal use does not receive organization
+  channel tokens and cannot report status for those channels. It runs only the channels in its own
+  file-based Gateway configuration (see [Set up channel bots](/docs/gateway/channel-setup)).
+
+### Managed channel slots
 
 When Ryu's managed provider inventory is enabled, managed Ryu Cloud nodes also get a dedicated
-Telegram and Discord channel slot for the default Ryu agent. Each node receives its own provider
-credential; Ryu never sends one customer's bot token to another customer's node, even when the nodes
-are in the same organization. If the inventory is temporarily unavailable, the slot stays disabled
-until it is ready, and you can paste your own token into that channel instead.
+Telegram and Discord channel slot for the default Ryu agent.
 
-Channel credentials are delivered only to nodes enrolled with organization-level authority. A node
-enrolled for a single team or for one member's personal use does not receive the organization's
-shared channel tokens and cannot report status for those channels. Run shared organization bots on
-an organization-level node. When a managed Ryu Cloud node is removed, its node credentials stop
-working at once, even if the background cleanup that revokes them is still being retried. That
-cleanup also turns off every channel bound to the removed node, including channels that use a
-token you pasted yourself. Ryu-managed bot credentials for the node are erased. A token you pasted
-stays saved on its channel but is no longer delivered to any node.
+- Each node receives its own provider credential. Ryu never sends one customer's bot token to
+  another customer's node, even when the nodes are in the same organization.
+- If the inventory is temporarily unavailable, the slot stays disabled until it is ready. You can
+  paste your own token into that channel instead.
 
-When a managed channel is ready, its channel card includes a platform action using that bot's public
-identity. Telegram shows **Open in Telegram** and opens the dedicated bot's `t.me` link so you can
-press **Start**. Discord shows **Install in Discord** and opens that dedicated application's install
-flow so someone with **Manage Server** permission can choose a server. These actions are per-node
-links, never expose the bot token, and do not create a second shared bot or transfer provider ownership.
+When a managed channel is ready, its channel card includes a platform action using that bot's
+public identity:
+
+- Telegram shows **Open in Telegram** and opens the dedicated bot's `t.me` link so you can press
+  **Start**.
+- Discord shows **Install in Discord** and opens that dedicated application's install flow, so
+  someone with **Manage Server** permission can choose a server.
+
+These actions are per-node links. They never expose the bot token, and they do not create a second
+shared bot or transfer provider ownership.
 
 Pasting a customer-owned token changes that channel to customer-managed credentials while keeping
-the same agent binding and channel history. Provider ownership transfer is not an automatic part of
-this switch: Telegram and Discord ownership changes remain subject to each platform's own account,
+the same agent binding and channel history. Provider ownership transfer is not part of this switch:
+Telegram and Discord ownership changes remain subject to each platform's own account,
 installation, and transfer rules.
+
+### Removing a managed node
+
+- When a managed Ryu Cloud node is removed, its node credentials stop working at once, even if the
+  background cleanup that revokes them is still being retried.
+- The cleanup turns off every channel bound to the removed node, including channels that use a
+  token you pasted yourself.
+- Ryu-managed bot credentials for the node are erased.
+- A token you pasted stays saved on its channel but is no longer delivered to any node.
 
 ### Ryu Cloud's shared WhatsApp front door
 
 Ryu Cloud's managed service can operate one official WhatsApp Business number for every managed
-organization. The hosted cloud-bot owns that single webhook and outbound sender, then uses the
-admin-granted WhatsApp phone identity to select exactly one organization's managed node and agent.
-An administrator-provided node address must be a public HTTPS origin; paths, query strings,
-fragments and local addresses are rejected before the hosted bot connects.
+organization. Members do not create a Meta app, buy a phone number, or paste provider credentials.
 
-An administrator-entered sender ID also needs a one-time claim code sent from that account before
-its messages route to a node. For older ID grants that have not been verified, reissue the claim
-code in the grant settings and share it with the intended sender.
-Pending IDs do not reserve a platform identity globally; only the sender's confirmed claim binds it.
-Changing the node address, allowed agents or teams, or intended username issues a new code and
-pauses routing until that sender confirms again.
-Members do not create a Meta app, buy a phone number, or paste provider credentials. An unknown
-phone receives onboarding information and is not assigned to an organization automatically.
+```mermaid
+flowchart LR
+  PHONE["WhatsApp sender"] --> BOT["Hosted cloud-bot (one number)"]
+  BOT --> GRANT{"Confirmed sender grant?"}
+  GRANT -->|"no"| ONBOARD["Onboarding information"]
+  GRANT -->|"yes"| NODE["One organization's managed node"]
+  NODE --> AGENT["Granted agent or team"]
+```
+
+- The hosted cloud-bot owns the single webhook and outbound sender. It uses the admin-granted
+  WhatsApp phone identity to select exactly one organization's managed node and agent.
+- An administrator-provided node address must be a public HTTPS origin. Paths, query strings,
+  fragments, and local addresses are rejected before the hosted bot connects.
+- An unknown phone receives onboarding information and is not assigned to an organization
+  automatically.
+
+#### Sender claim codes
+
+An administrator-entered sender ID needs a one-time claim code sent from that account before its
+messages route to a node.
+
+- Pending IDs do not reserve a platform identity globally. Only the sender's confirmed claim binds
+  it.
+- For older ID grants that have not been verified, reissue the claim code in the grant settings
+  and share it with the intended sender.
+- Changing the node address, allowed agents or teams, or intended username issues a new code and
+  pauses routing until that sender confirms again.
 
 ### Proactive WhatsApp templates
 
@@ -235,22 +270,28 @@ button text parameters, and quick-reply button payloads are supported; media,
 currency, and date-time parameters are not. Component types and button indices
 must be unique. Omit `components` for a template without dynamic parameters.
 
-A template request does not require `text`. If both are provided, only the template
-is sent. Invalid templates are rejected before delivery; provider failures appear
-in the push result's `errors` with `failed` incremented. The bot does not retry a
-rejected template as free-form text. Free-form replies still use `text` and remain
-subject to Meta's customer-service window. Template approval, available languages,
-and delivery permissions are managed by Meta, not granted by Ryu.
+- A template request does not require `text`. If both are provided, only the template is sent.
+- Invalid templates are rejected before delivery. Provider failures appear in the push result's
+  `errors`, with `failed` incremented.
+- The bot does not retry a rejected template as free-form text.
+- Free-form replies still use `text` and remain subject to Meta's customer-service window.
+- Template approval, available languages, and delivery permissions are managed by Meta, not granted
+  by Ryu.
+
+#### Billing and separation
 
 This managed front door is separate from the per-node WhatsApp `ChannelConfig` used by self-hosted
-or customer-managed Cloud API connections. Model and tool work performed on behalf of a routed
-organization continues through its normal Gateway policy and organization credit wallet. The shared
-phone line is Ryu platform infrastructure; it is not silently charged as a customer-owned number.
+or customer-managed Cloud API connections. Model and tool work performed for a routed organization
+continues through its normal Gateway policy and organization credit wallet. The shared phone line is
+Ryu platform infrastructure, and it is not silently charged as a customer-owned number.
 
-Deleting an agent does not delete its channel records or their Core history. If one of those channels
-receives a later message, Ryu routes that turn to the configured default agent and shows a warning on
-the channel until you rebind it. Deleting a channel is separate: it removes the bot credentials and
-configuration while keeping the shared Core conversation history.
+## Deleting an agent or a channel
+
+- Deleting an agent does not delete its channel records or their Core history. If one of those
+  channels receives a later message, Ryu routes that turn to the configured default agent and shows
+  a warning on the channel until you rebind it.
+- Deleting a channel removes the bot credentials and configuration while keeping the shared Core
+  conversation history.
 
 ## Focused guides
 

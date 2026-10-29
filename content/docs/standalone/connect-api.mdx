@@ -4,21 +4,28 @@ description: "Use one authenticated edge for MCP, a shared Skill catalog, and te
 tags: ["connect", "api", "mcp", "skills", "tools", "composio", "standalone"]
 ---
 
-The Connect API is the HTTP and MCP contract of Ryu Connect, for backends and
-agents that call hosted Skills, registered MCP tools, and Composio actions
-through one tenant-scoped edge. Routes under `/v1` and `/mcp` take a
-tenant-scoped bearer token. The exceptions are the signed Composio webhook
-ingress described in [trigger events](/docs/standalone/connect-api-trigger-events),
-the OAuth callback of natively served toolkits, and the optional keyless
-[free routes](/docs/standalone/connect-api-catalog#free-routes).
+The Connect API is the HTTP and MCP contract of Ryu Connect. Backends and
+agents use it to call hosted Skills, registered MCP tools, and Composio actions
+through one tenant-scoped edge.
+
+## Authentication
+
+Routes under `/v1` and `/mcp` take a tenant-scoped bearer token. The exceptions
+are:
+
+- the signed Composio webhook ingress described in
+  [trigger events](/docs/standalone/connect-api-trigger-events);
+- the OAuth callback of natively served toolkits;
+- the optional keyless [free routes](/docs/standalone/connect-api-catalog#free-routes).
 
 On Ryu-hosted Connect the bearer can be a key created in the Ryu console (see
 [Connect keys](/docs/standalone/connect#connect-keys)) or a short-lived
 [access token](/docs/standalone/connect-api-access-policy#access-tokens) Ryu
-issues; a revoked or unknown key gets `401` with `code: "unauthorized"`, and a
-refused token `401` with `code: "invalid_token"`. `GET /health`
-is public and reports which lanes are configured and ready without disclosing
-URLs, keys, or provider state.
+issues. A revoked or unknown key gets `401` with `code: "unauthorized"`, and a
+refused token gets `401` with `code: "invalid_token"`.
+
+`GET /health` is public. It reports which lanes are configured and ready
+without disclosing URLs, keys, or provider state.
 
 ## Related references
 
@@ -45,90 +52,124 @@ For action discovery, account linking, and revocation, see
 
 Connect also supports native Composio execution for operator-bound accounts.
 The authenticated tenant determines the connected account, provider user ID,
-toolkit version, project credential, and exact tool allowlist. The request
-contains `operation: "execute"`, `toolId`, an optional argument object in `body`,
-and optionally the restrictive `expectedAccountId` constraint; account or
-authentication overrides are rejected. Calls go directly
-from Connect to Composio's pinned HTTPS endpoint with redirects disabled.
+toolkit version, project credential, and exact tool allowlist. Linked-account
+revocation uses the separate management endpoint, and trigger orchestration
+stays outside this native path.
+
+```mermaid
+flowchart LR
+  C["Client (tenant bearer)"] --> A["/v1/composio or /v1/composio/execute"]
+  C --> B["/v1/exec/tool"]
+  C --> M["MCP tools/call"]
+  A --> G["Tenant binding: grants and limits"]
+  B --> G
+  M --> G
+  G --> P["Composio HTTPS API (pinned)"]
+  P --> R["successful, data, billingReceipt"]
+```
+
+### Execute an action
+
+The request body contains:
+
+- `operation: "execute"`;
+- `toolId`;
+- an optional argument object in `body`;
+- an optional `expectedAccountId` constraint.
+
+Account or authentication overrides are rejected. Calls go directly from
+Connect to Composio's pinned HTTPS endpoint with redirects disabled.
+
 The response contains `successful` and `data`, plus an optional
 `billingReceipt` with the provider transaction ID and billing metadata. It
 never includes provider session data or raw diagnostics. Clients with strict
-decoders should accept the receipt field. Linked-account revocation uses the
-separate management endpoint; trigger orchestration remains outside this
-native path.
+decoders should accept the receipt field.
 
-`POST /v1/composio/execute` is a native-only execution endpoint. It accepts the
-same `operation: "execute"`, `toolId`, and `body` as native `/v1/composio`, plus
-an optional `expectedAccountId`. That field is a constraint, not an account
-selector: it must equal the tenant's assigned account. A mismatch is rejected
-before contacting Composio. The native-only endpoint returns unavailable in
-compatibility mode instead of forwarding back to Core.
+### Native-only endpoints
 
-`GET /v1/composio/tools` returns only the authenticated tenant's configured
-Composio tool grants. It is native-only and does not contact the provider to
-discover tools from other accounts. Unconfigured compatibility mode returns
-unavailable instead of forwarding this request.
+| Route | Behavior |
+|---|---|
+| `POST /v1/composio/execute` | Accepts the same `operation: "execute"`, `toolId`, and `body` as native `/v1/composio`, plus an optional `expectedAccountId`. That field is a constraint, not an account selector: it must equal the tenant's assigned account, and a mismatch is rejected before contacting Composio. |
+| `GET /v1/composio/tools` | Returns only the authenticated tenant's configured Composio tool grants. It does not contact the provider to discover tools from other accounts. |
+
+Both return unavailable in compatibility mode instead of forwarding the
+request back to Core.
+
+### Actions through MCP and REST
 
 These actions also appear as `composio.<SLUG>` in native MCP discovery and
-REST search/describe. Execute them through `tools/call` or `/v1/exec/tool`
-under the same tenant restrictions. Both paths return the same receipt:
-`/v1/exec/tool` as a top-level `billingReceipt` beside `result`, and
-`tools/call` in the result's `_meta` under `com.ryuhq/billingReceipt`.
+REST search/describe. `kind=composio` filters REST searches. Execute them
+through `tools/call` or `/v1/exec/tool` under the same tenant restrictions.
+
+Both paths return the same receipt:
+
+- `/v1/exec/tool` as a top-level `billingReceipt` beside `result`;
+- `tools/call` in the result's `_meta` under `com.ryuhq/billingReceipt`.
+
+Arguments pass through as an object. Composio validates the action-specific
+schema for the configured version. The `composio` namespace is reserved while
+native Composio bindings are configured.
+
+### Grants and call limits
+
 Connect enforces exact grants on every path. A binding can also set a call-rate
-limit and a premium spend cap; refused calls get `429` with
+limit and a premium spend cap. Refused calls get `429` with
 `code: "rate_limited"` or `402` with `code: "spend_limit_reached"`. See
-[call limits](/docs/standalone/connect-api-composio#call-limits). `kind=composio`
-filters REST searches. Arguments pass through as an object; Composio validates the
-action-specific schema for the configured version. The `composio` namespace is
-reserved while native Composio bindings are configured.
+[call limits](/docs/standalone/connect-api-composio#call-limits).
 
 When the binding sets `maxCallsPerMinute`, native Composio executions and their
 `429` carry the IETF `RateLimit-Policy` and `RateLimit` fields described under
 [errors](#errors).
 
+### Refusals before a call runs
+
 On a Ryu-hosted Connect, an organization with no credits left gets `402` with
 `code: "insufficient_credits"` on every execution path: `/v1/composio`,
-`/v1/composio/execute`, `/v1/exec/tool`, and MCP `tools/call`. The call is
-refused before any tool or Composio request, so it has no receipt. Over MCP the
-refusal is an `isError` result whose text is the message and whose
-`_meta["com.ryuhq/refusal"]` holds the code. Discovery, reads,
-`GET /v1/usage`, `/health`, and `/` keep working. Execution resumes once Ryu
-sees the added credit, usually within two minutes. A self-hosted Connect never
-refuses calls for credits.
+`/v1/composio/execute`, `/v1/exec/tool`, and MCP `tools/call`.
+
+- The call is refused before any tool or Composio request, so it has no receipt.
+- Over MCP the refusal is an `isError` result whose text is the message and
+  whose `_meta["com.ryuhq/refusal"]` holds the code.
+- Discovery, reads, `GET /v1/usage`, `/health`, and `/` keep working.
+- Execution resumes once Ryu sees the added credit, usually within two minutes.
+- A self-hosted Connect never refuses calls for credits.
 
 A call whose toolkit account is not linked yet, or whose linked account expired
 or was revoked, is refused before it runs with `403` and
 `code: "precondition_required"` on every execution path. The body's
-`precondition` names the `toolkit`, whether it needs a first `connection` or a
-new `authorization`, and the `linkPath` the tenant's management bearer links it
-with. Over MCP the same fields are in `_meta["com.ryuhq/refusal"]`. Nothing is
+`precondition` names:
+
+- the `toolkit`;
+- whether it needs a first `connection` or a new `authorization`;
+- the `linkPath` the tenant's management bearer links it with.
+
+Over MCP the same fields are in `_meta["com.ryuhq/refusal"]`. Nothing is
 charged, and the same call runs once the account is linked. See
 [natively served toolkits](/docs/standalone/connect-api-composio#natively-served-toolkits)
 for an example body.
 
-Every execution response also reports what the call costs, and a caller can
-cap that cost, retry safely with `Idempotency-Key`, and read its balance. See
+Every execution response also reports what the call costs. A caller can cap
+that cost, retry safely with `Idempotency-Key`, and read its balance. See
 [Connect call cost and retries](/docs/standalone/connect-api-billing).
 
 ### Connection status
 
 Poll `GET /v1/composio/connection` to read the configured account's
-`connectedAccountId`, `status`, and `active` flag. Connect verifies both account
-ID and provider user ID against the authenticated tenant's binding. An owner
-mismatch is denied. Provider credential state and parameters are omitted;
-unknown statuses report inactive. Without native Composio bindings the endpoint
-returns `503` with `code: "native_composio_unavailable"`.
+`connectedAccountId`, `status`, and `active` flag.
 
-An optional `expectedAccountId` query parameter restricts polling to that exact
-account; a mismatch is denied before provider I/O. Pending, canceled, and revoked
-Connect-linked accounts return their stored account ID when one exists, along
-with their inactive local status. In remote mode, Core's existing connection-status
-endpoint uses this constraint and the verified caller's runtime token mapping.
+- Connect verifies both account ID and provider user ID against the
+  authenticated tenant's binding. An owner mismatch is denied.
+- Provider credential state and parameters are omitted. Unknown statuses
+  report inactive.
+- Without native Composio bindings the endpoint returns `503` with
+  `code: "native_composio_unavailable"`.
+- An optional `expectedAccountId` query parameter restricts polling to that
+  exact account. A mismatch is denied before provider I/O.
+- Pending, canceled, and revoked Connect-linked accounts return their stored
+  account ID when one exists, along with their inactive local status.
 
-## Skills and MCP
-
-Skills, the hosted MCP endpoint, native MCP registrations, and credential
-masking are in [Connect Skills and MCP](/docs/standalone/connect-api-mcp).
+In remote mode, Core's existing connection-status endpoint uses this constraint
+and the verified caller's runtime token mapping.
 
 ## Usage report
 
@@ -138,15 +179,22 @@ each execution whose receipt Connect has read. See the
 
 ## Errors
 
-Every JSON error that Connect's routes return has `code` (stable, for branching), `error`
-(a human-readable message), and `ok: false`, with the request ID in
-`x-request-id`. Call-limit refusals add `retryAfterSeconds`. A request whose
-`Accept` header names `application/problem+json` gets the same error as
-[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details instead:
-`type`, `title`, `status`, `detail`, and `instance` come first, followed by
-`code`, `docs`, `error`, `ok`, and any other member. JSON-RPC errors from the
-MCP endpoints and responses from an upstream in compatibility mode keep their
-own format.
+Every JSON error that Connect's routes return has these fields, with the
+request ID in the `x-request-id` header.
+
+- `code` - stable, for branching;
+- `error` - a human-readable message;
+- `ok: false`.
+
+Call-limit refusals add `retryAfterSeconds`.
+
+A request whose `Accept` header names `application/problem+json` gets the same
+error as [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details
+instead. `type`, `title`, `status`, `detail`, and `instance` come first,
+followed by `code`, `docs`, `error`, `ok`, and any other member.
+
+JSON-RPC errors from the MCP endpoints and responses from an upstream in
+compatibility mode keep their own format.
 
 A `401` carries `WWW-Authenticate: Bearer realm="ryu-connect"`, with
 `error="invalid_token"` added when the request sent a bearer that Connect
@@ -158,10 +206,12 @@ When the tenant's Composio binding sets `maxCallsPerMinute`, responses to
 native Composio executions (`/v1/composio`, `/v1/composio/execute`, and
 `/v1/exec/tool` for `composio.*` tools) carry the
 [IETF RateLimit fields](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/):
-`RateLimit-Policy: "composio-calls";q=<maxCallsPerMinute>;w=60` and
-`RateLimit: "composio-calls";r=<remaining>;t=<seconds>`, where `t` is when the
-oldest counted call leaves the rolling 60-second window. A `429 rate_limited`
-reports `r=0` and a `t` equal to `Retry-After`.
+
+- `RateLimit-Policy: "composio-calls";q=<maxCallsPerMinute>;w=60`
+- `RateLimit: "composio-calls";r=<remaining>;t=<seconds>`, where `t` is when
+  the oldest counted call leaves the rolling 60-second window.
+
+A `429 rate_limited` reports `r=0` and a `t` equal to `Retry-After`.
 
 ```sh
 curl -sS https://connect.example/v1/skills \

@@ -13,6 +13,20 @@ Read [Plugin Runtime (Turn Hooks)](/docs/extend/develop/extensions/plugin-runtim
 mapping to a Claude Code hook event. A plugin authored against Claude's naming can use `stop`, which
 `phase_matches` normalises to `post_assistant_turn`.
 
+This page covers the Claude-parity set. Other phases, such as `tool_result` and the message,
+session, and workflow seams, are listed in [Hooks & Lifecycle](/docs/extend/develop/extensions/hooks-lifecycle).
+
+```mermaid
+flowchart TD
+  S["session_start (first turn)"] --> U["pre_user_turn"]
+  U --> M["pre_model_select"]
+  M --> C["context"]
+  C --> T["pre_tool_use"]
+  T --> P["post_tool_use"]
+  P --> A["post_assistant_turn / stop"]
+  C --> A
+```
+
 | Phase constant | `on` value | Fires | Directives applied |
 |---|---|---|---|
 | `ON_PRE_USER_TURN` | `pre_user_turn` | Before the user message reaches the model | `Replace`, `Inject` |
@@ -47,43 +61,66 @@ event also carries **predictions** of what the turn will spend:
 | `ctx.event.account_id` | The saved account this conversation is expected to use, when Ryu already knows it. Never an account name. |
 | `ctx.event.pool_strategy` | How the provider's account pool picks an account (`manual`, `round_robin`, `quota_first`, `fill_first`, or `reset_first`). |
 
-Each field is omitted when Ryu cannot predict it. Other agents and Gateway-routed turns carry none of
-them, and `account_id` is missing until the conversation has used an account (and for providers whose
-account is chosen by the provider connection itself, such as ChatGPT). They are predictions, not pins: the pool can still pick
-another account when the turn starts, and a hook cannot choose the account. Making the prediction
-never delays the turn.
+Each field is omitted when Ryu cannot predict it:
 
-During `context`, `ctx.project_instructions` contains the exact legacy root instruction block and `ctx.project_rules` contains normalized Cursor, Claude, and `AGENTS.md` rule records for the active workspace. Core discovers the files; the plugin decides which records apply and whether to inject them.
+- Other agents and Gateway-routed turns carry none of them.
+- `account_id` is missing until the conversation has used an account, and for providers whose
+  account is chosen by the provider connection itself, such as ChatGPT.
+
+They are predictions, not pins. The pool can still pick another account when the turn starts, and a
+hook cannot choose the account. Making the prediction never delays the turn.
+
+During `context`, `ctx.project_instructions` contains the exact legacy root instruction block, and
+`ctx.project_rules` contains normalized Cursor, Claude, and `AGENTS.md` rule records for the active
+workspace. Core discovers the files; the plugin decides which records apply and whether to inject
+them.
 
 ### The process-global dispatcher
 
-The on-chat-path phases (`session_start`, `stop`) fire inside `run_chat_with_hooks` where the
-`ServerState` is already in scope. The off-path phases fire at sites that have no `ServerState` - the
-shared tool-dispatch core (`pre_tool_use` / `post_tool_use`), the delegation engine
-(`subagent_stop`), and the notification fan-out. Those reach the runtime through a **process-global
-dispatcher**, `dispatch_global(phase, ctx)` over the `HookDispatch` trait, installed once at boot
-via `set_global` (`plugin_host/mod.rs`). It returns an empty vec when no dispatcher is installed, so
-callers stay fail-open. Every off-path dispatch first runs a DB-free gate (`any_manifest_declares`).
-If no loaded manifest declares the phase, it returns at once, so a tool call adds no hot-path cost
-unless a tool-hook plugin is loaded.
+The on-chat-path phases (`session_start`, `stop`) fire inside `run_chat_with_hooks`, where the
+`ServerState` is already in scope. The off-path phases fire at sites that have no server state:
+
+- the shared tool-dispatch core (`pre_tool_use` / `post_tool_use`);
+- the delegation engine (`subagent_stop`);
+- the notification fan-out (`notification`).
+
+Those reach the runtime through a **process-global dispatcher**, `dispatch_global(phase, ctx)` over
+the `HookDispatch` trait, installed once at boot via `set_global` (`plugin_host/mod.rs`). It returns
+an empty vec when no dispatcher is installed, so callers stay fail-open.
+
+Every off-path dispatch first runs a DB-free gate (`any_manifest_declares`). If no loaded manifest
+declares the phase, it returns at once, so a tool call adds no hot-path cost unless a tool-hook
+plugin is loaded.
 
 ### The `tools` glob gate
 
 A `pre_tool_use` / `post_tool_use` hook usually cares about only some tools. The manifest `match`
-block's `tools` list is a gate evaluated in Rust before any sandbox run: the hook
-runs only when the tool being called matches one of its patterns. The matcher (`glob_match`) supports
-only these forms: `*` matches everything, `bash*` a prefix, `*write` a suffix, `*edit*` a
-substring, anything else an exact match. A hook whose gate does not match the current tool never
-starts a sandbox.
+block's `tools` list is a gate evaluated in Rust before any sandbox run. The hook runs only when the
+tool being called matches one of its patterns, so a non-matching hook never starts a sandbox.
+
+The matcher (`glob_match`) supports only these forms:
+
+| Pattern | Matches |
+|---|---|
+| `*` | Everything |
+| `bash*` | A prefix |
+| `*write` | A suffix |
+| `*edit*` | A substring |
+| Anything else | An exact tool name |
 
 <Callout type="warn">
-Maturity varies by phase. `session_start`, `pre_user_turn`, and `post_assistant_turn` fire on the
-chat path; `pre_tool_use` fires at the tool-dispatch core and its `Deny` **is** applied (the call is
-blocked). `post_tool_use`, `subagent_stop`, `session_end`, and `notification` are **observation only**
-in v1. They fire (detached, fail-open) but their directives are not applied to the result. The same
-live-verification caveat from the top of [Plugin Runtime](/docs/extend/develop/extensions/plugin-runtime) applies: the sandbox and the `post_assistant_turn`
-path are live-tested, the extended phases are wired but not all exercised end-to-end. Treat the
-observation-only phases as telemetry, not control points, until that changes.
+Maturity varies by phase.
+
+- `session_start`, `pre_user_turn`, and `post_assistant_turn` fire on the chat path.
+- `pre_tool_use` fires at the tool-dispatch core, and its `Deny` **is** applied (the call is
+  blocked).
+- `post_tool_use`, `subagent_stop`, `session_end`, and `notification` are **observation only** in
+  v1. They fire (detached, fail-open), but their directives are not applied to the result.
+
+The live-verification caveat from [Plugin Runtime](/docs/extend/develop/extensions/plugin-runtime)
+applies: the sandbox and the `post_assistant_turn` path are live-tested; the extended phases are
+wired but not all exercised end-to-end. Treat the observation-only phases as telemetry, not control
+points, until that changes.
 </Callout>
 
 ## Related

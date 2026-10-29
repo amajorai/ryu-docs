@@ -12,10 +12,12 @@ this page have no published process behind them. See
 [Start the standalone service](/docs/standalone/sites#start-the-standalone-service).
 </Callout>
 
-The standalone Sites service preserves the `/api/sites/*` route spelling used
-by the Sites Companion in Ryu Desktop. Management routes use the standalone
-Sites bearer. Deployed pages and their browser data routes are served on the
-separate visitor listener.
+The standalone Sites service keeps the `/api/sites/*` route spelling used by
+the Sites Companion in Ryu Desktop. It answers on two listeners:
+
+- **Management listener** - the routes under `/api/sites/*`, called with the
+  standalone Sites bearer.
+- **Visitor listener** - deployed pages and their browser data routes.
 
 The contract version is `v1`, also returned as `apiVersion` by the status
 route. The Core-managed app and the standalone process use the same resource
@@ -30,10 +32,12 @@ Authorization: Bearer <RYU_SITES_API_TOKEN>
 ```
 
 The token is separate from Core sidecar credentials, Gateway keys, and visitor
-sign-in. A missing or wrong bearer returns `401` with a
-`WWW-Authenticate: Bearer realm="ryu-sites"` challenge; when a bearer token was
-sent but rejected, the challenge adds `error="invalid_token"`. In standalone mode a
-visitor session is never accepted on the management API.
+sign-in. In standalone mode a visitor session is never accepted on the
+management API.
+
+A missing or wrong bearer returns `401` with a
+`WWW-Authenticate: Bearer realm="ryu-sites"` challenge. When a bearer token was
+sent but rejected, the challenge adds `error="invalid_token"`.
 
 Every management response, including errors, carries an `X-Request-ID`
 (`req_` followed by 32 hex characters). Quote it when you report a problem. The
@@ -75,6 +79,15 @@ and are unavailable in standalone mode.
 
 ## Create, save, and deploy
 
+```mermaid
+flowchart LR
+  Create["POST /projects (private)"] --> Save["POST /versions"]
+  Save --> Scan["POST /deploy runs the secret scan"]
+  Scan -->|"secret found"| Blocked["422 security_blocked"]
+  Scan -->|"clean"| Deploy["Deployed, still private"]
+  Deploy --> Public["PUT /settings audience public"]
+```
+
 Create a Site with a display name and a URL name. URL names start with a
 lowercase letter, have 5 to 48 characters, and use lowercase letters, digits,
 and single hyphens. `template` is optional and defaults to `website`.
@@ -107,11 +120,13 @@ Content-Type: application/json
 ```
 
 A new Site is private, and the first deploy keeps it private: its pages answer
-`403` until you change the audience. To serve it to everyone, the operator
-allows public Sites (`RYU_SITES_PUBLIC=1`, or the runtime config's
-`publicEnabled` when that variable is unset; `GET /api/sites/status` reports
-`publicEnabled`), and you set the audience to
-`public` with the Site's current settings and revision:
+`403` until you change the audience. To serve it to everyone:
+
+1. The operator allows public Sites with `RYU_SITES_PUBLIC=1`, or the runtime
+   config's `publicEnabled` when that variable is unset.
+   `GET /api/sites/status` reports `publicEnabled`.
+2. You set the audience to `public` with the Site's current settings and
+   revision:
 
 ```http
 PUT /api/sites/projects/:id/settings
@@ -137,11 +152,14 @@ Errors use one shape:
 { "error": { "code": "quota", "message": "Project limit reached" } }
 ```
 
-Invalid input returns `400` with the code `invalid_input`. A schema error also
-lists the rejected `fields`.
-Limits return `413` or `429` with the code `quota`. A quota is capacity, not a
-rate limit: no `Retry-After` is sent, and retrying fails until capacity is
-freed. A service the process does not have returns `503`. Common codes:
+- Invalid input returns `400` with the code `invalid_input`. A schema error
+  also lists the rejected `fields`.
+- Limits return `413` or `429` with the code `quota`. A quota is capacity, not
+  a rate limit: no `Retry-After` is sent, and retrying fails until capacity is
+  freed.
+- A service the process does not have returns `503`.
+
+Common codes:
 
 | Status | Code | Meaning |
 |---|---|---|
@@ -168,8 +186,10 @@ Send `Accept: application/problem+json` to receive errors as
 [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details. The
 response keeps the same `error` member and adds `type`, `title`, `status`,
 `detail`, `instance`, `code`, `docs`, and, on the management listener,
-`requestId`. `type` and `docs` link to this section for every code; use `code`
-to tell errors apart:
+`requestId`.
+
+`type` and `docs` link to this section for every code; use `code` to tell
+errors apart:
 
 ```json
 {
@@ -197,16 +217,21 @@ Content-Type: application/json
 { "name": "Launch notes copy", "slug": "launch-notes-copy", "expectedRevision": 3 }
 ```
 
-The response is `201` with the new Site. The owner and editors copy the latest
-saved version; other callers may copy only the deployed version, and only when
-the source Site's `settings.allowRemix` is `true` (the default is `false`). A Site
-the caller cannot visit returns `404`; one without the opt-in returns `403`.
+The response is `201` with the new Site. Who can copy what:
+
+- The owner and editors copy the latest saved version.
+- Other callers may copy only the deployed version, and only when the source
+  Site's `settings.allowRemix` is `true` (the default is `false`).
+- A Site the caller cannot visit returns `404`; one without the opt-in returns
+  `403`.
 
 A stale `expectedRevision`, a URL name already in use, or a source with nothing
-to copy returns `409`. The copy carries the HTML (as its first version), the
-template, and the `mode`, `aiMode`, and `aiDailyLimit` settings. It starts
-private and undeployed, and records its source as `remixedFrom` (`siteId`,
-`versionId`, `name`).
+to copy returns `409`.
+
+The copy carries the HTML (as its first version), the template, and the
+`mode`, `aiMode`, and `aiDailyLimit` settings. It starts private and
+undeployed, and records its source as `remixedFrom` (`siteId`, `versionId`,
+`name`).
 
 `GET /api/sites/projects?scope=remixable` returns only
 gallery fields (`id`, `name`, `slug`, `template`, `deploymentId`, `updatedAt`,
@@ -256,21 +281,26 @@ requests do not carry these fields.
 ## Shared visitor data
 
 Shared records answer only when `settings.sharedData.enabled` is `true` on a
-connected Site with its records database. Anyone the Site's audience admits can
-read. `settings.sharedData.write` chooses who creates records: `signed-in`
-visitors or only `editors`. Only a record's author, an editor, or the owner can
-replace or delete it.
+connected Site with its records database.
+
+| Action | Who may do it |
+|---|---|
+| Read | Anyone the Site's audience admits |
+| Create | Set by `settings.sharedData.write` - `signed-in` visitors or only `editors` |
+| Replace or delete | The record's author, an editor, or the owner |
 
 A list returns `records`, `nextCursor`, and `eventCursor`. Each record has `id`,
 `value`, `revision`, timestamps, a per-Site pseudonymous `author`, and the
 `mine` and `canModify` flags; the author's account ID is never returned.
+
 Replacing a record needs its current revision; a missing or stale revision
 returns `409` with the `current` record. A delete may send
-`?expectedRevision=`, and a stale one also returns `409`. The events stream resumes from
-`Last-Event-ID` or `?since=<eventCursor>` and sends a `reset` event when the
-missed changes are no longer known, after which the page should list again.
-Streams re-check access while open and close after 30 minutes so the browser
-reconnects.
+`?expectedRevision=`, and a stale one also returns `409`.
+
+The events stream resumes from `Last-Event-ID` or `?since=<eventCursor>`. It
+sends a `reset` event when the missed changes are no longer known, after which
+the page should list again. Streams re-check access while open and close after
+30 minutes so the browser reconnects.
 
 `/_ryu/complete` (general in-page AI) calls Ryu's model service. Standalone
 settings refuse the general AI mode, so the route returns `403`.
@@ -324,16 +354,20 @@ purges.
 
 `owner` is the visitor's verified account ID (the OpenID Connect subject).
 `visitor` is the same ID encoded as unpadded base64url, which names the visitor
-in the delete route. `DELETE /api/sites/projects/:id/visitors/:visitor/data`
-permanently deletes that visitor's records and uploaded files and returns the
-counts removed under `deleted`. A key that is not the canonical encoding of an
-ID returns `400`. The visitor can keep using the Site afterwards.
+in the delete route.
+
+`DELETE /api/sites/projects/:id/visitors/:visitor/data` permanently deletes
+that visitor's records and uploaded files and returns the counts removed under
+`deleted`. A key that is not the canonical encoding of an ID returns `400`. The
+visitor can keep using the Site afterwards.
 
 Records are deleted first. When the records database cannot be reached, the
-route returns `503` and deletes nothing. Every completed purge is kept in the
-Site's audit list with its time, the management caller, the counts, and a
-digest of the visitor's account ID instead of the ID. A Site keeps its 1,000
-most recent entries, and they are deleted with the Site.
+route returns `503` and deletes nothing.
+
+Every completed purge is kept in the Site's audit list with its time, the
+management caller, the counts, and a digest of the visitor's account ID instead
+of the ID. A Site keeps its 1,000 most recent entries, and they are deleted
+with the Site.
 
 ## Limits
 

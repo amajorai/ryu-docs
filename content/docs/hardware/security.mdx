@@ -5,6 +5,16 @@ description: "The hardware threat model and how to harden it: per-device tokens,
 
 The hardware design is safe on a LAN or tailnet. It needs the additions in the [checklist](#before-internet-exposure-the-checklist) below before any part of it faces the open internet.
 
+The device and the node pin each other's keys, so the relay phone carries only ciphertext and the node stores only token hashes.
+
+```mermaid
+flowchart LR
+  Device["Device (pinned node key)"] -->|"Encrypted session"| Phone["Relay phone (relay token only)"]
+  Phone -->|"Same ciphertext over WebSocket"| Node["Node (pinned device key)"]
+  Device -->|"Encrypted session over WiFi"| Node
+  Node --> Registry["Registry: hashed tokens"]
+```
+
 ## Device tokens
 
 Every device authenticates with a per-device `device_token`. [Pairing](/docs/hardware/pairing) issues the token, and the device sends it as the Bearer on the `GET /api/hardware/ws` upgrade.
@@ -28,14 +38,25 @@ Pairing a v1.1 device proves that you are holding that device, and that nobody i
 
 ### The necklace and "I can't verify"
 
-The necklace has no screen, so it plays its code as a sequence of beeps. If you cannot hear or compare them, the app offers **I can't verify**. Pairing still completes, but the device is marked **Unverified** in the app permanently, because the code comparison is what protects a BLE-only pairing against a nearby attacker. To clear the badge, remove the device and pair it again somewhere quiet.
+The necklace has no screen, so it plays its code as a sequence of beeps. If you cannot hear or compare them, the app offers **I can't verify**.
+
+Pairing still completes, but the device is marked **Unverified** in the app permanently, because the code comparison is what protects a BLE-only pairing against a nearby attacker. To clear the badge, remove the device and pair it again somewhere quiet.
 
 ### Legacy devices and re-pairing
 
-Devices paired with older firmware or an older app keep working in **legacy** mode, which uses the v1 plaintext protocol and is badged **Legacy** in the app. To upgrade one: update the firmware and the app, remove the device in the app, hold the device button for 10 seconds to factory-reset it, then pair again. There is no in-place upgrade, so a relay phone can never enroll a key on a device's behalf. Firmware that supports v1.1 refuses legacy provisioning entirely.
+Devices paired with older firmware or an older app keep working in **legacy** mode, which uses the v1 plaintext protocol and is badged **Legacy** in the app. To upgrade one:
+
+1. Update the firmware and the app.
+2. Remove the device in the app.
+3. Hold the device button for 10 seconds to factory-reset it.
+4. Pair again.
+
+There is no in-place upgrade, so a relay phone can never enroll a key on a device's behalf. Firmware that supports v1.1 refuses legacy provisioning entirely.
 
 <Callout type="warn">
-  Legacy pairing, which older firmware still uses and which stays enabled by default, has no code compare and no button press. It trusts the device ID and a one-time nonce, which do not prove that the caller controls the device. Keep the pair endpoint on your LAN or tailnet and do not expose it to the internet while you still pair legacy devices. Once every device is on v1.1, turn legacy pairing off by setting the node preference `hardware-legacy-v1-pairing` to `"false"` (`PUT /api/preferences/hardware-legacy-v1-pairing` with `{"value":"false"}`). `POST /api/hardware/pair` then answers `426` with `pairing_v2_required`.
+  Legacy pairing, which older firmware still uses and which stays enabled by default, has no code compare and no button press. It trusts the device ID and a one-time nonce, which do not prove that the caller controls the device. Keep the pair endpoint on your LAN or tailnet and do not expose it to the internet while you still pair legacy devices.
+
+  Once every device is on v1.1, turn legacy pairing off by setting the node preference `hardware-legacy-v1-pairing` to `"false"` (`PUT /api/preferences/hardware-legacy-v1-pairing` with `{"value":"false"}`). `POST /api/hardware/pair` then answers `426` with `pairing_v2_required`.
 </Callout>
 
 ## What the relay phone can and cannot see
@@ -54,6 +75,19 @@ If you enter Wi-Fi credentials while pairing, they pass through your node once, 
 
 A device on an encrypted session can offer tools to your agents, such as showing text on the watch. Tools are offered only on a personal node, only while the Hardware Devices app is enabled, and only while the device is connected. The node checks these conditions again on every call.
 
+```mermaid
+flowchart TD
+  Call["Agent lists or calls a device tool"] --> Personal{"Personal node?"}
+  Personal -->|"No"| Hidden["Tool not offered"]
+  Personal -->|"Yes"| AppOn{"Hardware Devices app enabled?"}
+  AppOn -->|"No"| Hidden
+  AppOn -->|"Yes"| Prefs{"Device prefs allow the tool?"}
+  Prefs -->|"No"| Hidden
+  Prefs -->|"Yes"| Live{"Device connected over an encrypted session?"}
+  Live -->|"No"| Hidden
+  Live -->|"Yes"| Run["capability_invoke to the device"]
+```
+
 - **Sensitive tools are off by default.** A tool the device marks as sensitive stays hidden until you turn it on.
 - **Personal nodes only.** Device tools are not offered on a managed or shared node.
 - **Turn them off any time.** In the mobile app, open the device and use **Device tools** to turn off all of its tools, or switch individual tools off. New calls stop immediately; a call already running finishes.
@@ -65,7 +99,11 @@ The wire messages that carry tools are in [Protocol](/docs/hardware/protocol#dev
 
 ## If your node's device key is lost
 
-Your node keeps a long-term key that every v1.1 device pins. It is stored encrypted with your node's other secrets and is never silently replaced. If it cannot be read (for example after restoring a node without its encryption key), the node reports its identity as unavailable in the device list and refuses new pairings until you reset it with `POST /api/hardware/identity/reset`. Resetting creates a new key and marks every v1.1 device **Re-pair required**; those devices show "Node identity changed" and must be removed and paired again.
+Your node keeps a long-term key that every v1.1 device pins. It is stored encrypted with your node's other secrets and is never silently replaced.
+
+If the key cannot be read (for example after restoring a node without its encryption key), the node reports its identity as unavailable in the device list. It refuses new pairings until you reset it with `POST /api/hardware/identity/reset`.
+
+Resetting creates a new key and marks every v1.1 device with the **Re-pair** badge. Those devices show "Node identity changed" and must be removed and paired again.
 
 ## Protect the device's storage
 

@@ -38,10 +38,14 @@ You can reconnect a replacement node using the same bucket, prefix and recovery 
 ### Amazon S3
 
 Use the region endpoint, such as `https://s3.us-east-1.amazonaws.com`, and the matching region.
-The credentials need `s3:ListBucket` for the bucket and `s3:GetObject`, `s3:PutObject`,
-`s3:DeleteObject` and `s3:AbortMultipartUpload` for the backup prefix. Large backups use multipart
-uploads. Configure a bucket lifecycle rule to remove incomplete multipart uploads after a suitable
-interval, so a machine failure does not leave unfinished parts indefinitely.
+The credentials need these permissions:
+
+- `s3:ListBucket` on the bucket.
+- `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and `s3:AbortMultipartUpload` on the backup
+  prefix.
+
+Large backups use multipart uploads. Add a bucket lifecycle rule that removes incomplete multipart
+uploads after a suitable interval, so a machine failure does not leave unfinished parts forever.
 
 ### Cloudflare R2
 
@@ -76,16 +80,32 @@ Ordinary files are checked for changes during the snapshot, and a changed file f
 so it can be retried. Pause an app's writes if you need a single coordinated point across its stores.
 
 Archives and their catalogs are authenticated and encrypted before upload. Transfers use bounded
-buffers. Node archives support up to one million files and 1 TiB of uncompressed data. Space
-snapshots support up to 100,000 documents and 128 MiB of source metadata, with binary files stored
-separately inside the archive. App JSON snapshots are limited to 8 MiB.
+buffers.
+
+| Scope | Size limit |
+| --- | --- |
+| Node archive | Up to one million files and 1 TiB of uncompressed data |
+| Space snapshot | Up to 100,000 documents and 128 MiB of source metadata; binary files are stored separately inside the archive |
+| App snapshot | 8 MiB of JSON |
+
+```mermaid
+flowchart LR
+  A["Schedule or Back up now"] --> B["Stage in tmp/backups/"]
+  B --> C["Snapshot node, Space or app"]
+  C --> D["Encrypt and authenticate"]
+  D --> E["Upload to S3 bucket"]
+  E --> F["Update catalog"]
+  F --> G["Prune by retention"]
+```
 
 ## Schedule and retain backups
 
 Select a destination and scope, enter a five-field cron expression, choose how many backups to
-keep, and select **Enable schedule**. The default `0 2 * * *` runs daily at 02:00 UTC. The node must
-be running at the scheduled time; missed offline runs are not replayed. You can pause or resume
-the schedule and use **Back up now** at any time.
+keep (from 1 to 500), and select **Enable schedule**. The default `0 2 * * *` runs daily at
+02:00 UTC.
+
+The node must be running at the scheduled time; missed offline runs are not replayed. You can
+pause or resume the schedule and use **Back up now** at any time.
 
 Retention runs after a successful upload and applies only to that source node, destination and
 scope. It never removes unrelated bucket objects. If pruning fails, the uploaded backup stays available and recent
@@ -104,25 +124,36 @@ all-scope catalog view.
 Select **Browse backups**, choose a snapshot, then **Restore**. Ryu verifies its size, checksum and
 encryption before recovery. Recent activity shows queued, running, completed and failed operations.
 
-API clients can set `dryRun: true` on the restore request to validate that the authenticated backup
-catalog entry is available and receive the recovery plan without queuing an operation or writing a
-Space, recovery directory, or local operation record. The preview is marked `status: "dry_run"` and
-reports whether a private Space or node recovery directory would be created. Archive checksum and
-encryption verification still runs when the live restore is queued, so a preview is a safe plan rather
-than a substitute for the final integrity check.
+### Preview a restore
+
+API clients can set `dryRun: true` on the restore request. Ryu checks that the authenticated
+catalog entry is available and returns the recovery plan. It does not queue an operation or write a
+Space, recovery directory, or local operation record.
+
+The preview is marked `status: "dry_run"` and reports whether a private Space or a node recovery
+directory would be created. Archive checksum and encryption checks still run when the live restore
+is queued, so a preview is a plan, not a substitute for the final integrity check.
+
+### Restore a Space
 
 Space recovery preserves the original Space. If the embedding model is unavailable, the recovered
 source remains available and the result tells you to run re-indexing later.
 
-Node recovery creates a separate folder and includes the original data-encryption key, protected
-inside the encrypted archive. Stop Core before starting it from that folder. The completed operation
-shows the command using the recovered folder and file-key mode. If your deployment explicitly
-injects a master key, remove that override or replace it with the recovered key before starting;
-an unrelated key cannot decrypt the recovered data. Reconnect accounts, providers and node access
-after recovery. Keep the original data folder until you have checked the restored node.
+### Restore a node
 
-In the recovery folder, that key is written to `secrets/` as an owner-only file, because the folder
-starts in file-key mode. Ryu does not remove recovery folders; delete one yourself once you have
+Node recovery creates a separate folder. It includes the original data-encryption key, protected
+inside the encrypted archive. The completed operation shows the start command for the recovered
+folder in file-key mode.
+
+1. Stop Core.
+2. If your deployment explicitly injects a master key, remove that override or replace it with the
+   recovered key. An unrelated key cannot decrypt the recovered data.
+3. Start Core from the recovered folder.
+4. Reconnect accounts, providers and node access.
+5. Keep the original data folder until you have checked the restored node.
+
+In the recovery folder, the key is written to `secrets/` as an owner-only file, because the folder
+starts in file-key mode. Ryu does not remove recovery folders. Delete one yourself once you have
 started from it or no longer need it, since it is a second full copy of the node with its key.
 
 While a backup or restore runs, Ryu stages it in the data folder's owner-only `tmp/backups/`, never

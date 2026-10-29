@@ -34,23 +34,31 @@ country and type that has no published AWS lease price cannot be leased
 self-serve and gets `422 number_not_available`. The purchase needs an
 `Idempotency-Key` and returns `201` with the number.
 
+### Purchase charges
+
 Ryu holds the first 30-day period, asks AWS for the number, and charges the
-monthly price that AWS returns. If AWS returns a higher price than the
-published one Ryu held, the number is given back at once, nothing is charged,
-and the request gets `409 price_changed` with `quotedMicroUsd` and
-`actualMicroUsd`. When the balance cannot cover the hold, the request gets
-`402 insufficient_credits` and no number is requested. Current lease prices
-are on the [AWS End User Messaging pricing](https://aws.amazon.com/end-user-messaging/pricing/)
+monthly price that AWS returns. Current lease prices are on the
+[AWS End User Messaging pricing](https://aws.amazon.com/end-user-messaging/pricing/)
 page.
+
+- If AWS returns a higher price than the published one Ryu held, the number is
+  given back at once, nothing is charged, and the request gets
+  `409 price_changed` with `quotedMicroUsd` and `actualMicroUsd`.
+- When the balance cannot cover the hold, the request gets
+  `402 insufficient_credits` and no number is requested.
+
+### Unconfirmed purchases
 
 If AWS does not confirm the purchase, the request gets `502 outcome_unknown`
 and the number stays `pending`. Retry with the same `Idempotency-Key` and the
 same body: Ryu repeats the same AWS request, so you get the number that AWS may
-already have leased, never a second one. Until then the pending number cannot
-be released (`409 purchase_unconfirmed`). If no retry comes, Ryu finishes the
-purchase on its own within a few hours. A number that was never paid for is
-given back to AWS and marked `failed`, with nothing charged. A retry after that
-gets `409 purchase_not_completed`; start a new purchase with a new key.
+already have leased, never a second one.
+
+Until then the pending number cannot be released (`409 purchase_unconfirmed`).
+If no retry comes, Ryu finishes the purchase on its own within a few hours. A
+number that was never paid for is given back to AWS and marked `failed`, with
+nothing charged. A retry after that gets `409 purchase_not_completed`; start a
+new purchase with a new key.
 
 A number can also stay `pending` after a successful purchase while AWS is
 still provisioning it. Its first period is paid and `phoneNumber` is set. Ryu
@@ -77,21 +85,43 @@ header. Purchases also count toward the organization's
 | `released` | Given back; the number can no longer send or receive |
 | `failed` | The purchase did not complete, and `error` says why |
 
+```mermaid
+stateDiagram-v2
+  [*] --> pending: POST /numbers
+  pending --> active: paid and provisioned
+  pending --> failed: never paid
+  active --> suspended: renewal unpaid
+  suspended --> active: balance covers renewal
+  suspended --> releasing: 7-day grace ends
+  active --> releasing: DELETE
+  suspended --> releasing: DELETE
+  releasing --> released: AWS confirms
+  released --> [*]
+  failed --> [*]
+```
+
+### Renewal
+
 Each lease period is 30 days. Ryu charges the next period, with a hold, within
 a day of the current period's end. If the balance cannot cover it, the number
 keeps its paid period and then becomes `suspended` for a 7-day grace period.
+
 Ryu retries the renewal every hour, and the number returns to `active` as soon
 as the balance covers it. After the grace period the number is released at AWS.
 Suspension and release each send a `number.suspended` or `number.released`
 webhook.
 
+### Release
+
 `DELETE /orgs/:orgId/numbers/:id` releases a number and stops its renewals at
 once. The current period is not refunded, because AWS does not prorate leases.
-Releasing a number that is already released returns it unchanged, and a
-release while the number is being bought, renewed, or released gets
-`409 conflict`; retry shortly. Renewal retries between attempts do not block a
-release. If AWS does not confirm a release, the number stays `releasing`; Ryu
-retries the release itself, and you can also send the `DELETE` again.
+
+- Releasing a number that is already released returns it unchanged.
+- A release while the number is being bought, renewed, or released gets
+  `409 conflict`; retry shortly. Renewal retries between attempts do not block
+  a release.
+- If AWS does not confirm a release, the number stays `releasing`. Ryu retries
+  the release itself, and you can also send the `DELETE` again.
 
 `GET /orgs/:orgId/numbers` lists the numbers the organization holds. Add
 `?status=all` to include released and failed numbers as well, newest first.
@@ -101,10 +131,11 @@ retries the release itself, and you can also send the `DELETE` again.
 US carriers require registration before a 10DLC or toll-free number carries
 traffic: a 10DLC brand and campaign, or toll-free verification. A US
 `TEN_DLC` or `TOLL_FREE` number refuses sends with `409 registration_required`
-until it has an approved registration (`registrationId` on the number). During
-early access, Ryu records the approved AWS registration on the number; contact
-Ryu to register one. Other countries can have their own sender rules; see the
-AWS End User Messaging documentation for the destination.
+until it has an approved registration (`registrationId` on the number).
+
+During early access, Ryu records the approved AWS registration on the number;
+contact Ryu to register one. Other countries can have their own sender rules;
+see the AWS End User Messaging documentation for the destination.
 
 ## Destination countries
 
@@ -118,9 +149,11 @@ needs a published AWS price for its destination.
 
 A new number with the `SMS` capability is set up for two-way SMS where the
 service supports it (`twoWayEnabled` on the number). If that setup fails, Ryu
-retries it every hour. Replies to it, and inbound
-WhatsApp messages, are stored in the message log with `direction: "inbound"`
-and `status: "received"`, and send a `message.received` webhook.
+retries it every hour.
+
+Replies to it, and inbound WhatsApp messages, are stored in the message log
+with `direction: "inbound"` and `status: "received"`, and send a
+`message.received` webhook.
 
 AWS charges some inbound messages. Ryu charges AWS's published inbound fee, if
 any, only while the organization's available balance covers it. Otherwise Ryu
@@ -131,10 +164,12 @@ inbound message never takes a hold.
 
 Each organization has its own opt-out list at AWS, created with its first
 number or its first manual opt-out. If Ryu cannot create one, the request gets
-`503 messaging_capacity`; retry later or contact Ryu. AWS answers the STOP and
-HELP keywords on the organization's numbers and adds a recipient who sends STOP to the list (`endUserOptedOut: true`). Ryu
-checks the list before every SMS, MMS, voice, and WhatsApp send and refuses a
-listed recipient with `422 recipient_opted_out`, before any hold is taken.
+`503 messaging_capacity`; retry later or contact Ryu.
+
+AWS answers the STOP and HELP keywords on the organization's numbers and adds a
+recipient who sends STOP to the list (`endUserOptedOut: true`). Ryu checks the
+list before every SMS, MMS, voice, and WhatsApp send and refuses a listed
+recipient with `422 recipient_opted_out`, before any hold is taken.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -142,12 +177,14 @@ listed recipient with `422 recipient_opted_out`, before any hold is taken.
 | `POST` | `/orgs/:orgId/opt-outs` | Add `{ "phoneNumber": "+…" }` |
 | `DELETE` | `/orgs/:orgId/opt-outs/:phoneNumber` | Remove a URL-encoded E.164 number |
 
-Remove a number only when the recipient has opted back in. Ryu caches the list
-for up to five minutes per organization, so a change made through `/opt-outs`
-can take that long to reach every server. For a very long list, and for every
-WhatsApp send, Ryu asks AWS about the one recipient instead of relying on the
-cached copy. AWS itself enforces the list only on the organization's SMS, MMS,
-and voice numbers, not on WhatsApp senders.
+Remove a number only when the recipient has opted back in.
+
+- Ryu caches the list for up to five minutes per organization, so a change made
+  through `/opt-outs` can take that long to reach every server.
+- For a very long list, and for every WhatsApp send, Ryu asks AWS about the one
+  recipient instead of relying on the cached copy.
+- AWS itself enforces the list only on the organization's SMS, MMS, and voice
+  numbers, not on WhatsApp senders.
 
 ## WhatsApp senders
 
@@ -157,12 +194,10 @@ WhatsApp number to the organization as a sender. Contact Ryu to request one.
 `GET /orgs/:orgId/whatsapp/senders` lists the organization's senders; send with
 a sender's `id` as `senderId`.
 
-A sender on a **dedicated** WhatsApp Business Account (`dedicatedWaba: true`)
-belongs to the organization alone. Its templates can be listed with
-`GET /orgs/:orgId/whatsapp/senders/:senderId/templates` and submitted for Meta
-review by posting `{ "definition": { … } }` in Meta's template format. A sender
-on a shared account uses templates that Ryu manages, and its template routes
-get `403 forbidden`.
+| Sender account | Templates |
+|---|---|
+| **Dedicated** WhatsApp Business Account (`dedicatedWaba: true`), owned by the organization alone | List with `GET /orgs/:orgId/whatsapp/senders/:senderId/templates`; submit for Meta review by posting `{ "definition": { … } }` in Meta's template format |
+| Shared account | Uses templates that Ryu manages; its template routes get `403 forbidden` |
 
 A business-initiated message must use an approved template. Free-form text is
 accepted only within 24 hours of the contact's last message, which opens Meta's
@@ -170,8 +205,11 @@ service window; outside it, a text send gets `422 window_closed`.
 
 Each WhatsApp message costs AWS's per-message fee plus Meta's rate for its
 category in the recipient's market, as billed through AWS. The hold covers the
-dearest category rate for a template. The charge settles at the category that
-Meta reports, at AWS's fee alone when Meta reports the message as not billable,
-and at nothing when the handover to Meta failed. See the
-[AWS End User Messaging pricing](https://aws.amazon.com/end-user-messaging/pricing/)
+dearest category rate for a template. The charge settles at:
+
+- the category that Meta reports;
+- AWS's fee alone when Meta reports the message as not billable;
+- nothing when the handover to Meta failed.
+
+See the [AWS End User Messaging pricing](https://aws.amazon.com/end-user-messaging/pricing/)
 page for the fees.

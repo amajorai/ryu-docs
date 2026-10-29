@@ -5,8 +5,10 @@ description: "Reference for the activation fields, contribution points, activati
 
 This page is part of the [Plugin API reference](/docs/extend/develop/sdk/plugin-api).
 VS-Code-style manifest fields drive the activation runtime. They live on `PluginManifest`, and the
-loader validates them at load time. Sidecar-backed data categories, scheduled jobs, event
-subscriptions, and activity rows are in [Plugin sidecar capabilities](/docs/extend/develop/sdk/plugin-sidecar-capabilities).
+loader validates them at load time.
+
+Sidecar-backed data categories, scheduled jobs, event subscriptions, and activity rows are in
+[Plugin sidecar capabilities](/docs/extend/develop/sdk/plugin-sidecar-capabilities).
 
 ## Activation fields
 
@@ -34,11 +36,14 @@ which is the Core crate version.
 
 ## Message actions
 
-Plugins can contribute per-message controls through `contributes.message_actions`. Core validates
-the required identity fields and serves each declaration only while its plugin is enabled. Desktop
-owns the renderer and dispatches the action with the current message id through the host's
-supported seam. The `kind` and `args` fields are extensible, so renderer-specific metadata stays
-opaque to Core and never runs as plugin code.
+Plugins can contribute per-message controls through `contributes.message_actions`.
+
+- Core validates the required identity fields and serves each declaration only while its plugin
+  is enabled.
+- Desktop owns the renderer. It dispatches the action with the current message id through the
+  host's supported seam.
+- The `kind` and `args` fields are extensible. Renderer-specific metadata stays opaque to Core and
+  never runs as plugin code.
 
 For example, a plugin can opt into Ryu's native emoji reaction surface with a generic menu action:
 
@@ -68,12 +73,17 @@ renderer.
 
 ## Contribution reference
 
-Each `contributes` key below is self-contained: Core validates the required fields, tags every
-entry with its owning plugin id, and serves it from `GET /api/plugins/contributions` only while the
-plugin is enabled. The shell owns rendering and dispatch; no entry carries executable UI code.
-Where an entry names a `capability`, it must be one the plugin was granted, and its static `args`
-are passed through unchanged. The complete field list for every key is in the public
-[JSON Schema](https://ryuhq.com/schemas/plugin.json); `bunx ryu validate <dir>` checks against it.
+Each `contributes` key below is self-contained:
+
+- Core validates the required fields and tags every entry with its owning plugin id.
+- Core serves the entry from `GET /api/plugins/contributions` only while the plugin is enabled.
+- The shell owns rendering and dispatch. No entry carries executable UI code.
+- Where an entry names a `capability`, it must be one the plugin was granted. Its static `args`
+  are passed through unchanged.
+
+The complete field list for every key is in the public
+[JSON Schema](https://ryuhq.com/schemas/plugin.json). `bunx ryu validate <dir>` checks a plugin
+against it.
 
 | Key | Each entry | Required fields | Notes |
 |---|---|---|---|
@@ -94,6 +104,16 @@ are passed through unchanged. The complete field list for every key is in the pu
 
 The activation contract is in `apps/core/src/runnable/mod.rs`.
 
+```mermaid
+flowchart TD
+  Event["Activation event fires"] --> Record["Add to FIRED_ACTIVATION_EVENTS"]
+  Record --> Loop["For each enabled plugin"]
+  Loop --> Check{"manifest_should_activate?"}
+  Check -->|"eager, * or matching event"| Register["register_active: runnables live"]
+  Check -->|no| Wait["Held until its event fires"]
+  Enable["Plugin enabled"] --> Check
+```
+
 - `RunnableRegistry::register_active(manifest, fired_events)` activates a plugin's runnables **only**
   if it should wake. `manifest_should_activate` returns `true` for an eager plugin (empty
   `activation_events`), for a `"*"` declaration, or when any declared event is in `fired_events`.
@@ -101,9 +121,12 @@ The activation contract is in `apps/core/src/runnable/mod.rs`.
   plugin enabled **after** an event still sees it via the snapshot.
 - `fire_activation_event(state, event)` (`apps/core/src/server/mod.rs`) is the live driver: it records
   the event, then runs every **enabled** plugin through `register_active` against the new snapshot.
-- `onStartup` is fired once from `apps/core/src/main.rs` after `ServerState` exists.
+- `onStartup` is fired once at boot (`apps/core/src/boot/state_wiring.rs`) after `ServerState`
+  exists.
 - `onChat` is fired once from the first HTTP chat entry, without blocking the streaming response.
-- `onCommand:<id>` is fired by the desktop command-palette activation seam.
+- `onCommand:<id>` is fired by the desktop command-palette activation seam,
+  `POST /api/plugins/activation-event` with `{ "event": "onCommand:<id>" }`. The route accepts
+  only `onCommand:` events.
 - `onRoute` and `onCapabilityCall` are fired when a lazy sidecar/provider is cold-started by its
   first matching request.
 - The `enable` lifecycle path uses the same `register_active` against the live fired set, so enable and
@@ -131,12 +154,15 @@ dispatches on each Policy runnable's `policy_type` when the plugin is enabled or
 | `predict` | Turn Core's system-wide autocomplete on or off. | None |
 | `dictation` | Turn system-wide dictation on or off and sync the `dictation` preference. | None |
 
-`firewall` and `routing` push their section to the running Gateway with no respawn, so in-flight
-requests, rate-limit windows, and caches survive. The flag is also set, so the change survives the
-next spawn. `compression` sets a `gateway_dirty` flag, and `apply_policy` calls
-`gateway.refresh()` once at the end, so enabling several respawn policies is one restart. An
-unknown `policy_type` is a logged no-op. At startup, `main.rs` seeds the flags from each plugin's
-persisted state, so a Gateway restart never reverts what a Policy plugin set.
+- **Live push.** `firewall` and `routing` push their section to the running Gateway with no
+  respawn, so in-flight requests, rate-limit windows, and caches survive. The flag is also set, so
+  the change survives the next spawn.
+- **Respawn.** `compression` sets a `gateway_dirty` flag. `apply_policy` calls `gateway.refresh()`
+  once at the end, so enabling several respawn policies costs one restart.
+- **Unknown types.** An unknown `policy_type` is a logged no-op.
+- **Restarts.** At startup, Core seeds the flags from each plugin's persisted state
+  (`apps/core/src/boot/plugin_boot.rs`), so a Gateway restart never reverts what a Policy plugin
+  set.
 
 <Callout type="info">
   Per the Core-vs-Gateway rule, Core decides whether a feature is active for this install, and the
@@ -145,25 +171,31 @@ persisted state, so a Gateway restart never reverts what a Policy plugin set.
   [Gateway governance](/docs/gateway/governance).
 </Callout>
 
-The built-in Policy plugins (`@ryu/firewall`, `@ryu/routing`, `@ryu/sandbox`, `@ryu/headroom`,
-`@ryu/predict`, and `@ryu/dictation`) are opt-in.
+The built-in Policy plugins `@ryu/firewall`, `@ryu/routing`, `@ryu/sandbox`, `@ryu/headroom`, and
+`@ryu/predict` are opt-in. `@ryu/dictation` is pre-installed and enabled on a fresh install; the
+user can disable it.
 
 ## External-runtime provisioning (scaffold)
 
-A plugin may declare an external language runtime, today a Python venv with pip dependencies, in
-an optional `runtime` block. The provisioner (`apps/core/src/sidecar/external_runtime.rs`) derives
-OS-correct venv paths (`.venv/Scripts/python.exe` on Windows, `.venv/bin/python` elsewhere). Its
-best-effort `provision()` fetches declared assets through Core's download center, creates the venv,
-and runs `pip install`. The enable path calls `provision_external_runtime`
-(`apps/core/src/server/mod.rs`), which spawns the work so a slow `pip install` never blocks the
-enable response.
+A plugin may declare an external language runtime in an optional `runtime` block. Today that is a
+Python venv with pip dependencies. The provisioner is `apps/core/src/sidecar/external_runtime.rs`.
+
+- It derives OS-correct venv paths: `.venv/Scripts/python.exe` on Windows, `.venv/bin/python`
+  elsewhere.
+- Its best-effort `provision()` fetches declared assets through Core's download center, creates
+  the venv, and runs `pip install`.
+- The enable path calls `provision_external_runtime` (`apps/core/src/server/mod.rs`). It spawns
+  the work, so a slow `pip install` never blocks the enable response.
 
 <Callout type="warn">
-  External-runtime provisioning is a scaffold. Only `kind: "python"` is provisionable. Running
-  `pip install` from a manifest is a network and arbitrary-code surface, so a Core-tier
-  (first-party) plugin may provision, and a Community plugin may provision only when the Gateway
-  approved its `runtime:external` grant. Live provisioning is not exercised by tests; the path
-  derivation, asset resolution, and provisioning gate are unit-tested.
+  External-runtime provisioning is a scaffold. Only `kind: "python"` is provisionable.
+
+  Running `pip install` from a manifest is a network and arbitrary-code surface. A Core-tier
+  (first-party) plugin may provision. A Community plugin may provision only when the Gateway
+  approved its `runtime:external` grant.
+
+  Live provisioning is not exercised by tests. The path derivation, asset resolution, and
+  provisioning gate are unit-tested.
 </Callout>
 
 ## Remaining runtime boundaries

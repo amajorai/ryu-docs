@@ -10,12 +10,42 @@ broader scope can only be tightened by a narrower one.
 
 ## LLM traffic inspector
 
-Alongside the regex scanner, the firewall can run an opt-in cheap-LLM inspector that asks a model whether the inbound turn is a prompt injection or leaks PII / secrets, then applies the same `FirewallPolicy` action (Block / Sanitize / Warn) to a flagged turn.
+Alongside the regex scanner, the firewall can run an opt-in cheap-LLM inspector. It asks a model
+whether the inbound turn is a prompt injection or leaks PII or secrets, then applies the same
+`FirewallPolicy` action (Block / Sanitize / Warn) to a flagged turn.
 
-- **Swappable model, resolving to a local tier.** The inspector model resolves through the normal `ModelRouter` and is called via `provider.complete` directly, like smart routing, so it cannot recurse back into the pipeline or the tool loop. Leaving `model` blank resolves to this node's [local classifier tier](/docs/core/classifier-tier), a dedicated small model on its own port, rather than to your chat model or a hosted provider. Any other model id routes like any other request, so you can point inspection at a hosted model by setting `model`.
-- **Fail-open everywhere.** A disabled config, a too-short turn (below `min_chars`), an unconfigured provider, a provider error, a timeout, or an unparseable reply all resolve to "not flagged" (allow) with a warning. A cheap local model emits dirty JSON, so the verdict is parsed defensively (the first `{…}` block; on any failure, allow).
+`InspectorConfig` takes these fields, and like the rest of the firewall it follows the cascade:
 
-The inspector config is part of the cascade (`InspectorConfig` with `enabled`, `model`, `mode`, `min_chars`, `timeout_ms`, `action`), so a locked inspector at a broader scope can only be tightened by a narrower one.
+| Field | Meaning |
+|---|---|
+| `enabled` | Turns the inspector on. Off by default |
+| `model` | The judge model. Blank resolves to the local classifier tier (see below) |
+| `mode` | What to look for: `injection`, `dlp` (PII and secret leaks), or `both` (the default) |
+| `min_chars` | Turns shorter than this many characters are not inspected. Default `40` |
+| `timeout_ms` | Per-inspection timeout. On timeout the request is allowed. Default `1500` |
+| `action` | The `FirewallPolicy` action for a flagged turn. Defaults to block |
+
+### Model choice
+
+The inspector model resolves through the normal `ModelRouter` and is called via `provider.complete`
+directly, like smart routing, so it cannot recurse back into the pipeline or the tool loop.
+
+- Leaving `model` blank resolves to this node's [local classifier tier](/docs/core/classifier-tier),
+  a dedicated small model on its own port, rather than to your chat model or a hosted provider.
+- Any other model id routes like any other request, so you can point inspection at a hosted model
+  by setting `model`.
+
+### Fail-open behavior
+
+These cases all resolve to "not flagged" (allow) with a warning:
+
+- a disabled config;
+- a turn shorter than `min_chars`;
+- an unconfigured provider, a provider error, or a timeout;
+- an unparseable reply.
+
+A cheap local model emits dirty JSON, so the verdict is parsed defensively: the first `{…}` block,
+and on any failure, allow.
 
 ### What the judge adds over the regex scanner
 
@@ -34,10 +64,13 @@ floor can back-stop the cases where it did not.
 
 <Callout type="warn">
 The inspector is **opt-in** (`enabled` defaults off). The `InspectorConfig` stage inspects the
-**prompt**, not the response. Response-side LLM judging is a separate mechanism: output-target
-`LlmJudge` evaluators (toxicity, bias, PII leakage) run against the completion and apply the same
-Block / Sanitize / Warn actions; see [evaluator catalog](/docs/gateway/evaluators). Those evaluators
-read the inspector's model and timeout settings, so configuring this section also configures them.
+**prompt**, not the response.
+
+Response-side LLM judging is a separate mechanism: output-target `LlmJudge` evaluators (toxicity,
+bias, PII leakage) run against the completion and apply the same Block / Sanitize / Warn actions;
+see [evaluator catalog](/docs/gateway/evaluators). Those evaluators read the inspector's model and
+timeout settings, so configuring this section also configures them.
+
 A provider that cannot produce a verdict may fall back to deterministic scanning. Authentication,
 DLP, model-policy, quota and credit denials remain enforced; a failed governance check is not an
 allow verdict.
@@ -47,15 +80,30 @@ allow verdict.
 
 The hazard screener classifies what a request sends upstream, and what the model sends back,
 against the MLCommons hazard categories `S1` to `S14` and prompt attacks. It runs after the regex
-firewall, before any provider is called, on every attempt the Gateway makes: a fallback attempt, a
-tool round and text a skill, compression or pool handoff adds are screened again. Long text is
-classified in overlapping chunks, so nothing is missed at a chunk boundary. Text it has already
-classified beside the same earlier conversation is answered from a per-node cache, so a fallback
-attempt does not classify an unchanged body twice, and a later turn mostly classifies only the
-messages it adds and its tool definitions. The same text placed after different earlier messages is
-classified again.
+firewall and before any provider is called.
 
-The screener is pluggable. Each backend answers the same per-category scores, and a fixed decision
+It screens every attempt the Gateway makes. A fallback attempt, a tool round, and text that a
+skill, compression or pool handoff adds are screened again.
+
+- **Chunking.** Long text is classified in overlapping chunks, so nothing is missed at a chunk
+  boundary.
+- **Cache.** Text already classified beside the same earlier conversation is answered from a
+  per-node cache. A fallback attempt does not classify an unchanged body twice, and a later turn
+  mostly classifies only the messages it adds and its tool definitions.
+- The same text placed after different earlier messages is classified again.
+
+```mermaid
+flowchart LR
+  TEXT["Request or response text"] --> REGEX["Regex firewall"]
+  REGEX --> BACKEND["Screener backend"]
+  BACKEND --> SCORES["Per-category scores"]
+  SCORES --> TABLE["Fixed decision table"]
+  TABLE -->|"block category"| BLOCK["403 refusal"]
+  TABLE -->|"other category"| FLAG["Flag recorded, request continues"]
+  TABLE -->|"clean"| PASS["Provider call"]
+```
+
+The screener is pluggable. Each backend answers the same per-category scores. A fixed decision
 table turns scores into an action, never the model's own allow or block answer:
 
 | Backend `kind` | What it is |
@@ -96,7 +144,9 @@ allow_remote_processor = true
 
 Each value can also come from an environment variable (`base_url_env`, `model_env`,
 `weights_sha256_env`). A backend that cannot be built, for example a local decision model with no
-weights hash, is left out and the Gateway still starts. On your own Gateway:
+weights hash, is left out and the Gateway still starts.
+
+On your own Gateway:
 
 - `S4`, `S9` and `S12` block, and every other category, prompt attacks included, is recorded as
   a flag. A block returns `403` with `code: "tenant_policy_blocked"` and `layer: "node"`. Responses
@@ -139,10 +189,11 @@ model_env = "RYU_SCREENER_GUARD_MODEL"
 weights_sha256_env = "RYU_SCREENER_GUARD_SHA256"
 ```
 
-Use the ids `decision_local` and `guard_text`, because they are the ids your Gateway's own screener roles
-use. The guard model is never registered as a provider, so no request can be routed to it. To use
-your own guard engine instead, set `RYU_SCREENER_GUARD_URL` and `RYU_SCREENER_GUARD_MODEL` in
-Core's environment and Core starts no guard model.
+Use the ids `decision_local` and `guard_text`, because they are the ids your Gateway's own screener
+roles use. The guard model is never registered as a provider, so no request can be routed to it.
+
+To use your own guard engine instead, set `RYU_SCREENER_GUARD_URL` and `RYU_SCREENER_GUARD_MODEL`
+in Core's environment, and Core starts no guard model.
 
 A node's screener is always your own policy. Ryu's platform policy never applies to a self-hosted
 or bring-your-own-key node.

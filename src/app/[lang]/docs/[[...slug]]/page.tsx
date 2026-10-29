@@ -18,7 +18,7 @@ import { DocsTOC } from "@/components/docs-toc";
 import { Feedback } from "@/components/feedback/client";
 import { FeedbackText } from "@/components/feedback/text";
 import { JsonLd } from "@/components/json-ld";
-import { getMDXComponents, VersionedAnchor } from "@/components/mdx";
+import { DocsAnchor, getMDXComponents } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
 import { hasLocalizedDocsContent } from "@/lib/canonical-docs";
 import {
@@ -26,11 +26,8 @@ import {
   submitDocsFeedback,
 } from "@/lib/docs-feedback";
 import {
-  archivedDocsUrl,
   docsPath,
   docsPathForLocale,
-  docsPathForVersion,
-  isDocsVersionSlug,
   isVersionSegment,
 } from "@/lib/docs-version";
 import { tocTitle } from "@/lib/fumadocs-translations";
@@ -68,34 +65,18 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
 
   const lang = params.lang;
   const slugs = params.slug ?? [];
-  if (
-    slugs.length === 0 ||
-    (isDocsVersionSlug(slugs[0]) && slugs.length === 1)
-  ) {
+  if (slugs.length === 0) {
     permanentRedirect(docsPathForLocale(lang, "start-here"));
   }
 
-  if (!isDocsVersionSlug(slugs[0])) {
-    // A STALE version segment must be dropped, not carried along. This used to
-    // pass `slugs` through whole, so `/docs/0.1.1/start-here` redirected to
-    // `/docs/<current>/0.1.1/start-here` — a path with a version segment buried
-    // in the middle, which resolves to nothing and 404s. Every deep link
-    // published under a previous release died that way at each bump.
-    //
-    // If that version has an archived deployment, send the reader there: those
-    // docs actually describe the release they asked for. Otherwise fall back to
-    // the same page on the current version, losing the version but never the
-    // reader.
-    if (isVersionSegment(slugs[0])) {
-      const rest = slugs.slice(1);
-      const archived = archivedDocsUrl(slugs[0]);
-      permanentRedirect(
-        archived
-          ? `${archived}${docsPathForVersion(slugs[0], ...rest)}`
-          : docsPathForLocale(lang, ...rest),
-      );
-    }
-    permanentRedirect(docsPathForLocale(lang, ...slugs));
+  // Docs URLs carry no version. next.config.mjs already redirects a
+  // version-shaped first segment (a link published by an older release); this
+  // covers any request that reaches the page route with one anyway.
+  if (isVersionSegment(slugs[0])) {
+    const rest = slugs.slice(1);
+    permanentRedirect(
+      docsPathForLocale(lang, ...(rest.length > 0 ? rest : ["start-here"])),
+    );
   }
 
   const page = getPage(slugs, lang);
@@ -215,7 +196,7 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
                   components={getMDXComponents(
                     {
                       // this allows you to link to other pages with relative file paths.
-                      a: createRelativeLink(source, page, VersionedAnchor),
+                      a: createRelativeLink(source, page, DocsAnchor),
                       // renders the interactive OpenAPI reference in generated API pages
                       // with the current page's schema preloaded server-side.
                       APIPage: async (props: GeneratedPageProps) => (

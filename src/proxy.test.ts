@@ -30,38 +30,38 @@ describe("Fumadocs locale proxy", () => {
       "http://localhost:4010/en/",
     );
     expect(
-      runProxy("/docs/0.4.0/start-here").headers.get("x-middleware-rewrite"),
-    ).toBe("http://localhost:4010/en/docs/0.4.0/start-here");
+      runProxy("/docs/start-here").headers.get("x-middleware-rewrite"),
+    ).toBe("http://localhost:4010/en/docs/start-here");
   });
 
   test("leaves a non-default locale on its localized route", () => {
-    const response = runProxy("/es/docs/0.4.0/start-here");
+    const response = runProxy("/es/docs/start-here");
 
     expect(response.headers.get("x-middleware-next")).toBe("1");
   });
 
   test("negotiates localized Markdown through the matching page projection", () => {
-    const response = runProxy("/es/docs/0.4.0/start-here", "text/markdown");
+    const response = runProxy("/es/docs/start-here", "text/markdown");
 
     expect(response.headers.get("vary")).toBe("Accept");
     expect(response.headers.get("x-middleware-rewrite")).toBe(
-      "http://localhost:4010/llms.mdx/docs/es/0.4.0/start-here",
+      "http://localhost:4010/llms.mdx/docs/es/start-here",
     );
   });
 
   test("rewrites the default docs path without redirecting to itself", () => {
-    const response = runProxy("/docs/0.4.0/gateway/batches");
+    const response = runProxy("/docs/gateway/batches");
 
     expect(response.status).toBe(200);
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("x-middleware-rewrite")).toBe(
-      "http://localhost:4010/en/docs/0.4.0/gateway/batches",
+      "http://localhost:4010/en/docs/gateway/batches",
     );
   });
 
   test("consumes the internal English rewrite marker before the page handler", () => {
     const response = proxy(
-      new NextRequest("http://localhost:4010/en/docs/0.4.0/gateway/batches", {
+      new NextRequest("http://localhost:4010/en/docs/gateway/batches", {
         headers: { "x-fumadocs-default-english-rewrite": "1" },
       }),
       event,
@@ -83,7 +83,7 @@ describe("Fumadocs locale proxy", () => {
     expect(config.matcher).not.toContain("/:locale/:path*");
   });
   test("the internal English rewrite resolves instead of redirecting back to itself", () => {
-    for (const path of ["/", "/docs/0.4.0/start-here"]) {
+    for (const path of ["/", "/docs/start-here"]) {
       const rewrite = runProxy(path).headers.get("x-middleware-rewrite");
       expect(rewrite).not.toBeNull();
       if (rewrite === null) {
@@ -96,9 +96,9 @@ describe("Fumadocs locale proxy", () => {
   });
 
   test("English-prefixed Markdown still uses content negotiation", () => {
-    const response = runProxy("/en/docs/0.4.0/start-here", "text/markdown");
+    const response = runProxy("/en/docs/start-here", "text/markdown");
     expect(response.headers.get("x-middleware-rewrite")).toBe(
-      "http://localhost:4010/llms.mdx/docs/en/0.4.0/start-here",
+      "http://localhost:4010/llms.mdx/docs/en/start-here",
     );
   });
 
@@ -123,8 +123,7 @@ describe("Accept negotiation shared with the main site", () => {
   // proxy, through fumadocs-core's negotiator) and ryuhq.com (its own parser)
   // answer the same Accept header. Pin both sites to one table so a negotiator
   // upgrade or a main-site parser change cannot silently split the two.
-  const markdownProjection =
-    "http://localhost:4010/llms.mdx/docs/0.4.0/start-here";
+  const markdownProjection = "http://localhost:4010/llms.mdx/docs/start-here";
   const cases: [accept: string, docs: boolean, main: boolean][] = [
     ["text/markdown", true, true],
     // A zero weight in any spelling declines Markdown on both sites, and so
@@ -178,7 +177,7 @@ describe("Accept negotiation shared with the main site", () => {
       ["TEXT/HTML", false, false],
     ];
     for (const [accept, docs, main] of caseCases) {
-      const response = runProxy("/docs/0.4.0/start-here", accept);
+      const response = runProxy("/docs/start-here", accept);
       expect({
         accept,
         docs:
@@ -189,15 +188,15 @@ describe("Accept negotiation shared with the main site", () => {
     }
     // The localized projection follows the same rule.
     expect(
-      runProxy("/es/docs/0.4.0/start-here", "TEXT/MARKDOWN").headers.get(
+      runProxy("/es/docs/start-here", "TEXT/MARKDOWN").headers.get(
         "x-middleware-rewrite",
       ),
-    ).toBe("http://localhost:4010/llms.mdx/docs/es/0.4.0/start-here");
+    ).toBe("http://localhost:4010/llms.mdx/docs/es/start-here");
   });
 
   test("both sites read every Markdown weight the same way", () => {
     for (const [accept, docs, main] of cases) {
-      const rewrite = runProxy("/docs/0.4.0/start-here", accept).headers.get(
+      const rewrite = runProxy("/docs/start-here", accept).headers.get(
         "x-middleware-rewrite",
       );
       expect({

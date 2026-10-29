@@ -204,7 +204,8 @@ export async function listFiles(
 export const pages: Page[] = await Promise.all(
   (await listFiles(sdkRoot, ".mdx")).map(async (path) => ({
     content: await readFile(path, "utf8"),
-    file: relative(sdkRoot, path),
+    // POSIX separators, so `page("frameworks/nextjs.mdx")` resolves on Windows.
+    file: relative(sdkRoot, path).replaceAll("\\", "/"),
   })),
 );
 

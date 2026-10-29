@@ -5,7 +5,7 @@ tags: ["agents", "multi-agent", "handoff", "supervisor", "sdk"]
 ---
 
 The TypeScript SDK's `Agent` can work with other agents in three ways. All of them run in your own
-process on the SDK-owned loop (an `Agent` without a `sessionId`); every model call still routes
+process on the SDK-owned loop (an `Agent` without a `sessionId`). Every model call still routes
 through the Gateway, and remote Ryu tools still run through Core.
 
 | Pattern | Who stays in charge | Use it when |
@@ -123,19 +123,49 @@ for await (const event of network.stream("My refund never arrived.")) {
 | `returnTo` | After any other member finishes a turn, return control to this agent |
 
 Without `returnTo` the network behaves like a swarm: the run ends when the active agent answers
-without handing off. The final `result` event includes `activations`, the summed model `steps`
-and `usage`, the shared `messages` transcript, and `maxStepsReached`, which is `true` when the
-cap ended the run before an agent answered. `network.generate()` returns the same fields and
-throws when a member reports an error.
+without handing off.
+
+```mermaid
+flowchart TD
+  Start["Input"] --> Turn["Active agent turn"]
+  Turn --> Handoff{"Handoff called?"}
+  Handoff -->|yes| Target["Target becomes active"]
+  Target --> Turn
+  Handoff -->|no| Return{"returnTo set and another agent answered?"}
+  Return -->|yes| Back["returnTo becomes active"]
+  Back --> Turn
+  Return -->|no| Done["result event"]
+  Cap["maxSteps reached"] -.-> Done
+```
+
+The final `result` event includes these fields:
+
+- `activations`, the number of agent turns used;
+- the summed model `steps` and `usage`;
+- the shared `messages` transcript;
+- `maxStepsReached`, which is `true` when the cap ended the run before an agent answered.
+
+`network.generate()` returns the same fields and throws when a member reports an error.
 
 ## Supervisors
 
 `createSupervisor` builds a supervisor agent that delegates to member agents. The supervisor gets
 one transfer tool per member, named `transfer_to_<name>` and described from the member's
-`description`. After each member turn, control returns to the supervisor, which delegates again
-or writes the final answer. The member's reply stays in the transcript as an assistant message,
-followed by a short user-role note naming the member, so the supervisor's next model call never
-ends on an assistant message.
+`description`.
+
+After each member turn, control returns to the supervisor, which delegates again or writes the
+final answer. The member's reply stays in the transcript as an assistant message. A short
+user-role note naming the member follows it, so the supervisor's next model call never ends on an
+assistant message.
+
+```mermaid
+sequenceDiagram
+  participant S as Supervisor
+  participant M as Member agent
+  S->>M: transfer_to_member
+  M-->>S: Reply plus return note
+  S->>S: Delegate again or answer
+```
 
 ```typescript
 import { createSupervisor } from "@ryuhq/sdk";
@@ -151,9 +181,16 @@ console.log(result.agent, result.text);
 ```
 
 `createSupervisor` accepts the usual `Agent` options for the supervisor itself (`model`, `node`,
-`core`, `middleware`, `approvalHandler`, and so on). `instructions` replaces the default
-supervisor prompt; the team roster is always appended. `tools` adds tools beside the transfer
-tools, and `supervisorMaxSteps` bounds the supervisor's own model rounds per turn.
+`core`, `middleware`, `approvalHandler`, and so on). It adds these options:
+
+| Option | Meaning |
+|---|---|
+| `agents` | Member agents the supervisor routes between |
+| `instructions` | Replaces the default supervisor prompt. The team roster is always appended. |
+| `tools` | Extra tools beside the transfer tools |
+| `maxSteps` | Cap on agent turns, supervisor turns included (default 10) |
+| `supervisorMaxSteps` | The supervisor's own model rounds per turn (default 10) |
+| `name` | Supervisor name (default `supervisor`) |
 
 A network or supervisor can itself be a tool of another agent:
 
@@ -176,10 +213,11 @@ and use it as a tool the same way.
 - Agents with a `sessionId` run inside Core and cannot take part in a handoff or network. Use
   them through `asTool()` instead.
 - A member that pauses for approval without an `approvalHandler`, or for an account connection,
-  ends the network run after its `approval_requested` or `auth_required` event. To answer
-  approvals for every member that has no handler of its own, pass one for the run:
+  ends the network run after its `approval_requested` or `auth_required` event.
+- To answer approvals for every member that has no handler of its own, pass one for the run:
   `network.stream(input, signal, { approvalHandler })`. `Agent.stream()` takes the same third
-  argument and passes it on to handoff targets, and `agent.streamMessages(messages, {
-  approvalHandler, followHandoffs: true })` continues a transcript the way `stream()` would.
+  argument and passes it on to handoff targets.
+- `agent.streamMessages(messages, { approvalHandler, followHandoffs: true })` continues a
+  transcript the way `stream()` would.
   [`createRyuServer`](/docs/extend/develop/sdk/server#tool-approvals) uses this to route approvals
   to its `/approvals` route.

@@ -6,11 +6,12 @@ tags: ["managed-agents", "events", "sse", "standalone"]
 
 Every Managed Agents session has an append-only event log. You send input as
 user events, and Ryu appends the agent's output, status changes, errors, and
-usage as further events. Read the log by page with
-`GET /sessions/{sessionId}/events`, or follow it live with the Server-Sent
-Events (SSE) stream at `GET /sessions/{sessionId}/stream`. Paths are relative
-to `/api/v1/managed-agents`. Authentication and errors are on the
-[Managed Agents API](/docs/standalone/managed-agents-api) page.
+usage as further events.
+
+Read the log by page with `GET /sessions/{sessionId}/events`, or follow it live
+with the Server-Sent Events (SSE) stream at `GET /sessions/{sessionId}/stream`.
+Paths are relative to `/api/v1/managed-agents`. Authentication and errors are
+on the [Managed Agents API](/docs/standalone/managed-agents-api) page.
 
 ## Event envelope
 
@@ -62,6 +63,21 @@ as a `[non-text output omitted]` text block.
 | `failed` | No further input can succeed in this session, for example after the credential was rejected or the provider lost the session. | Yes |
 | `canceled` | The session was closed with `cancel`. | Yes |
 
+```mermaid
+stateDiagram-v2
+  [*] --> pending
+  pending --> idle: ready, no input queued
+  pending --> running: input queued
+  pending --> failed: still pending after 5 minutes
+  idle --> running: new input
+  running --> idle: turn ends (stopReason)
+  running --> failed: unrecoverable error
+  idle --> completed: complete, or 7 days idle
+  pending --> canceled: cancel
+  running --> canceled: cancel
+  idle --> canceled: cancel
+```
+
 A new session starts as `pending`. When the backend is ready and no input is
 queued, the session becomes `idle` with `detail` set to `"provisioned"`. When
 input is already queued, the session goes straight to `running`, so no `idle`
@@ -70,9 +86,11 @@ appears between an input and the turn that answers it. A session that is still
 
 The `detail` field is `"provisioning"`, `"provisioned"`, `"rescheduling"` (the
 provider retries the turn after a transient error), `"closing"` (a cancel or
-complete has started), or `null`. The `inputSeq` field is the highest user
-event `seq` that the backend had accepted. To match an `idle` to your input,
-wait for an `idle` whose `inputSeq` is at least the `seq` of your input.
+complete has started), or `null`.
+
+The `inputSeq` field is the highest user event `seq` that the backend had
+accepted. To match an `idle` to your input, wait for an `idle` whose `inputSeq`
+is at least the `seq` of your input.
 
 `cancel` and `complete` start a close. Ryu removes the provider resources,
 records the final usage, and then appends the terminal `session.status`. After
@@ -158,18 +176,25 @@ same fields.
 The `billing` object has `mode` (`"platform"`, `"byok"`, or `"none"`) and
 `amountMicroUsd`. With Ryu-provided credentials, `amountMicroUsd` is the exact
 amount charged to the wallet for this delta, including any Ryu service fee.
-With BYOK credentials and nodes it is 0. Usage that is measured after the
-terminal status is still billed, but it does not appear in the event log. See
-[Ryu Managed Agents](/docs/standalone/managed-agents) for who bills each mode.
+With BYOK credentials and nodes it is 0.
+
+Usage that is measured after the terminal status is still billed, but it does
+not appear in the event log. See
+[Ryu Managed Agents](/docs/standalone/managed-agents#billing) for who bills each mode.
 
 ## Send input
 
 `POST /sessions/{sessionId}/events` takes `{"events": [...]}` with one of three
-shapes: 1 to 8 `user.message` events, exactly 1 `user.interrupt`, or 1 to 8
-answers (`user.custom_tool_result` and `user.tool_approval` events) with
-different `toolUseId` values. Any other mix gets `400 invalid_request`. The response is `202` with the appended events
-in `data`. Ryu appends each user event before the backend sees it, so every
-reaction to an input has a higher `seq` than the input.
+shapes:
+
+- 1 to 8 `user.message` events;
+- exactly 1 `user.interrupt`;
+- 1 to 8 answers (`user.custom_tool_result` and `user.tool_approval` events)
+  with different `toolUseId` values.
+
+Any other mix gets `400 invalid_request`. The response is `202` with the
+appended events in `data`. Ryu appends each user event before the backend sees
+it, so every reaction to an input has a higher `seq` than the input.
 
 The checks run in this order.
 
@@ -228,9 +253,10 @@ such an agent on another backend gets `422 unsupported_for_backend` with
 When the agent wants to run the tool, Ryu appends the `agent.tool_use` with the
 call's input, then an `agent.tool_approval_request` with the same `toolUseId`,
 and adds the id to `pendingToolUseIds`. The turn ends with `requires_action`.
-Send one `user.tool_approval` per request. `allow` runs the call and the turn
-continues; `deny` refuses it, and the model sees your `message` (or a default
-denial text). Ryu accepts one answer per `toolUseId`.
+
+Send one `user.tool_approval` per request; Ryu accepts one answer per
+`toolUseId`. `allow` runs the call and the turn continues. `deny` refuses it,
+and the model sees your `message` (or a default denial text).
 
 A request that is not answered by its `expiresAt` (10 minutes after it was
 appended) is denied by Ryu: the log gets a `session.error` with the code
@@ -245,9 +271,8 @@ seq 16 session.status              status running, inputSeq 15
 ```
 
 With `@ryuhq/client`, answer with `client.sessions.respondToApproval(sessionId,
-toolUseId, "allow")`. Backends other than `anthropic`, and agents that do not
-set `requireApproval`, keep the default: tools run without asking, and an
-unexpected provider approval request is denied with `tool_approval_unsupported`.
+toolUseId, "allow")`. For the default on other backends, see
+[Tool approval](/docs/standalone/managed-agents#tool-approval).
 
 ## Read events by page
 
@@ -261,10 +286,11 @@ unexpected provider approval request is denied with `tool_approval_unsupported`.
 | `types` | A comma-separated list of event types. An unknown type gets `400 invalid_request`. |
 
 The response is `{ "data": [...], "hasMore": boolean, "nextAfter": number, "headSeq": number }`.
-`nextAfter` is the last returned `seq`, or `after` when the page is empty.
-`headSeq` is the newest `seq` in the log when the page was read. A page also
-stops before the event that would take it past 4 MiB, and `hasMore` is then
-`true`. The first event of a page is always included.
+
+- `nextAfter` is the last returned `seq`, or `after` when the page is empty.
+- `headSeq` is the newest `seq` in the log when the page was read.
+- A page also stops before the event that would take it past 4 MiB, and
+  `hasMore` is then `true`. The first event of a page is always included.
 
 An `after` beyond the newest event is not an error. The page is empty, and
 `nextAfter` equals `after`. When a page of a live session is empty, Ryu can
@@ -276,7 +302,9 @@ answers.
 `GET /sessions/{sessionId}/stream` first sends every event with a `seq` greater
 than the resume position, then keeps sending new events as they arrive. Set the
 resume position with `?after=<seq>` or the `Last-Event-ID` header. When both
-are present, `Last-Event-ID` wins. An invalid position gets a JSON
+are present, `Last-Event-ID` wins.
+
+An invalid position gets a JSON
 `400 invalid_cursor` before the stream starts. A position beyond the newest
 event is accepted, and the stream waits for new events.
 
@@ -306,11 +334,15 @@ data: {"sessionId":"msess_…","status":"completed","headSeq":42,"reason":"termi
 
 The server can close a stream without an `end` frame: after 600 seconds, when
 an API server restarts, or after a read error. Reconnect with `Last-Event-ID`.
-Concurrent streams are limited to 4 for each session, 8 for each caller, and
-16 for each organization on one API server, and 512 in total on one API
-server. Over a limit, the request gets `429 stream_limit_reached` with
-`Retry-After: 5`, and `details.scope` is `"session"`, `"principal"`,
-`"organization"`, or `"replica"`.
+
+| Concurrent streams | Limit | `details.scope` |
+|---|---|---|
+| Per session | 4 | `"session"` |
+| Per caller | 8 | `"principal"` |
+| Per organization on one API server | 16 | `"organization"` |
+| In total on one API server | 512 | `"replica"` |
+
+Over a limit, the request gets `429 stream_limit_reached` with `Retry-After: 5`.
 
 ## Reconnect and deduplicate
 

@@ -42,26 +42,52 @@ PUT  /api/predict/config
 
 `POST /api/predict/complete` takes the text before your cursor and returns a continuation
 (`crates/core/predict/src/api.rs`). It uses the same side-model path as `/btw`, so the prediction
-goes through the Gateway and is governed like every other model call. The enabled check runs
-first. With the app disabled, the whole `/api/predict/*` surface returns `503` and Core never
-calls a model.
+goes through the Gateway and is governed like every other model call.
 
-Core resolves the model in this order: the picked agent's bound chat model, then the configured
-model, then the `RYU_PREDICT_MODEL` or `RYU_DEFAULT_LLM_MODEL` env var, then the built-in default.
+The enabled check runs first. With the app disabled, the whole `/api/predict/*` surface returns
+`503` and Core never calls a model.
+
+Core resolves the model in this order:
+
+1. The picked agent's bound chat model.
+2. The configured model.
+3. The `RYU_PREDICT_MODEL` or `RYU_DEFAULT_LLM_MODEL` env var.
+4. The built-in default.
+
 Leave the model blank in the settings tab to use the system default.
 
-Core also enforces privacy server-side (`crates/core/predict/src/lib.rs`). Password and other
-secure fields (`password`, `secure`, `pin`, `otp`, `cvv`, `secret`, and similar markers) are on a
-denylist and are never read. The per-app allowlist is matched on the app basename, case-insensitive.
-The denylist always wins, whatever you put in the allowlist.
+Core also enforces privacy server-side (`crates/core/predict/src/lib.rs`):
+
+- Password and other secure fields (`password`, `secure`, `pin`, `otp`, `cvv`, `secret`, and
+  similar markers) are on a denylist and are never read.
+- The per-app allowlist is matched on the app basename, case-insensitive.
+- The denylist always wins, whatever you put in the allowlist.
 
 ## The system-wide overlay
 
 A separate companion process, `apps-store/predict/`, draws the inline ghost text. It is a Win32
 process that reads the caret through UI Automation, debounces, calls `POST /api/predict/complete`,
-and paints a click-through overlay at the cursor. A low-level keyboard hook
-(`apps-store/predict/src/hook.rs`) swallows **Tab** only while a suggestion is showing, so Tab
-works normally when there is nothing to accept.
+and paints a click-through overlay at the cursor.
+
+```mermaid
+sequenceDiagram
+  participant O as Overlay
+  participant C as Core
+  participant G as Gateway
+  participant M as Model
+  O->>O: Read caret, wait for debounce
+  O->>C: POST /api/predict/complete
+  C->>C: Enabled check, denylist, allowlist
+  C->>G: Side-model request
+  G->>M: Routed call
+  M-->>G: Continuation
+  G-->>C: Continuation
+  C-->>O: Suggestion
+  O->>O: Paint ghost text, Tab accepts
+```
+
+A low-level keyboard hook (`apps-store/predict/src/hook.rs`) swallows **Tab** only while a
+suggestion is showing, so Tab works normally when there is nothing to accept.
 
 Use the **Autocomplete** settings tab to shape it:
 
@@ -73,22 +99,27 @@ Use the **Autocomplete** settings tab to shape it:
 
 These settings belong to the selected node. Switching nodes loads that node's saved agent, model,
 allowlist, and debounce. An unfinished save on the previous node does not change the new node's
-controls. While loading or saving, the controls wait for the request to finish. If loading fails,
-choose **Retry** before editing. If saving fails, the saved settings stay active, and **Retry**
-applies the same change again.
+controls.
+
+While loading or saving, the controls wait for the request to finish. If loading fails, choose
+**Retry** before editing. If saving fails, the saved settings stay active, and **Retry** applies the
+same change again.
 
 ## The in-editor copilot
 
 Inside a Spaces document, the editor has its own ghost-text completion (PlateJS). It is a
-separate surface from the system-wide overlay. It is always available and is not gated by the
-Autocomplete app. It does not stream: Core returns the completion as plain JSON and the editor
-inserts it inline.
+separate surface from the system-wide overlay:
+
+- It is always available and is not gated by the Autocomplete app.
+- It does not stream. Core returns the completion as plain JSON and the editor inserts it inline.
 
 Configure the model behind it under **Settings → Editor & Embeddings → Inline AI editing**, not on
 the Autocomplete tab. You can also open the same node-scoped card from **Gateway settings →
-Apps → Spaces → Editor & Embeddings**. Choose an agent to use its model, or **Custom model** to
-enter a Gateway-routed model id directly. The optional Gateway base URL defaults to the active
-node's Gateway when blank. **Save** applies the choice to open editors immediately.
+Apps → Spaces → Editor & Embeddings**.
+
+- Choose an agent to use its model, or **Custom model** to enter a Gateway-routed model id directly.
+- The optional Gateway base URL defaults to the active node's Gateway when blank.
+- **Save** applies the choice to open editors immediately.
 
 If the saved preference cannot load, use **Retry** in the card. A failed Save keeps the current
 editor configuration active and leaves the draft in place so you can correct it or save again.

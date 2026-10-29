@@ -19,6 +19,17 @@ event webhooks, and hands outbound mail to the configured transport.
 Mail can run inside a Ryu node or as its own process. Both shapes use the same
 `/api/mail/*` contract, but they have different process and credential owners.
 
+<Figure name="mail" />
+
+```mermaid
+flowchart LR
+  Sender["Inbound provider"] -->|"signed POST"| Mail["Ryu Mail"]
+  Client["Agent or app"] -->|"/api/mail/*"| Mail
+  Mail --> Store["mail.db and blobs"]
+  Mail -->|"signed events"| Hooks["Your webhooks"]
+  Mail --> Transport["Outbound transport"]
+```
+
 ## Choose a deployment shape
 
 | Shape | Credential | API ownership |
@@ -58,48 +69,65 @@ RYU_SMTP_FROM=agent@example.com
 RYU_SMTP_TLS=starttls
 ```
 
-`RYU_SMTP_TLS` is `starttls` (the default), `implicit` for SMTPS (the default on
-port 465), or `none`. With `none`, Mail authenticates only to a relay on the same
-host (`localhost` or a loopback address). For a remote relay it logs an error at
-startup and leaves sending unconfigured instead of sending the password
-unencrypted. The older `RYU_SMTP_STARTTLS=false` is read as `none`, except on
-port 465, which stays implicit TLS.
+`RYU_SMTP_TLS` takes one of three values:
+
+| Value | Meaning |
+|---|---|
+| `starttls` | The default |
+| `implicit` | SMTPS, the default on port 465 |
+| `none` | No encryption. Mail authenticates only to a relay on the same host (`localhost` or a loopback address) |
+
+With `none` and a remote relay, Mail logs an error at startup and leaves
+sending unconfigured instead of sending the password unencrypted. The older
+`RYU_SMTP_STARTTLS=false` is read as `none`, except on port 465, which stays
+implicit TLS.
 
 The process refuses protected API access without its bearer, and refuses an
 outbound webhook destination that is not public HTTPS. The full route,
 signature, WebSocket, attachment, and retry contract is in [Ryu Mail API](/docs/standalone/mail-api).
 
-To expose the process beyond the host, set a standalone token and
-put TLS and rate limiting in front of it. A non-loopback bind without
-`RYU_MAIL_API_TOKEN` is refused, and so is one whose token is shorter than 32
-characters or a documentation placeholder. The Mail database and attachment
-blobs remain owned by this process. They live in `plugin-data/@ryu+mail/` under
-`RYU_DIR` (`mail.db` plus a `blobs/` folder), the same place a Ryu node keeps
-them.
+### Expose the service and protect its data
 
-The database holds every message plus the inbound and webhook signing secrets,
-so Mail creates it and the attachment store readable only by the service user
-(files `0600`, directories `0700`) and narrows an existing store when it opens
-it. Run the service under a dedicated account that owns `RYU_DIR`.
+To expose the process beyond the host, set a standalone token and put TLS and
+rate limiting in front of it. A non-loopback bind is refused when
+`RYU_MAIL_API_TOKEN` is missing, shorter than 32 characters, or a documentation
+placeholder.
+
+The Mail database and attachment blobs remain owned by this process. They live
+in `plugin-data/@ryu+mail/` under `RYU_DIR` (`mail.db` plus a `blobs/` folder),
+the same place a Ryu node keeps them.
+
+The database holds every message plus the inbound and webhook signing secrets.
+Mail therefore creates it and the attachment store readable only by the
+service user (files `0600`, directories `0700`), and narrows an existing store
+when it opens it. Run the service under a dedicated account that owns
+`RYU_DIR`.
 
 ### Sealing stored secrets
 
 Mail always stores inbox inbound secrets, webhook signing secrets, and webhook
 custom header values encrypted, with ChaCha20-Poly1305 under a key derived for
-Mail. Run inside Ryu, Mail receives that key when Ryu starts it. Run as a
-standalone service, set `RYU_MASTER_KEY` to a base64-encoded 32-byte key, for
-example from `openssl rand -base64 32`, and Mail derives its key from it. On the
-first start with a key, Mail encrypts the secrets an earlier version stored in
-plaintext, including secrets an earlier standalone Mail encrypted with the
-previous `RYU_MASTER_KEY` scheme. Messages and attachments are not encrypted.
+Mail. Messages and attachments are not encrypted.
+
+- **Inside Ryu**, Mail receives that key when Ryu starts it.
+- **As a standalone service**, set `RYU_MASTER_KEY` to a base64-encoded 32-byte
+  key, for example from `openssl rand -base64 32`, and Mail derives its key
+  from it.
+
+On the first start with a key, Mail encrypts the secrets an earlier version
+stored in plaintext. That includes secrets an earlier standalone Mail encrypted
+with the previous `RYU_MASTER_KEY` scheme.
 
 Keep the key outside `RYU_DIR`, in the secret store that starts the service,
-and keep supplying the same value. Mail refuses to start when the key is not
-32 bytes of base64, when it cannot open the stored secrets, or when a store
-with encrypted secrets starts without it. Without any key, Mail starts but
-refuses to create an inbox or webhook rather than store its secret in
-plaintext. The encrypted secrets cannot be recovered without the key, so back
-it up separately from backups of `RYU_DIR`. See
+and keep supplying the same value. Mail refuses to start when:
+
+- the key is not 32 bytes of base64;
+- it cannot open the stored secrets;
+- a store with encrypted secrets starts without the key.
+
+Without any key, Mail starts but refuses to create an inbox or webhook rather
+than store its secret in plaintext. The encrypted secrets cannot be recovered
+without the key, so back it up separately from backups of `RYU_DIR`. See
 [encryption at rest](/docs/core/encryption-at-rest) for how Ryu derives
 per-app keys.
 
@@ -110,8 +138,8 @@ Hosted organization members manage Agent Inboxes from the Ryu dashboard's
 does not receive a Mail service bearer or an inbound HMAC secret.
 
 A hosted organization has one permanent mailbox, which an admin with
-`mail.manage` claims once, and each agent claims its own permanent address on
-it, from chat with the built-in `agent_inbox` tools or through the hosted API.
+`mail.manage` claims once. Each agent claims its own permanent address on it,
+from chat with the built-in `agent_inbox` tools or through the hosted API.
 Hosted organizations no longer create separate inboxes.
 
 In the **Products** view, the Ryu Mail card works like this:
@@ -136,26 +164,36 @@ mailbox, agent addresses, revocation, and send approval. The self-hosted
 `ryu-mail` service described on this page has no organizations or agent
 addresses and keeps its own inbox API.
 
+### Service home page
+
 The standalone Mail home at `GET /` returns a short JSON description of the
-service: its name, version, and the `/health` path. It redirects people only
-when `RYU_PRODUCT_DASHBOARD_URL` is set to a non-empty URL, such as your own
-console or landing page. Ryu's hosted deployment sets it to the Ryu dashboard,
-so a self-hosted Mail never sends visitors to Ryu by default. The `/api/mail/*`
-routes remain the service contract for authenticated callers and the inbound
-webhook.
+service: its name, version, and the `/health` path.
+
+- It redirects people only when `RYU_PRODUCT_DASHBOARD_URL` is set to a
+  non-empty URL, such as your own console or landing page.
+- Ryu's hosted deployment sets it to the Ryu dashboard, so a self-hosted Mail
+  never sends visitors to Ryu by default.
+- The `/api/mail/*` routes remain the service contract for authenticated
+  callers and the inbound webhook.
 
 ## Pricing and hosted limits
 
 Ryu Mail has a free hosted baseline of **1 mailbox, 3 agent addresses, 50
-emails per month, and 1 GiB of stored mail**, granted once per person and shared across every unpaid
-organization they own. Emails are counted per recipient. A Major Pass and the
-desktop license keep this baseline. Eligible paid Ryu plans include larger
-allowances: Pro has 5,000 emails and 10 GiB, Max has 100,000 emails
-and 100 GiB, and Teams and Business have 100,000 emails and 20 GiB.
-Enterprise limits are set by contract. There is no separate public hosted Mail
-subscription price; self-hosting uses your own infrastructure and mail
-transport. See [Agent Inboxes](/docs/billing/agent-inboxes) for full limits and
-enforcement details.
+emails per month, and 1 GiB of stored mail**. It is granted once per person and
+shared across every unpaid organization they own. A Major Pass and the desktop
+license keep this baseline. Emails are counted per recipient.
+
+Eligible paid Ryu plans include larger allowances:
+
+- Pro has 5,000 emails and 10 GiB.
+- Max has 100,000 emails and 100 GiB.
+- Teams and Business have 100,000 emails and 20 GiB.
+- Enterprise limits are set by contract.
+
+There is no separate public hosted Mail subscription price. Self-hosting uses
+your own infrastructure and mail transport. See
+[Agent Inboxes](/docs/billing/agent-inboxes) for full limits and enforcement
+details.
 
 <Cards>
   <DocCard href="/docs/standalone/mail-api" />

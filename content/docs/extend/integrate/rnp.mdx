@@ -18,9 +18,29 @@ RNP does not replace the protocols around it:
 
 ## Continue a chat on another node
 
-Open a saved chat, choose **Continue on another node**, select a node you already configured, and review the exact visible messages that will move. Ryu exports the preview with the source node's credential, freezes that bundle, then imports the same reviewed data with the destination node's credential. A lost response can be retried without creating a new bundle. Ryu binds the chat tab to the destination only after the import succeeds.
+1. Open a saved chat and choose **Continue on another node**.
+2. Select a node you already configured.
+3. Review the exact visible messages that will move.
 
-The default snapshot contains up to the latest 50 visible user and assistant messages. You can add a short context note and optionally suggest the same agent. Ryu saves the note as a visible user message. It never becomes a hidden system instruction, and the transfer never sends a chat turn automatically.
+Ryu exports the preview with the source node's credential and freezes that bundle. It then imports the same reviewed data with the destination node's credential. A lost response can be retried without creating a new bundle, and Ryu binds the chat tab to the destination only after the import succeeds.
+
+```mermaid
+sequenceDiagram
+  participant Client as Ryu client
+  participant Source as Source node
+  participant Dest as Destination node
+  Client->>Source: POST .../export (source credential)
+  Source-->>Client: snapshot preview
+  Client->>Client: user reviews, bundle frozen
+  Client->>Dest: POST .../resume (destination credential)
+  Dest-->>Client: imported conversation
+  Client->>Client: bind chat tab to destination
+```
+
+The default snapshot contains up to the latest 50 visible user and assistant messages. You can add a short context note and optionally suggest the same agent.
+
+- Ryu saves the note as a visible user message. It never becomes a hidden system instruction.
+- The transfer never sends a chat turn automatically.
 
 RNP v0 does not move:
 
@@ -41,9 +61,20 @@ When the chat works in a git repository and both nodes support it, the review sh
 - The changed tracked files
 - A checklist of untracked files with their sizes. Files whose names look like secrets (`.env*`, `*.pem`, `*.key`, `id_*`, `.npmrc`, `.netrc`, `credentials*`) start unticked and highlighted. Ignored files are never listed and never move.
 
-The destination clones the repository into its handoffs folder, rebuilds the work in a new git worktree on a `handoff/<thread>` branch, and points the chat at it. Your source folder, branch, and staging area are not changed. After the destination succeeds, the source chat's sidebar row shows **on** and the destination computer's name, as a reminder not to keep editing the same branch on both computers. The source chat is not locked. Choose **Take back here** from the row's menu to clear the reminder. In **All computers** mode the same badge and action appear on the source computer's group.
+The destination clones the repository into its handoffs folder, rebuilds the work in a new git worktree on a `handoff/<thread>` branch, and points the chat at it. Your source folder, branch, and staging area are not changed.
 
-A handed-off folder is never trusted automatically on the destination. Trust it there before letting agents run tools in it. The chat opens on the destination with its run mode set to **Local**. Keep it there for a handed-off folder. Ryu refuses to fork a second isolated worktree from it, because that fork would leave the handed-off uncommitted changes behind.
+After the destination succeeds, the source chat's sidebar row shows **on** and the destination computer's name. This reminds you not to keep editing the same branch on both computers:
+
+- The source chat is not locked.
+- Choose **Take back here** from the row's menu to clear the reminder.
+- In **All computers** mode the same badge and action appear on the source computer's group.
+
+<Callout type="warn">
+  A handed-off folder is never trusted automatically on the destination. Trust it there before
+  letting agents run tools in it.
+</Callout>
+
+The chat opens on the destination with its run mode set to **Local**. Keep it there for a handed-off folder. Ryu refuses to fork a second isolated worktree from it, because that fork would leave the handed-off uncommitted changes behind.
 
 Folders that are not git repositories are not handed off, and the review omits the section.
 
@@ -54,7 +85,12 @@ POST /api/rnp/v0/conversations/:id/export
 POST /api/rnp/v0/conversations/:id/resume
 ```
 
-Export requires read access to the source conversation and includes only its selected visible branch. Resume creates a private conversation for the verified caller or requires write access when that conversation already exists on the destination. Stable conversation, message, bundle, and context IDs make retries of the frozen review idempotent and let optional cloud sync converge on the same data later.
+| Endpoint | Access rule |
+|---|---|
+| `export` | Read access to the source conversation. Includes only its selected visible branch. |
+| `resume` | Creates a private conversation for the verified caller, or requires write access when that conversation already exists on the destination. |
+
+Stable conversation, message, bundle, and context IDs make retries of the frozen review idempotent and let optional cloud sync converge on the same data later.
 
 The TypeScript contract is available from `@ryuhq/protocol/continuity` (`RNP_CONTINUITY_LIMITS`). The encoded bundle is capped at 2 MiB, with at most 200 messages and 16 text context items. Implementations reject unsupported versions and oversized data instead of guessing or truncating silently.
 
@@ -76,6 +112,17 @@ DELETE /api/rnp/v0/conversations/:id/continued           (source: take back)
 
 A node that answers 404 on the capability probe does not support working-tree handoff, and clients hide the option. The order is as follows.
 
+```mermaid
+flowchart TD
+  Probe["GET capabilities on both nodes"] --> Inspect["Inspect source"]
+  Inspect --> Export["Export once (manifest frozen)"]
+  Export --> Resume["Resume transcript on destination"]
+  Resume --> Copy["Copy missing blobs: HEAD, GET, PUT"]
+  Copy --> WsResume["Resume working tree on destination"]
+  WsResume -->|"blob missing"| Err["409 blob-missing"]
+  WsResume -->|"success"| Mark["Mark source as continued"]
+```
+
 1. Inspect the source, then export once with `ifHead` (the reviewed commit), `ifUpdatedAt`, and the ticked untracked paths. The export returns a manifest and stages its blobs for the caller that exported them. The review freezes that manifest and resends it unchanged on retry.
 2. Resume the transcript as before.
 3. Copy each blob: `HEAD` on the destination skips blobs it already has, otherwise `GET` from the source and `PUT` to the destination. Blobs are content-addressed. The destination checks the SHA-256 digest and stores a blob only once.
@@ -84,7 +131,15 @@ A node that answers 404 on the capability probe does not support working-tree ha
 
 Inspect and export need read access to the conversation and return `409` (`turn-running`) while a reply is still being generated. Resume needs write access and the agent-edit permission. The result always carries the `workspace-untrusted` warning.
 
-The manifest names the repository (`name`, credential-free `remoteUrl`, `baseCommit`, `branch`), an optional git bundle of unpushed commits with its prerequisite commits, an optional binary patch with the list of files it touches, the selected untracked files, and the omitted paths with a reason. Every path is repo-relative with `/` separators. Absolute paths, drive letters, backslashes, `..`, `.git` segments, control characters, and names that collide by case or Unicode normalization are rejected.
+The manifest contains:
+
+- the repository (`name`, credential-free `remoteUrl`, `baseCommit`, `branch`)
+- an optional git bundle of unpushed commits, with its prerequisite commits
+- an optional binary patch, with the list of files it touches
+- the selected untracked files
+- the omitted paths, each with a reason
+
+Every path is repo-relative with `/` separators. These are rejected: absolute paths, drive letters, backslashes, `..`, `.git` segments, control characters, and names that collide by case or Unicode normalization.
 
 `RNP_WORKSPACE_LIMITS` in the same module sets the working-tree limits.
 
@@ -97,7 +152,13 @@ The manifest names the repository (`name`, credential-free `remoteUrl`, `baseCom
 | Path length | 4096 bytes |
 | Manifest JSON | 256 KiB |
 
-Unlike the transcript, a working-tree resume makes the destination contact a git remote that came from another computer. It accepts only credential-free HTTPS URLs and `git@` SSH URLs, refuses loopback, private, link-local, and cloud-metadata hosts, and uses the destination's own git credentials. Git runs with repository hooks, filters, external diff drivers, and textconv disabled. Staged and received blobs expire after a short time.
+Unlike the transcript, a working-tree resume makes the destination contact a git remote that came from another computer. The destination guards that contact:
+
+- It accepts only credential-free HTTPS URLs and `git@` SSH URLs.
+- It refuses loopback, private, link-local, and cloud-metadata hosts.
+- It uses the destination's own git credentials.
+- Git runs with repository hooks, filters, external diff drivers, and textconv disabled.
+- Staged and received blobs expire after a short time.
 
 ## Handoff links
 
@@ -105,7 +166,9 @@ Unlike the transcript, a working-tree resume makes the destination contact a git
 ryu://handoff/<conversation-id>?source=<node-url>&v=0
 ```
 
-A handoff link is a locator, not the transcript. It carries only the conversation ID, protocol version, and a credential-free HTTPS source-node URL (HTTP is accepted only for loopback Core). The receiver must match that URL to a node already configured on the device and show the exported transcript review. Unknown nodes fail closed. Extra fields, tokens, prompts, context, query-bearing node URLs, and embedded credentials are rejected.
+A handoff link is a locator, not the transcript. It carries only the conversation ID, protocol version, and a credential-free HTTPS source-node URL (HTTP is accepted only for loopback Core).
+
+The receiver must match that URL to a node already configured on the device and show the exported transcript review. Unknown nodes fail closed. Extra fields, tokens, prompts, context, query-bearing node URLs, and embedded credentials are rejected.
 
 ## Cloud sync is optional
 

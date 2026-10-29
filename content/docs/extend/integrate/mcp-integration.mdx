@@ -19,8 +19,11 @@ MCP endpoints. Both routes need a node or paired bearer token.
 
 For hosts that only accept a stdio command, the `apps/mcp` package (`ryu-mcp`) is a compatibility
 bridge. It holds no model and runs no inference. It exposes a fixed set of `ryu_*` tools (for
-example `ryu_list_agents`, `ryu_run_workflow`, `ryu_call_mcp_tool`, `ryu_ask`) and translates each
-call into a Core HTTP request through `@ryuhq/core-client`.
+example `ryu_list_agents`, `ryu_run_workflow`, `ryu_call_mcp_tool`, `ryu_ask`).
+
+The bridge answers the standard MCP JSON-RPC methods. `tools/list` returns the tools with their
+names, descriptions, and input schemas, and `tools/call` runs one tool by name with arguments. The
+bridge translates each call into a Core HTTP request through `@ryuhq/core-client`.
 
 ```mermaid
 flowchart LR
@@ -117,12 +120,19 @@ flowchart TD
 
 ### Built-in tool servers
 
-Core synthesizes built-in tools in-process, without spawning external processes. The reserved
-built-in servers are listed in `BUILTIN_SERVERS` (`apps/core/src/sidecar/mcp/catalog.rs`), and
-`ryu_self_build` is also classified as built-in. Core-provided capability facades such as `web`,
-`browser`, `computer`, `memory`, `decision`, and `verify` (`capability_tools.rs`) are wired into
-the same registry. `composio.*` tools are classified as Composio, and the synthetic `app` server
-holds app tools.
+Core synthesizes built-in tools in-process, without spawning external processes. The registry
+classifies each tool by its server segment (`classify_kind` in
+`apps/core/src/sidecar/mcp/catalog.rs`):
+
+| Server | Kind |
+|---|---|
+| A reserved name in `BUILTIN_SERVERS`, or `ryu_self_build` | Built-in |
+| `composio` | Composio |
+| The synthetic `app` server | App tools |
+| Anything else | External MCP server |
+
+Core-provided capability facades such as `web`, `browser`, `computer`, `memory`, `decision`, and
+`verify` (`capability_tools.rs`) are wired into the same registry.
 
 [Built-in Tools Reference](/docs/core/built-in-tools) lists every server, its tool ids, and which
 ones are off by default.
@@ -218,7 +228,23 @@ also return widget content.
 
 ## Pre/post tool hooks
 
-Plugins can intercept tool calls at two boundaries.
+Plugins can intercept tool calls at two boundaries, before the tool runs and after it returns.
+
+```mermaid
+sequenceDiagram
+  participant Model
+  participant Core
+  participant Hook as Plugin hook
+  participant Tool
+  Model->>Core: tool call
+  Core->>Hook: pre_tool_use (if match.tools matches)
+  Hook-->>Core: none or deny
+  Core->>Tool: execute (when not denied)
+  Tool-->>Core: result
+  Core->>Hook: tool_result (awaited, may transform)
+  Core-->>Model: result
+  Core-)Hook: post_tool_use (detached, observe only)
+```
 
 ### Pre-tool hooks (`pre_tool_use`)
 
@@ -279,15 +305,6 @@ Core wraps untrusted tool results in boundary markers (`apps/core/src/sidecar/un
 
 The markers tell the model that the wrapped text is data, not instructions. This reduces the
 risk that a tool output can redirect the agent.
-
-## MCP tool format
-
-MCP tools use the standard JSON-RPC methods.
-
-- `tools/list` - returns available tools with names, descriptions, and input schemas
-- `tools/call` - executes a tool by name with arguments
-
-The stdio bridge translates these into Core HTTP requests.
 
 ## Security
 

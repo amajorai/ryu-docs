@@ -20,7 +20,7 @@ You can also require approval before each run. Scheduled execution survives rest
 ### Have a workflow to run
 
 Start from a workflow you have built on the **Workflows** page, or assemble one. You can drag nodes
-on the canvas, or describe it to the builder chat and let it build the DAG.
+on the canvas, or describe it in the Ask Ryu panel and let the builder create the DAG.
 
 <TryInRyu page="workflows" />
 
@@ -30,22 +30,37 @@ on the canvas, or describe it to the builder chat and let it build the DAG.
 
 ### Add a schedule trigger
 
-A workflow declares zero or more triggers. Above the canvas, the trigger panel lets you add a
-**schedule** trigger and choose either a cron expression or an `every` interval.
+A workflow declares zero or more triggers. On the canvas, select the pinned **Trigger** node at the
+top. Its config panel opens on the right. Set **When this runs** to **Schedule**, then choose an
+**Every** preset (`5m`, `15m`, `1h`, `6h`, `1d`) or **Custom cron**.
 
 | Kind | Example | Fires |
 |---|---|---|
 | `cron` | `0 9 * * *` | At most once per matching minute, evaluated in UTC (here, 9:00 UTC daily) |
 | `every` | `30m` | On a fixed interval parsed like `30s`, `5m`, `1h` |
 
-On save, Core reconciles the trigger into a scheduler job with a deterministic id
-(`wf-sched-<workflow_id>-<idx>`) and target `JobTarget::Workflow`. The job is file-backed, so the
-schedule survives a Core restart. On boot, the scheduler reloads it and resumes ticking.
+On save, Core reconciles the trigger into a scheduler job:
+
+- The job id is deterministic: `wf-sched-<workflow_id>-<idx>`.
+- The job target is `JobTarget::Workflow`.
+- The job is file-backed, so the schedule survives a Core restart. On boot, the scheduler reloads it
+  and resumes ticking.
+
+```mermaid
+flowchart LR
+  A["Save workflow"] --> B["Reconcile triggers"]
+  B --> C["Scheduler job (wf-sched-...)"]
+  C -->|"cron or every fires"| D{"require_approval?"}
+  D -->|"no"| E["Run workflow"]
+  D -->|"yes"| F["Approval inbox entry"]
+  F -->|"approve"| E
+  F -->|"reject or expire"| G["Skip this run"]
+```
 
 <Callout type="info">
 Triggers are reconciled idempotently on every save. Editing the schedule updates the same job, and
 deleting the trigger (or the workflow) removes the job. A cron expression wins over `every` if you
-set both.
+set both, and a schedule trigger with neither is skipped.
 </Callout>
 
 </Step>
@@ -55,9 +70,12 @@ set both.
 ### Optional: require approval before each run
 
 To review each run first, set `require_approval: true` on the schedule trigger in the workflow
-definition. The reconciled scheduler job copies the flag. When a flagged job fires, it raises one
-deduplicated entry in the approval inbox instead of running. Approving it starts the same run the
-tick would have started. Rejecting it, or letting it expire, skips that run.
+definition. The reconciled scheduler job copies the flag.
+
+- When a flagged job fires, it raises one deduplicated entry in the approval inbox instead of
+  running.
+- Approving the entry starts the same run the tick would have started.
+- Rejecting it, or letting it expire, skips that run.
 
 ```json
 {
@@ -67,18 +85,25 @@ tick would have started. Rejecting it, or letting it expire, skips that run.
 }
 ```
 
+<Callout type="warn">
+The canvas trigger panel has no approval switch. Changing the schedule there rewrites the trigger
+without `require_approval`, so set the flag again after a panel edit.
+</Callout>
+
 </Step>
 
 <Step>
 
 ### Let the scheduler run it
 
-You do not start anything. The scheduler's tick loop fires the job on its cron or interval, runs the
-workflow, and checkpoints every node to disk so a crash mid-run resumes rather than restarting. Watch
-runs on the Workflows page, or trigger one immediately to test the wiring:
+You do not start anything. The scheduler's tick loop fires the job on its cron or interval and runs
+the workflow. Every node is checkpointed to disk, so a crash mid-run resumes rather than restarting.
+
+Watch runs on the Workflows page, or trigger one immediately to test the wiring. Core serves the
+workflow routes without an `/api` prefix:
 
 ```http
-POST /api/workflows/:id/run
+POST /workflows/:id/run
 ```
 
 </Step>
@@ -88,7 +113,7 @@ POST /api/workflows/:id/run
 ## Check your work
 
 - On save, a scheduler job appears with the deterministic id `wf-sched-<workflow_id>-<idx>`.
-- `POST /api/workflows/:id/run` runs it immediately so you can verify the wiring without waiting for
+- `POST /workflows/:id/run` runs it immediately so you can verify the wiring without waiting for
   the next tick.
 - Restart Core and the schedule survives. The file-backed job reloads on boot and resumes ticking.
 - If you flagged the job for approval, its firing raises one entry in the approval inbox instead of
@@ -96,6 +121,8 @@ POST /api/workflows/:id/run
 
 ## Going further
 
-- Fire the workflow from an external event instead of a clock: the `webhook` and `composio` triggers in [Triggers and schedules](/docs/core/workflow-triggers-and-history#triggers-and-schedules).
+- Fire the workflow from an external event instead of a clock: the `webhook` and `composio`
+  triggers in [Triggers and schedules](/docs/core/workflow-triggers-and-history#triggers-and-schedules).
 - Pause mid-run for a human decision: the `Awakeable` HITL gate in [Workflows](/docs/core/workflows).
-- Make a flaky step retry with backoff and a timeout: the per-node `retry` policy in [Workflows](/docs/core/workflow-execution#reliability-and-durable-execution).
+- Make a flaky step retry with backoff and a timeout: the per-node `retry` policy in
+  [Workflow execution](/docs/core/workflow-execution#reliability-and-durable-execution).

@@ -9,23 +9,33 @@ The model files live in the plugin's private runtime directory, and Core downloa
 only the files the manifest allowlists. The plugin can then expose a small HTTP
 contract through the authenticated extension proxy.
 
+```mermaid
+flowchart LR
+    E["User enables plugin"] --> S["Copy source.path tree"]
+    S --> C["Check Hub tree"]
+    C -->|missing or unsafe| F["Provisioning fails"]
+    C --> D["Download allowlisted files"]
+    D --> V["Create venv, pip install -e"]
+    V --> X["Sidecar serves via ext-proxy"]
+```
+
 ## The manifest shape
 
 Use a Python managed sidecar when the model needs a Python library. Its `source.path`
-points at a package-owned directory containing `pyproject.toml`; Core copies that
+points at a package-owned directory containing `pyproject.toml`. Core copies that
 directory into the sidecar runtime before running `pip install -e`.
 
-Keep model-snapshot sidecars eager (`lazy: false`) when provisioning downloads the
-weights. Core starts that work in the background when the user enables the plugin,
-so a model transfer does not have to finish inside the bounded first-request wake-up.
-Snapshot transfers appear as **Local model** downloads in the Downloads view while
-the sidecar is being prepared.
+- First-party Store plugins carry this small source tree with the compiled plugin package, and Core
+  materializes it on install.
+- A signed Marketplace package must include the same `source.path` tree in its archive.
+- In both cases the checkpoint weights stay out of the plugin archive and Core binary.
+  `model_snapshots` downloads only the pinned, allowlisted Hugging Face files into the private
+  runtime.
 
-First-party Store plugins carry this small source tree with the compiled plugin
-package and Core materializes it on install. A signed Marketplace package must
-include the same `source.path` tree in its archive. In both cases, the checkpoint
-weights stay out of the plugin archive and Core binary: `model_snapshots` downloads
-only the pinned, allowlisted Hugging Face files into the private runtime.
+Keep model-snapshot sidecars eager (`lazy: false`) when provisioning downloads the weights. Core
+starts that work in the background when the user enables the plugin, so a model transfer does not
+have to finish inside the bounded first-request wake-up. Snapshot transfers appear as **Local
+model** downloads in the Downloads view while the sidecar is being prepared.
 
 `model_snapshots` names a public or license-gated Hugging Face repository, an immutable revision, a
 private destination, and exact repository-relative files:
@@ -57,29 +67,42 @@ private destination, and exact repository-relative files:
 }
 ```
 
-The Hub tree is checked before download. Missing files, duplicate paths, unsafe
-paths, and missing source directories fail the provisioning step. Large LFS files
-use the Hub's content digest for resumable checksum verification. A model repository
-is not treated as an executable bundle: its model and configuration files are the
-only files copied into the runtime.
+### Download checks
 
-Core creates the sidecar venv with the host's `python` executable on Windows or
-`python3` on macOS/Linux; it does not download a Python interpreter. Keep the
-sidecar's `requires-python` and dependencies compatible with that host Python.
-The manifest's `python_version` field is an advisory hint, not a bundled-runtime
-or interpreter-selection guarantee.
+- The Hub tree is checked before download. Missing files, duplicate paths, unsafe paths, and missing
+  source directories fail the provisioning step.
+- Large LFS files use the Hub's content digest for resumable checksum verification.
+- A model repository is not treated as an executable bundle. Its model and configuration files are
+  the only files copied into the runtime.
 
-Core uses the Hugging Face token configured in the **Integrations** section of the Desktop **Gateway** dialog for
-Hugging Face metadata and file requests only. A gated repository still requires the
-user to accept the model owner's license on Hugging Face first; Ryu does not accept
-terms on the user's behalf. The token is not passed into the plugin sidecar.
+### Host Python
 
-Anything the sidecar downloads or writes at run time should stay inside Ryu's data folder too. Core
-points `HF_HOME` and `TORCH_HOME` at the shared `models/hf` and `models/torch` caches unless the
-manifest sets them, and gives the sidecar `RYU_PLUGIN_DATA_DIR` for its own files and
-`RYU_MODELS_DIR` for weights other parts of Ryu can reuse. The manifest `env` can build paths from
-`${RYU_PLUGIN_DATA_DIR}`, `${RYU_MODELS_DIR}`, and `${RYU_RUNTIME_DIR}`; see
-[Where a sidecar keeps its data](/docs/extend/develop/extensions/managed-sidecar#where-a-sidecar-keeps-its-data).
+Core creates the sidecar venv with the host's `python` executable on Windows or `python3` on
+macOS/Linux. It does not download a Python interpreter, so keep the sidecar's `requires-python` and
+dependencies compatible with that host Python. The manifest's `python_version` field is an advisory
+hint, not a bundled-runtime or interpreter-selection guarantee.
+
+### Hugging Face token and gated models
+
+Core uses the Hugging Face token configured in the **Integrations** section of the Desktop
+**Gateway** dialog for Hugging Face metadata and file requests only. The token is not passed into
+the plugin sidecar.
+
+A gated repository still requires the user to accept the model owner's license on Hugging Face
+first. Ryu does not accept terms on the user's behalf.
+
+### Run-time data
+
+Anything the sidecar downloads or writes at run time should stay inside Ryu's data folder too:
+
+- Core points `HF_HOME` and `TORCH_HOME` at the shared `models/hf` and `models/torch` caches unless
+  the manifest sets them.
+- `RYU_PLUGIN_DATA_DIR` holds the sidecar's own files.
+- `RYU_MODELS_DIR` holds weights other parts of Ryu can reuse.
+- The manifest `env` can build paths from `${RYU_PLUGIN_DATA_DIR}`, `${RYU_MODELS_DIR}`, and (Python
+  runtimes only) `${RYU_RUNTIME_DIR}`.
+
+See [Where a sidecar keeps its data](/docs/extend/develop/extensions/managed-sidecar#where-a-sidecar-keeps-its-data).
 
 ## Invoke a local decision model
 
@@ -110,9 +133,11 @@ plugin is enabled, agents can call `laya.predict` with a state and typed questio
 ```
 
 `router`, `english`, `multilingual`, and `typed-decisions` are selectable profiles.
-The router chooses English or multilingual from the input. Laya returns structured
-answers and probabilities; it does not generate text. Use it for routing, moderation, guardrails,
-and triage, not for autocomplete or grammar repair.
+The router chooses English or multilingual from the input. Question types are `choice`, `score`,
+and `noul`.
+
+Laya returns structured answers and probabilities; it does not generate text. Use it for routing,
+moderation, guardrails, and triage, not for autocomplete or grammar repair.
 
 The same typed-decision contract can also be served by [Ollaya](https://ollaya.dev/), a separate
 local service with a TypeSafe-compatible `/v1/systemone` API. Ryu exposes Laya and Ollaya through
@@ -140,18 +165,36 @@ Shadow's settings picker discovers only models from enabled plugins.
 }
 ```
 
-The plugin implements the fixed local planner adapter using its own inference
-protocol. Shadow sends the current goal, accessibility candidates, and closed action
-choices. The adapter returns only `{ "operation": "CLICK", "target": "3" }` (or
-another allowed operation with a null target). The host checks that choice against
-the current action set, then re-reads the focused window and target before input.
-Laya normalizes its typed-choice response; Needle 3 and FunctionGemma normalize their
-own tool-call formats. None of these planners receives a direct mouse or keyboard API.
+The plugin implements the fixed local planner adapter using its own inference protocol. None of
+these planners receives a direct mouse or keyboard API.
 
-Model plugins should expose a bounded input schema, enforce a sidecar token at the
-process boundary, keep model output as untrusted data, and return a clear unavailable
-error when the runtime or checkpoint is missing. Do not make a local model look like
-an OpenAI text-generation provider unless it actually implements that protocol.
+```mermaid
+sequenceDiagram
+    participant S as Shadow (host)
+    participant A as Planner adapter
+    S->>A: Goal, accessibility candidates, action choices
+    A-->>S: operation and target
+    S->>S: Check choice against current action set
+    S->>S: Re-read focused window and target
+    S->>S: Send input
+```
+
+- Shadow sends the current goal, accessibility candidates, and closed action choices.
+- The adapter returns only `{ "operation": "CLICK", "target": "3" }` (or another allowed operation
+  with a null target).
+- The host checks that choice against the current action set, then re-reads the focused window and
+  target before input.
+- Laya normalizes its typed-choice response; Needle 3 and FunctionGemma normalize their own
+  tool-call formats.
+
+## Model plugin rules
+
+- Expose a bounded input schema.
+- Enforce a sidecar token at the process boundary.
+- Keep model output as untrusted data.
+- Return a clear unavailable error when the runtime or checkpoint is missing.
+- Do not make a local model look like an OpenAI text-generation provider unless it actually
+  implements that protocol.
 
 <Callout type="warn">
   A full checkpoint bundle can be large. Tell users the expected download size and

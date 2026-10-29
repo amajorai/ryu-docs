@@ -4,18 +4,23 @@ description: "Reference for Core's MCP registry: how tool servers are registered
 tags: ["mcp", "registry", "tools", "server", "allowlist", "governance", "integration"]
 ---
 
-The MCP registry (`apps/core/src/sidecar/mcp/mod.rs`, `McpRegistry`) is Core's list of tool servers.
-It speaks MCP (Model Context Protocol), combines built-in, plugin-declared, and user-configured
-servers, and checks an agent's allowlist before each call. Chat, ACP and OpenAI-compatible agents, workflows, monitors,
-recipes, and programmatic tool calls all use this registry.
+The MCP registry (`apps/core/src/sidecar/mcp/mod.rs`, `McpRegistry`) is Core's list of tool
+servers. It speaks MCP (Model Context Protocol), combines built-in, plugin-declared, and
+user-configured servers, and checks an agent's allowlist before each call.
 
-The registry is **Core calling another MCP server**. The opposite direction, where an external MCP
-host calls Ryu, is [Ryu MCP](/docs/extend/mcp). The public website also has an anonymous read-only
-`/mcp` endpoint. It cannot reach this registry or a private node.
+Chat, ACP and OpenAI-compatible agents, workflows, monitors, recipes, and programmatic tool calls
+all use this registry.
 
-For the search and execution layer built on top of the registry (the Gateway tool-search front and
-`POST /v1/exec/tool`), see [Unified tool catalog](/docs/core/unified-tool-catalog). For model-authored fan-out across many
-tools, see [Programmatic tool calling](/docs/core/programmatic-tool-calling).
+The registry is **Core calling another MCP server**. Related pages cover the other directions and
+layers:
+
+- [Ryu MCP](/docs/extend/mcp) is the opposite direction, where an external MCP host calls Ryu. The
+  public website also has an anonymous read-only `/mcp` endpoint. It cannot reach this registry or
+  a private node.
+- [Unified tool catalog](/docs/core/unified-tool-catalog) is the search and execution layer built
+  on top of the registry (the Gateway tool-search front and `POST /v1/exec/tool`).
+- [Programmatic tool calling](/docs/core/programmatic-tool-calling) covers model-authored fan-out
+  across many tools.
 
 ## How servers are registered
 
@@ -25,20 +30,29 @@ tools, see [Programmatic tool calling](/docs/core/programmatic-tool-calling).
 2. Servers declared in the `mcp_servers` block of an enabled plugin manifest.
 3. The user's config in `~/.ryu/state/mcp.json`.
 
-A user entry with the same name as a plugin-declared server wins, so you can repoint or disable it. The config file uses the common `mcpServers` map
-shape, so an existing MCP host config can be pasted in. Ryu accepts local stdio servers, current
-Streamable HTTP servers, and legacy HTTP+SSE servers.
+A user entry with the same name as a plugin-declared server wins, so you can repoint or disable
+it. In Safe Mode, plugin and user servers are skipped and only the built-in config servers load.
 
-When Ryu updates `~/.ryu/state/mcp.json`, it changes only the server entry involved. Top-level metadata,
-schema markers, alternate config keys, and unknown fields inside existing entries are preserved, and
-concurrent settings changes are serialized before the file is atomically replaced. This lets Ryu
-share a config with another MCP host without silently discarding that host's settings.
+The config file uses the common `mcpServers` map shape, so an existing MCP host config can be
+pasted in. Ryu accepts local stdio servers, current Streamable HTTP servers, and legacy HTTP+SSE
+servers.
+
+When Ryu updates `~/.ryu/state/mcp.json`, it changes only the server entry involved:
+
+- Top-level metadata, schema markers, alternate config keys, and unknown fields inside existing
+  entries are preserved.
+- Concurrent settings changes are serialized before the file is atomically replaced.
+
+This lets Ryu share a config with another MCP host without silently discarding that host's
+settings.
 
 ### Catalog installs
 
 Catalog MCP installs accept `dryRun: true`. `POST /api/mcp/catalog/install` then resolves and
 validates the command or remote transport, reports the disabled server entry it would write, and
-does not modify `mcp.json`, create a plugin lifecycle record, or warm an npm package. Executable
+does not modify `mcp.json`, create a plugin lifecycle record, or warm an npm package.
+
+Executable
 catalog packages need an exact version plus registry ownership metadata. Floating `latest` tags,
 mutable OCI tags, and package names without provenance are rejected.
 
@@ -53,16 +67,19 @@ Each entry uses `type` when the source config declares it. The accepted values a
 | `sse` | Open the configured SSE URL, read its `endpoint` event, then POST JSON-RPC messages to that endpoint. |
 
 When `type` is omitted, Ryu infers stdio from `command` and Streamable HTTP from `url`.
-Remote `headers` are sent on each request. Core owns protocol headers such as `Accept`,
-`Content-Type`, session, and negotiated-version headers. A configured header cannot override them.
-Remote URLs are screened before network access and redirects are not followed. HTTP failure details
-redact configured header values before Core returns or logs them. If a legacy SSE
-server announces a different-origin message endpoint, Core keeps the connection but does not
-forward configured credentials to that second origin.
-Network errors are reported without the endpoint URL, since URLs can contain operator credentials
-in their query string.
-Agent-scoped MCP requests also require the caller's `agent.run` permission for that exact agent.
-Tool availability alone does not grant permission to invoke a denied agent.
+
+Remote connection rules:
+
+- Remote `headers` are sent on each request. Core owns protocol headers such as `Accept`,
+  `Content-Type`, session, and negotiated-version headers. A configured header cannot override them.
+- Remote URLs are screened before network access, and redirects are not followed.
+- HTTP failure details redact configured header values before Core returns or logs them.
+- Network errors are reported without the endpoint URL, since URLs can contain operator
+  credentials in their query string.
+- If a legacy SSE server announces a different-origin message endpoint, Core keeps the connection
+  but does not forward configured credentials to that second origin.
+- Agent-scoped MCP requests also require the caller's `agent.run` permission for that exact agent.
+  Tool availability alone does not grant permission to invoke a denied agent.
 
 ```json
 {
@@ -94,32 +111,54 @@ Tool availability alone does not grant permission to invoke a denied agent.
 | List tools (optionally per agent) | `GET /api/mcp/tools?agent=<id>` |
 | Call a tool | `POST /api/mcp/tools/call` |
 
-User servers are hot-reloaded with no process restart (`McpRegistry::reload` re-derives the
-built-in and plugin servers, re-overlays `mcp.json`, and clears the tool cache). A worked registration example lives in
-[Register an MCP server](/docs/extend/develop/extensions/mcp-server).
+User servers are hot-reloaded with no process restart. `McpRegistry::reload` re-derives the
+built-in and plugin servers, re-overlays `mcp.json`, and clears the tool cache. A worked
+registration example lives in [Register an MCP server](/docs/extend/develop/extensions/mcp-server).
 
-Writing `mcp.json` is an administrative node mutation: registering, updating, or removing a
+### Who can change servers
+
+Writing `mcp.json` is an administrative node mutation. Registering, updating, or removing a
 user-owned server requires the caller's `gateway.configure` permission. The check is applied at
 Core's mutation routes, so a direct API caller cannot bypass the desktop's settings UI.
 
 An organization can also apply a signed Fleet assignment with `kind: "mcp"` to block a server on
-enrolled nodes. A blocked server is removed from summaries and tool discovery, and the dispatch
-chokepoint rejects a direct call even if a stale user-owned config still names it. This node policy
-is separate from the per-agent allowlist and from the caller's organization and resource
-permissions. All three layers must allow the action.
+enrolled nodes (see [Managed fleet](/docs/core/managed-fleet)). A blocked server is removed from
+summaries and tool discovery. The dispatch chokepoint rejects a direct call even if a stale
+user-owned config still names it.
 
-The server summary also reports whether authentication is required and whether static credentials are
-configured. A conventional credential header such as `Authorization` or `X-API-Key`, or a credential
-environment variable such as `OPENAI_API_KEY`, is classified as static authentication. A manifest OAuth
-declaration is classified as OAuth. Credential values are never included in the summary. OAuth
-connection state is managed separately through Marketplace Connections, while local `env` and `headers`
-values remain on the Core node and are only shown as masked fields in the desktop settings form.
+All three layers must allow a tool call:
+
+```mermaid
+flowchart LR
+  Req["Tool call"] --> Node["Node policy (Fleet block)"]
+  Req --> Caller["Caller org and resource permissions"]
+  Req --> Agent["Per-agent allowlist"]
+  Node --> All{"All three allow?"}
+  Caller --> All
+  Agent --> All
+  All -->|yes| Dispatch["Dispatch"]
+  All -->|no| Deny["Rejected"]
+```
+
+### Authentication in server summaries
+
+The server summary reports whether authentication is required and whether static credentials are
+configured. Credential values are never included.
+
+- A conventional credential header such as `Authorization` or `X-API-Key`, or a credential
+  environment variable such as `OPENAI_API_KEY`, is classified as static authentication.
+- A manifest OAuth declaration is classified as OAuth. OAuth connection state is managed separately
+  through Marketplace Connections.
+- Local `env` and `headers` values remain on the Core node and are only shown as masked fields in
+  the desktop settings form.
 
 ### Tool ids
 
 Every tool has a fully-qualified id of the form `<server>.<tool>` (`TOOL_ID_SEP = "."`). A configured
 server key may contain dots (for example, `io.github.acme/files`); Core resolves the longest
-registered server prefix before dispatch. The legacy `server__tool` spelling is accepted only at
+registered server prefix before dispatch.
+
+The legacy `server__tool` spelling is accepted only at
 compatibility ingress, while new registry rows and allowlist entries use dotted ids. The id is the
 unit of allowlisting and the unit of dispatch end to end.
 
@@ -139,23 +178,31 @@ Two kinds of built-in exist:
 The full inventory of built-in server names and tool ids, including Ghost, Shadow, the facades,
 and the builder tools, is the [built-in tools reference](/docs/core/built-in-tools).
 
-Ghost's node-wide permission lives in the Gateway's `[computer_use]` section. In the
-desktop this is **Device settings** for the selected device. `locked_use` is an
-explicit opt-in and does not itself unlock a machine. The operating system and the
-provider still decide whether a locked-session path is available, so unsupported
-platforms remain foreground-only.
+### Ghost permissions
+
+Ghost's node-wide permission lives in the Gateway's `[computer_use]` section. In the desktop this
+is **Device settings** for the selected device.
+
+`locked_use` is an explicit opt-in and does not itself unlock a machine. The operating system and
+the provider still decide whether a locked-session path is available, so unsupported platforms
+remain foreground-only.
+
+### Capability facades
 
 The reserved `web`, `browser`, `computer`, and `memory` names are facades, not vendor servers.
-Their stable verbs are advertised only when the enabled provider set resolves the corresponding
-capability and the selected provider declares that verb. Provider-native ids remain registered for
-compatibility, so adopting a facade is additive. The facade re-enters the normal provider tool
-dispatch and does not create a second execution authority.
+
+- Their stable verbs are advertised only when the enabled provider set resolves the corresponding
+  capability and the selected provider declares that verb.
+- Provider-native ids remain registered for compatibility, so adopting a facade is additive.
+- The facade re-enters the normal provider tool dispatch and does not create a second execution
+  authority.
 
 Capability discovery distinguishes enabled providers from providers that are merely installable.
 Use `GET /api/capabilities` to inspect `providers`, `available`, `bound`, `serves_verbs`, and
 `serves_route`. `toolkit` and `decisionModel` identify which provider picker owns the capability.
-Availability answers "could this provider serve the slot if enabled?" Permission answers "may this
-caller perform the operation?" The two checks are separate.
+
+Availability and permission are separate checks. Availability answers "could this provider serve
+the slot if enabled?" Permission answers "may this caller perform the operation?"
 
 ### Optional Node MCP plugins
 
@@ -206,12 +253,18 @@ flowchart TD
    through a short-lived MCP client using its configured stdio, Streamable HTTP, or legacy SSE
    transport.
 
-On the direct Core tool-call endpoint, `host_conversation_id` is an internal forwarding context, not
-a caller-selected vault identity. A request carrying a managed user JWT may name only a conversation
-that user owns. Visibility or collaboration on another user's conversation does not delegate that
-owner's user-scoped vault secrets. Core-to-Gateway forwards carry a process-local proof, and a bare node
-bearer cannot select a host conversation on a bound node. Core also validates the portable
-conversation-id grammar before it can reach shell-backed agent startup.
+### Host conversation on the direct endpoint
+
+On the direct Core tool-call endpoint, `host_conversation_id` is an internal forwarding context,
+not a caller-selected vault identity.
+
+- A request carrying a managed user JWT may name only a conversation that user owns. Visibility or
+  collaboration on another user's conversation does not delegate that owner's user-scoped vault
+  secrets.
+- Core-to-Gateway forwards carry a process-local proof. A bare node bearer cannot select a host
+  conversation on a bound node.
+- Core validates the portable conversation-id grammar before it can reach shell-backed agent
+  startup.
 
 ## The per-agent allowlist
 

@@ -5,14 +5,17 @@ tags: ["managed-agents", "api", "standalone"]
 ---
 
 This reference is for backend developers who call the hosted Ryu Managed
-Agents API. The API is a versioned HTTP contract on the Ryu control plane. Every path on this page is relative to `/api/v1/managed-agents`. The
+Agents API. The API is a versioned HTTP contract on the Ryu control plane.
+Every path on this page is relative to `/api/v1/managed-agents`, and the
 contract version is `ryu.managed-agents.v1`. For the concepts behind agents,
 environments, and sessions, see [Ryu Managed Agents](/docs/standalone/managed-agents).
 
-JSON bodies use camelCase field names. Timestamps are RFC 3339 UTC strings with
-milliseconds, such as `2026-10-10T12:00:00.000Z`. Money is an integer number of
-micro-USD in fields that end in `MicroUsd`. Ids are opaque strings with a type
-prefix, such as `magt_` for agents and `msess_` for sessions. Do not parse them.
+| Convention | Rule |
+|---|---|
+| Field names | JSON bodies use camelCase |
+| Timestamps | RFC 3339 UTC strings with milliseconds, such as `2026-10-10T12:00:00.000Z` |
+| Money | An integer number of micro-USD in fields that end in `MicroUsd` |
+| Ids | Opaque strings with a type prefix, such as `magt_` for agents and `msess_` for sessions. Do not parse them |
 
 ## Related references
 
@@ -29,25 +32,48 @@ always gets `429 rate_limited` with `Retry-After`, never `401`.
 
 | Limit | Applies to | Value |
 |---|---|---|
-| Per API key | Every request made with an API key | 600 requests by default. The count resets only after the key sends no request for 60 seconds, as the next paragraph explains. A key created with its own rate-limit fields uses those values. A key keeps the limit that was stored when it was created, so create a new key if an older key is throttled sooner. |
+| Per API key | Every request made with an API key | 600 requests by default. The count resets only after the key sends no request for 60 seconds (see [the per-key count](#how-the-per-key-count-resets)) |
 | Per organization API key | Organization API keys with their own `rpm` or spend cap | The values set for that key. See [Spend limits](/docs/billing/usage-limits). An exceeded `stop` spend cap gets `402 api_key_spend_cap_reached`. |
 | Per organization | Agent, environment, and session write routes, for console sessions and both key types | 600 writes per organization per minute. Credential writes are not counted. |
 
-The per-key limit does not reset every minute. Each request that is not
-throttled adds one to the key's count and starts a new 60-second wait. The
-count goes back to zero only when a full wait ends with no request from the
-key. A key that sends at least one request every 60 seconds is therefore
-throttled after its 600th request, even at a low rate. A throttled request does
-not start a new wait. Its `Retry-After` value is the time left in the current
-wait, and the next request after that time starts a new count. A long-running
-integration that polls or reconnects without a pause gets this `429` from time
-to time, so handle it by waiting for `Retry-After`. To send fewer requests,
-follow a session with one stream as shown in
+### How the per-key count resets
+
+The per-key limit does not reset every minute.
+
+- Each request that is not throttled adds one to the key's count and starts a
+  new 60-second wait.
+- The count goes back to zero only when a full wait ends with no request from
+  the key. A key that sends at least one request every 60 seconds is therefore
+  throttled after its 600th request, even at a low rate.
+- A throttled request does not start a new wait. Its `Retry-After` value is the
+  time left in the current wait, and the next request after that time starts a
+  new count.
+
+A key created with its own rate-limit fields uses those values instead of the
+default. A key keeps the limit that was stored when it was created, so create a
+new key if an older key is throttled sooner.
+
+```mermaid
+flowchart TD
+  Req["Request with an API key"] --> Full{"Count at the limit?"}
+  Full -->|yes| Throttle["429 rate_limited, Retry-After = time left"]
+  Full -->|no| Count["Count + 1, restart the 60 s wait"]
+  Count --> Idle{"Full wait with no request?"}
+  Idle -->|yes| Reset["Count back to zero"]
+  Idle -->|no| Req
+```
+
+A long-running integration that polls or reconnects without a pause gets this
+`429` from time to time, so handle it by waiting for `Retry-After`. To send
+fewer requests, follow a session with one stream as shown in
 [Managed Agents events and streams](/docs/standalone/managed-agents-events)
 instead of polling the event list.
 
+### Volume quotas and rate-limit headers
+
 Volume quotas, such as queued inputs per session or sessions created per hour,
 also return `429 rate_limited`. In that case `details.limit` names the quota.
+
 A `429` from the per-organization write limit, sessions created per hour, or
 user event bytes per day also carries the IETF `RateLimit-Policy` and
 `RateLimit` headers, named after `details.limit`, as in this example.
@@ -58,21 +84,31 @@ RateLimit-Policy: "writesPerOrgPerMinute";q=600;w=60
 RateLimit: "writesPerOrgPerMinute";r=0;t=42
 ```
 
-`q` is the window's quota, `w` its length in seconds, `r` what is left, and `t`
-the seconds until it resets, the same as `Retry-After`. For
-`userEventBytesPerOrgPerDay`, `q` and `r` count bytes, and the policy says so
-with `qu="content-bytes"`. A refused large append can leave `r` above zero, so a
-smaller append may still fit before the reset. `RateLimit` is left out when the
-remaining amount cannot be read.
+| Parameter | Meaning |
+|---|---|
+| `q` | The window's quota |
+| `w` | The window's length in seconds |
+| `r` | What is left |
+| `t` | The seconds until it resets, the same as `Retry-After` |
+
+- For `userEventBytesPerOrgPerDay`, `q` and `r` count bytes, and the policy
+  says so with `qu="content-bytes"`. A refused large append can leave `r` above
+  zero, so a smaller append may still fit before the reset.
+- `RateLimit` is left out when the remaining amount cannot be read.
 
 ## Endpoint surface
 
 The **API key scopes** column applies to API keys. The **Member permission**
 column applies to people, through a personal API key or a console session. A
-personal API key needs both. The **Retry** column is **Key** for routes that
-accept `Idempotency-Key` (see
-[idempotency](/docs/standalone/managed-agents-api-requests#idempotency)), **Safe** for routes that you can repeat, **Read** for
-read routes, and **No** for routes that are neither.
+personal API key needs both.
+
+The **Retry** column takes one of four values:
+
+- **Key** for routes that accept `Idempotency-Key` (see
+  [idempotency](/docs/standalone/managed-agents-api-requests#idempotency));
+- **Safe** for routes that you can repeat;
+- **Read** for read routes;
+- **No** for routes that are neither.
 
 | Method | Path | API key scopes | Member permission | Retry | Body limit | Success |
 |---|---|---|---|---|---|---|
@@ -106,8 +142,10 @@ read routes, and **No** for routes that are neither.
 
 Session routes apply a visibility rule. A person sees and changes only their
 own sessions unless they have `agent.edit`. An organization API key sees and
-changes only the sessions it started. Credential responses send
-`Cache-Control: no-store` and never return the provider key.
+changes only the sessions it started.
+
+Credential responses send `Cache-Control: no-store` and never return the
+provider key.
 
 The **step-up** in the credential rows is a fresh identity confirmation in the
 console. Without it a credential write gets `403 step_up_required`.

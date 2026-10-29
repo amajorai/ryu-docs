@@ -7,6 +7,19 @@ Diagnostics export is off by default. [Privacy and Telemetry](/docs/surfaces/des
 explains the consent, what is sent, and how to turn it on. This page is the technical reference for
 the export once it is on.
 
+```mermaid
+flowchart LR
+  Core["Core spans"] --> On{"Export enabled?"}
+  GW["Gateway spans"] --> On
+  On -->|no| Off["Nothing sent"]
+  On -->|yes| Mode{"Content mode"}
+  Mode -->|metadata_only| Meta["Metadata only"]
+  Mode -->|content| Red["Content after redaction"]
+  Meta --> Preset["Exporter preset resolves URL and headers"]
+  Red --> Preset
+  Preset --> Col["OTLP collector"]
+```
+
 ## Endpoint and headers
 
 Core and Gateway export traces with OTLP over HTTP (protobuf). Enter the collector's **base URL**;
@@ -20,12 +33,14 @@ Ryu appends the traces path for you:
 
 Request headers come from `OTEL_EXPORTER_OTLP_HEADERS` as comma-separated `key=value` pairs, for
 example `Authorization=Bearer <token>` or a vendor's dataset header. Core uses the same headers for
-its own exporter and forwards them to the Gateway it manages. Exported spans carry the resource
-attributes `service.name` (`ryu-core` or `ryu-gateway`) and `service.version`; set
-`OTEL_SERVICE_NAME` or `OTEL_RESOURCE_ATTRIBUTES` to override or extend them. Pending spans are
-flushed when Core or Gateway shuts down. When Core restarts or stops the Gateway it manages (for
-example after you change export or content settings), it asks the Gateway to exit and gives it a
-few seconds to flush first.
+its own exporter and forwards them to the Gateway it manages.
+
+Exported spans carry the resource attributes `service.name` (`ryu-core` or `ryu-gateway`) and
+`service.version`. Set `OTEL_SERVICE_NAME` or `OTEL_RESOURCE_ATTRIBUTES` to override or extend them.
+
+Pending spans are flushed when Core or Gateway shuts down. When Core restarts or stops the Gateway
+it manages (for example after you change export or content settings), it asks the Gateway to exit
+and gives it a few seconds to flush first.
 
 ## Exporter presets
 
@@ -56,22 +71,34 @@ fields are preferences with env mirrors:
 | `diagnostics-otlp-api-key-ref` | `RYU_DIAGNOSTICS_OTLP_API_KEY_REF` | API key (Langfuse: secret key), as a secret reference |
 | `diagnostics-otlp-public-key-ref` | `RYU_DIAGNOSTICS_OTLP_PUBLIC_KEY_REF` | Langfuse public key, as a secret reference |
 
+### Credential references
+
 Credentials are never stored as plain values. Each one is a **secret reference**:
-`secret:NAME` reads a node secret from the [Secret Vault](/docs/security/secret-vault), `env:NAME` reads an
-environment variable, and `file:/absolute/path` reads a mounted secret file. A literal key is
-rejected when you save it, so it never reaches the preferences store. Core resolves references when it builds the exporter, sends the resulting headers itself,
-and forwards them to the Gateway it manages. A separately managed Gateway reads the same
-`RYU_DIAGNOSTICS_OTLP_*` env vars and accepts `env:` and `file:` references (not `secret:`).
+
+| Reference | Reads |
+| --- | --- |
+| `secret:NAME` | a node secret from the [Secret Vault](/docs/security/secret-vault) |
+| `env:NAME` | an environment variable |
+| `file:/absolute/path` | a mounted secret file |
+
+A literal key is rejected when you save it, so it never reaches the preferences store. Core resolves
+references when it builds the exporter, sends the resulting headers itself, and forwards them to the
+Gateway it manages. A separately managed Gateway reads the same `RYU_DIAGNOSTICS_OTLP_*` env vars
+and accepts `env:` and `file:` references (not `secret:`).
 
 Changing any preset field pauses export until Core restarts, like changing the endpoint. If a preset
 cannot be resolved (an unknown name, a missing key, an unreadable reference), export stays off and
-**Send test span** reports why; Ryu never falls back to sending spans unauthenticated.
+**Send test span** reports why. Ryu never falls back to sending spans unauthenticated.
+
+### What a preset exports
 
 With a preset active, the run traces described in [Run traces](/docs/surfaces/desktop/observability)
-are exported as one tree per agent run: each span keeps its trace and span ids and carries
-OpenInference (`openinference.span.kind`, `session.id`) and GenAI (`gen_ai.operation.name`,
-`gen_ai.request.model`, `gen_ai.tool.name`, `gen_ai.agent.id`) attributes, so Langfuse, LangSmith,
-Phoenix, Braintrust, Helicone, and Datadog can group and classify them.
+are exported as one tree per agent run. Each span keeps its trace and span ids and carries these
+attributes, so Langfuse, LangSmith, Phoenix, Braintrust, Helicone, and Datadog can group and
+classify them:
+
+- OpenInference - `openinference.span.kind`, `session.id`;
+- GenAI - `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.tool.name`, `gen_ai.agent.id`.
 
 ## Content mode
 
@@ -88,12 +115,14 @@ carry:
   `tool_call`, `tool_call_response`, or `reasoning`);
 - `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` on tool spans.
 
-Content passes the same protections as the data itself before it is exported. Model-call content
-goes through the Gateway's outbound firewall for that request: what the firewall redacts or
-sanitizes for you is redacted or sanitized in the span too, and when the firewall blocks a response
-its content is left out of the span, which then carries `ryu.content.redacted=true`. Tool arguments
-and results on Core's tool spans have recognized secrets and personal data (keys, tokens, email
-addresses, and similar patterns) replaced with `[REDACTED:<kind>]` before export.
+Content passes the same protections as the data itself before it is exported:
+
+- Model-call content goes through the Gateway's outbound firewall for that request. What the
+  firewall redacts or sanitizes for you is redacted or sanitized in the span too.
+- When the firewall blocks a response, its content is left out of the span, which then carries
+  `ryu.content.redacted=true`.
+- Tool arguments and results on Core's tool spans have recognized secrets and personal data (keys,
+  tokens, email addresses, and similar patterns) replaced with `[REDACTED:<kind>]` before export.
 
 <Callout type="warn">
   Full content sends your prompts, model responses, and tool data to the collector you configured,
@@ -101,17 +130,29 @@ addresses, and similar patterns) replaced with `[REDACTED:<kind>]` before export
   destination you control. Content mode never sends anything while diagnostics export is off.
 </Callout>
 
-Content mode also decides what the local run-trace store keeps. With it on, run-trace spans on this
-device record their inputs and outputs (for example a tool's arguments and result, or the recall
-query and injected context); with it off they keep only names, timing, status, counts, and input
-fingerprints. Stored payloads are encrypted on disk, and turning content mode off clears the ones
-already stored the next time Core records a span. Run-trace span payloads are exported as OpenInference `input.value` and
-`output.value` only while export is also on.
+### Local run-trace store
+
+Content mode also decides what the local run-trace store keeps:
+
+- **On** - run-trace spans on this device record their inputs and outputs (for example a tool's
+  arguments and result, or the recall query and injected context).
+- **Off** - they keep only names, timing, status, counts, and input fingerprints.
+
+Stored payloads are encrypted on disk. Turning content mode off clears the ones already stored the
+next time Core records a span. Run-trace span payloads are exported as OpenInference `input.value`
+and `output.value` only while export is also on.
+
+### Content size cap
 
 Each span's content is capped at 750,000 bytes by default (`diagnostics-otlp-max-content-bytes`,
-env mirror `RYU_DIAGNOSTICS_MAX_CONTENT_BYTES`). When a span exceeds the cap, Ryu drops the system
-instructions first, then the earliest input messages, then the earliest output messages; tool
-results are cut from the end. Truncated spans carry `ryu.content.truncated=true`.
+env mirror `RYU_DIAGNOSTICS_MAX_CONTENT_BYTES`). When a span exceeds the cap, Ryu drops content in
+this order:
+
+1. the system instructions;
+2. the earliest input messages;
+3. the earliest output messages.
+
+Tool results are cut from the end. Truncated spans carry `ryu.content.truncated=true`.
 
 ## Trace context propagation
 
@@ -129,15 +170,22 @@ exportable spans nor sends `traceparent`.
 
 ## Send a test span
 
-Turn export on, save the endpoint, and restart Core so its exporter binds the new destination. Then
-use **Send test span** in **Settings → Privacy → Diagnostics & support** to send one span named
-`ryu.test` and flush it immediately. Look for it in
-your collector to confirm the URL and headers. The same check is available as
-`POST /api/diagnostics/otlp/test-span` on Core's API: it returns `200` with the base endpoint when
-the span was exported, `409` when export is off, no endpoint is active, the endpoint changed since
-Core started, or the configured endpoint is not a valid URL (nothing is sent), and
-`502` when the collector rejected the span or could not be reached. A `200` confirms Ryu handed the
-span to the destination; check the collector to confirm it was stored.
+1. Turn export on and save the endpoint.
+2. Restart Core so its exporter binds the new destination.
+3. Choose **Send test span** in **Settings → Privacy → Diagnostics & support**. Ryu sends one span
+   named `ryu.test` and flushes it immediately.
+4. Look for it in your collector to confirm the URL and headers.
+
+The same check is available as `POST /api/diagnostics/otlp/test-span` on Core's API:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | The span was exported. The response holds the base endpoint. |
+| `409` | Nothing was sent. Export is off, no endpoint is active, the endpoint changed since Core started, or the configured endpoint is not a valid URL. |
+| `502` | The collector rejected the span or could not be reached. |
+
+A `200` confirms Ryu handed the span to the destination. Check the collector to confirm it was
+stored.
 
 ## Span reference
 
@@ -154,13 +202,21 @@ span to the destination; check the collector to confirm it was stored.
 
 Model calls and tool spans nest under the agent turn that made them. `gen_ai.provider.name` uses the
 OpenTelemetry well-known value where one exists (`anthropic`, `openai`, `aws.bedrock`,
-`gcp.vertex_ai`, `gcp.gemini`, `azure.ai.openai`, and so on) and Ryu's provider id otherwise. Failed
-spans have status ERROR and a short `error.type` class (for example an HTTP status code or
-`provider_error` for model calls, `cancelled` for a model call the client abandoned or that timed
-out before it finished, and `tool_error` for tools); error messages and response bodies are not
-exported. The `gen_ai.*` attributes on model-call spans follow the experimental GenAI
-conventions and require the `OTEL_SEMCONV_STABILITY_OPT_IN` opt-in above. Attributes specific to
-Ryu use the `ryu.` prefix.
+`gcp.vertex_ai`, `gcp.gemini`, `azure.ai.openai`, and so on) and Ryu's provider id otherwise.
+
+Failed spans have status ERROR and a short `error.type` class. Error messages and response bodies
+are not exported.
+
+| `error.type` | Used for |
+| --- | --- |
+| an HTTP status code, or `provider_error` | model calls |
+| `cancelled` | a model call the client abandoned, or that timed out before it finished |
+| `tool_error` | tools |
+
+The `gen_ai.*` attributes on model-call spans follow the experimental GenAI conventions. The Gateway
+emits them only when `OTEL_SEMCONV_STABILITY_OPT_IN` contains `gen_ai`. Core sets it for the Gateway
+it manages (see [Privacy and Telemetry](/docs/surfaces/desktop/transparency#diagnostics-export-otlp)).
+Attributes specific to Ryu use the `ryu.` prefix.
 
 <Callout type="warn">
   Delivery to a third-party OTLP backend depends on that destination's endpoint, credentials, and

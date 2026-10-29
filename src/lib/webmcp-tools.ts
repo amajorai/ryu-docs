@@ -10,11 +10,7 @@ import {
   type WebMcpToolDefinition,
 } from "@ryu/assistant-widget/webmcp-api";
 import { z } from "zod";
-import {
-  DOCS_VERSION,
-  docsPathForLocale,
-  isVersionSegment,
-} from "@/lib/docs-version";
+import { docsPathForLocale, stripDocsVersion } from "@/lib/docs-version";
 import {
   DEFAULT_DOCS_LOCALE,
   isDocsLocale,
@@ -61,7 +57,7 @@ export const DOCS_WEBMCP_TOOL_SPECS: DocsWebMcpToolSpec[] = [
     name: "docs_get_page",
     title: "Read a Ryu Docs page",
     description:
-      "Read one public Ryu documentation page as Markdown. Accepts a /docs path, a versioned docs path, or a bare docs slug.",
+      "Read one public Ryu documentation page as Markdown. Accepts a /docs path or a bare docs slug.",
     annotations: { readOnlyHint: true, untrustedContentHint: true },
     inputSchema: {
       type: "object",
@@ -69,7 +65,7 @@ export const DOCS_WEBMCP_TOOL_SPECS: DocsWebMcpToolSpec[] = [
         path: {
           type: "string",
           description:
-            "A docs path such as '/es/docs/0.2.3/extend/mcp/webmcp' or 'extend/mcp/webmcp'.",
+            "A docs path such as '/es/docs/extend/mcp/webmcp' or 'extend/mcp/webmcp'.",
         },
       },
       required: ["path"],
@@ -186,14 +182,12 @@ async function executeDocsTool(
     if (url.origin !== window.location.origin || parts[0] !== "docs") {
       throw new Error("Only public docs paths on this site can be read.");
     }
-    const version = parts[1] ?? DOCS_VERSION;
-    const hasVersion = isVersionSegment(version);
-    const slugs = hasVersion ? parts.slice(2) : parts.slice(1);
+    const slugs = stripDocsVersion(parts.slice(1));
     if (slugs.length === 0) {
       throw new Error("A specific docs page is required.");
     }
     const markdownUrl = new URL(
-      `/llms.mdx/docs/${locale === DEFAULT_DOCS_LOCALE ? "" : `${locale}/`}${hasVersion ? version : DOCS_VERSION}/${slugs.join("/")}`,
+      `/llms.mdx/docs/${locale === DEFAULT_DOCS_LOCALE ? "" : `${locale}/`}${slugs.join("/")}`,
       window.location.origin,
     );
     const response = await fetch(markdownUrl, {

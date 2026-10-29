@@ -14,6 +14,20 @@ Ryu implements the A2A v1 JSON-RPC and HTTP+JSON bindings, including streaming,
 task lookup and listing, cancellation, subscription, push-notification configuration,
 and authenticated extended Agent Cards.
 
+```mermaid
+sequenceDiagram
+  participant P as Remote A2A host
+  participant K as Ryu Core (/a2a)
+  participant A as Published Ryu agent
+  P->>K: GET /.well-known/agent-card.json
+  K-->>P: Agent Card (signed when enrolled)
+  P->>K: SendStreamingMessage + bearer token
+  K->>K: Check token scopes and published agents
+  K->>A: Task framed as untrusted data
+  A-->>K: Reply
+  K-->>P: SSE task updates and artifacts
+```
+
 ## A2A, ACP, and MCP (Model Context Protocol)
 
 | Protocol | Connects | Best for |
@@ -47,22 +61,28 @@ The public Agent Card is served at this path.
 https://agent.example.com/.well-known/agent-card.json
 ```
 
-When the node is registered to an organization, the card names that organization as its
-`provider`. An unregistered node omits `provider`.
+What the card contains:
 
-The card's `iconUrl` points at the Ryu icon served from the same public base URL
-(`/a2a-card/icon.svg`).
+- **Provider.** When the node is registered to an organization, the card names that organization
+  as its `provider`. An unregistered node omits `provider`.
+- **Icon.** The card's `iconUrl` points at the Ryu icon served from the same public base URL
+  (`/a2a-card/icon.svg`).
+- **Interfaces.** The card advertises both `JSONRPC` and `HTTP+JSON` interfaces. If more than one
+  local agent is published, callers select one by adding `metadata.ryuAgentId` to `SendMessage` or
+  `SendStreamingMessage`.
 
-A node enrolled in an organization also signs its card. The signature is a detached JWS
-(`EdDSA`) over the card's RFC 8785 canonical form, excluding `signatures`. Its protected header
-names the signing key (`kid`) and a `jku` pointing at the node's key set on the same base URL
-(`/a2a-card/jwks.json`). An unenrolled node serves the card unsigned. A signature proves the card
-came from the node holding that key. Peers should still authenticate the endpoint through HTTPS
-and the issued token.
+### Card signatures
 
-The card advertises both `JSONRPC` and `HTTP+JSON` interfaces. If more than one local agent is
-published, callers select one by adding `metadata.ryuAgentId` to `SendMessage` or
-`SendStreamingMessage`.
+A node enrolled in an organization also signs its card. An unenrolled node serves the card
+unsigned.
+
+- The signature is a detached JWS (`EdDSA`) over the card's RFC 8785 canonical form, excluding
+  `signatures`.
+- Its protected header names the signing key (`kid`) and a `jku` pointing at the node's key set on
+  the same base URL (`/a2a-card/jwks.json`).
+
+A signature proves the card came from the node holding that key. Peers should still authenticate
+the endpoint through HTTPS and the issued token.
 
 ### Inbound authentication
 
@@ -93,6 +113,14 @@ Under **Peer agents**, enter the peer's base URL or full Agent Card URL and any 
 requires. Ryu supports bearer tokens, named API-key headers, Basic authentication, and OAuth 2
 client credentials. Discovery validates the v1 card but leaves the peer in `pending` state.
 
+```mermaid
+stateDiagram-v2
+  [*] --> pending: Discover card
+  pending --> trusted: Select Trust
+  trusted --> revoked: Select Revoke
+  revoked --> trusted: Select Trust
+```
+
 Discovery also checks the card's signature. It fetches the key set only from the card's own origin.
 
 - A card with an invalid signature is always rejected.
@@ -101,13 +129,18 @@ Discovery also checks the card's signature. It fetches the key set only from the
 - Each peer shows its card status: signed, unsigned, signature unchecked, or signature invalid.
 
 Review the name, URL, interfaces, and skills before you select **Trust**. Ryu does not send a task
-to a pending or revoked peer. Once trusted, add the peer to the agent roster. Chats, teams, and
-delegation then use the normal Ryu routing path, and the remote exchange stays a durable A2A task.
+to a pending or revoked peer.
 
-A peer in the roster runs on its own node, with that node's accounts. Ryu sends it only the task,
-using the credential you saved for the peer, and none of your accounts on this node, so the agent
-editor shows that it runs on another node instead of offering an identity or account access. Only an
-agent that acts as you with no account limit can hand work to a peer.
+Once trusted, add the peer to the agent roster. Chats, teams, and delegation then use the normal
+Ryu routing path, and the remote exchange stays a durable A2A task.
+
+A peer in the roster runs on its own node, with that node's accounts:
+
+- Ryu sends it only the task, using the credential you saved for the peer, and none of your
+  accounts on this node.
+- The agent editor shows that it runs on another node instead of offering an identity or account
+  access.
+- Only an agent that acts as you with no account limit can hand work to a peer.
 
 Credentials are write-only. The settings API reports whether a credential exists and which kind
 it is, but never returns the secret.
@@ -136,13 +169,16 @@ persisted, so task inspection survives a Core restart.
 ## Push notifications
 
 An inbound caller can attach a push configuration to a message or manage it through the task push
-configuration operations. Ryu sends the A2A `StreamResponse` payload to the configured HTTPS
-callback, applies the declared HTTP authorization scheme, and includes an opaque notification
-token in `X-A2A-Notification-Token` when one was supplied.
+configuration operations. For each notification, Ryu:
 
-Callback credentials are encrypted at rest and omitted from reads. Deliveries use bounded retries
-(up to three attempts), so receivers should handle duplicate notifications idempotently. A
-notification token is limited to 4096 bytes.
+1. Sends the A2A `StreamResponse` payload to the configured HTTPS callback.
+2. Applies the declared HTTP authorization scheme.
+3. Includes an opaque notification token in `X-A2A-Notification-Token` when one was supplied.
+
+- Callback credentials are encrypted at rest and omitted from reads.
+- Deliveries use bounded retries (up to three attempts), so receivers should handle duplicate
+  notifications idempotently.
+- A notification token is limited to 4096 bytes.
 
 ## Security model
 
@@ -154,10 +190,11 @@ notification token is limited to 4096 bytes.
 - DNS answers are validated and pinned for each request. Redirects are revalidated and cannot cross
   origins.
 - Remote message content is framed as untrusted data before it reaches a local agent, and remote
-  text cannot invoke Ryu operator commands. URL parts are fetched only over HTTPS to public
-  addresses (DNS-pinned, no redirects), at most four per message, up to 256 KiB each, within ten
-  seconds, and only for textual media types (`text/*`, JSON, XML). Fetched text is placed inside the
-  same untrusted block; any other URL part is passed to the agent as an unfetched reference.
+  text cannot invoke Ryu operator commands.
+- URL parts in a remote message are fetched only over HTTPS to public addresses (DNS-pinned, no
+  redirects), at most four per message, up to 256 KiB each, within ten seconds, and only for
+  textual media types (`text/*`, JSON, XML). Fetched text is placed inside the same untrusted
+  block. Any other URL part is passed to the agent as an unfetched reference.
 - Payload, stream-event, redirect, hop, callback, rate, and concurrency limits are enforced at the
   protocol boundaries.
 - Task reads and mutations are isolated to the authenticated caller. The local settings view uses a

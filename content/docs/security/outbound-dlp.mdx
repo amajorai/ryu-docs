@@ -3,7 +3,9 @@ title: "Outbound DLP"
 description: "How the Gateway redacts secrets and PII from responses, streamed replies, companion egress, and error and log surfaces before they reach the caller."
 ---
 
-The Gateway firewall scans traffic in both directions. The outbound side is data-loss prevention (DLP): it redacts secret-like tokens from response text and from error and log surfaces. A secret that leaks into a model response or an error message does not reach the caller verbatim. For the full firewall, its policies, and inbound scanning, see [Gateway security](/docs/gateway/security).
+The Gateway firewall scans traffic in both directions. The outbound side is data-loss prevention (DLP): it redacts secret-like tokens from response text and from error and log surfaces, so a secret that leaks into a model response or an error message does not reach the caller verbatim.
+
+For the full firewall, its policies, and inbound scanning, see [Gateway security](/docs/gateway/security).
 
 The firewall is on by default (`enabled` and `scan_outbound` both default to `true` in the Gateway firewall config). Outbound secret redaction runs whenever the firewall is enabled; it does not depend on the `redact_secrets` setting.
 
@@ -25,7 +27,27 @@ Each match is replaced with a stable marker such as `[REDACTED:gh_pat]`. The res
 ## Non-streaming and streaming responses
 
 - **Non-streaming responses** are scanned and rewritten in full before they reach the caller.
-- **Streaming responses** reach the caller as they are generated. The Gateway parses every SSE frame and redacts its strings; there is no raw-byte fast path. A frame is released only after the policy scan covers it. The Gateway holds back a short window of recent text, so a secret that arrives across several deltas is judged whole before any part of it is sent.
+- **Streaming responses** reach the caller as they are generated. The Gateway parses every SSE frame and redacts its strings; there is no raw-byte fast path.
+- A streamed frame is released only after the policy scan covers it. The Gateway holds back a short window of recent text, so a secret that arrives across several deltas is judged whole before any part of it is sent.
+
+```mermaid
+flowchart TD
+  A["Model response"] --> B{"Streaming?"}
+  B -- No --> C["Scan and rewrite whole body"]
+  B -- Yes --> D{"Custom patterns, evaluators, or complex deltas?"}
+  D -- Yes --> C
+  D -- No --> E["Parse SSE frame, hold short text window"]
+  E --> F{"Match found?"}
+  F -- No --> G["Release frame"]
+  F -- Yes --> H{"Policy"}
+  H -- block --> I["End stream with block notice"]
+  H -- sanitize --> J["Redact and continue"]
+  H -- warn_and_continue --> K["Log and continue"]
+  C --> L["Caller"]
+  G --> L
+  J --> L
+  K --> L
+```
 
 The firewall `policy` decides what a streaming violation does:
 
@@ -35,7 +57,10 @@ The firewall `policy` decides what a streaming violation does:
 | `sanitize` | The stream continues with the match redacted |
 | `warn_and_continue` | The detection is logged and the stream continues |
 
-A firewall with custom patterns or output evaluators buffers the whole response before it sends any of it. Custom patterns can span unbounded whitespace, and evaluators judge the complete reply. Tool-call arguments, parallel choices, and other complex delta shapes are also buffered, so each independent text stream is scanned as a whole.
+Some responses are buffered in full before any of them is sent:
+
+- A firewall with custom patterns or output evaluators buffers the whole response. Custom patterns can span unbounded whitespace, and evaluators judge the complete reply.
+- Tool-call arguments, parallel choices, and other complex delta shapes are also buffered, so each independent text stream is scanned as a whole.
 
 <Callout type="info">
 Content deltas are scanned together, without provider metadata such as `id` or `model` between them. Metadata is scanned separately. When a protected value spans several JSON strings, Ryu may replace the held payload with `[REDACTED]` instead of keeping fragments that could rebuild the value in the client.
@@ -45,24 +70,30 @@ Content deltas are scanned together, without provider metadata such as `id` or `
 
 Buffered and streaming chat responses are scanned with the same per-request policy: the node
 baseline plus the organization, team, and agent overlays described in
-[hierarchical policy resolution](/docs/gateway/security#hierarchical-policy-resolution). An overlay
-that turns on `scan_outbound`, sets a stricter `policy`, or adds `custom_patterns` therefore also
-applies to `stream: true` responses. When `block` ends a stream, the Gateway writes a `firewall`
-audit row for the request, including when the match completes only in the final chunks.
+[hierarchical policy resolution](/docs/gateway/security#hierarchical-policy-resolution).
+
+An overlay that turns on `scan_outbound`, sets a stricter `policy`, or adds `custom_patterns`
+therefore also applies to `stream: true` responses. When `block` ends a stream, the Gateway writes a
+`firewall` audit row for the request, including when the match completes only in the final chunks.
+
+## Keys and logprobs
 
 Outbound scanning reads every string in the response and every object key, so a value placed in a
-key of object-typed tool arguments is redacted like any other text. A streamed frame whose choice
-carries `logprobs` is held until the reply ends and scanned as a whole, because each logprob token
-mirrors part of the text. When `sanitize` rewrites a choice, the Gateway sets its `logprobs` to
-`null` (`apps/gateway/src/pipeline/json_text.rs`) so the tokens cannot rebuild the redacted value.
+key of object-typed tool arguments is redacted like any other text.
+
+A streamed frame whose choice carries `logprobs` is held until the reply ends and scanned as a whole,
+because each logprob token mirrors part of the text. When `sanitize` rewrites a choice, the Gateway
+sets its `logprobs` to `null` (`apps/gateway/src/pipeline/json_text.rs`) so the tokens cannot
+rebuild the redacted value.
 
 ## Companion egress redaction
 
 Core forwards requests that come from the context companion (a screen-capture source) with the
 `x-ryu-companion-source` header. The Gateway then runs `redact_companion_egress`
-(`apps/gateway/src/firewall/mod.rs`), which redacts both PII and secrets before egress and ignores
-`enabled`, `redact_pii`, and `redact_secrets`. Screen-captured text is always sanitized, even when
-the firewall is fully disabled. This is one of the Gateway's
+(`apps/gateway/src/firewall/mod.rs`), which redacts both PII and secrets before egress.
+
+This path ignores `enabled`, `redact_pii`, and `redact_secrets`, so screen-captured text is always
+sanitized, even when the firewall is fully disabled. It is one of the Gateway's
 [locked guardrails](/docs/gateway/security#locked-guardrails).
 
 ## Passthrough responses

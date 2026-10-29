@@ -26,26 +26,31 @@ BlueBubbles), the bot reacts to the message it is answering:
   reactions are copied even when lifecycle reactions are off, because they are part of the reply.
 - **❌ when the turn fails**, if lifecycle reactions are on.
 
-A successful turn that the agent did not react to ends with no reaction; the reply itself confirms
-the message was handled. Telegram bots can only use Telegram's fixed set of reaction emoji, so
-common emoji outside that set are swapped for the closest one (✅ becomes 👌, 😂 becomes 🤣), and
-emoji with no close match are skipped. Slack reactions are sent by their Slack name (for example
-`eyes` or `+1`). On iMessage, only emoji that have a matching tapback are sent.
+A successful turn that the agent did not react to ends with no reaction. The reply itself confirms
+the message was handled.
+
+Each platform limits which emoji can be sent:
+
+- **Telegram** bots can only use Telegram's fixed set of reaction emoji. Common emoji outside that
+  set are swapped for the closest one (✅ becomes 👌, 😂 becomes 🤣), and emoji with no close match
+  are skipped.
+- **Slack** reactions are sent by their Slack name, for example `eyes` or `+1`.
+- **iMessage** sends only emoji that have a matching tapback.
 
 ### Optional reaction learning
 
-With the [Learning app](/docs/apps/learning) enabled, a supported channel can turn reactions on Ryu's
-own replies into the same **up** / **down** feedback used by the desktop chat.
-This bridge is disabled by default, maps only the configured emojis, and ignores
-reactions that cannot be linked to the exact outbound Ryu message. Group-room
-reactions require an explicit opt-in because the feedback sink is shared by the
-node rather than scoped to an individual room member.
+With the [Learning app](/docs/apps/learning) enabled, a supported channel can turn reactions on
+Ryu's own replies into the same **up** / **down** feedback used by the desktop chat.
 
-The Gateway stores each provider-message link in its durable channel state, so a
-delayed reaction still targets the exact Core assistant message after a Gateway
-restart. When one channel turn produces continued assistant messages, feedback is
-applied to every message that formed the delivered reply. Old links are pruned
-after 90 days and the store keeps at most 4,096 links.
+- The bridge is disabled by default and maps only the configured emojis.
+- It ignores reactions that cannot be linked to the exact outbound Ryu message.
+- Group-room reactions need an explicit opt-in, because the feedback sink is shared by the node
+  instead of scoped to an individual room member.
+
+The Gateway stores each provider-message link in its durable channel state, so a delayed reaction
+still targets the exact Core assistant message after a Gateway restart. When one channel turn
+produces continued assistant messages, feedback applies to every message that formed the delivered
+reply. Old links are pruned after 90 days, and the store keeps at most 4,096 links.
 
 Telegram supports this configuration in file-based Gateway deployments.
 
@@ -64,18 +69,43 @@ channel's normal lifecycle reactions.
 
 ### Delivery retries and duplicate webhooks
 
-Webhook providers deliver at least once, so a callback can arrive again after a
-network timeout or while a previous attempt is still running. Gateway claims the
-provider's stable event identity before acknowledging the callback and keeps a
-bounded, node-local delivery ledger in its existing channel state. The ledger is
+Webhook providers deliver at least once, so a callback can arrive again after a network timeout or
+while a previous attempt is still running. The Gateway claims the provider's stable event identity
+before it acknowledges the callback.
+
+```mermaid
+sequenceDiagram
+  participant P as Provider
+  participant G as Gateway adapter
+  participant L as Delivery ledger
+  participant C as Core
+  P->>G: Webhook callback
+  G->>L: Claim event id
+  alt New event
+    L-->>G: Claimed
+    G-->>P: 200
+    G->>C: Run the turn
+  else Duplicate in flight or completed
+    L-->>G: Already claimed
+    G-->>P: 200, no new turn
+  else Queue or ledger unavailable
+    G-->>P: 503, provider retries
+  end
+```
+
+The delivery ledger is bounded and node-local, kept in the Gateway's existing channel state. It is
 shared by the channel adapters, written atomically, and retained for 30 days.
 
-The stable identities are the Telegram `update_id`, WhatsApp Business `wamid`,
-OpenWA's message or delivery id, and BlueBubbles' message `guid`. Store-backed
-channel records are part of the ledger scope, so two Telegram bots or WhatsApp
-numbers cannot suppress one another's events. A duplicate that is already in
-flight or has completed is acknowledged without another model call or outbound
-message.
+| Platform | Stable event identity |
+|---|---|
+| Telegram | `update_id` |
+| WhatsApp Business | `wamid` |
+| WhatsApp Personal (OpenWA) | Message or delivery id |
+| BlueBubbles | Message `guid` |
+
+Store-backed channel records are part of the ledger scope, so two Telegram bots or WhatsApp numbers
+cannot suppress one another's events. A duplicate that is already in flight or has completed is
+acknowledged without another model call or outbound message.
 
 The webhook response follows this failure contract.
 
@@ -87,71 +117,105 @@ The webhook response follows this failure contract.
   delivery stays reclaimable by a later provider retry, and the channel status reports the
   failure to the operator.
 
-For agent/team-routed channels, the same delivery key is passed to Core as
-`idempotencyKey`. If a provider send times out after Core already persisted the
-turn, a retry replays the stored reply and assistant message ids instead of
-running the model again. The legacy model-only pipeline has the Gateway ledger
-protection, but does not have Core's persisted reply replay.
+For agent- and team-routed channels, the same delivery key is passed to Core as `idempotencyKey`.
+If a provider send times out after Core already persisted the turn, a retry replays the stored
+reply and assistant message ids instead of running the model again. The legacy model-only pipeline
+has the Gateway ledger protection, but not Core's persisted reply replay.
 
 ### Telegram
 
-Telegram uses Bot API long polling by default, so a bot works without a public URL. Set the optional
-webhook URL and webhook secret to switch to webhook delivery; the local bind and path are configurable
-per channel. Custom Bot API and file endpoints are available for a proxy or a local Bot API server,
-and **Local media mode** reads downloaded file paths from the Gateway host instead of fetching them.
+Telegram uses Bot API long polling by default, so a bot works without a public URL.
 
-In groups, Ryu supports bot mentions, replies to the bot, slash commands, additional
-`mention_patterns`, `exclusive_bot_mentions`, and ignored forum-topic ids. Direct messages always
-reply. Guest-query updates can be accepted with **Guest queries**, and the native Telegram command
-menu is populated from the same Core command registry as the desktop (up to the configured menu
-limit, clamped to Telegram's API limit). Rich replies use Telegram formatting; when streaming is
-enabled, private chats receive a short thinking draft before the final response. Photos, files,
-voice transcription, voice replies, reactions, topic sessions, and bot profile fields use Telegram's
-native APIs where available.
+**Delivery options**
+
+- Set the optional webhook URL and webhook secret to switch to webhook delivery. The local bind and
+  path are configurable per channel.
+- Custom Bot API and file endpoints are available for a proxy or a local Bot API server.
+- **Local media mode** reads downloaded file paths from the Gateway host instead of fetching them.
+
+**Groups and commands**
+
+- In groups, Ryu supports bot mentions, replies to the bot, slash commands, additional
+  `mention_patterns`, `exclusive_bot_mentions`, and ignored forum-topic ids. Direct messages always
+  reply.
+- **Guest queries** accepts guest-query updates.
+- The native Telegram command menu is populated from the same Core command registry as the desktop,
+  up to the configured menu limit (clamped to Telegram's API limit).
+
+**Replies and media**
+
+- Rich replies use Telegram formatting. When streaming is enabled, private chats receive a short
+  thinking draft before the final response.
+- Photos, files, voice transcription, voice replies, reactions, topic sessions, and bot profile
+  fields use Telegram's native APIs where available.
 
 ### Discord
 
-Discord uses an identified Gateway WebSocket with heartbeats, reconnect handling, an online presence,
-and the required Message Content intent. The bot can serve DMs even when no guild channel is listed;
-guild channels can be restricted with watched channel ids, **Allowed channels**, **Ignored channels**,
-**Allowed roles**, or **Free-response channels**. Mentions are required in normal guild traffic by
-default, while DMs always reply. Additional mention patterns, bot-message handling, and the **Mention
-in threads** rule are configurable.
+Discord uses an identified Gateway WebSocket with heartbeats, reconnect handling, an online
+presence, and the required Message Content intent.
 
-Replies can open a thread per triggering message, except in **No-thread channels**, and thread
-follow-ups keep their own Core conversation. **Backfill after reconnect** fetches messages missed while
-the Gateway was disconnected. Core commands are registered as native Discord application commands
-and are also accepted as text. Replies are split at Discord's message limit; images, documents,
-audio attachments, audio-file voice replies, reactions, and typing indicators are supported.
-Bot replies never ping `@everyone`, `@here`, or roles, even when the bot has the **Mention
-Everyone** permission; a user mention in a reply still notifies that user.
+**Where the bot listens**
 
-Ryu supports multiple Discord bot records, but each Discord application and bot must first be created
-in the [Discord Developer Portal](https://docs.discord.com/developers/bots/overview). Discord's public
-developer workflow does not provide a Ryu-managed equivalent of Telegram's bot-creation flow, so
-choose **Paste a token** and add one record per Discord bot. For a managed-node record, use its
-**Install in Discord** action instead of copying the token; the link installs that node's own
-application and still requires a server member with **Manage Server** permission.
+- The bot can serve DMs even when no guild channel is listed. DMs always reply.
+- Guild channels can be restricted with watched channel ids, **Allowed channels**, **Ignored
+  channels**, **Allowed roles**, or **Free-response channels**.
+- Mentions are required in normal guild traffic by default. Additional mention patterns,
+  bot-message handling, and the **Mention in threads** rule are configurable.
+
+**Replies**
+
+- Replies can open a thread per triggering message, except in **No-thread channels**. Thread
+  follow-ups keep their own Core conversation.
+- **Backfill after reconnect** fetches messages missed while the Gateway was disconnected.
+- Core commands are registered as native Discord application commands and are also accepted as
+  text.
+- Replies are split at Discord's message limit. Images, documents, audio attachments, audio-file
+  voice replies, reactions, and typing indicators are supported.
+- Bot replies never ping `@everyone`, `@here`, or roles, even when the bot has the **Mention
+  Everyone** permission. A user mention in a reply still notifies that user.
+
+**Creating Discord bots**
+
+Ryu supports multiple Discord bot records, but each Discord application and bot must first be
+created in the [Discord Developer Portal](https://docs.discord.com/developers/bots/overview).
+Discord's public developer workflow has no Ryu-managed equivalent of Telegram's bot-creation flow,
+so choose **Paste a token** and add one record per Discord bot.
+
+For a managed-node record, use its **Install in Discord** action instead of copying the token. The
+link installs that node's own application and still requires a server member with **Manage
+Server** permission.
 
 ### Slack
 
-Slack uses Socket Mode with an app-level `xapp-` token and a bot `xoxb-` token; it does not need an
-inbound public URL. Enable Socket Mode, subscribe to the message events for the channels and DMs the
-bot should hear, grant the matching history scopes, reinstall the app after scope changes, and invite
-the bot to each channel. Native slash commands must be declared in the Slack app manifest; Ryu also
-accepts those Socket Mode command frames and routes them through Core.
+Slack uses Socket Mode with an app-level `xapp-` token and a bot `xoxb-` token, so it does not need
+an inbound public URL.
 
-Channel replies default to threads, with optional broadcast-to-channel replies. DMs always reply;
-channel behavior can be tuned with strict mentions, active-thread mention requirements,
-free-response channels, mention-required channels, allow/ignore lists, additional mention patterns,
-and bot-message handling. A thread the bot has replied in stays active while it is in use; after a
-week without a bot reply, or after a Gateway restart, mention the bot again to resume it.
+**App setup**
 
-Slack `mrkdwn` is generated from the agent's Markdown. Optional rich blocks and feedback buttons add
-native message actions; feedback buttons confirm with a reaction and do not create an extra agent
-turn. Slack has assistant thread status as a best-effort typing indicator, file and audio uploads,
-inbound voice transcription, reactions, and text chunking. It does not expose a true token draft
-surface, so final replies remain complete messages.
+1. Enable Socket Mode.
+2. Subscribe to the message events for the channels and DMs the bot should hear.
+3. Grant the matching history scopes, and reinstall the app after scope changes.
+4. Invite the bot to each channel.
+5. Declare native slash commands in the Slack app manifest. Ryu accepts those Socket Mode command
+   frames and routes them through Core.
+
+**Channel behavior**
+
+- Channel replies default to threads, with optional broadcast-to-channel replies. DMs always reply.
+- Tune channel behavior with strict mentions, active-thread mention requirements, free-response
+  channels, mention-required channels, allow and ignore lists, additional mention patterns, and
+  bot-message handling.
+- A thread the bot has replied in stays active while it is in use. After a week without a bot reply,
+  or after a Gateway restart, mention the bot again to resume it.
+
+**Replies**
+
+- Slack `mrkdwn` is generated from the agent's Markdown.
+- Optional rich blocks and feedback buttons add native message actions. Feedback buttons confirm
+  with a reaction and do not create an extra agent turn.
+- Assistant thread status serves as a best-effort typing indicator. File and audio uploads, inbound
+  voice transcription, reactions, and text chunking are supported.
+- Slack has no true token draft surface, so final replies remain complete messages.
 
 ### BlueBubbles (iMessage)
 
@@ -160,19 +224,28 @@ signed into Messages, and the Gateway talks to that server over HTTP. BlueBubble
 adapter like the other channel adapters, with no separate channel sidecar. If the Mac sleeps or
 goes offline, the channel is down.
 
-Enter the BlueBubbles Server URL and password and keep the Mac awake. In BlueBubbles Server, open
-**Settings → Webhooks** and enter the tokenized webhook URL that the Gateway reports for this
-channel. The receiver derives that webhook token from the channel password and accepts it in the URL,
-query, or `x-ryu-webhook-token` header; keep the webhook on a trusted LAN or behind a private reverse
-proxy. BlueBubbles does not provide a native mention entity, so group replies use the common group
-mode plus `ryu`, `@ryu`, `hey ryu`, or custom mention patterns.
+**Setup**
 
-Text, images, video, documents, audio attachments, voice transcription, audio-file voice replies,
-pairing, direct phone/email targets, and home-chat targeting are supported. Markdown is sent as plain
-text because Messages does not render Slack/Telegram-style formatting. Install and enable the
-BlueBubbles Private API helper for typing indicators, read receipts, and tapbacks; without it, text
-and media messaging still works. There are no native threads or command menus, but Core text commands
-and `/help` remain available.
+1. Enter the BlueBubbles Server URL and password, and keep the Mac awake.
+2. In BlueBubbles Server, open **Settings → Webhooks** and enter the tokenized webhook URL that the
+   Gateway reports for this channel.
+
+The receiver derives the webhook token from the channel password and accepts it in the URL, query,
+or `x-ryu-webhook-token` header. Keep the webhook on a trusted LAN or behind a private reverse
+proxy.
+
+**Behavior**
+
+- BlueBubbles has no native mention entity, so group replies use the common group mode plus `ryu`,
+  `@ryu`, `hey ryu`, or custom mention patterns.
+- Text, images, video, documents, audio attachments, voice transcription, audio-file voice replies,
+  pairing, direct phone or email targets, and home-chat targeting are supported.
+- Markdown is sent as plain text, because Messages does not render Slack- or Telegram-style
+  formatting.
+- Install and enable the BlueBubbles Private API helper for typing indicators, read receipts, and
+  tapbacks. Without it, text and media messaging still works.
+- There are no native threads or command menus, but Core text commands and `/help` remain
+  available.
 
 <Callout type="warn">
   BlueBubbles does not HMAC-sign its webhooks. Ryu adds a channel-derived bearer token to the
@@ -203,16 +276,18 @@ In **Gateway → Channels**, choose **WhatsApp Personal** and provide the follow
 - optionally `true` for **Self-chat mode** to accept only messages sent from the linked account to
   itself.
 
-The adapter supports text, groups, media/voice transcription, typing, read receipts, reactions,
-WhatsApp markdown, `/help`, and OpenWA session lifecycle/reconnects. OpenWA retries webhook
-deliveries, so Ryu deduplicates them using the stable message id first, then
-`X-OpenWA-Idempotency-Key`/the provider delivery id when needed. Voice replies require
-OpenWA's optional media conversion feature (`MEDIA_CONVERSION_ENABLED=true`) so Core's WAV output
-can become an OGG/Opus voice note.
+- The adapter supports text, groups, media and voice transcription, typing, read receipts,
+  reactions, WhatsApp markdown, `/help`, and OpenWA session lifecycle and reconnects.
+- OpenWA retries webhook deliveries. Ryu deduplicates them by the stable message id first, then by
+  `X-OpenWA-Idempotency-Key` or the provider delivery id when needed.
+- Voice replies require OpenWA's optional media conversion feature (`MEDIA_CONVERSION_ENABLED=true`),
+  so Core's WAV output can become an OGG/Opus voice note.
 
-This path is not an official WhatsApp integration. Use a dedicated number and accept the risk of
-account restriction or banning from WhatsApp. For an official business number, use the Cloud API
-setup instead.
+<Callout type="warn">
+  This path is not an official WhatsApp integration. Use a dedicated number and accept the risk of
+  account restriction or banning from WhatsApp. For an official business number, use the Cloud API
+  setup instead.
+</Callout>
 
 ### WhatsApp Business (Cloud API)
 
@@ -225,11 +300,13 @@ phone number, and a public HTTPS webhook. In **Gateway → Channels**, choose **
 - Meta App Secret for `X-Hub-Signature-256` verification;
 - a random Verify token, entered again in Meta's webhook configuration.
 
-Point Meta's callback URL at the channel's webhook path (default
-`/webhooks/whatsapp`) and subscribe the app to `messages`. The default listener is
-`0.0.0.0:8443`; the channel's **Advanced delivery** fields allow a different bind/path for another
-Cloud API record on the same Gateway. The Cloud API is DM-only, and Meta's 24-hour customer-service
-window still applies: messages outside the window require an approved template. Ryu sends text,
-images, video, documents, reactions, read receipts, typing indicators, and incoming voice notes;
-Core transcribes inbound audio, while generated voice replies remain text-only because Core emits
-WAV and the Cloud API does not accept that format.
+Point Meta's callback URL at the channel's webhook path (default `/webhooks/whatsapp`) and
+subscribe the app to `messages`. The default listener is `0.0.0.0:8443`. The channel's **Advanced
+delivery** fields allow a different bind and path for another Cloud API record on the same Gateway.
+
+- The Cloud API is DM-only.
+- Meta's 24-hour customer-service window still applies. Messages outside the window require an
+  approved template.
+- Ryu sends text, images, video, documents, reactions, read receipts, and typing indicators.
+- Core transcribes incoming voice notes. Generated voice replies remain text-only, because Core
+  emits WAV and the Cloud API does not accept that format.

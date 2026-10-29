@@ -6,7 +6,9 @@ tags: ["passport", "identity", "api", "standalone"]
 
 This page is the HTTP reference for the standalone Ryu Passport service, which
 stores sealed agent login state per tenant. The API is a tenant-scoped contract
-under `/v1`. Management and runtime routes require their respective Passport bearer tokens.
+under `/v1`.
+
+Management and runtime routes require their respective Passport bearer tokens.
 Health, the state-bound OAuth callback, and the client metadata routes are
 public. No response contains the `encrypted_state` column or a decrypted
 credential value.
@@ -20,15 +22,20 @@ header in seconds, even for a valid token. Wait that long before retrying. See
 
 Every error is JSON with the message in `error` and a stable machine `code`,
 for example `{"error":"connection not found","code":"not_found"}`. Branch on
-`code`. A body that is not valid JSON is `400 invalid_request`, a request
-without a JSON `content-type` is `415 invalid_request`, a JSON body that does
-not match the route is `422 invalid_request`, an unknown route is
-`404 not_found`, and a wrong method is `405 method_not_allowed` with an
-`Allow` header. All of them have a JSON body. Send
-`Accept: application/problem+json` to get the same error as RFC 9457 problem
-details (`type`, `title`, `status`, `detail`, `instance`, `code`, `docs`)
-that keep the `error` member; `type` and `docs` link the code's row below.
-The OAuth callback still answers with a short page for the browser.
+`code`. Request-shape errors all have a JSON body:
+
+| Request | Response |
+|---|---|
+| Body that is not valid JSON | `400 invalid_request` |
+| No JSON `content-type` | `415 invalid_request` |
+| JSON body that does not match the route | `422 invalid_request` |
+| Unknown route | `404 not_found` |
+| Wrong method | `405 method_not_allowed` with an `Allow` header |
+
+Send `Accept: application/problem+json` to get the same error as RFC 9457
+problem details (`type`, `title`, `status`, `detail`, `instance`, `code`,
+`docs`) that keep the `error` member; `type` and `docs` link the code's row
+below. The OAuth callback still answers with a short page for the browser.
 
 | Code | Meaning |
 |---|---|
@@ -61,31 +68,47 @@ curl -fsS http://127.0.0.1:8093/v1/connections \
   -d '{"profile_id":"default","domain":"app.example.com"}'
 ```
 
+### Idempotent create
+
 To make a retry safe, add an `Idempotency-Key` header with a value of up to
 255 printable ASCII characters (for example `-H 'Idempotency-Key: "c1f3..."'`).
 Passport builds that honour it report `"idempotency_keys": true` under
 `features` in `GET /v1/capabilities`; an older build ignores the header.
 
 Keys are scoped to the tenant and kept for up to 24 hours; each tenant keeps
-at most 10,000 keys and drops the oldest completed ones first. A retry with
-the same key and body returns the first response with
-`Idempotent-Replayed: true` and does not create a second connection. The same
-key with a different body returns `409 idempotency_conflict`, and a retry
-while the first request is still running returns
-`409 idempotency_in_progress` with `Retry-After`.
+at most 10,000 keys and drops the oldest completed ones first.
 
-Only a success or a `400`, `404`, `409` or `422` is replayed. An authentication, credit or metering
-refusal, a `413`, a `429`, a server error, or a response larger than 64 KiB
-frees the key, so a retry with it runs again. Without the header, every
-request creates a connection. The `@ryuhq/services` SDK and the Python
-`ryu_sdk.services` client send a key they generate, and retry the create with
-it after a network error, timeout or `5xx`, only when `GET /v1/capabilities`
-lists `features.idempotency_keys: true`; otherwise they never retry a create.
-A key you supply is always sent (see
+| Retry | Result |
+|---|---|
+| Same key and body | The first response, with `Idempotent-Replayed: true`; no second connection |
+| Same key, different body | `409 idempotency_conflict` |
+| Same key while the first request is still running | `409 idempotency_in_progress` with `Retry-After` |
+
+Only a success or a `400`, `404`, `409` or `422` is replayed. An
+authentication, credit or metering refusal, a `413`, a `429`, a server error, or
+a response larger than 64 KiB frees the key, so a retry with it runs again.
+Without the header, every request creates a connection.
+
+The `@ryuhq/services` SDK and the Python `ryu_sdk.services` client send a key
+they generate. They retry the create with it after a network error, timeout or
+`5xx` only when `GET /v1/capabilities` lists `features.idempotency_keys: true`;
+otherwise they never retry a create. A key you supply is always sent (see
 [Idempotency and retries](/docs/standalone/sdk/passport#idempotency-and-retries)).
+
+### Authenticate the connection
 
 New connections begin as `NEEDS_AUTH` with `IDLE` flow status. Start the manual
 flow, complete the provider login out of band, then import the resulting state.
+
+```mermaid
+flowchart LR
+  C["POST /v1/connections"] --> N["NEEDS_AUTH, IDLE"]
+  N --> L["POST /:id/login"]
+  L --> P["Provider login (out of band)"]
+  P --> I["POST /:id/import"]
+  I --> S["Sealed state stored"]
+  S --> F["POST /:id/fetch"]
+```
 
 ```sh
 curl -fsS -X POST http://127.0.0.1:8093/v1/connections/conn_.../login \
@@ -148,10 +171,12 @@ credential:
 ```
 
 Check `code`, as with the other Ryu services; `error` carries the same value
-for older clients. The check runs right after authentication, for
-administration and runtime tokens alike, so a refused call never reaches an
-upstream and is not counted as usage. Every other route keeps working. A
-self-hosted Passport never returns this response.
+for older clients.
+
+The check runs right after authentication, for administration and runtime
+tokens alike, so a refused call never reaches an upstream and is not counted as
+usage. Every other route keeps working. A self-hosted Passport never returns
+this response.
 
 ## Usage cannot be recorded
 
@@ -171,9 +196,11 @@ call's count in memory and refuses the routes listed above with
 
 A refused call never reaches an upstream, so it is safe to retry. Each new call
 tries to store the kept counts first, and calls are accepted again as soon as
-that works. While counts are kept, the usage report answers a window that
-contains them with the same `503` instead of a total that leaves them out.
-Other windows, reads, deletes, and health checks keep working.
+that works.
+
+While counts are kept, the usage report answers a window that contains them
+with the same `503` instead of a total that leaves them out. Other windows,
+reads, deletes, and health checks keep working.
 
 ## Usage report
 
@@ -196,17 +223,18 @@ Both bounds must be RFC 3339 UTC timestamps on whole hours, with `from` before
 `"code": "invalid_request"` (also in `error`). Runtime grants cannot read the report, and the
 failed-authentication backoff applies as on other administration routes.
 
-`connectionSeconds` adds up the seconds each stored credential existed inside
-the window. A stored credential is a connection or an MCP OAuth credential. It
-counts from creation until it is deleted, whether or not it holds a working
-login at the time. Importing new state into a connection or refreshing an MCP
-token does not start a new count. Credentials created before usage tracking
-count from the first start of a release that tracks them. Time after the
-request is never counted.
+| Meter | Counts |
+|---|---|
+| `connectionSeconds` | The seconds each stored credential (a connection or an MCP OAuth credential) existed inside the window |
+| `fetches` | Authenticated fetches and runtime MCP transport calls that got a response from their upstream, in the hours that start inside the window |
 
-`fetches` counts the authenticated fetches and runtime MCP transport calls that
-got a response from their upstream, in the hours that start inside the window.
-Requests refused before egress are not counted. That includes failed
+A stored credential counts from creation until it is deleted, whether or not it
+holds a working login at the time. Importing new state into a connection or
+refreshing an MCP token does not start a new count. Credentials created before
+usage tracking count from the first start of a release that tracks them. Time
+after the request is never counted.
+
+Requests refused before egress are not counted as fetches. That includes failed
 authentication, validation errors, `409` responses, the backoff, and
 destinations the egress screen denies. Starting a login does not contact an
 upstream, so it is not counted either.

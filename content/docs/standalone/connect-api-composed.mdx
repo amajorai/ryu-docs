@@ -56,17 +56,23 @@ curl -X POST https://connect.example/v1/composed \
   with an adapter for that job (the candidates in the
   [routing listing](/docs/standalone/connect-api-routing#jobs-and-candidates)),
   and the job's input. A step's `result` is the job's result in Ryu's shape.
-- A mapping is `{"value": …}` (a constant), `{"from": "input.<field>"}` or
-  `{"from": "steps.<id>.result.<path>"}` (a dotted path; numbers index lists),
-  `{"template": "… {{input.topic}} …"}`, or `{"list": [ …mappings ]}`. A step
-  may read only steps declared before it. Steps that do not read each other
-  run at the same time.
+- A mapping fills one input or output field (see the table below). A step may
+  read only steps declared before it. Steps that do not read each other run at
+  the same time.
 - `makerPriceMicroUsd` - your fee per completed run, 0 to 100,000,000
   micro-USD ($100). Default 0.
 - `visibility` - `org` (default; every key of your organization can see and run
   it) or `marketplace` (also listed for every Connect user). Listing is a flag:
   there is no review queue. Setting a fee or listing on the marketplace needs
   an organization key, because the fee is credited to the organization.
+
+| Mapping | Value |
+|---|---|
+| `{"value": …}` | A constant |
+| `{"from": "input.<field>"}` | A field of the tool's input |
+| `{"from": "steps.<id>.result.<path>"}` | A dotted path into an earlier step's result; numbers index lists |
+| `{"template": "… {{input.topic}} …"}` | A string with input values filled in |
+| `{"list": [ …mappings ]}` | A list built from other mappings |
 
 The answer has the tool's `id` (`cmp_…`). `PUT /v1/composed/<id>` with a full
 definition (same `slug`) makes a new version; versions never change, so a
@@ -112,34 +118,69 @@ curl -X POST https://connect.example/v1/composed/cmp_…/call \
 
 ## Money
 
-- **Before anything is sent:** every step's endpoint must have a verified
-  per-call price now, or the run is refused with
-  `409 composed_step_unavailable`. The estimate is every step's price plus
-  the maker's fee; a ceiling (`maxCostMicroUsd` or `x-ryu-max-cost-micro-usd`)
-  below it refuses the run with `402 max_cost_exceeded`. The fee and every
-  step's price are held against your credit first.
-- **A fee you agreed to.** A maker can publish a new version with a
-  different fee at any time. A run that pays a fee must therefore name the
-  `version` (a version's fee never changes) or set a ceiling; otherwise it is
-  refused with `400 composed_fee_unpinned` and the current fee
-  (`maker_fee_micro_usd`). A run with no fee to pay needs neither.
-- **Steps** run exactly like direct [vendor calls](/docs/standalone/connect-api-relay#the-credential-ladder):
-  on your own key they cost nothing; on Ryu's key each is charged its
-  verified price on its own call id when the vendor answers 2xx.
-- **The maker's fee** is charged once per run, only when every step ran and
-  the output was built. It is paid from your organization's top-up credit
-  only: plan, gift and standalone credit are for your own use and never
-  become another organization's earnings. A fee your top-up credit cannot
-  cover when the run is settled is not charged, and the maker earns nothing
-  for that run. On a deployment billed through Polar there is no top-up
-  balance to check, so the fee is not charged there at all. A run that fails
-  part-way charges the steps that ran and no fee. A caller in the maker's own organization pays no fee
-  (`waived: "own_org"`), and a deployment Ryu does not bill charges none
-  (`waived: "unbilled"`).
-- **The maker earns** the fee as spendable credit in the organization's
-  wallet, on deployments that bill from the local wallet. Ryu takes no share
-  of it, and earned credit can be spent but not withdrawn. Neither rule is
-  final and both may change.
+A run passes these checks before Connect sends anything, then charges each
+step as it runs and the maker's fee once at the end:
+
+```mermaid
+flowchart TD
+  R["POST /v1/composed/:id/call"] --> F{"Fee to pay, no version or ceiling?"}
+  F -->|yes| F1["400 composed_fee_unpinned"]
+  F -->|no| P{"Every step has a verified price?"}
+  P -->|no| P1["409 composed_step_unavailable"]
+  P -->|yes| C{"Estimate fits ceiling and credit?"}
+  C -->|no| C1["402 max_cost_exceeded or insufficient_credits"]
+  C -->|yes| S["Steps run, each charged like a direct call"]
+  S --> O{"Every step ran and output built?"}
+  O -->|yes| M["Maker fee charged once"]
+  O -->|no| N["No fee"]
+```
+
+### Before anything is sent
+
+- Every step's endpoint must have a verified per-call price now, or the run is
+  refused with `409 composed_step_unavailable`.
+- The estimate is every step's price plus the maker's fee. A ceiling
+  (`maxCostMicroUsd` or `x-ryu-max-cost-micro-usd`) below it refuses the run
+  with `402 max_cost_exceeded`.
+- The fee and every step's price are held against your credit first.
+
+### A fee you agreed to
+
+A maker can publish a new version with a different fee at any time. A run that
+pays a fee must therefore name the `version` (a version's fee never changes) or
+set a ceiling. Otherwise it is refused with `400 composed_fee_unpinned` and the
+current fee (`maker_fee_micro_usd`). A run with no fee to pay needs neither.
+
+### Steps
+
+Steps run exactly like direct
+[vendor calls](/docs/standalone/connect-api-relay#the-credential-ladder). On
+your own key they cost nothing. On Ryu's key each is charged its verified price
+on its own call id when the vendor answers 2xx.
+
+### The maker's fee
+
+The fee is charged once per run, only when every step ran and the output was
+built. A run that fails part-way charges the steps that ran and no fee.
+
+It is paid from your organization's top-up credit only. Plan, gift and
+standalone credit are for your own use and never become another
+organization's earnings.
+
+The fee is not charged when:
+
+- your top-up credit cannot cover it when the run is settled (the maker earns
+  nothing for that run);
+- the deployment is billed through Polar, which has no top-up balance to check;
+- the caller is in the maker's own organization (`waived: "own_org"`);
+- the deployment is one Ryu does not bill (`waived: "unbilled"`).
+
+### What the maker earns
+
+The maker earns the fee as spendable credit in the organization's wallet, on
+deployments that bill from the local wallet. Ryu takes no share of it, and
+earned credit can be spent but not withdrawn. Neither rule is final and both
+may change.
 
 ## Refusals
 

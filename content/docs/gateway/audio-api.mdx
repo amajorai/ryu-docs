@@ -3,17 +3,23 @@ title: Speech API
 description: Reference for the Gateway speech routes - POST /v1/audio/speech synthesis, POST /v1/audio/transcriptions, speech provider accounts, and retry behaviour.
 ---
 
-The Gateway exposes OpenAI-style speech and transcription routes. Use a Gateway
-client key with inference access. Upstream credentials remain in the provider
-connection. Select a provider and model through your node's speech routing settings
-or an explicit model mapping. See [Provider connections](/docs/gateway/provider-connections)
-for account controls and Gateway client authentication.
+The Gateway exposes OpenAI-style speech and transcription routes. Call them with a Gateway client
+key that has inference access. Upstream credentials stay in the provider connection.
+
+Select a provider and model through your node's speech routing settings or an explicit model
+mapping. See [Provider connections](/docs/gateway/provider-connections) for account controls and
+Gateway client authentication.
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /v1/audio/speech` | JSON | Audio bytes, at most 8 MiB |
+| `POST /v1/audio/transcriptions` | Multipart form data, one file of at most 25 MiB | Transcript in the requested format |
 
 ## Synthesize speech
 
 `POST /v1/audio/speech` accepts a JSON request and returns audio bytes. The response
-`Content-Type` identifies the actual encoding. It does not return a base64 JSON
-envelope or a hosted download URL.
+`Content-Type` identifies the actual encoding. It does not return a base64 JSON envelope or a
+hosted download URL.
 
 ```http
 POST /v1/audio/speech
@@ -23,64 +29,86 @@ Content-Type: application/json
 {"model":"tts-1","input":"Hello from Ryu.","voice":"alloy","response_format":"mp3"}
 ```
 
-Use the native voice IDs and formats supported by the selected provider. A voice
-name from one provider is not automatically an alias for another provider's voice.
-Speech delivery is bounded to 8 MiB. Server-sent speech events are not supported.
+### Request rules
 
-The text to speak is the non-empty string `input`. Optional `instructions`, for providers that
-support delivery instructions, must also be a string. Both pass through the same inbound firewall
-and guardrails as chat input. A request that includes `messages` is rejected; send
-conversations to chat completions instead.
+- The text to speak is the non-empty string `input`.
+- Optional `instructions`, for providers that support delivery instructions, must also be a string.
+  Both pass through the same inbound firewall and guardrails as chat input.
+- A request that includes `messages` is rejected. Send conversations to chat completions instead.
+- Use the native voice IDs and formats of the selected provider. A voice name from one provider is
+  not an alias for another provider's voice.
+- Speech delivery is bounded to 8 MiB. Server-sent speech events are not supported.
 
-OpenAI, ElevenLabs, and Deepgram synthesis, and OpenAI, Deepgram, and Qwen transcription,
-do not automatically repeat a request after a timeout or an ambiguous upstream server failure.
-The error reports uncertain delivery because the provider may have accepted billable work.
-A definitive rate-limit rejection can still select another configured account.
+### Hosted audio downloads
 
-Once AssemblyAI has accepted a transcription job, a polling failure or exhausted polling
-deadline reports uncertain delivery and does not create a new job through another account
-or provider. Malformed accepted Inworld audio is handled the same way. This prevents
-duplicate billed work when the original provider's result cannot be recovered.
+For providers that generate hosted audio, the Gateway completes the download using the selected
+connection's transport. Hosted completion is restricted to supported provider CDN hosts and does
+not send the upstream credential to the CDN. A failed download does not regenerate the speech or
+debit accepted work twice.
 
-Edge TTS is an explicit anonymous consumer integration. Enable it under
-**Gateway → AI providers → Anonymous speech**, then use `edge-tts` with a native
-Microsoft voice ID, such as `en-US-EmmaMultilingualNeural`. It has no provider
-credential account and is separate from Azure Speech authentication.
+## Retries and uncertain delivery
 
-Google Cloud Text-to-Speech and Amazon Polly are direct speech providers. Their
-Gateway provider IDs are `google-tts` and `polly`. Both support multiple explicit
-accounts; use a native voice name in each speech request. Google Cloud TTS needs
-an operator-supplied OAuth bearer token paired with its quota project. Ryu does
-not perform a Google sign-in or refresh that supplied token.
+These rules prevent duplicate billed work when the original provider's result cannot be recovered.
 
-Polly needs an AWS region and explicit access key ID, secret access key, and
-optional temporary session token. It signs each request for the selected region
-without reading the ambient AWS credential chain. Gateway configuration holds
-these rows in `providers.google_tts.accounts` and `providers.polly.accounts`.
-Expired credentials are skipped when an expiry is supplied.
+```mermaid
+flowchart TD
+  FAIL["Upstream failure"] --> KIND{"Failure kind"}
+  KIND -->|"definitive rate-limit rejection"| NEXT["Try another configured account"]
+  KIND -->|"timeout or ambiguous server failure"| UNCERTAIN["Report uncertain delivery"]
+  KIND -->|"accepted job, result unrecoverable"| UNCERTAIN
+  UNCERTAIN --> NORETRY["No new request through another account or provider"]
+```
 
-The Desktop **Gateway → AI providers → Cloud speech connections** section can add,
-name, disable, prioritize, or remove Google and Polly accounts on a node you can configure. Enter the
-Google token and quota project, or the Polly region and explicit AWS keys. An
-optional expiry uses Unix seconds. The account list shows only a credential ID,
-project or key hint, region, and expiry; secret values are never returned by the
-account editor. Remove all Polly accounts before changing its region. The
-[routing guide](/docs/gateway/routing) covers provider selection.
-The **Routing** control beside each saved account edits its name, enabled state,
-and numeric priority. Lower priority numbers are tried first. Accounts at the
-same priority participate in the provider's account selection policy; keep a
-stable selection when upstream caching depends on reusing one account.
+- OpenAI, ElevenLabs, and Deepgram synthesis, and OpenAI, Deepgram, and Qwen transcription, do not
+  repeat a request after a timeout or an ambiguous upstream server failure. The error reports
+  uncertain delivery because the provider may have accepted billable work.
+- A definitive rate-limit rejection can still select another configured account.
+- Once AssemblyAI has accepted a transcription job, a polling failure or an exhausted polling
+  deadline reports uncertain delivery. It does not create a new job through another account or
+  provider.
+- Malformed accepted Inworld audio is handled the same way.
 
-For providers that generate hosted audio, the Gateway completes the download using
-the selected connection's transport. Hosted completion is restricted to supported
-provider CDN hosts and does not send the upstream credential to the CDN. A failed
-download does not regenerate the speech or debit accepted work twice.
+## Edge TTS, Google Cloud TTS, and Amazon Polly
+
+| Provider | Gateway provider ID | Credential | Notes |
+|---|---|---|---|
+| Edge TTS | `edge-tts` | None | An explicit anonymous consumer integration. Enable it under **Gateway → AI providers → Anonymous speech** and use a native Microsoft voice ID, such as `en-US-EmmaMultilingualNeural`. Separate from Azure Speech authentication |
+| Google Cloud Text-to-Speech | `google-tts` | Operator-supplied OAuth bearer token plus its quota project | Ryu does not perform a Google sign-in or refresh the supplied token |
+| Amazon Polly | `polly` | AWS region, explicit access key ID and secret access key, optional temporary session token | Signs each request for the selected region without reading the ambient AWS credential chain |
+
+Google Cloud TTS and Polly both support multiple explicit accounts. Use a native voice name in each
+speech request. Gateway configuration holds these rows in `providers.google_tts.accounts` and
+`providers.polly.accounts`. Expired credentials are skipped when an expiry is supplied.
+
+### Cloud speech connections in Desktop
+
+The Desktop **Gateway → AI providers → Cloud speech connections** section adds, names, disables,
+prioritizes, or removes Google and Polly accounts on a node you can configure.
+
+- Enter the Google token and quota project, or the Polly region and explicit AWS keys. An optional
+  expiry uses Unix seconds.
+- The account list shows only a credential ID, project or key hint, region, and expiry. The account
+  editor never returns secret values.
+- Remove all Polly accounts before you change its region.
+- The **Routing** control beside each saved account edits its name, enabled state, and numeric
+  priority. Lower priority numbers are tried first.
+- Accounts at the same priority follow the provider's account selection policy. Keep a stable
+  selection when upstream caching depends on reusing one account.
+
+The [routing guide](/docs/gateway/routing) covers provider selection.
 
 ## Transcribe audio
 
-`POST /v1/audio/transcriptions` accepts multipart form data. Send one nonempty file
-with a supported leaf filename and a size no larger than 25 MiB. Folder paths are
-not accepted as filenames.
+`POST /v1/audio/transcriptions` accepts multipart form data. Send one nonempty file with a
+supported leaf filename and a size no larger than 25 MiB. Folder paths are not accepted as
+filenames.
+
+<Callout type="warn">
+  On a hosted Gateway, Ryu has no audio screener yet, so every transcription request is refused
+  with `403` and `code: "media_unscreenable"` before any provider is called. See
+  [Hosted Gateway restrictions](/docs/gateway/managed-data-plane#hosted-gateway-restrictions). A
+  self-hosted Gateway is not bound by this restriction.
+</Callout>
 
 ```sh
 curl https://YOUR_GATEWAY_HOST/v1/audio/transcriptions \
@@ -90,20 +118,17 @@ curl https://YOUR_GATEWAY_HOST/v1/audio/transcriptions \
   -F "response_format=json"
 ```
 
-Supported fields are `file`, `model`, `language`, `prompt`, `response_format`,
-`temperature`, `timestamp_granularities[]`, and `stream`. Duplicate fields and
-unsupported options are rejected. This route does not accept base64 JSON uploads.
+Supported fields are `file`, `model`, `language`, `prompt`, `response_format`, `temperature`,
+`timestamp_granularities[]`, and `stream`. Duplicate fields and unsupported options are rejected.
+This route does not accept base64 JSON uploads.
 
-On a hosted Gateway, Ryu has no audio screener yet, so every transcription request
-is refused with `403` and `code: "media_unscreenable"` before any provider is called.
-See [Hosted Gateway restrictions](/docs/gateway/managed-data-plane#hosted-gateway-restrictions).
-A self-hosted Gateway is not bound by this restriction.
+### Response formats
 
-The supported response formats are `json`, `verbose_json`, `text`, `srt`, and
-`vtt`, subject to the selected provider's capabilities. Text output uses the
-returned transcript. Segment and word timings are included only when measured by
-the upstream; Ryu does not invent timestamps. Qwen's native transcription adapter
-supports JSON output.
+The supported response formats are `json`, `verbose_json`, `text`, `srt`, and `vtt`, subject to
+the selected provider's capabilities. Qwen's native transcription adapter supports JSON output.
+
+Text output uses the returned transcript. Segment and word timings are included only when the
+upstream measured them. Ryu does not invent timestamps.
 
 - **Word and segment timestamps**: send `timestamp_granularities[]=word` and/or
   `timestamp_granularities[]=segment` with `response_format=verbose_json`, as the
@@ -121,15 +146,15 @@ supports JSON output.
 
 ## Core voice callers
 
-Core read-aloud and realtime voice consume the Gateway's binary speech response.
-Core transcription sends multipart audio and uses JSON output for a common
-provider contract. Explicit operator slot overrides are honored; when they are
-absent, node modality routing chooses the provider and model.
-The cloud voice picker follows the node's configured speech provider. If a
-previous OpenAI voice is still saved after switching to Edge TTS, Google Cloud
-TTS, or Polly, Core uses that provider's native default voice for read-aloud.
-An explicitly selected native voice is sent unchanged.
+- Core read-aloud and realtime voice consume the Gateway's binary speech response.
+- Core transcription sends multipart audio and uses JSON output for a common provider contract.
+- Explicit operator slot overrides are honored. When they are absent, node modality routing
+  chooses the provider and model.
+- The cloud voice picker follows the node's configured speech provider. If a previous OpenAI voice
+  is still saved after you switch to Edge TTS, Google Cloud TTS, or Polly, Core uses that
+  provider's native default voice for read-aloud. An explicitly selected native voice is sent
+  unchanged.
 
-Gateway authentication, provider policy, rate limits, budgets, and audit continue
-to apply. Successful responses include `x-request-id` and `x-provider`; a fallback
-can also report `x-degraded`.
+Gateway authentication, provider policy, rate limits, budgets, and audit continue to apply.
+Successful responses include `x-request-id` and `x-provider`. A fallback can also report
+`x-degraded`.

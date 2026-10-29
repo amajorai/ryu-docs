@@ -8,6 +8,8 @@ machine, and install one with a checksum-verified download. The logic lives in C
 crate (`crates/core/model-catalog/src/`), so every client (desktop, mobile, CLI, extension) uses the
 same search, ranking, device-fit, and install behavior.
 
+<Figure name="models" />
+
 The catalog is format-aware. A model has a weight format, and the engine to serve it is derived from
 that format, so the catalog browses across GGUF, safetensors, and MLX rather than GGUF only. See
 [Model formats and engine compatibility](#model-formats-and-engine-compatibility) below.
@@ -18,15 +20,21 @@ that format, so the catalog browses across GGUF, safetensors, and MLX rather tha
 GET /api/models/catalog
 ```
 
-Search the Hub with a `query`, a `sort` (trending, downloads, likes, or recent), a `limit`, and an
-optional `task` filter. A `format` facet (`gguf`, `safetensors`, or `mlx`, defaulting to GGUF)
-selects which weight format the query browses. The desktop fans out across all three formats
-(`MODEL_FORMATS` in `apps/desktop/src/lib/api/models.ts`) and keeps one clean Hub cursor per format.
-Pagination uses an opaque `cursor` forwarded from the Hub. Pass `installed_only=true` to list what is
-already on disk without a network request.
+| Parameter | Meaning |
+|---|---|
+| `query` | Search text for the Hub. |
+| `sort` | `trending`, `downloads`, `likes`, or `recent`. |
+| `limit` | Page size. |
+| `task` | Optional task filter. |
+| `format` | `gguf`, `safetensors`, or `mlx`. Defaults to GGUF. |
+| `cursor` | Opaque pagination cursor forwarded from the Hub. |
+| `installed_only` | `true` lists what is already on disk without a network request. |
+
+The desktop fans out across all three formats (`MODEL_FORMATS` in
+`apps/desktop/src/lib/api/models.ts`) and keeps one clean Hub cursor per format.
 
 An optional Hugging Face token (from preferences or environment) raises rate limits and unlocks gated
-repos, but no token is required for public models.
+repos. No token is required for public models.
 
 ## Detail
 
@@ -34,17 +42,26 @@ repos, but no token is required for public models.
 GET /api/models/catalog/detail?id=author%2Fname
 ```
 
-The detail view fetches three things from the Hub and merges them: the model card metadata, the file
-tree (every runnable model-weight GGUF quantization with its real size and SHA-256), and the README
-(front-matter stripped). Quantization inputs such as `imatrix_*.gguf` are omitted. They help create
-quantized weights but are not models that the local engine can run.
+The detail view fetches three things from the Hub and merges them:
+
+- the model card metadata;
+- the file tree: every runnable model-weight GGUF quantization with its real size and SHA-256;
+- the README, with its front matter stripped.
+
+Quantization inputs such as `imatrix_*.gguf` are omitted. They help create quantized weights but are
+not models that the local engine can run.
+
+### The download picker
 
 The quantizations are presented as a single collapsed **download dropdown** rather than a flat list.
-The dropdown preselects the best device-fit quantization for this machine via `pickRecommendedFile`.
-A "Recommended for your Mac/PC/device" badge shows while that quant is selected and disappears if
-you choose another. A `too_big` or `no_space` quant stays listed with its reason but cannot be
-added. A `cpu` or `partial` quant shows a "may be slow" warning. Installed quants and add-ons (like
-the mmproj projector) keep their own controls below the picker.
+
+- The dropdown preselects the best device-fit quantization for this machine via
+  `pickRecommendedFile`.
+- A "Recommended for your Mac/PC/device" badge shows while that quant is selected, and disappears if
+  you choose another.
+- A `too_big` or `no_space` quant stays listed with its reason but cannot be added.
+- A `cpu` or `partial` quant shows a "may be slow" warning.
+- Installed quants and add-ons (like the mmproj projector) keep their own controls below the picker.
 
 Repo ids and filenames are validated to prevent path traversal and URL injection before any request
 or download.
@@ -58,6 +75,12 @@ download (`crates/core/model-catalog/src/device.rs`). It detects your hardware w
 - GPU VRAM via `nvidia-smi` for discrete NVIDIA cards, or unified memory on Apple Silicon.
 - Free disk space on the drive that holds your models folder.
 
+Query your detected hardware directly:
+
+```text
+GET /api/models/device
+```
+
 The verdict is one of:
 
 | Verdict | Meaning | What you can do |
@@ -70,21 +93,42 @@ The verdict is one of:
 | `no_space` | The download doesn't fit on your disk (Ryu keeps 2 GB free in reserve) | Blocked until you free up space |
 | `unknown` | Size or hardware could not be detected | Install; Ryu never blocks on an unknown |
 
-The estimate budgets about 1.2x the file size for the model plus context, and adds about 1.5 GB of
-system headroom for the RAM check. For a vision model, the projector that installs alongside it counts
-toward the size too. Already-installed files are judged on memory only.
+### How the memory verdict is computed
 
-The verdict is always computed by the node you are installing to. When the desktop points at a remote
-node, the verdict, the warnings, and the blocks reflect that machine's RAM, GPU, and disk, not the
-computer you are typing on.
+The estimate budgets about 1.2x the file size for the model plus context, and adds about 1.5 GB of
+system headroom for the RAM check. For a vision model, the projector that installs alongside it
+counts toward the size too. Already-installed files are judged on memory only.
+
+On a discrete GPU the check runs in this order. On Apple Silicon, unified memory is one pool, and
+the same tiers apply to total RAM.
+
+```mermaid
+flowchart TD
+  Size{"File size known?"} -->|"No"| Unknown["unknown"]
+  Size -->|"Yes"| GPU{"GPU detected?"}
+  GPU -->|"Yes"| VRAM{"Fits in VRAM?"}
+  VRAM -->|"With headroom"| Great["great"]
+  VRAM -->|"Just"| Ok["ok"]
+  VRAM -->|"No"| Both{"Fits VRAM + RAM?"}
+  Both -->|"Yes"| Partial["partial"]
+  Both -->|"No"| TooBig["too_big"]
+  GPU -->|"No"| RAM{"Fits in RAM?"}
+  RAM -->|"Yes"| Cpu["cpu"]
+  RAM -->|"No"| TooBig
+```
+
+An unknown RAM figure gives `unknown`, never a refusal. The disk check that gives `no_space` runs
+separately.
+
+### Remote nodes and blocked options
+
+The verdict is always computed by the node you are installing to. When the desktop points at a
+remote node, the verdict, the warnings, and the blocks reflect that machine's RAM, GPU, and disk,
+not the computer you are typing on.
 
 Blocked options stay visible in the download picker with the reason and your device's numbers, but
-their **Add** button is disabled. The one-click **Add** on Store Home picks the best quantization that
-fits, and declines with an explanation when none does. Query your detected hardware directly.
-
-```text
-GET /api/models/device
-```
+their **Add** button is disabled. The one-click **Add** on Store Home picks the best quantization
+that fits, and declines with an explanation when none does.
 
 ## Optional speed estimate
 
@@ -97,11 +141,13 @@ GET /api/models/llmfit-estimate?repo=author%2Fname&context=32768&quant=Q4_K_M
 ```
 
 The desktop sends the selected model's context window and the recommended model-weight quant when
-they are available, so the estimate describes the artifact the picker recommends rather than an
-unrelated default. LLM Fit reports estimated **tokens/sec**, not words/sec. It is not called for
-every list card. The sidecar call can take around 15 seconds, uses the sidecar's curated
-catalog, and falls back to the native device-fit verdict when it is unavailable or cannot match the
-model.
+they are available. The estimate then describes the artifact the picker recommends rather than an
+unrelated default.
+
+- LLM Fit reports estimated **tokens/sec**, not words/sec.
+- It is not called for every list card.
+- The sidecar call can take around 15 seconds and uses the sidecar's curated catalog.
+- It falls back to the native device-fit verdict when it is unavailable or cannot match the model.
 
 ## Model formats and engine compatibility
 
@@ -122,11 +168,14 @@ Because GGUF is a single quantized file, only GGUF gets per-file quantization li
 device fit. Safetensors and MLX install as a multi-file repo snapshot and get a coarser repo-level
 verdict.
 
-Compatibility is computed per node. A catalog card is marked compatible when at least one engine that
-can serve its format is runnable on this node, otherwise it carries a `needs_engine` label (for
-example `vLLM` or `MLX`) so an incompatible model still surfaces and is annotated rather than hidden.
-The desktop renders this as a format facet plus compatibility badges. Read which formats and engines
-a node can run with this route.
+### Compatibility per node
+
+A catalog card is marked compatible when at least one engine that can serve its format is runnable
+on this node. Otherwise it carries a `needs_engine` label (for example `vLLM` or `MLX`), so an
+incompatible model still surfaces and is annotated rather than hidden. The desktop renders this as a
+format facet plus compatibility badges.
+
+Read which formats and engines a node can run with this route:
 
 ```text
 GET /api/models/engines
@@ -142,10 +191,12 @@ GET /api/models/engines
 ## Optional benchmark stats
 
 If you set an Artificial Analysis API key, detail views are enriched with benchmark stats: an
-intelligence index, output tokens per second, time to first token, and a blended price. Save the key
-in **Settings → Integrations**, or set `ARTIFICIAL_ANALYSIS_API_KEY`.
-A saved key takes precedence. Without a key, the catalog omits these stats. Artificial Analysis
-tracks hosted models, so many community repos get partial or no stats.
+intelligence index, output tokens per second, time to first token, and a blended price.
+
+- Save the key in **Settings → Integrations**, or set `ARTIFICIAL_ANALYSIS_API_KEY`. A saved key
+  takes precedence.
+- Without a key, the catalog omits these stats.
+- Artificial Analysis tracks hosted models, so many community repos get partial or no stats.
 
 ## Install
 
@@ -153,17 +204,39 @@ tracks hosted models, so many community repos get partial or no stats.
 POST /api/models/catalog/install
 ```
 
-Install a chosen quantization by passing the repo `id` and the `file`. Core fetches the SHA-256 from
-the file tree, downloads with the shared checksum-verified downloader (atomic, retrying), records
-provenance in `state/installed-models.json`, and stores the weight under `models/chat/`. Both paths
-are in the [data folder](/docs/surfaces/desktop/user-guide/data-and-storage#whats-in-the-data-folder).
+Install a chosen quantization by passing the repo `id` and the `file`. Core then:
 
-For Hugging Face installs, Core refuses an install whose verdict is `too_big` or `no_space` with HTTP
-`422` before any byte is downloaded, so a client that skips the picker can't install it either. The
-response carries a `code` of `model_too_large` or `insufficient_disk` and a plain-language message with
-the numbers. Installs from a model index or the Ryu Marketplace don't get that refusal, because those
-sources don't report a file size up front. Every download, whatever its source, checks free disk space
-as soon as its size is known and stops early, rather than filling the disk partway through.
+1. fetches the SHA-256 from the file tree;
+2. downloads the weight with the shared checksum-verified downloader (atomic, retrying) and stores
+   it under `models/chat/`;
+3. installs the companion projector for a vision model (see [Vision models](#vision-models-mmproj));
+4. records provenance in `state/installed-models.json`.
+
+Both paths are in the
+[data folder](/docs/surfaces/desktop/user-guide/data-and-storage#whats-in-the-data-folder).
+
+```mermaid
+flowchart LR
+  Req["POST install"] --> Fit{"Verdict too_big or no_space?"}
+  Fit -->|"Yes"| Refuse["422 refusal"]
+  Fit -->|"No"| DL["Checksum-verified download"]
+  DL --> Store["Weight in models/chat/"]
+  Store --> Proj["Companion mmproj, if vision"]
+  Proj --> Prov["Record provenance"]
+```
+
+### Refusals and disk checks
+
+For Hugging Face installs, Core refuses an install whose verdict is `too_big` or `no_space` with
+HTTP `422` before any byte is downloaded, so a client that skips the picker can't install it either.
+The response carries a `code` of `model_too_large` or `insufficient_disk` and a plain-language
+message with the numbers.
+
+Installs from a model index or the Ryu Marketplace don't get that refusal, because those sources
+don't report a file size up front. Every download, whatever its source, checks free disk space as
+soon as its size is known and stops early, rather than filling the disk partway through.
+
+### Previews
 
 Install, removal, and active-model previews show the complete plan returned by Core. Desktop
 refuses an incomplete preview response instead of showing a partial plan. A preview does not
@@ -171,15 +244,18 @@ download, delete, or switch a model.
 
 ## Start a chat
 
-For an installed text model, choose **Chat with this model** in its detail view. Desktop checks the
-active node's format and engine capabilities, reuses a compatible installed engine when possible, and
-installs the first supported engine when the node does not have one yet. It then switches the served
-model and opens a new chat with the model selected for that tab. This does not change the saved model
-choice for other agents or chats.
+For an installed text model, choose **Chat with this model** in its detail view. Desktop then:
 
-If the model is already active, the same action opens chat directly. If engine setup or Gateway refresh
-fails, Desktop keeps the catalog open and shows a retryable setup error. Models that are not chat
-models continue to use their format-specific local runtime controls.
+1. checks the active node's format and engine capabilities;
+2. reuses a compatible installed engine when possible, or installs the first supported engine when
+   the node does not have one yet;
+3. switches the served model and opens a new chat with the model selected for that tab.
+
+This does not change the saved model choice for other agents or chats. If the model is already
+active, the same action opens chat directly.
+
+If engine setup or Gateway refresh fails, Desktop keeps the catalog open and shows a retryable setup
+error. Models that are not chat models continue to use their format-specific local runtime controls.
 
 <Callout type="info">
   Repeat browse and detail calls are served from a short in-process cache (a 60-second list cache and
@@ -192,17 +268,26 @@ A GGUF vision model ships its multimodal projector as a separate companion file,
 `mmproj` token (`mmproj-F16.gguf`, `mmproj-model-f16.gguf`, and so on). Core detects this file and
 installs it for you.
 
-In the detail view (`crates/core/model-catalog/src/lib.rs`), a repo is flagged `vision: true` when any
-of its GGUF siblings is a projector file (`is_mmproj_filename`). The projector is filtered out of the
-listed quantizations because it is an adapter, not a user-selectable weight, so the quant picker shows
-only the model weights while the UI can still badge the repo as vision-capable.
+### Detection
+
+In the detail view (`crates/core/model-catalog/src/lib.rs`), a repo is flagged `vision: true` when
+any of its GGUF siblings is a projector file (`is_mmproj_filename`).
+
+The projector is filtered out of the listed quantizations because it is an adapter, not a
+user-selectable weight. The quant picker shows only the model weights, while the UI can still badge
+the repo as vision-capable.
+
+### Projector install
 
 When you install a quant, Core auto-installs the matching projector alongside it
-(`install_companion_mmproj`). It picks the projector by precision, preferring `f16` and falling back
-to the smallest available, then downloads it through the same checksum-verified downloader and stores
-it bound to the model's stem at `~/.ryu/models/chat/<stem>.mmproj.gguf`. The same path runs during
-onboarding for the default model (`apps/core/src/sidecar/onboarding.rs`). Projector download is
-best-effort: if it fails, the model still chats as text-only.
+(`install_companion_mmproj`):
+
+- It picks the projector by precision, preferring `f16` and falling back to the smallest available.
+- It downloads it through the same checksum-verified downloader.
+- It stores it bound to the model's stem at `~/.ryu/models/chat/<stem>.mmproj.gguf`.
+
+The same path runs during onboarding for the default model (`apps/core/src/sidecar/onboarding.rs`).
+Projector download is best-effort: if it fails, the model still chats as text-only.
 
 You can override the projector precision:
 
@@ -210,16 +295,19 @@ You can override the projector precision:
 |---|---|---|
 | `RYU_MMPROJ_QUANT` | `f16` | Preferred projector precision; falls back to the smallest projector if absent |
 
+### Launch and chat
+
 At launch, the local engine (`apps/core/src/sidecar/providers/llamacpp/mod.rs`) resolves the adapter
 by the on-disk `<stem>.mmproj.gguf` convention. If the file is present it starts llama.cpp with
-`--mmproj` so the served model accepts images, otherwise it does a plain text launch. This runs both
+`--mmproj` so the served model accepts images. Otherwise it does a plain text launch. This runs both
 for the registry default and for a runtime active-model switch.
 
 On the chat path, a user message that carries image `file` parts becomes an OpenAI content array
 (text plus each image as an `image_url` data-URL) through `route_openai_stream`
-(`apps/core/src/sidecar/adapters/mod.rs`), so a locally served vision model with its projector loaded,
-or any multimodal provider, receives the image. Text-only messages keep the plain-string
-content shape, so non-vision chat is unaffected.
+(`apps/core/src/sidecar/adapters/adapter_core/openai_stream.rs`). A locally served vision model with
+its projector loaded, or any multimodal provider, then receives the image.
+
+Text-only messages keep the plain-string content shape, so non-vision chat is unaffected.
 
 <Callout type="warn">
   The projector must live in the same repo as the model weights (same-repo `mmproj` only). Vision
@@ -232,13 +320,19 @@ content shape, so non-vision chat is unaffected.
 The Models page is a master-detail browser over these endpoints. Open it from the command palette or
 the sidebar. See [The Store](/docs/surfaces/desktop/user-guide/store).
 
+### Default model for evaluations
+
 When an agent has no model of its own, its evaluation panel uses the selected node's saved local
 default until you type a model ID. Set that default under **Gateway → Default agent & model**.
-Automatic evaluations stay disabled while that default is reloading or if it cannot be reloaded;
-use **Retry** in the default controls. If a save fails, Desktop keeps the previous choice and shows
-the error.
+
+- Automatic evaluations stay disabled while that default is reloading or if it cannot be reloaded.
+  Use **Retry** in the default controls.
+- If a save fails, Desktop keeps the previous choice and shows the error.
+
+### Provider catalogs
 
 Provider account catalogs follow the selected node and its credentials. Switching identities
 reloads the matching catalog. If a reload fails, the old account list stays hidden. Use **Retry** in
-the provider controls to reload it before you edit. External provider billing and transaction
-settlement stay with the provider and the Gateway.
+the provider controls to reload it before you edit.
+
+External provider billing and transaction settlement stay with the provider and the Gateway.

@@ -11,7 +11,14 @@ Provider prompt caching lets an upstream model provider reuse an eligible prefix
 
 ## Before enabling caching
 
-Keep long-lived instructions, tool definitions, and shared context stable near the start of the prompt. Put per-turn details later. A changed prefix can prevent reuse. Gateway transforms keep that prefix stable: firewall redaction under the Sanitize policy rewrites each string identically on every request, and enabled skills are prepended to the system prompt without dropping its content parts or their `cache_control` markers. Provider minimum prefix sizes, retention windows, and cache-write prices vary by model, so check the provider's current rules before choosing a cache lifetime.
+Keep long-lived instructions, tool definitions, and shared context stable near the start of the prompt. Put per-turn details later. A changed prefix can prevent reuse.
+
+Gateway transforms keep that prefix stable:
+
+- Firewall redaction under the Sanitize policy rewrites each string identically on every request.
+- Enabled skills are prepended to the system prompt without dropping its content parts or their `cache_control` markers.
+
+Provider minimum prefix sizes, retention windows, and cache-write prices vary by model. Check the provider's current rules before choosing a cache lifetime.
 
 Ryu defaults to **Auto** with each provider's short default lifetime. Some providers charge more for cache writes; Anthropic's one-hour lifetime has a higher write price than its five-minute lifetime.
 
@@ -55,11 +62,38 @@ allow_request_override = true
 | `session_affinity` | When enabled, forwards the request's `x-ryu-session-id` (the Ryu conversation ID) as OpenRouter's `session_id` so related requests can reach the same provider cache. It is off by default because this changes routing affinity. |
 | `allow_request_override` | Allows request headers to override the node mode and TTL. Set false when operators need a fixed node-wide cost policy. |
 
-When request overrides are allowed, a caller can send `x-ryu-prompt-cache: off|auto|explicit` and `x-ryu-prompt-cache-ttl: 5m|1h`. The caller's own cache markers take precedence and are not rewritten. On the Anthropic-compatible `/v1/messages` endpoint, `cache_control` on `system` blocks, message text blocks, tool use and tool result blocks, tools, and the request itself is carried through to a provider or model that reads `cache_control` markers. A request routed to an OpenAI endpoint has those markers removed first, because strict OpenAI endpoints reject them. Otherwise, the accepted request override takes precedence over `[prompt_cache]`; a missing section or mode defaults to `auto`.
+### Request overrides and caller markers
+
+When request overrides are allowed, a caller can send `x-ryu-prompt-cache: off|auto|explicit` and `x-ryu-prompt-cache-ttl: 5m|1h`. An accepted request override takes precedence over `[prompt_cache]`. A missing section or mode defaults to `auto`.
+
+The caller's own cache markers take precedence and are not rewritten. On the Anthropic-compatible `/v1/messages` endpoint, `cache_control` is carried through to a provider or model that reads those markers when it appears on:
+
+- `system` blocks and message text blocks;
+- tool use and tool result blocks;
+- tools, and the request itself.
+
+A request routed to an OpenAI endpoint has those markers removed first, because strict OpenAI endpoints reject them.
 
 ## Check what happened
 
-The response `x-ryu-prompt-cache` header reports the Gateway's action:
+The Gateway decides its action in this order, and reports it in the response `x-ryu-prompt-cache` header.
+
+```mermaid
+flowchart TD
+  REQ["Routed request"] --> MODE{"Mode off?"}
+  MODE -->|"yes"| DIS["disabled"]
+  MODE -->|"no"| CALLER{"Caller sent markers?"}
+  CALLER -->|"yes"| KEEP["caller or caller-breakpoints"]
+  CALLER -->|"no"| FAMILY{"Provider-managed family?"}
+  FAMILY -->|"yes"| AUTO["automatic"]
+  FAMILY -->|"no"| SIZE{"Prefix below min_prefix_tokens?"}
+  SIZE -->|"yes"| MIN["below-minimum"]
+  SIZE -->|"no"| INJ["injected"]
+  SIZE -->|"no, OpenAI without a session id"| AUTO
+```
+
+An OpenAI request with no session id and no explicit breakpoints gets no marker from Ryu, so it
+also reports `automatic`.
 
 | Value | Meaning |
 |---|---|
@@ -69,10 +103,24 @@ The response `x-ryu-prompt-cache` header reports the Gateway's action:
 | `below-minimum` | The estimated prompt prefix was below `min_prefix_tokens`. |
 | `injected` | Ryu added a provider-supported marker. |
 
-The Gateway audit and **Agent observability** view keep each request's cache-policy outcome and provider-reported cache reads and writes. A read count is a cache hit; a write count identifies new tokens written to the cache. A request can read an existing prefix and write a new suffix at the same time. The aggregate cache hit rate is read tokens divided by reported read-plus-write tokens; request hit/miss counts appear separately. Selecting a model-call trace also shows its input tokens against the model's reported context-window size. Missing provider usage is shown as unreported. The `tokens.cached_input` metric remains the aggregate read-token count. These values are for observability, not a second billing calculation; Gateway billing uses the provider-reported cost where available.
+### Cache reads and writes
 
-Pi's Claude and Qwen model entries enable its Anthropic-style cache markers. Its OpenAI-style path can also send `prompt_cache_key` for provider stickiness. Chat session stats show provider-reported cache hit rate, reads and writes alongside the current context length and model context window; a selected Agent observability trace shows the input tokens against its model window. For current provider-specific cache support, usage fields, and TTL pricing, see [OpenRouter's prompt-caching guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+The Gateway audit and **Agent observability** view keep each request's cache-policy outcome and provider-reported cache reads and writes.
+
+- A read count is a cache hit. A write count identifies new tokens written to the cache. One request can read an existing prefix and write a new suffix.
+- The aggregate cache hit rate is read tokens divided by reported read-plus-write tokens. Request hit and miss counts appear separately.
+- The `tokens.cached_input` metric remains the aggregate read-token count.
+- Missing provider usage is shown as unreported.
+- Selecting a model-call trace shows its input tokens against the model's reported context-window size.
+
+These values are for observability, not a second billing calculation. Gateway billing uses the provider-reported cost where available.
+
+Chat session stats show the provider-reported cache hit rate, reads, and writes alongside the current context length and model context window.
+
+### Pi and OpenRouter
+
+Pi's Claude and Qwen model entries enable its Anthropic-style cache markers. Its OpenAI-style path can also send `prompt_cache_key` for provider stickiness.
+
+OpenRouter and Pi cache behavior, and how to read cache activity in agent observability, are on [OpenRouter prompt caching](/docs/providers/prompt-caching). For current provider-specific cache support, usage fields, and TTL pricing, see [OpenRouter's prompt-caching guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 
 Tool-heavy prompt prefixes are covered on the [Tool execution governance](/docs/gateway/tools) page.
-OpenRouter and Pi cache behavior, and how to read cache activity in agent observability, are on
-[OpenRouter prompt caching](/docs/providers/prompt-caching).

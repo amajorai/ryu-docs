@@ -29,7 +29,7 @@ test("language bindings docs describe every tested SDK project", async () => {
     "bindings/kotlin/test.sh",
     "bindings/csharp/test.sh",
     "bindings/java/test.sh",
-    "crates/sdk/napi && bun test",
+    "crates/sdk/napi && bun run test",
   ]) {
     expect(page).toContain(command);
   }

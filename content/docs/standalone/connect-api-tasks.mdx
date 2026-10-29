@@ -31,12 +31,14 @@ value returns `400 invalid_request` and nothing is sent.
 | Larger than the limit | `502 upstream_response_too_large`, nothing passed on | The stream is cut at the limit | `502 upstream_response_too_large`, nothing kept |
 
 In every mode, a credential Connect added is replaced with `[REDACTED]`
-wherever the upstream quotes it, in the headers and the body. In `stream` and
-`spool` modes this happens byte for byte as the answer flows, including a
-credential split across two chunks. Connect holds back only the last few bytes
-of a chunk when they could be the start of a credential, so an event stream is
-not delayed. A compressed answer is still refused
-(`502 upstream_encoding_refused`) because it cannot be checked.
+wherever the upstream quotes it, in the headers and the body.
+
+- In `stream` and `spool` modes this happens byte for byte as the answer
+  flows, including a credential split across two chunks.
+- Connect holds back only the last few bytes of a chunk when they could be the
+  start of a credential, so an event stream is not delayed.
+- A compressed answer is still refused (`502 upstream_encoding_refused`)
+  because it cannot be checked.
 
 A streamed answer adds `x-ryu-response: stream` and `x-ryu-stream-max-bytes`.
 If the upstream stops sending for 60 seconds, or the answer grows past the
@@ -64,15 +66,17 @@ A spooled call answers with the upstream's status and this body.
 ```
 
 The download URL needs no bearer, so you can hand it to another tool. Treat it
-as a secret until it expires (one hour by default). It serves the stored body
-as an attachment with its original content type, under the same sandbox
-headers as a relayed answer, and supports one `Range` per request.
-`DELETE /v1/spool/:token` with your runtime bearer removes it early.
+as a secret until it expires (one hour by default).
+
+- It serves the stored body as an attachment with its original content type,
+  under the same sandbox headers as a relayed answer.
+- It supports one `Range` per request.
+- `DELETE /v1/spool/:token` with your runtime bearer removes it early.
 
 Connect checks for room before it sends the call. If the spool is full, or your
 share of it is, the call returns `503 spool_full` and nothing is sent or
-charged. An organization and its team keys share one allowance. A
-deployment without a spool returns `404 spool_not_configured`.
+charged. An organization and its team keys share one allowance. A deployment
+without a spool returns `404 spool_not_configured`.
 
 The answer must be written within two minutes of its headers, or the call
 returns `504 upstream_timeout`. If you disconnect while it is written, the
@@ -91,11 +95,17 @@ curl -sS -X POST https://connect.example/v1/vendors/tavily/search \
   -d '{ "query": "ryu connect", "search_depth": "advanced" }'
 ```
 
-Connect first runs every check the call would run now: the provider and
-overflow headers, the path, your organization's tool policy, the credential
-ladder and, for a call on Ryu's key, the published price. If the call would be
-refused now, the submission is refused the same way and nothing is queued.
-Otherwise you get `202 Accepted` with `Location: /v1/tasks/<id>` and the task.
+Connect first runs every check the call would run now:
+
+- the provider and overflow headers;
+- the path;
+- your organization's tool policy;
+- the credential ladder;
+- for a call on Ryu's key, the published price.
+
+If the call would be refused now, the submission is refused the same way and
+nothing is queued. Otherwise you get `202 Accepted` with
+`Location: /v1/tasks/<id>` and the task.
 
 ```json
 {
@@ -138,15 +148,34 @@ A task moves from `queued` to `running` to one of these states.
 - `canceled` - you canceled it.
 - `expired` - it was still queued at its deadline.
 
+```mermaid
+stateDiagram-v2
+  [*] --> queued: "202 Accepted"
+  queued --> running
+  queued --> canceled: "cancel"
+  queued --> expired: "deadline"
+  running --> completed: "upstream answered"
+  running --> failed: "refused, not kept, or restart"
+  running --> canceled: "cancel (own credentials)"
+  completed --> [*]
+  failed --> [*]
+  canceled --> [*]
+  expired --> [*]
+```
+
 ### Polling and results
 
 `GET /v1/tasks/:id` returns the task. Polling is free and only your tenant
-sees your tasks. `GET /v1/tasks/:id/result` returns the call's answer exactly
-as the call would have answered (status, headers, body) once the task is
-`completed` or `failed`, with `x-ryu-task-id` and `x-ryu-task-status`. Before
-then it returns `409 task_pending` with `Retry-After`. A canceled or expired
-task returns `409 task_canceled` or `409 task_expired`. `GET /v1/tasks` lists
-your recent tasks (`status` and `limit`, up to 200, filter it).
+sees your tasks. `GET /v1/tasks` lists your recent tasks (`status` and
+`limit`, up to 200, filter it).
+
+`GET /v1/tasks/:id/result` returns the call's answer exactly as the call would
+have answered (status, headers, body) once the task is `completed` or
+`failed`, with `x-ryu-task-id` and `x-ryu-task-status`.
+
+- Before then it returns `409 task_pending` with `Retry-After`.
+- A canceled or expired task returns `409 task_canceled` or
+  `409 task_expired`.
 
 Finished tasks and their answers are kept for a day, then deleted.
 
@@ -164,12 +193,14 @@ Finished tasks and their answers are kept for a day, then deleted.
 
 ### Cancellation
 
-`POST /v1/tasks/:id/cancel` cancels a queued task at once. A running call on
-your own credentials (a relay tool, or your team's or organization's vendor key)
-is aborted. A running call on Ryu's key cannot be canceled, because the vendor
-may already be running it: you get `409 task_running_metered`, and it is
-charged only if the vendor answers 2xx. Canceling a finished task returns
-`409 task_finished`.
+`POST /v1/tasks/:id/cancel` behaves by task state:
+
+| Task | Result |
+|---|---|
+| Queued | Canceled at once |
+| Running on your own credentials (a relay tool, or your team's or organization's vendor key) | Aborted |
+| Running on Ryu's key | `409 task_running_metered`. The vendor may already be running it, so it is charged only if the vendor answers 2xx |
+| Finished | `409 task_finished` |
 
 ### If Connect restarts
 
@@ -188,11 +219,16 @@ is the task as `GET /v1/tasks/:id` returns it, never the answer body.
 { "id": "evt_task_…", "type": "task.completed", "timestamp": "…", "data": { "object": "task", "…": "…" } }
 ```
 
-Deliveries are signed with [Standard Webhooks](https://www.standardwebhooks.com/):
-`webhook-id` (the same on every retry, for de-duplication), `webhook-timestamp`
-(Unix seconds) and `webhook-signature: v1,<signature>`, the base64 HMAC-SHA256
-of `<webhook-id>.<webhook-timestamp>.<body>` keyed by your secret's decoded
-bytes. Read the secret with your **management** bearer.
+Deliveries are signed with [Standard Webhooks](https://www.standardwebhooks.com/)
+headers:
+
+- `webhook-id` - the same on every retry, for de-duplication;
+- `webhook-timestamp` - Unix seconds;
+- `webhook-signature: v1,<signature>` - the base64 HMAC-SHA256 of
+  `<webhook-id>.<webhook-timestamp>.<body>`, keyed by your secret's decoded
+  bytes.
+
+Read the secret with your **management** bearer.
 
 ```sh
 curl -fsS https://connect.example/v1/tasks/webhook-secret \
@@ -202,9 +238,11 @@ curl -fsS https://connect.example/v1/tasks/webhook-secret \
 
 Any 2xx answer counts as delivered. Otherwise Connect retries after 30 seconds,
 2 minutes, 10 minutes and an hour, then gives up. The task shows `webhook`
-`status`, `attempts` and `lastStatus`. Webhooks are sent only to public HTTPS
-addresses, like every relayed request. A deployment without a signing key
-refuses `x-ryu-task-webhook` with `400 task_webhooks_unavailable`; poll instead.
+`status`, `attempts` and `lastStatus`.
+
+Webhooks are sent only to public HTTPS addresses, like every relayed request.
+A deployment without a signing key refuses `x-ryu-task-webhook` with
+`400 task_webhooks_unavailable`; poll instead.
 
 ## Limits
 
@@ -217,7 +255,7 @@ refuses `x-ryu-task-webhook` with `400 task_webhooks_unavailable`; poll instead.
 | Spooled answer | 64 MiB each, 128 MiB per organization or tenant, 1 GiB in all, written within 2 minutes, kept for an hour |
 | Streamed answer | 32 MiB, 60 seconds without data |
 
-Operators can change these (see [Ryu Connect](/docs/standalone/connect)).
+Operators can change these (see [Connect configuration](/docs/standalone/connect-configuration#settings)).
 
 ## Routes
 

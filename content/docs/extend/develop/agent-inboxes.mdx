@@ -3,83 +3,130 @@ title: "Agent Inboxes (Ryu Mail)"
 description: "Hosted email for agents: one permanent organization mailbox, a permanent address for each agent, send approval, and an API to receive and send mail."
 ---
 
-Agent Inboxes (Ryu Mail) is Ryu Cloud's hosted email service for agents, built on AWS SES. Each
-organization (or personal account) has one permanent **mailbox** at `<handle>@<mail domain>`, and
-each of its agents can claim one permanent **address** of its own on that mailbox, such as
-`sales@<handle>.<mail domain>`. Mail to an agent's address lands in that agent's own view of the
-mailbox, and the agent always sends as that address. Organization admins see every address and
-message, can revoke an address, and decide when agent sends need their approval.
+Agent Inboxes (Ryu Mail) is Ryu Cloud's hosted email service for agents, built on AWS SES.
 
-This page covers the mailbox, agent addresses, and how mail reaches agents. The route tables,
-custom domains, and address rules are in [Agent Inboxes API](/docs/extend/develop/agent-inboxes-api).
-Send approval, rate limits, plan gating, and webhook signatures are in
-[Agent Inboxes sending and webhooks](/docs/extend/develop/agent-inboxes-sending).
+<Figure name="mail" />
 
+- Each organization (or personal account) has one permanent **mailbox** at
+  `<handle>@<mail domain>`.
+- Each of its agents can claim one permanent **address** of its own on that mailbox, such as
+  `sales@<handle>.<mail domain>`. Mail to that address lands in the agent's own view of the
+  mailbox, and the agent always sends as that address.
+- Organization admins see every address and message, can revoke an address, and decide when agent
+  sends need their approval.
+
+This page covers the mailbox, agent addresses, and how mail reaches agents. Related pages:
+
+- [Agent Inboxes API](/docs/extend/develop/agent-inboxes-api) - route tables, custom domains, and
+  address rules.
+- [Agent Inboxes sending and webhooks](/docs/extend/develop/agent-inboxes-sending) - send approval,
+  rate limits, plan gating, and webhook signatures.
+
+<Callout type="info">
 These pages document the hosted service. The self-hosted `ryu-mail` process is a separate
-deployment with a local SQLite store, its own API bearer, and per-inbox HMAC inbound
-verification. Its `/api/mail/*` request shape and ownership differ from the hosted API; see
+deployment with a local SQLite store, its own API bearer, and per-inbox HMAC inbound verification.
+Its `/api/mail/*` request shape and ownership differ from the hosted API; see
 [Standalone Ryu Mail](/docs/standalone/mail).
+</Callout>
 
 ## Hosted service scope
 
 The hosted service manages the mailbox, agent addresses, message storage, and plan-based send
-quotas for organizations and personal accounts. Organization members reach the whole mailbox
-according to the organization's Mail permissions (`mail.read` to read, `mail.manage` to send and
-administer); a personal mailbox belongs to its signed-in owner. An agent reaches only its own
-address and the mail sent to it.
+quotas for organizations and personal accounts. Who can reach what:
+
+| Caller | Reach |
+|---|---|
+| Organization member | The whole mailbox, by Mail permission: `mail.read` to read, `mail.manage` to send and administer |
+| Personal account owner | Their own personal mailbox, from a signed-in session |
+| Agent | Only its own address and the mail sent to it |
 
 ## Message handling
 
-- **Sending.** Outbound messages are submitted through AWS SES. A refused provider request, or a
-  message that could not be built for SES (such as a subject containing a line break), is recorded
-  as a `failed` message, reported as a `message.rejected` event, and returns an error to the caller.
-  When SES gives no definite answer (a timeout, a dropped connection, or an SES server error), the
-  message may have been sent: it is recorded as `unresolved`, no `message.rejected` event is sent,
-  and the caller gets a `502` saying the outcome is unknown. Check the inbox's sent messages before
-  sending it again.
-- **Normalized mail.** Incoming MIME messages are normalized into a stored message with bodies,
-  recipients, and attachments. Thread grouping uses the first reference, then In-Reply-To, then
-  the message's own ID.
-- **Verified inbound notifications.** AWS SNS signatures are verified against their signing
-  certificate. The certificate must come from a regional AWS SNS endpoint
-  (`https://sns.<region>.amazonaws.com/SimpleNotificationService-<id>.pem`), and the
-  subscription-confirmation URL must be a `ConfirmSubscription` request on a regional SNS endpoint
-  for the same topic. Only `SignatureVersion` 1 (SHA1) and 2 (SHA256) are accepted, and a
-  notification whose `Timestamp` is more than one hour old is refused, so a captured delivery cannot
-  be replayed later. Subscription confirmation happens only after signature verification. Incoming
-  MIME is read from the notification's content or its referenced S3 object.
+```mermaid
+flowchart LR
+  A["Agent or member send"] --> SES["AWS SES"]
+  SES --> R["Recipient"]
+  X["External sender"] --> SESIN["SES inbound"]
+  SESIN --> SNS["SNS notification"]
+  SNS --> IN["POST /mail/inbound"]
+  IN --> V{"Signature valid?"}
+  V -->|no| D["Refused"]
+  V -->|yes| N["Normalize MIME"]
+  N --> RT["Route by envelope recipient"]
+```
+
+### Sending
+
+Outbound messages are submitted through AWS SES. The stored outcome depends on what SES answers:
+
+| SES answer | Message status | Event | Caller gets |
+|---|---|---|---|
+| Accepted | `sent` | `message.sent` | Success |
+| Refused, or the message could not be built (such as a subject with a line break) | `failed` | `message.rejected` | An error |
+| No definite answer (timeout, dropped connection, SES server error) | `unresolved` | None | `502`, outcome unknown |
+
+An `unresolved` message may have been sent. Check the inbox's sent messages before sending it again.
+
+### Normalized mail
+
+Incoming MIME messages are normalized into a stored message with bodies, recipients, and
+attachments. Thread grouping uses the first reference, then In-Reply-To, then the message's own ID.
+
+### Verified inbound notifications
+
+AWS SNS signatures are verified against their signing certificate before anything else happens:
+
+- The certificate must come from a regional AWS SNS endpoint
+  (`https://sns.<region>.amazonaws.com/SimpleNotificationService-<id>.pem`).
+- The subscription-confirmation URL must be a `ConfirmSubscription` request on a regional SNS
+  endpoint for the same topic. Confirmation happens only after signature verification.
+- Only `SignatureVersion` 1 (SHA1) and 2 (SHA256) are accepted.
+- A notification whose `Timestamp` is more than one hour old is refused, so a captured delivery
+  cannot be replayed later.
+
+Incoming MIME is read from the notification's content or its referenced S3 object.
 
 ## Organization mailbox
 
 Each organization, and each personal account, has exactly one mailbox. An admin with `mail.manage`
 claims it once from a signed-in session:
 
-1. `GET /mail/mailbox/check?handle=acme` checks the handle. A handle is 1–30 lowercase letters,
-   digits, or dashes, starting and ending with a letter or digit, so it is also a valid DNS label.
-   It can't have `--` as its third and fourth characters (the `xn--` form of an internationalized
-   name), and it can't be a reserved or brand name or a look-alike of one (`p0stmaster`,
-   `ryusupport`, `support-ryu`). A name that only ends in `ryu`, such as `kiryu`, is allowed.
-   Checks are rate-limited per organization and per person.
-   The answer names both addresses the handle creates: the mailbox `acme@<mail domain>` and the
-   agent address host `acme.<mail domain>`.
+1. `GET /mail/mailbox/check?handle=acme` checks the handle. The answer names both addresses the
+   handle creates: the mailbox `acme@<mail domain>` and the agent address host
+   `acme.<mail domain>`. Checks are rate-limited per organization and per person.
 2. `POST /mail/mailbox` with `{ "handle": "acme", "confirmAddress": "acme@<mail domain>" }` claims
-   it. `confirmAddress` must repeat the exact address, because it can never be changed, released,
-   or reused. A different value returns `400` with `code: "confirm_mismatch"`. Only one claim per
-   organization (and per person) runs at a time; another one sent meanwhile returns `409` with
-   `code: "mailbox_claim_in_progress"`.
+   it. `confirmAddress` must repeat the exact address, because the address can never be changed,
+   released, or reused.
 
-In the Ryu dashboard, the organization's **Products** view runs the same flow: it checks the name
+A handle must be a valid DNS label:
+
+- 1-30 lowercase letters, digits, or dashes, starting and ending with a letter or digit.
+- No `--` as its third and fourth characters (the `xn--` form of an internationalized name).
+- Not a reserved or brand name, or a look-alike of one (`p0stmaster`, `ryusupport`,
+  `support-ryu`). A name that only ends in `ryu`, such as `kiryu`, is allowed.
+
+| Refusal | Status | Cause |
+|---|---|---|
+| `confirm_mismatch` | 400 | `confirmAddress` is not the exact address |
+| `mailbox_claim_in_progress` | 409 | Another claim for the organization (or person) is running |
+
+In the Ryu dashboard, the organization's **Products** view runs the same flow. It checks the name
 as you type, shows both addresses, and asks you to type the address before it is claimed.
 
+### Adopting an existing inbox
+
 An organization that already had shared inboxes picks one of them instead:
-`GET /mail/mailbox` lists them as `selection.candidates`, and
-`POST /mail/mailbox/adopt` with `{ inboxId, confirmAddress }` makes that inbox the mailbox at its
-unchanged address. An agent's own inbox can't become the mailbox. If the adopted address can't
-also name an agent address host, `aliasHost` stays `null` and the admin picks a label once with
-`POST /mail/mailbox/alias-host`.
+
+1. `GET /mail/mailbox` lists them as `selection.candidates`.
+2. `POST /mail/mailbox/adopt` with `{ inboxId, confirmAddress }` makes that inbox the mailbox at its
+   unchanged address. An agent's own inbox can't become the mailbox.
+3. If the adopted address can't also name an agent address host, `aliasHost` stays `null`. The
+   admin picks a label once with `POST /mail/mailbox/alias-host`.
+
+### Mailbox lifetime and visibility
 
 The mailbox can be renamed, disabled (`PATCH /mail/mailbox` with `enabled: false`), and have its
-branding footer removed on a paid plan, but it can't be deleted or moved. Other inboxes the
+branding footer removed on a paid plan. It can't be deleted or moved. Other inboxes the
 organization had before the mailbox keep working at their addresses.
 
 Gateway keys never see the mailbox: it is left out of `GET /mail/inboxes`, and its routes answer
@@ -88,25 +135,45 @@ including mail to plus-addresses, revoked agent addresses, and mail held as spam
 
 ## Agent addresses
 
-Each agent can claim one permanent address on its organization's mailbox: a name on the mailbox's
-agent address host, such as `sales@acme.<mail domain>`, or on one of the organization's verified
-custom domains, such as `sales@agents.example.com` (pass its `domainId`). The name is 1–32
-lowercase letters, digits, or dashes, starting and ending with a letter or digit. Without a
-`localPart`, it is the agent's `displayName` (or name) folded to that form, with no random suffix:
-`Sales Bot` becomes `sales-bot`.
+Each agent can claim one permanent address on its organization's mailbox. The address can be on:
 
-On the gateway-key path, each key belongs to one node, and an agent id must be `<nodeId>:<agentId>`,
-where `nodeId` is the node that key is registered to. A key can only reach agents under its own
-node id: any other agent id, including an unprefixed one or another node's, returns `403` with
-`code: "agent_inbox_forbidden"`. Ryu nodes send this form automatically. Signed-in sessions are
-not node-bound and keep using the organization's Mail permissions.
+- the mailbox's agent address host, such as `sales@acme.<mail domain>`; or
+- one of the organization's verified custom domains, such as `sales@agents.example.com` (pass its
+  `domainId`).
 
-Claim with `GET /mail/agents/:agentId/alias/check`, then `POST /mail/agents/:agentId/alias`. The
-check returns the full `address`, `available`, a `reason` and `message` when the name can't be
-used, and up to three claimable `suggestions` (`sales-2`, `sales-3`, `sales-4`, then the name with
-the first four characters of the node id). A claim the agent already made returns `200` with
-`status: "existing"`; asking for a different name then returns `409` with
-`code: "agent_has_alias"`, because an agent's address never changes.
+The name is 1-32 lowercase letters, digits, or dashes, starting and ending with a letter or digit.
+Without a `localPart`, it is the agent's `displayName` (or name) folded to that form, with no
+random suffix: `Sales Bot` becomes `sales-bot`.
+
+### Agent ids on the gateway-key path
+
+Each gateway key belongs to one node, and an agent id must be `<nodeId>:<agentId>`, where `nodeId`
+is the node that key is registered to. Ryu nodes send this form automatically.
+
+A key can only reach agents under its own node id. Any other agent id, including an unprefixed one
+or another node's, returns `403` with `code: "agent_inbox_forbidden"`. Signed-in sessions are not
+node-bound and keep using the organization's Mail permissions.
+
+### Claiming an address
+
+```mermaid
+stateDiagram-v2
+  [*] --> Pending: claim under approval policy
+  [*] --> Active: claim under agents policy
+  Pending --> Active: admin approves
+  Pending --> [*]: rejected or 24 hours pass
+  Active --> Active: transfer to another agent
+  Active --> Revoked: revoke
+  Revoked --> Active: reinstate within 30 days
+```
+
+1. `GET /mail/agents/:agentId/alias/check` returns the full `address` and `available`. When the
+   name can't be used, it adds a `reason`, a `message`, and up to three claimable `suggestions`
+   (`sales-2`, `sales-3`, `sales-4`, then the name with the first four characters of the node id).
+2. `POST /mail/agents/:agentId/alias` claims it.
+
+A claim the agent already made returns `200` with `status: "existing"`. Asking for a different name
+then returns `409` with `code: "agent_has_alias"`, because an agent's address never changes.
 
 | Refusal `code` | Status | Meaning |
 |---|---|---|
@@ -119,8 +186,11 @@ the first four characters of the node id). A claim the agent already made return
 | `alias_claims_disabled` | 403 | Admins assign addresses on this mailbox |
 | `mailbox_missing` | 409 | No mailbox yet, or it has no agent address host |
 | `mailbox_inactive` | 403 | The mailbox is disabled or deactivated |
+| `mail_disabled` | 403 | The plan's allowance includes no hosted mail |
 | `alias_hosts_unconfigured` | 503 | Agent addresses are not available on this deployment yet |
 | `rate_limited` | 429 | More than 10 claims in an hour for the organization |
+
+### Who may claim
 
 The mailbox's `aliasClaimPolicy` decides who may claim:
 
@@ -138,16 +208,23 @@ agent uses in chat. Revoking and the send policy stay with organization admins i
 
 ### Revoking an address
 
-`POST /mail/aliases/:id/revoke` stops the agent from sending as the address, cancels its held
-sends, and frees its place in the plan's address limit. The address is retired forever: nobody can
-claim that name on that host again, including in the same organization (`alias_retired`), because
-third parties may still send password resets and sign-in codes to it. Mail to a revoked address
-keeps arriving in the mailbox for admins; it is never bounced and never reaches an agent. Revoking
-an older agent inbox's address also hides that inbox from its node's gateway key, so the node can no
-longer read it or receive its webhooks, until the address is reinstated.
+`POST /mail/aliases/:id/revoke` does three things:
+
+- stops the agent from sending as the address;
+- cancels its held sends;
+- frees its place in the plan's address limit.
+
+The address is retired forever. Nobody can claim that name on that host again, including in the
+same organization (`alias_retired`), because third parties may still send password resets and
+sign-in codes to it.
+
+Mail to a revoked address keeps arriving in the mailbox for admins. It is never bounced and never
+reaches an agent. Revoking an older agent inbox's address also hides that inbox from its node's
+gateway key, so the node can no longer read it or receive its webhooks until the address is
+reinstated.
 
 An agent address on a custom domain works only while that domain is a verified domain of the
-organization. Deleting the domain, or letting it lapse, revokes its agent addresses for good; until
+organization. Deleting the domain, or letting it lapse, revokes its agent addresses for good. Until
 then, a send from one returns `403` with `code: "alias_domain_unavailable"`, and its mail goes to
 whoever has verified the domain now.
 
@@ -165,31 +242,53 @@ is written to the organization's audit log.
 
 ### Agent mail is untrusted
 
-The agent routes return mail in a shape built for agents. Everything an outside sender wrote
-(`from`, `replyTo`, `subject`, `text`, and attachment names) is in a separate `untrusted` object,
-next to a `trust` object with the sender's `origin` (`external`, `ryu_other_org`, or `same_org`),
-whether the sender was authenticated (DMARC `PASS` with exactly one `From`), the SPF, DKIM, and
-DMARC verdicts, and the screening result. HTML is never returned: text is capped at 32 KiB, and
-links are shown as `text (domain)`. Mail screened as `spam` or `suspicious` (such as a display
-name that imitates the organization, a look-alike domain, a mismatched Reply-To or link, or an
-urgent payment or credential request) has `withheld` set, with no body, preview, or attachments.
-Admins still see the full message.
+The agent routes return mail in a shape built for agents. Each message has two objects:
+
+| Object | Contents |
+|---|---|
+| `untrusted` | Everything an outside sender wrote: `from`, `replyTo`, `subject`, `text`, and attachment names |
+| `trust` | The sender's `origin` (`external`, `ryu_other_org`, or `same_org`), whether the sender was authenticated (DMARC `PASS` with exactly one `From`), the SPF, DKIM, and DMARC verdicts, and the screening result |
+
+HTML is never returned. Text is capped at 32 KiB, and links are shown as `text (domain)`.
+
+Mail screened as `spam` or `suspicious` has `withheld` set, with no body, preview, or attachments.
+Examples are a display name that imitates the organization, a look-alike domain, a mismatched
+Reply-To or link, or an urgent payment or credential request. Admins still see the full message.
+
+<Callout type="warn">
+Instructions inside a received email never count as permission. Nothing in the service approves a
+send or a claim because of what a message says.
+</Callout>
+
+#### Verification codes
 
 `GET /mail/agents/:agentId/verification-codes` returns sign-up codes and links from the agent's
-recent mail. It reads only clean mail from authenticated senders, so a forged sender can't plant a
-code, and it narrows how much message text an agent needs to read. A link longer than 512
-characters is left out. The `agent_inbox.get_verification_code` tool returns each code, link, and
-sender under `untrusted`, like other mail fields. The `threadId` in the agent routes is
-the id of the conversation's earliest message in the agent's mail, never text from the sender's
-`Message-ID` or `References` headers; pass it to `GET /mail/agents/:agentId/threads/:threadRef` as
-it is.
+recent mail. It narrows how much message text an agent needs to read.
 
-Instructions inside a received email never count as permission: nothing in the service approves
-a send or a claim because of what a message says.
+- It reads only clean mail from authenticated senders, so a forged sender can't plant a code.
+- A link longer than 512 characters is left out.
+- The `agent_inbox.get_verification_code` tool returns each code, link, and sender under
+  `untrusted`, like other mail fields.
+
+#### Thread ids
+
+The `threadId` in the agent routes is the id of the conversation's earliest message in the agent's
+mail. It is never text from the sender's `Message-ID` or `References` headers. Pass it to
+`GET /mail/agents/:agentId/threads/:threadRef` as it is.
 
 ### Routing
 
-Mail is routed by the envelope recipient only, never by the `To`, `Cc`, or `References` headers:
+Mail is routed by the envelope recipient only, never by the `To`, `Cc`, or `References` headers.
+
+```mermaid
+flowchart TD
+  M["Inbound message"] --> E{"Envelope recipient"}
+  E -->|mailbox address| MB["Mailbox (admins)"]
+  E -->|"mailbox plus-address"| PA["Mailbox only, 200 a day"]
+  E -->|agent address| AV["That agent's view"]
+  E -->|"role name (postmaster@)"| RY["Handled by Ryu"]
+  E -->|other name on alias host| DR["Dropped, no bounce"]
+```
 
 - The mailbox address delivers to the mailbox. A plus-address of the mailbox (`acme+news@`)
   arrives in the mailbox for admins only, up to 200 a day; it never reaches an agent and never
@@ -203,21 +302,25 @@ Mail is routed by the envelope recipient only, never by the `To`, `Cc`, or `Refe
 Conversations are kept per agent: a reply that references another agent's thread starts a thread
 in the receiving agent's view instead of joining the other one.
 
-Webhooks follow the same boundary. A webhook created with a gateway key receives an agent's events
-only when the agent belongs to that key's node, and only for the addresses in its `aliasIds` when
-that list is set. Events for the mailbox itself (including mail sent from it and its delivery
-events), plus-addresses, revoked addresses, and mail held as spam or suspicious go only to webhooks
-created from a signed-in session. A gateway key can read the
-organization's webhooks but can change, rotate, or delete only the ones its own node created; the
-others return `404`.
+Webhooks follow the same boundary:
+
+- A webhook created with a gateway key receives an agent's events only when the agent belongs to
+  that key's node, and only for the addresses in its `aliasIds` when that list is set.
+- Events for the mailbox itself (including mail sent from it and its delivery events),
+  plus-addresses, revoked addresses, and mail held as spam or suspicious go only to webhooks
+  created from a signed-in session.
+- A gateway key can read the organization's webhooks but can change, rotate, or delete only the
+  ones its own node created. The others return `404`.
 
 ### Older agent inboxes
 
 Agent inboxes created before mailboxes keep their addresses and messages, and count as that
-agent's address: the agent sends as it and can't claim a second one. Until an admin revokes it,
-the agent reads and sends through the same agent routes. With a gateway key, another node's agent
-inbox is left out of `GET /mail/inboxes` and `GET /mail/events`, and its inbox, message, thread,
-draft, event, webhook, and allow/block list routes return `404`, as if it did not exist.
+agent's address. The agent sends as it and can't claim a second one. Until an admin revokes it,
+the agent reads and sends through the same agent routes.
+
+With a gateway key, another node's agent inbox is left out of `GET /mail/inboxes` and
+`GET /mail/events`. Its inbox, message, thread, draft, event, webhook, and allow/block list routes
+return `404`, as if it did not exist.
 
 `GET|POST /mail/agents/:agentId/inbox` still answer with an inbox-shaped view of the agent's
 address, and `POST /mail/inboxes/:id/address` returns `409` with `code: "address_permanent"`.

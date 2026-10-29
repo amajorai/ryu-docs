@@ -6,9 +6,10 @@ tags: ["Providers", "Accounts", "Routing"]
 
 Account routing decides which saved account serves a request when one provider has more than one
 account. It runs after the provider is chosen. This page is the single reference for account
-binding, retries, cooldowns, and selection strategies. For how the provider itself is chosen, see
-[Provider Routing](/docs/providers/routing). For where each kind of credential is stored, see
-[BYOK and Provider Accounts](/docs/providers/byok).
+binding, retries, cooldowns, and selection strategies.
+
+- For how the provider itself is chosen, see [Provider Routing](/docs/providers/routing).
+- For where each kind of credential is stored, see [BYOK and Provider Accounts](/docs/providers/byok).
 
 ## Which pool applies
 
@@ -42,15 +43,28 @@ New chat sessions select an account with the configured strategy, round robin by
 that carries `x-ryu-session-id`, `prompt_cache_key`, `conversation_id`, or `sessionId` stays on its
 selected account. Requests with no stable session identifier rotate per request.
 
+```mermaid
+flowchart TD
+  R["Chat request"] --> S{"Stable session ID?"}
+  S -->|yes| B["Bound account"]
+  S -->|no| P["Strategy picks an account"]
+  B --> U["Upstream provider"]
+  P --> U
+  U -->|"429, 402, 401 or 403"| C["Cool down or remove key"]
+  C --> N["Next available account"]
+  N --> U
+  U -->|success| O["Session follows this account"]
+```
+
 | Upstream response | Effect |
 |---|---|
 | 429 (rate limited) | The account cools down and the next available account is tried. The session then follows the account that succeeded. |
 | 402 (out of credit) | Only that key leaves rotation, and the next available account is tried. The rest of the pool is not rate-limited. |
 | 401 or 403 (revoked or invalid key) | Only that key leaves rotation for a few minutes, and the next key is tried. |
 
-The last account that can still serve is not taken out of rotation for a 401, 403, or 402. Its own error keeps being returned, and a refilled key serves again at
-once. When every key of an OpenAI-compatible provider fails, the out-of-credit error is returned in
-preference to a rate limit.
+The last account that can still serve is not taken out of rotation for a 401, 403, or 402. Its own
+error keeps being returned, and a refilled key serves again at once. When every key of an
+OpenAI-compatible provider fails, the out-of-credit error is returned in preference to a rate limit.
 
 When upstream responses identify a shared organization quota, a 429 cools every key known to share
 that quota, and the same request skips them. Keys without a known shared quota identity keep
@@ -104,9 +118,13 @@ drain_threshold_percent = 70
 
 Native Gemini API-key accounts support **Round robin** and **Fill first**. The native SDK does not
 expose account-qualified quota observations, so the configuration API rejects quota first, reset
-first, and a drain threshold for Gemini. Chat sessions stay on one key. A 429, an account payment
-rejection, or a refused key (401 or 403) cools that key and tries the next. Image requests rotate per
-request. Other GenAI adapter kinds use one configured key each.
+first, and a drain threshold for Gemini.
+
+- Chat sessions stay on one key.
+- A 429, an account payment rejection, or a refused key (401 or 403) cools that key and tries the
+  next.
+- Image requests rotate per request.
+- Other GenAI adapter kinds use one configured key each.
 
 ```toml
 [providers.genai]
@@ -137,6 +155,19 @@ request to local Core with a proxy credential, and Core selects and refreshes th
 account. Manual selection is the default: new conversations use the account selected in the account
 list.
 
+```mermaid
+sequenceDiagram
+  participant Pi as Pi engine
+  participant Core as Core (local)
+  participant V as Sealed account store
+  participant Up as Claude or ChatGPT
+  Pi->>Core: Request with proxy credential
+  Core->>V: Select and refresh account
+  Core->>Up: Request with real credential
+  Up-->>Core: Response, or 401, 403, 429
+  Core-->>Pi: Response (retry another account on 401, 403, 429)
+```
+
 ### Binding
 
 - A conversation with a stable session ID stays on its account after you switch the active login.
@@ -160,10 +191,11 @@ four accounts in total (`MAX_POOL_ATTEMPTS` in `apps/core/src/server/claude_api.
 ### Strategies and drain
 
 Claude and native ChatGPT offer manual, round robin, quota first, fill first, and reset first, with
-enable controls and priorities. Fill first has a used-quota threshold (80% by default). Accounts with
-subscription observations expose a drain override: blank inherits the provider setting, and `0`
-disables proactive draining. New work can move past a fully observed exhausted tier to a
-lower-priority account with measured headroom.
+enable controls and priorities. Fill first has a used-quota threshold (80% by default).
+
+Accounts with subscription observations expose a drain override. Blank inherits the provider
+setting, and `0` disables proactive draining. New work can move past a fully observed exhausted
+tier to a lower-priority account with measured headroom.
 
 Quota strategies use recent, account-wide subscription usage windows tied to the exact sealed
 credential revision. Core refreshes these readings in the background, so a first conversation does
@@ -213,10 +245,12 @@ A restart does not retry the same refresh token. A newer saved login remains eli
 
 Codex OAuth and GitHub Copilot OAuth have account-specific usage readers
 (`quota_observations_supported` in `apps/core/src/pi_config/sdk_account_routing.rs`). Use
-**Refresh quota** to read each enabled account. Readings match the saved credential generation and
-expire after five minutes. Missing, failed, stale, or model-specific readings stay unknown, and a
-newer login cannot inherit an older credential's quota. Priority groups are considered before
-ranking.
+**Refresh quota** to read each enabled account.
+
+- Readings match the saved credential generation and expire after five minutes.
+- Missing, failed, stale, or model-specific readings stay unknown.
+- A newer login cannot inherit an older credential's quota.
+- Priority groups are considered before ranking.
 
 Empty keys and access-only OAuth credentials that need refresh are excluded from automatic
 selection. Ryu captures the configured model for dispatch and usage attribution. Usage records mark

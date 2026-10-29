@@ -14,9 +14,10 @@ iframe** inside the conversation. The widget reads the tool output and talks to 
 
 This guide uses the **template path**. Copy the `@ryu/sample-widget` reference plugin from
 [`amajorai/ryu-marketplace`](https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/sample-widget)
-and adapt it. It is a zero-dependency Node MCP server. Use it when you already have an MCP server
-or want no build step. To author the same thing through the SDK's `defineApp`, see
-[Author a Ryu App](/docs/extend/develop/extensions/ryu-apps).
+and adapt it. It is a zero-dependency Node MCP server, opt-in and not preinstalled.
+
+Use this path when you already have an MCP server or want no build step. To author the same thing
+through the SDK's `defineApp`, see [Author a Ryu App](/docs/extend/develop/extensions/ryu-apps).
 
 <Callout type="warn">
   A Community widget plugin must be installed, enabled, and approved for both `mcp:server` and
@@ -48,8 +49,8 @@ without an error.
 | `server.mjs` | Zero-dependency stdio MCP server: the render tool + the widget HTML resource. |
 | `sample.html` | Self-contained skybridge widget UI, mounted inline in a sandboxed iframe. |
 
-The **binding** lives in the tool definition's `_meta`; the **consent** lives in the manifest. Neither
-alone promotes a widget. Core joins them.
+The **binding** lives in the tool definition's `_meta`, and the **consent** lives in the manifest.
+Neither alone promotes a widget. Core [joins them](#promotion-how-core-joins-the-two-halves).
 
 ## How a widget renders
 
@@ -134,10 +135,6 @@ These fields do the work:
   **same** string, and the server must serve that uri from `resources/list` + `resources/read`.
 </Callout>
 
-The `@ryu/sample-widget` manifest is published as a reference package at
-[`amajorai/ryu-marketplace`](https://github.com/amajorai/ryu-marketplace/tree/main/plugins/plugins/sample-widget).
-It is **opt-in** and not preinstalled, so install and enable it before the widget can render.
-
 ## 2. The MCP server (`server.mjs`)
 
 The server is newline-delimited JSON-RPC 2.0 over stdin/stdout: one compact JSON object per line,
@@ -165,13 +162,9 @@ const TOOLS = [
       additionalProperties: false,
     },
     _meta: {
-      // REQUIRED: points at the resource served below. This is what makes
-      // `render` a *widget* tool. Must match manifest.json's uri.
+      // Required. Must match manifest.json's uri.
       "openai/outputTemplate": "ui://widget/sample.html",
-      // Lets the mounted widget call THIS server's widget-accessible tools back
-      // over the MessagePort. tool:call / ui:send_message grants are auto-derived
-      // from this flag; do NOT list them in permission_grants. Omit for a
-      // read-only widget.
+      // Lets the widget call this server's tools back. Omit for a read-only widget.
       "openai/widgetAccessible": true,
       // Optional status labels shown while the tool runs.
       "openai/toolInvocation": {
@@ -185,10 +178,11 @@ const TOOLS = [
 
 ### `tools/call` returns the data channel
 
-The key output is `structuredContent`. Core maps it to `window.openai.toolOutput`, which the widget
-reads at module top level. `content` is the plain-text fallback shown when the widget can't render
-(for example, when the plugin lacks the `widget:render` grant). Return `isError: false` (the default), because **an error
-result emits no widget.**
+- `structuredContent` is the key output. Core maps it to `window.openai.toolOutput`, which the
+  widget reads at module top level.
+- `content` is the plain-text fallback shown when the widget cannot render, for example when the
+  plugin lacks the `widget:render` grant.
+- Return `isError: false` (the default). **An error result emits no widget.**
 
 ```js
 function callTool(params) {
@@ -199,9 +193,7 @@ function callTool(params) {
     renderedAt: new Date().toISOString(),
   };
   return {
-    // Plain-text fallback (shown if the widget itself doesn't render).
     content: [{ type: "text", text: `${structuredContent.greeting} (open the widget to interact)` }],
-    // The widget's data channel → window.openai.toolOutput.
     structuredContent,
   };
 }
@@ -365,8 +357,20 @@ Read the current mode from `bridge.displayMode` (or `bridge.view.displayMode`) a
 ## Promotion: how Core joins the two halves
 
 The `_meta` binding alone does **not** authorize a widget. Core runs a single promotion decision
-(`resolve_widget_promotion`, `apps/core/src/sidecar/mcp/mod.rs`) that joins the tool's binding to the
-live manifest + grant state, and **fails closed**:
+(`resolve_widget_promotion`, `apps/core/src/sidecar/mcp/mod.rs`) that joins the tool's binding to
+the live manifest and grant state:
+
+```mermaid
+flowchart TD
+  A["Tool has an outputTemplate binding?"] -->|No| N["No widget"]
+  A -->|Yes| B{"A plugin declares this tool_id?"}
+  B -->|"Yes, plugin disabled"| T["Text only"]
+  B -->|"Yes, enabled, no widget:render"| T
+  B -->|"Yes, enabled, granted"| W["Allow: render widget"]
+  B -->|No| C{"MCP-server record owns the namespace?"}
+  C -->|Yes| T
+  C -->|No| W
+```
 
 - **Allow** - an enabled plugin declares this `tool_id` in `contributes.widgets` and holds
   `widget:render`.
@@ -375,6 +379,12 @@ live manifest + grant state, and **fails closed**:
 - **DeniedUndeclared** - an enabled MCP-server record owns the tool's namespace but never declared
   this specific widget. Text only. Without this rule, any enabled server that advertises an
   `outputTemplate` would promote HTML with no per-widget consent.
+
+<Callout type="info">
+  One case stays open for compatibility. When no plugin declares the `tool_id` and no MCP-server
+  record owns its namespace (a record-less legacy external server, or a built-in), Core allows the
+  widget. Do not rely on it for a plugin you ship: declare the widget and request `widget:render`.
+</Callout>
 
 ## Copy the template
 
@@ -435,10 +445,11 @@ You should see the tool (carrying `_meta.outputTemplate`) and the HTML come back
 ### Approve the grants and enable the plugin
 
 Core scans its plugins folder (`~/.ryu/plugins/` in the default data directory) on load
-(`PluginManifestLoader`), so the directory you dropped in step 1
-is discovered and shows up in `GET /api/plugins` as a disabled record. Before enabling a Community
-copy, approve the reserved `mcp:server` request through the
-[Gateway grant policy](/docs/gateway/governance). Enable it so the live record holds both
+(`PluginManifestLoader`). The directory you dropped in step 1 shows up in `GET /api/plugins` as a
+disabled record.
+
+Before enabling a Community copy, approve the reserved `mcp:server` request through the
+[Gateway grant policy](/docs/gateway/governance). Then enable it, so the live record holds both
 `mcp:server` and `widget:render` and its `contributes.widgets` entry goes live:
 
 ```bash

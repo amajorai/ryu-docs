@@ -8,11 +8,14 @@ human decision. Agents, workflows, and automations configured to require approva
 source runs up to the decision point, parks the action, and notifies you. On approve, Core runs or
 resumes the action.
 
+<Figure name="approvals" />
+
 <Callout type="info">
-This is distinct from [Command approval](/docs/security/command-approval), which is the Gateway's
-shell-command scanner (`RYU_EXEC_APPROVAL_MODE`) that classifies a single command as allow / deny /
-approval-required before Core executes it. The approvals engine is the general inbox that any
-source parks a whole action into. The two share the `off` / `smart` / `manual` vocabulary but are
+This is distinct from [Command approval](/docs/security/command-approval). That is the Gateway's
+shell-command scanner (`RYU_EXEC_APPROVAL_MODE`), which classifies a single command as allow, deny,
+or approval-required before Core executes it.
+
+The approvals engine is the general inbox that any source parks a whole action into. The two share the `off` / `smart` / `manual` vocabulary but are
 separate systems with separate settings.
 </Callout>
 
@@ -64,79 +67,132 @@ the inbox shows it read-only. A request resolves in one of four ways:
 
 Each arm of `execute_action` proxies the same engine the source already uses, so an approved run is
 identical to the autonomous run it replaced. A `ToolCall` records its output (a bounded 4000-char
-preview) back onto the row; other kinds record only success or an error.
+preview) back onto the row. Other kinds record only success or an error.
 
-Tool-call requests also carry an optional `question` alongside `summary`. The question is the
-first-person intent shown above the explanation in approval cards (for example,
-``Can I run `gmail.send_email` now?``); the summary remains the plain-language description of what will happen.
-Desktop, remote mobile, and offline native confirmations use this same question-plus-summary shape.
-The question explains the proposed action but never grants permission by itself.
+### Question and summary
+
+Tool-call requests carry an optional `question` alongside `summary`, and the two do different jobs.
+
+- The **question** is the first-person intent shown above the explanation in approval cards, for
+  example ``Can I run `gmail.send_email` now?``.
+- The **summary** is the plain-language description of what will happen.
+
+Desktop, remote mobile, and offline native confirmations use this same shape. The question explains
+the proposed action but never grants permission by itself.
 
 ## The decision
 
-`ApprovalStatus` is `pending` / `approved` / `rejected` / `expired` / `cancelled`. Only a `pending`
+`ApprovalStatus` is `pending`, `approved`, `rejected`, `expired`, or `cancelled`. Only a `pending`
 request ever transitions.
 
-The main guarantee is a **single-winner atomic compare-and-set**. `decide` fast-paths anything
-already decided, then calls `ApprovalStore::try_transition`, whose SQL carries a
-`WHERE id = ?1 AND status = 'pending'` guard (`apps/core/src/approvals/store.rs`). Exactly one of N
-concurrent deciders sees the row change; the rest see `false` and run no side effects. This closes the
-read-check-then-write window where a double-click (or a phone and a desktop deciding at once) could
-double-execute the action.
+```mermaid
+stateDiagram-v2
+  [*] --> pending
+  pending --> approved: approve (action runs in background)
+  pending --> rejected: reject
+  pending --> expired: sweep_expired past expires_at
+  pending --> cancelled: cancel
+```
 
-The status is flipped **durably before** the action runs, and the action runs in a spawned background
-task. So the decide call returns immediately, and a crash mid-execute fails safe: the row is left
-`approved` with its action lost, never double-run. `cancel` and the periodic `sweep_expired`
-(auto-rejecting past `expires_at`) use the same CAS, so a cancel or expiry racing an approve can never
-both act. A rejected or expired `workflow_gate` fails its suspended run so it does not hang.
-The same periodic sweep deletes decided requests 90 days after their decision; pending requests are
-never deleted.
+### Single-winner transitions
 
-Creating a request also dedups: `request_deduped` is a no-op when a `pending` request already exists
-for the same `source_ref` (`has_pending_for_source`), so a scheduled job cannot pile up a fresh
-approval on every tick. A new request also sends a best-effort Expo push notification (using the
-[monitors](/docs/core/website-monitoring) push tokens), so a phone learns about a pending decision.
+The main guarantee is a **single-winner atomic compare-and-set**:
 
-The push shows the request's title only on a device whose signed-in member could open the inbox on
-that node. On an unbound node that is any signed-in member. On a personal node it is the owner. On an
-organization or team node it is a member whose role grants `approvals.view`. Every other device,
-including one registered without signing in, gets "A request is waiting for a decision" and the
-request id. It gets the same message when the node can't reach the control plane to check.
+1. `decide` fast-paths anything already decided.
+2. It then calls `ApprovalStore::try_transition`, whose SQL carries a
+   `WHERE id = ?1 AND status = 'pending'` guard (`apps/core/src/approvals/store.rs`).
+3. Exactly one of N concurrent deciders sees the row change. The rest see `false` and run no side
+   effects.
+
+This closes the read-check-then-write window where a double-click, or a phone and a desktop deciding
+at once, could double-execute the action. `cancel` and the periodic `sweep_expired` (which expires
+pending requests past `expires_at`) use the same compare-and-set, so a cancel or expiry racing an
+approve can never both act.
+
+### Execution and retention
+
+The status is flipped **durably before** the action runs, and the action runs in a spawned
+background task. The decide call returns immediately. A crash mid-execute fails safe: the row is
+left `approved` with its action lost, never double-run.
+
+- A rejected or expired `workflow_gate` fails its suspended run so it does not hang.
+- The periodic sweep deletes decided requests 90 days after their decision. Pending requests are
+  never deleted.
+
+### Dedup and push notifications
+
+`request_deduped` is a no-op when a `pending` request already exists for the same `source_ref`
+(`has_pending_for_source`). A scheduled job therefore cannot pile up a fresh approval on every tick.
+
+A new request also sends a best-effort Expo push notification, using the
+[monitors](/docs/core/website-monitoring) push tokens. The push shows the request's title only on a
+device whose signed-in member could open the inbox on that node:
+
+| Node | Who sees the title |
+|---|---|
+| Unbound | Any signed-in member |
+| Personal | The owner |
+| Organization or team | A member whose role grants `approvals.view` |
+
+Every other device, including one registered without signing in, gets "A request is waiting for a
+decision" and the request id. It gets the same message when the node cannot reach the control plane
+to check.
 
 ## The tool-dispatch gate
 
 `tool_call` approvals are raised at the gated MCP tool-dispatch chokepoint. Before it runs the tool,
 `McpRegistry::call_tool_with_identity` calls `approvals::gate_tool_call`
-(`apps/core/src/approvals/mod.rs`). If the policy gates the tool, the call is **not** executed - an
-error is returned (every plane treats a tool error as not-done, so a gated call never looks like a
-completed side effect), the action is queued in the inbox, and the engine runs the tool on approve. It is **fail-closed**: if the approval cannot even be persisted, the tool still does not
-run.
+(`apps/core/src/approvals/mod.rs`). If the policy gates the tool:
+
+1. The call is **not** executed. An error is returned, and every plane treats a tool error as
+   not-done, so a gated call never looks like a completed side effect.
+2. The action is queued in the inbox.
+3. The engine runs the tool on approve.
+
+The gate is **fail-closed**: if the approval cannot be persisted, the tool still does not run.
+
+### Programs that read private data
 
 Inside a [programmatic tool calling](/docs/core/programmatic-tool-calling) program, the gate also
-holds any call that can send data off the machine (web and browser tools, desktop input, writes
-through Ryu's own API, delegation, outbound channels, external MCP tools) once the same program has
-read private data such as conversation history, memory, or a connected account. The held call is
-queued here with its full arguments, so you can see where the data would go, and an earlier "Allow
-for this chat" does not skip it. With no approval inbox running, the call is refused instead.
+holds any call that can send data off the machine once the same program has read private data, such
+as conversation history, memory, or a connected account. Calls that can send data out include:
+
+- web and browser tools, and desktop input;
+- writes through Ryu's own API, and delegation;
+- outbound channels and external MCP tools.
+
+The held call is queued here with its full arguments, so you can see where the data would go. An
+earlier "Allow for this chat" does not skip it. With no approval inbox running, the call is refused
+instead.
+
+### Policy layers
+
+The gate combines three layers (`apps/core/src/approvals/policy.rs`,
+`apps/core/src/approvals/mod.rs`):
+
+| Layer | Source | Effect |
+|---|---|---|
+| C, organization tool policy | The organization's tool rules, on an organization-bound node only | Runs first. A denied tool, or one outside a non-empty allowlist, is refused and never queued. Deny-only: it never adds an approval gate |
+| A, per-agent gate | The agent's `approval_tools` list, plus non-read-only calls for an agent with the **Approval required** safety profile, plus held program calls | A listed or held call queues for approval. Held program calls still require approval when the mode is **off** |
+| B, global approval mode | The `approval-mode` preference | Gates by mode (see the next table) |
+
+Layers A and B are OR'd: either can require approval. Because Layer C runs first, a local approval
+can never override an organization denial.
+
+```mermaid
+flowchart TD
+  T["Tool call"] --> C{"Org policy denies? (Layer C)"}
+  C -- yes --> R["Refused, never queued"]
+  C -- no --> G{"Agent gate (A) or mode (B) requires approval?"}
+  G -- no --> Run["Tool runs"]
+  G -- yes --> Chat{"Live chat can confirm this call?"}
+  Chat -- yes --> Ask["Allow once / Allow for this chat / Deny"]
+  Chat -- no --> Q["Queued in the Approvals inbox"]
+```
 
 ### Policy: the approval mode
 
-Agent configuration always requires an operator decision, including when the global mode
-is **off**. Interactive agents, managed Pi callbacks, and network tool clients use the same
-persisted Approvals inbox. A tool result reports that the change is pending; the stored
-change runs only after approval. Model arguments and cached session choices cannot approve it.
-
-A Ryu Challenges submission (`challenges.submit`) is also confirmed on every call, including
-when the global mode is **off**, because it sends a project entry under your own Ryu account.
-If the approval inbox is unavailable, the submission is refused rather than sent unconfirmed.
-
-Agent-builder configuration is unavailable on managed or shared organization nodes while
-the tool's ownership boundary remains unsupported. On supported personal nodes, HTTP calls
-also require edit access to the exact agent being changed. Approval replay rechecks the node
-boundary, so an earlier personal-node approval cannot enable configuration after the node
-becomes managed or shared.
-
-The gate reads the global **approval mode** (`apps/core/src/approvals/policy.rs`), stored under the
+The global **approval mode** (`apps/core/src/approvals/policy.rs`) is stored under the
 `approval-mode` preference and exposed at `GET/PUT /api/approvals/mode`.
 
 | `mode` | Behavior |
@@ -145,50 +201,60 @@ The gate reads the global **approval mode** (`apps/core/src/approvals/policy.rs`
 | `smart` | Gates mandatory operator-review actions and tool calls whose action segment matches a curated risky-verb list (`send`, `delete`, `pay`, `deploy`, `email`, `merge`, …) |
 | `manual` | Gates every tool call |
 
-`smart` classification (`classify_risk`) matches against the tool id's action segment (the part after
-the last `.`), and excludes broad read verbs (`get` / `list` / `search` / `read`) so it
-does not gate ordinary reads. `composio.` tools are skipped here because they own their own
-connection-required flow.
+`smart` classification (`classify_risk`) matches against the tool id's action segment, the part
+after the last `.`, by substring. The risky-verb list has no read verbs such as `get`, `list`,
+`search`, or `read`, so most ordinary reads are not gated. `composio.*` tools are **not** exempt: a risky Composio
+action gates like any other tool. Only its connect and consent step runs ungated.
 
-Changes an agent makes to Ryu itself always ask, in every mode, including `off`. This covers every mutating
-Self-API call (`ryu_api.*`, for example Gateway routing, budgets and guardrails, a model's launch
-settings, or a preference) and switching the user's interface (`workspace.switch_interface`).
+Spaces mutations are in the risky set: `create_space`, `rename_space`, `create_page`, `create_file`,
+`attach_space`, and `detach_space` wait for approval in `smart` mode. Listing and searching Spaces
+remain reads. The agent-plane authorization check still runs before the approval is queued, so an
+unresolved or non-owner agent cannot use approval to get around Space ownership.
+
+### Actions that always ask
+
+These actions ask in every mode, including `off`, as listed below.
+
+- **Changes an agent makes to Ryu itself.** This covers every mutating Self-API call (`ryu_api.*`,
+  for example Gateway routing, budgets and guardrails, a model's launch settings, or a preference)
+  and switching the user's interface (`workspace.switch_interface`).
+- **Agent configuration.** Interactive agents, managed Pi callbacks, and network tool clients use
+  the same persisted inbox. A tool result reports that the change is pending, and the stored change
+  runs only after approval. Model arguments and cached session choices cannot approve it.
+- **Ryu Challenges submissions** (`challenges.submit`), because they send a project entry under
+  your own Ryu account. If the inbox is unavailable, the submission is refused rather than sent
+  unconfirmed.
+
 Mutating app API calls (`ryu_ext.*`) write an app's own data, so they are gated unless the mode is
-explicitly `off`. When the agent runs in an interactive chat, these ask in that chat
-instead of the inbox: the user picks **Allow once**, **Allow for this chat**, or **Deny**, and an
-allowed call runs immediately. The gate still checks the organization tool policy first, so an
-in-chat allow never overrides an administrator's denial. Without an interactive chat (routines,
-network MCP clients, programmatic tool calls) the call is queued here as before.
+explicitly `off`.
 
-Spaces mutations are included in the risky set: `create_space`, `rename_space`, `create_page`,
-`create_file`, `attach_space`, and `detach_space` wait for approval in `smart` mode. Listing and
-searching Spaces remain read operations. The agent-plane authorization check still runs before the
-approval is queued, so an unresolved or non-owner agent cannot use approval as a way around Space
-ownership.
+Agent-builder configuration is unavailable on managed or shared organization nodes while the tool's
+ownership boundary remains unsupported. On supported personal nodes, HTTP calls also require edit
+access to the exact agent being changed. Approval replay rechecks the node boundary, so an earlier
+personal-node approval cannot enable configuration after the node becomes managed or shared.
 
-<Callout type="warn">
-The policy is designed as three layers OR'd together. Layer A - a per-agent `approval_tools` list on
-the agent record - is fed into the dispatch gate, so a listed tool queues for approval before it can
-run. An agent with the **Approval required** safety profile also adds non-read-only tool calls to
-that per-agent gate. A program's call that would send data out after reading private data is held
-the same way, as an agent-level gate, and still requires approval when the approval mode is **off**.
-This composes with Layer B's global `approval-mode`; either policy can require approval. Layer C is
-the organization tool-policy consult.
+### Asking in chat
 
-On an organization-bound node it runs before Layers A and B: a
-tool the organization denies, or one outside a non-empty organization allowlist, is refused and never
-queued, so a local approval cannot override it. Layer C is deny-only. It never adds an approval gate,
-and it does nothing on a node that is not bound to an organization
-(`apps/core/src/approvals/policy.rs`, `apps/core/src/approvals/mod.rs`).
-</Callout>
+When the agent runs in an interactive chat, Self-API and app API calls ask in that chat instead of
+the inbox. The user picks **Allow once**, **Allow for this chat**, or **Deny**, and an allowed call
+runs immediately.
+
+The gate still checks the organization tool policy first, so an in-chat allow never overrides an
+administrator's denial. Without an interactive chat (routines, network MCP clients, programmatic
+tool calls), the call is queued in the inbox.
 
 ## Storage
 
-The `ApprovalStore` (`apps/core/src/approvals/store.rs`) persists to SQLite at `db/approvals.db` in the Ryu data directory.
-One `approvals` table holds the full `ApprovalRequest` as embedded JSON, plus denormalized `status`
-and `source_ref` columns (indexed) so status filters and pending-by-source dedup do not scan JSON. A
-Tokio broadcast channel fans `Created` / `Decided` events out to SSE subscribers (the desktop inbox +
-the island chip).
+The `ApprovalStore` (`apps/core/src/approvals/store.rs`) persists to SQLite at `db/approvals.db` in
+the Ryu data directory.
+
+- One `approvals` table holds the full `ApprovalRequest` as embedded JSON.
+- Denormalized, indexed `status` and `source_ref` columns let status filters and pending-by-source
+  dedup avoid scanning JSON.
+- The JSON (tool arguments, prompts, message text, results, notes) is sealed per row at rest. The
+  `status`, `source_ref`, and timestamp columns stay plaintext for the indexes, dedup, and pruning.
+- A Tokio broadcast channel fans `Created` / `Decided` events out to SSE subscribers (the desktop
+  inbox and the island chip).
 
 ## Routes
 
@@ -204,32 +270,52 @@ All routes are under `/api/approvals` (`apps/core/src/server/approvals_api.rs`).
 | `PUT /api/approvals/mode` | Set the global approval mode (`off` / `smart` / `manual`) |
 | `GET /api/approvals/events` | SSE feed of approval events (created / decided) |
 
-Every route requires a signed-in caller with the matching approvals permission: `approvals.view` to
-read requests, the mode, and the event feeds, and `approvals.decide` to approve, reject, or change the
-mode. On an organization or team node, owners and admins hold both through their built-in role. A
-custom role can grant either one to another member. On a personal node only its owner passes.
+### Permissions
 
-Approval events are also
-delivered on the `approvals` channel of the unified `GET /api/events/all` stream, which includes that channel
-only for a caller with `approvals.view`. Both streams close when the session token they connected with
-expires, and re-check `approvals.view` about every 30 seconds. The re-check stops events within about 30
-seconds when a custom role that granted `approvals.view` is revoked. A built-in role change or a removal
-from the organization takes effect when the token expires. To receive events again, reconnect with a current token.
+Every route requires a signed-in caller with the matching approvals permission:
 
-A permission that comes from a built-in role is checked on the node, so a control-plane outage does not
-affect it. When `approvals.view` comes from a custom role and the node cannot reach the control plane to
-check it, the check is refused, not passed. `GET /api/approvals/events` answers
-`503 Service Unavailable`, so retry it later. On `GET /api/events/all` the other channels keep streaming
-without approval events, and the node retries the check in the background (after 1 second, then backing off
-to every 30 seconds). Once the control plane answers, the node closes the stream so the client reconnects
-with its current token, refetches what it missed, and is checked again. Approval events are never sent before
-a check passes.
+| Permission | Allows |
+|---|---|
+| `approvals.view` | Read requests, the mode, and the event feeds |
+| `approvals.decide` | Approve, reject, or change the mode |
+
+On an organization or team node, owners and admins hold both through their built-in role, and a
+custom role can grant either one to another member. On a personal node, only its owner passes.
+
+### Event streams
+
+Approval events are also delivered on the `approvals` channel of the unified `GET /api/events/all`
+stream. That channel is included only for a caller with `approvals.view`.
+
+- Both streams close when the session token they connected with expires.
+- Both re-check `approvals.view` about every 30 seconds. Revoking a custom role that granted it
+  stops events within about 30 seconds.
+- A built-in role change, or removal from the organization, takes effect when the token expires.
+  To receive events again, reconnect with a current token.
+
+### When the control plane is unreachable
+
+A permission from a built-in role is checked on the node, so a control-plane outage does not affect
+it. When `approvals.view` comes from a custom role and the node cannot reach the control plane, the
+check is refused, not passed:
+
+- `GET /api/approvals/events` answers `503 Service Unavailable`. Retry it later.
+- On `GET /api/events/all`, the other channels keep streaming without approval events. The node
+  retries the check in the background, after 1 second and then backing off to every 30 seconds.
+- Once the control plane answers, the node closes the stream. The client reconnects with its
+  current token, refetches what it missed, and is checked again.
+
+Approval events are never sent before a check passes.
+
+### Activity feed
 
 The activity feed records every approval event with its title and summary. Those rows go only to a
-caller who passes the same `approvals.view` check. On `GET /api/events/all` the `activity` channel
-leaves them out unless the connect-time check passed; an outage counts as a refusal. `GET /api/activity`
-and its stream leave them out for a caller without the permission, including a request that carries
-only the node token.
+caller who passes the same `approvals.view` check.
+
+- On `GET /api/events/all`, the `activity` channel leaves them out unless the connect-time check
+  passed. An outage counts as a refusal.
+- `GET /api/activity` and its stream leave them out for a caller without the permission, including
+  a request that carries only the node token.
 
 ## Related
 

@@ -4,20 +4,37 @@ description: How the Auto entry in the agent picker chooses an agent per turn fr
 tags: ["routing", "agent-auto", "auto", "plane-b", "openrouter-auto", "pareto-code"]
 ---
 
-[Smart model routing](/docs/gateway/smart-routing) is **Plane A**: it picks a *model* inside one governed completion. A separate,
-higher-level route picks the *agent* that serves the turn. In the universal picker an **"Auto"** entry
-sits above the agent list; selecting it sets the composer's agent to the sentinel `auto`, and Core
-resolves the concrete agent per turn from your own rules, then continues exactly as if you had picked
-that agent.
+[Smart model routing](/docs/gateway/smart-routing) is **Plane A**: it picks a *model* inside one
+governed completion. Agent-auto is a separate, higher-level route that picks the *agent* that serves
+the turn.
 
-Agent-auto reuses the **same strategy vocabulary** as smart routing (`llm` / `embedding` / `keyword`),
-but the rule *targets are agent ids*, not model ids. It is configured by the Core `agent-auto-routing`
-preference:
+The universal picker's **"Auto"** entry sets the chat's agent to the sentinel id `auto`. Core
+resolves the concrete agent per turn from your own rules, then continues exactly as if you had
+picked that agent (`apps/core/src/agent_routing/auto.rs`).
+
+```mermaid
+flowchart LR
+  TURN["Turn with agent auto"] --> ACTIVE{"Config enabled with rules?"}
+  ACTIVE -->|"no"| FALLBACK["Default agent"]
+  ACTIVE -->|"yes"| CACHE{"Cached pick for this session?"}
+  CACHE -->|"yes"| PICK["Chosen agent"]
+  CACHE -->|"no"| STRAT["llm, embedding or keyword strategy"]
+  STRAT -->|"rule matched"| PICK
+  STRAT -->|"no match or error"| FALLBACK
+  PICK --> DISPATCH["Normal agent dispatch"]
+  FALLBACK --> DISPATCH
+```
+
+## Configuration
+
+Agent-auto reuses the **same strategy vocabulary** as smart routing (`llm`, `embedding`,
+`keyword`), but the rule *targets are agent ids*, not model ids. It is configured by the Core
+`agent-auto-routing` preference.
 
 ```jsonc
 {
   "enabled": true,
-  "strategy": "embedding",          // llm, embedding, or keyword (same vocabulary as Plane A)
+  "strategy": "embedding",          // llm (default), embedding, or keyword
   "classifier_model": "gemma-3-270m-it-qat-Q4_0", // optional; blank uses the local classify tier
   "embedding_model": "",            // for embedding; empty -> default local embedder
   "similarity_threshold": 0.35,
@@ -27,30 +44,37 @@ preference:
     { "description": "long-form research and analysis",         "agent_id": "gemini" }
   ],
   "default_agent_id": "ryu",        // when no rule matches
-  "cache_by_session": true
+  "cache_by_session": true,         // default false
+  "timeout_ms": 5000                // classifier timeout; default 5000
 }
 ```
 
-In Desktop, choose **Auto** in the composer, then select **Configure Auto** to edit this
-preference for the active Core node. If the settings read fails, use **Retry**; a failed save keeps
-the draft open so you can correct the connection and try again.
+- Agent-auto runs only when `enabled` is true and `rules` is not empty.
+- When `default_agent_id` is empty, the fallback is the node's default agent, then `ryu`.
+- `cache_by_session` classifies once per conversation and reuses that pick.
+
+Desktop's agent-auto editor writes this preference for the active Core node. If the settings read
+fails, use **Retry**. A failed save keeps the draft open so you can correct the connection and try
+again.
 
 <Callout type="info">
-  The Plane B backend split (an OpenAI-compatible agent's chat is governed by the Gateway; an ACP
-  agent self-routes) is explained on [Routing planes](/docs/gateway/routing-planes). Agent-auto's default LLM classifier is the local
-  270M Gemma classify tier, so it adds a small local classification step rather than sending the
-  user's turn to a second hosted model. If the classifier is unavailable or returns an unusable
-  result, Core fails open to the configured default agent.
+  The default LLM classifier is the local 270M Gemma classify tier, so agent-auto adds a small local
+  classification step instead of sending the user's turn to a second hosted model. If the
+  classifier is unavailable, times out, or returns an unusable result, Core fails open to the
+  default agent.
+
+  The Plane B backend split (the Gateway governs an OpenAI-compatible agent's chat;
+  an ACP agent self-routes) is explained on [Routing planes](/docs/gateway/routing-planes).
 </Callout>
 
 <Callout type="warn">
   Auto may pick a different harness than last turn (Ryu/Pi → Claude Code → Gemini). ACP agents own
-  stateful subprocesses, so switching agents starts a fresh session for the newly chosen agent (the
-  previous one is kept warm for a switch-back). Conversation history is replayed into the new agent
-  as prior context, but live in-subprocess state is not. Files an ACP agent had open, its working
-  buffers, and similar state are lost across a harness switch; only the transcript carries over.
-  `cache_by_session` classifies once per conversation and reuses that pick, so the harness does not
-  change every turn.
+  stateful subprocesses, so switching agents starts a fresh session for the newly chosen agent. The
+  previous one is kept warm for a switch-back.
+
+  Conversation history is replayed into the new agent as prior context, but live in-subprocess
+  state is not. Files an ACP agent had open, its working buffers, and similar state are lost across
+  a harness switch. Set `cache_by_session` so the harness does not change every turn.
 </Callout>
 
 ## The auto routes, disambiguated
@@ -71,7 +95,9 @@ and no Ryu-side classifier.
 For coding tasks, `openrouter/pareto-code` uses OpenRouter's current coding shortlist and picks a
 model from the requested quality tier, favoring the cheapest available model in that tier. It is
 also a model id, so Ryu's firewall, budgets, routing, and usage accounting still run before the
-request leaves the Gateway. OpenRouter documents the optional `pareto-router` plugin and its
+request leaves the Gateway.
+
+OpenRouter documents the optional `pareto-router` plugin and its
 `min_coding_score` setting in the [Pareto Router guide](https://openrouter.ai/docs/guides/routing/routers/pareto-router).
 
 <Callout type="info">

@@ -6,16 +6,21 @@ tags: ["messaging", "sms", "whatsapp", "voice", "api", "standalone"]
 
 This reference is for backend developers who send SMS, MMS, WhatsApp, and
 voice messages through the hosted Ryu Messaging API, an HTTP contract on the
-Ryu control plane. Every path on this page is relative to `/api/messaging`, and organization routes name the
-organization in the path as `/orgs/:orgId`. `GET /status` reports
-`apiVersion: "v1"`. For the concepts, pricing, and holds behind these routes,
+Ryu control plane. For the concepts, pricing, and holds behind these routes,
 see [Ryu Messaging](/docs/standalone/messaging).
 
-JSON bodies use camelCase field names. Request bodies are closed: an unknown
-field gets `400 invalid_request`. Phone numbers are E.164 strings such as
-`+6591234567`, and countries are ISO 3166-1 alpha-2 codes such as `US`. Money is
-an integer number of micro-USD in fields that end in `MicroUsd`. Timestamps are
-ISO 8601 UTC strings. Ids are opaque strings; do not parse them.
+Every path on this page is relative to `/api/messaging`, and organization
+routes name the organization in the path as `/orgs/:orgId`. `GET /status`
+reports `apiVersion: "v1"`.
+
+Wire conventions:
+
+- JSON bodies use camelCase field names. Request bodies are closed: an unknown
+  field gets `400 invalid_request`.
+- Phone numbers are E.164 strings such as `+6591234567`, and countries are
+  ISO 3166-1 alpha-2 codes such as `US`.
+- Money is an integer number of micro-USD in fields that end in `MicroUsd`.
+- Timestamps are ISO 8601 UTC strings. Ids are opaque strings; do not parse them.
 
 ## Authentication
 
@@ -29,11 +34,15 @@ works for organization members.
 | Console session | The member's `messaging.read` or `messaging.manage` permission. The organization's access policy applies. Support access sessions are refused. |
 
 The scopes exist only on the hosted control plane and are never delegated to a
-node. Every organization route also checks, in order, that Ryu Messaging is
-available for the organization (`404 not_found` while it is not) and that the
-organization's **Ryu Messaging** feature is on (`403 feature_disabled`). See
-[Tokens, OAuth apps, and revocation](/docs/security/authentication-tokens) for
-API keys and [Permissions](/docs/security/permissions) for the role sets.
+node. Every organization route also checks, in order:
+
+1. that Ryu Messaging is available for the organization (`404 not_found` while
+   it is not);
+2. that the organization's **Ryu Messaging** feature is on
+   (`403 feature_disabled`).
+
+See [Tokens, OAuth apps, and revocation](/docs/security/authentication-tokens)
+for API keys and [Permissions](/docs/security/permissions) for the role sets.
 
 ## Errors
 
@@ -72,9 +81,11 @@ not configured on the server answers `503 not_configured`.
 A `502 outcome_unknown` on a send means AWS may have sent it. The send's hold
 stays until the message settles. The body carries the stored message as
 `messageRecord`, so you can follow it with `GET /orgs/:orgId/messages/:id`
-before you send again with a new key. A `502 provider_refused` on a send also
-carries `messageRecord`. A `502 outcome_unknown` on a number purchase is
-different: retry it with the same `Idempotency-Key` to finish that purchase.
+before you send again with a new key.
+
+A `502 provider_refused` on a send also carries `messageRecord`. A
+`502 outcome_unknown` on a number purchase is different: retry it with the same
+`Idempotency-Key` to finish that purchase.
 
 ## Idempotency
 
@@ -142,7 +153,15 @@ The quote is a ceiling, not the final price. The settled amount is never higher.
 Each send is checked in this order: the sender, the price, the organization's
 allowed destination countries, its opt-out list, its spend limits, and its send
 limits. The hold is taken only after all of them pass. A send returns `202`
-with `{ "message": … }` once AWS has accepted it, with `status: "accepted"` and `chargeState: "held"`.
+with `{ "message": … }` once AWS has accepted it, with `status: "accepted"` and
+`chargeState: "held"`.
+
+```mermaid
+flowchart LR
+  S["Sender"] --> P["Price"] --> C["Allowed countries"] --> O["Opt-out list"]
+  O --> SL["Spend limits"] --> R["Send limits"] --> H["Hold credits"]
+  H --> A["AWS End User Messaging"] --> OK["202 accepted, held"]
+```
 
 | Route | Required fields | Optional fields |
 |---|---|---|
@@ -151,12 +170,15 @@ with `{ "message": … }` once AWS has accepted it, with `status: "accepted"` an
 | `POST /orgs/:orgId/voice` | `from`, `to`, and exactly one of `text` (up to 3,000 characters) or `ssml` (up to 6,000) | `voiceId` (an Amazon Polly voice id such as `JOANNA`), `ttlSeconds`, `metadata` |
 | `POST /orgs/:orgId/whatsapp` | `senderId`, `to`, and exactly one of `template` (`name`, `language`, optional `components`) or `text` (up to 4,096 characters) | `previewUrl` (with `text`), `metadata` |
 
-`from` is the id of one of the organization's active numbers with the matching
-capability, not the phone number itself. `ttlSeconds` is 5 to 259,200 seconds;
-an SMS or MMS defaults to 14,400 and a voice message to 3,600. MMS media is
-JPEG, PNG, GIF, or MP4, at most 600 KiB decoded, and the whole MMS body is at
-most 1 MiB. `metadata` is up to 16 string entries (keys up to 64 characters,
-values up to 512), returned on the message and its webhooks.
+Field rules:
+
+- `from` is the id of one of the organization's active numbers with the
+  matching capability, not the phone number itself.
+- `ttlSeconds` is 5 to 259,200 seconds; an SMS or MMS defaults to 14,400 and a
+  voice message to 3,600.
+- MMS media is JPEG, PNG, GIF, or MP4, at most 600 KiB decoded, and the whole
+  MMS body is at most 1 MiB.
+- `metadata` is up to 16 string entries (keys up to 64 characters, values up to 512), returned on the message and its webhooks.
 
 A voice hold covers the spoken length of the text at a slow speaking rate plus
 one minute, at most 10 minutes. Free-form WhatsApp `text` is accepted only
@@ -203,12 +225,13 @@ SMS and WhatsApp replies appear here with `direction: "inbound"`.
 | `none` | Nothing was or will be charged |
 
 `absorbedMicroUsd` is any part of the price that Ryu absorbed, above the hold
-or beyond what the balance could cover.
-`estimated: true` means no final provider price arrived, so the charge settled
-at the price-list estimate. SMS, MMS, and voice messages settle at AWS's final
-event, or at the estimate once the message's time to live plus 72 hours has
-passed. WhatsApp messages settle at the first status that carries Meta's
-pricing, or at AWS's fee alone after 72 hours.
+or beyond what the balance could cover. `estimated: true` means no final
+provider price arrived, so the charge settled at the price-list estimate.
+
+| Channel | Settles at |
+|---|---|
+| SMS, MMS, voice | AWS's final event, or the estimate once the message's time to live plus 72 hours has passed |
+| WhatsApp | The first status that carries Meta's pricing, or AWS's fee alone after 72 hours |
 
 ## Send limits
 
@@ -227,30 +250,40 @@ a `Retry-After` header. Number purchases have their own limits, described in
 
 Messaging charges count toward the organization's spend limits. Before each
 hold, Ryu checks every limit whose action is stop that applies to the request:
-the API key's, the acting member's (or the default member limit), and the
-organization's. A send or number purchase whose ceiling would take any of them
-past its budget gets `402 spend_limit_reached` with `scope` (`key`, `member`,
-or `org`), `budgetMicroUsd`, `spentMicroUsd`, and `requiredMicroUsd`. A key's
-Messaging spend is what its sent messages were charged plus the lease and
-renewal charges of the numbers it bought. Charges still on hold count as spent,
-so a burst of sends cannot each pass a limit on the settled spend alone. Two
-requests that arrive at the same instant can still pass a limit by their own
-holds.
+
+- the API key's;
+- the acting member's, or the default member limit;
+- the organization's.
+
+A send or number purchase whose ceiling would take any of them past its budget
+gets `402 spend_limit_reached` with `scope` (`key`, `member`, or `org`),
+`budgetMicroUsd`, `spentMicroUsd`, and `requiredMicroUsd`.
+
+A key's Messaging spend is what its sent messages were charged plus the lease
+and renewal charges of the numbers it bought. Charges still on hold count as
+spent, so a burst of sends cannot each pass a limit on the settled spend alone.
+Two requests that arrive at the same instant can still pass a limit by their
+own holds.
 
 ## Settings and webhooks
 
-`PUT /orgs/:orgId/settings` accepts `webhookUrl` (a public HTTPS URL, or `null`
-to remove it), `allowedCountries` (destination countries beyond those of the
-organization's own numbers and WhatsApp senders, up to 250), and
-`dailySendLimit` (`null` restores the default). A send to any other country
-gets `403 country_not_allowed`.
+`PUT /orgs/:orgId/settings` accepts:
+
+| Field | Meaning |
+|---|---|
+| `webhookUrl` | A public HTTPS URL, or `null` to remove it |
+| `allowedCountries` | Destination countries beyond those of the organization's own numbers and WhatsApp senders, up to 250 |
+| `dailySendLimit` | The daily send cap; `null` restores the default |
+
+A send to a country outside those gets `403 country_not_allowed`.
 
 The first webhook URL mints a signing secret (`whsec_…`), returned only in that
 reply as `webhookSecret`. `POST /orgs/:orgId/settings/webhook-secret/rotate`
-replaces it; the old secret stops verifying at once. Deliveries are signed with
-[Standard Webhooks](https://www.standardwebhooks.com/) headers (`webhook-id`,
-`webhook-timestamp`, `webhook-signature`, repeated as `svix-*`) over
-`id.timestamp.body`.
+replaces it; the old secret stops verifying at once.
+
+Deliveries are signed with [Standard Webhooks](https://www.standardwebhooks.com/)
+headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`, repeated as
+`svix-*`) over `id.timestamp.body`.
 
 | `event_type` | `data` |
 |---|---|
@@ -311,11 +344,12 @@ try {
 | `optOuts` | `list(query?)`, `add(phoneNumber)`, `remove(phoneNumber)` |
 | `settings` | `get()`, `update(input)`, `rotateWebhookSecret()` |
 
-When `idempotencyKey` is omitted, the client generates one per call, so pass
-your own to retry a send or purchase safely. A failed request throws
-`MessagingError` with `status`, `code`, `details`, and `retryAfterSeconds`.
-`messagingErrorMessageRecord(error)` returns the `messageRecord` of an
-unconfirmed or refused send, or `null`.
-`verifyMessagingWebhook(secret, headers, rawBody)` checks a delivery's
-signature and timestamp (300 seconds of tolerance by default) and returns the
-event; pass the raw body exactly as received.
+- When `idempotencyKey` is omitted, the client generates one per call, so pass
+  your own to retry a send or purchase safely.
+- A failed request throws `MessagingError` with `status`, `code`, `details`,
+  and `retryAfterSeconds`.
+- `messagingErrorMessageRecord(error)` returns the `messageRecord` of an
+  unconfirmed or refused send, or `null`.
+- `verifyMessagingWebhook(secret, headers, rawBody)` checks a delivery's
+  signature and timestamp (300 seconds of tolerance by default) and returns the
+  event; pass the raw body exactly as received.

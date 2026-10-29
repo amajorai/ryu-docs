@@ -4,8 +4,8 @@ description: "How skills interact with tools, how progressive disclosure loads t
 tags: ["skills", "progressive-disclosure", "tool-interaction", "skill-injection", "mcp"]
 ---
 
-A skill interacts with the tool system, the Gateway, and the agent's context. The `SKILL.md`
-format is on [Skills](/docs/extend/skills).
+This page explains how a skill works with the tool system, the Gateway, the request body, and
+turn hooks. The `SKILL.md` format and the disclosure modes are on [Skills](/docs/extend/skills).
 
 ## How skills interact with tools
 
@@ -21,7 +21,7 @@ allowed-tools:
 ```
 
 When the skill is active, Core surfaces those tools to the MCP bridge for the turn. The Gateway
-enforces the grant. A declared tool that the caller is not granted stays uncallable.
+enforces the grant, so a declared tool that the caller is not granted stays uncallable.
 
 ```mermaid
 flowchart LR
@@ -32,25 +32,34 @@ flowchart LR
   GW -->|"approved"| TOOL[Tool execution]
 ```
 
-## Progressive disclosure mechanics
+## Discovery and loading
 
-Progressive disclosure injects only skill metadata up front and loads full bodies on demand.
+Under progressive disclosure, a skill reaches the model in four phases. Agents discover and load
+skills through the `skills` MCP server.
 
-### The flow
+1. **Selection.** Core injects each enabled skill's `name` and `description` into the system
+   prompt.
+2. **Decision.** The model decides which skill fits the turn. It can call `skills.search` to rank
+   the installed skills by intent; results carry the name and description only.
+3. **Loading.** The model calls `skills.load` with the skill id. Core returns the full `SKILL.md`
+   body into the context.
+4. **Execution.** The model follows the skill's instructions and uses the tools it declared.
 
-1. **Selection phase:** Only each skill's `name` and `description` are injected into the system
-   prompt. The model sees a list of available skills.
+```mermaid
+sequenceDiagram
+  participant Core
+  participant Model
+  participant Skills as skills MCP server
+  Core->>Model: System prompt with skill names and descriptions
+  Model->>Skills: skills.search (optional)
+  Skills-->>Model: Matching skills, name and description
+  Model->>Skills: skills.load with id
+  Skills-->>Model: Full SKILL.md body
+  Model->>Model: Follow the instructions with declared tools
+```
 
-2. **Decision phase:** The model decides which skill is relevant to the current turn.
-
-3. **Loading phase:** The model calls `skills.load` with the skill id. Core loads the full
-   `SKILL.md` body and injects it into the context.
-
-4. **Execution phase:** The model follows the skill's instructions, using the tools it declared.
-
-### Always-on skills
-
-Set `always-on: true` in the front-matter to inject the full body up front.
+An `always-on: true` skill skips phases 2 and 3: its full body is injected up front. Use it for a
+critical skill or a model that cannot reliably load skills itself.
 
 ```yaml
 ---
@@ -60,21 +69,23 @@ always-on: true
 You MUST check every outbound request for PII before sending.
 ```
 
-Use this for critical skills or models that cannot reliably self-load skills.
-
 ## Skill injection into requests
 
-When a skill is active, Core injects it into the outgoing request body.
+When a skill is active, Core injects its instructions into the outgoing request body as part of
+the system message, then forwards the request to the Gateway.
 
 ```mermaid
-flowchart TD
-  REQ[Outgoing request] --> INJ["Skill injection<br/>(inside route_openai_stream)"]
-  INJ -->|"system message prepended"| BODY[Final request body]
+flowchart LR
+  TRIM["Context trimming"] --> INJ["Skill injection"]
+  INJ -->|"system message"| BODY["Final request body"]
+  BODY -->|"x-ryu-skill-ids"| GW["Gateway"]
+  GW --> AUD["Budget and audit"]
 ```
 
-The injection happens **after** context trimming. The context window manager reserves 512 tokens
-(`SKILLS_RESERVE`) for it. The Gateway counts skill-tagged calls toward budget and audit
-through the `x-ryu-skill-ids` header.
+- Injection happens **after** context trimming. The context window manager reserves a flat 512
+  tokens (`SKILLS_RESERVE`) for it. This is an approximation, not an exact count.
+- The `x-ryu-skill-ids` header lists the active skill ids. The Gateway counts the call toward
+  budget and audit for those skills.
 
 ## Skill-tool interaction patterns
 
@@ -133,14 +144,6 @@ whether code was modified and injects a review follow-up when the "Code Reviewer
 The Desktop **Gateway → Hooks** tab is where you review and trust hooks such as the one above. See
 [Review hooks in Gateway](/docs/extend/develop/extensions/hooks-authoring#review-hooks-in-gateway)
 for the scope order and the trust rules.
-
-## Skill discovery by agents
-
-Agents discover skills through the `skills` MCP server.
-
-1. `skills.search` returns matching installed skills (name and description only).
-2. The model decides which skill fits the current conversation.
-3. `skills.load` loads that skill's full body.
 
 ## Skill lifecycle
 

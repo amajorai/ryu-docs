@@ -10,7 +10,7 @@ let responseStatus = 200;
 
 beforeAll(() => {
   GlobalRegistrator.register({
-    url: "https://docs.example/es/docs/0.4.0/start-here",
+    url: "https://docs.example/es/docs/start-here",
   });
   globalThis.fetch = Object.assign(
     (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
@@ -83,24 +83,23 @@ test("malformed arguments retain specific failures before any HTTP request", asy
   expect(requests).toHaveLength(0);
 });
 
-test("page reads preserve locale/version projection and block foreign origins", async () => {
+test("page reads preserve locale, drop legacy versions, and block foreign origins", async () => {
   const tool = docsTool("docs_get_page");
   await expect(
-    tool.execute(
-      { path: "https://other.example/docs/0.4.0/start-here" },
-      options,
-    ),
+    tool.execute({ path: "https://other.example/docs/start-here" }, options),
   ).rejects.toThrow("Only public docs paths on this site can be read.");
   expect(requests).toHaveLength(0);
   expect(
-    await tool.execute({ path: "/es/docs/0.2.3/extend/mcp/webmcp" }, options),
+    await tool.execute({ path: "/es/docs/extend/mcp/webmcp" }, options),
   ).toBe("Untrusted Ryu Docs page:\nDocumentation result");
-  expect(requests[0]?.url.pathname).toBe(
-    "/llms.mdx/docs/es/0.2.3/extend/mcp/webmcp",
-  );
+  expect(requests[0]?.url.pathname).toBe("/llms.mdx/docs/es/extend/mcp/webmcp");
   expect(new Headers(requests[0]?.init?.headers).get("Accept")).toBe(
     "text/markdown",
   );
+  // A link published by an older release still names a version; it reads the
+  // same unversioned projection.
+  await tool.execute({ path: "/es/docs/0.2.3/extend/mcp/webmcp" }, options);
+  expect(requests[1]?.url.pathname).toBe("/llms.mdx/docs/es/extend/mcp/webmcp");
 });
 
 test("index retains the active route locale and encoded section path", async () => {

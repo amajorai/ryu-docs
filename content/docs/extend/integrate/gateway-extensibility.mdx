@@ -15,6 +15,15 @@ The `[backends]` table in `gateway.toml` names the active backend for each stage
 absent table keeps the built-in behavior. An id that is not registered is refused when the Gateway
 builds its state, so a typo fails closed.
 
+```mermaid
+flowchart LR
+  Toml["gateway.toml [backends]"] --> Build["Gateway builds state"]
+  Build --> Check{"Id registered?"}
+  Check -->|"No"| Refuse["Refused (fails closed)"]
+  Check -->|"Yes"| Active["Stage registry active backend"]
+  Active --> Request["Each request uses the active backend"]
+```
+
 | Stage | Field |
 |---|---|
 | Budget | `budget` |
@@ -30,10 +39,12 @@ builds its state, so a typo fails closed.
 | Passthrough proxy | `passthrough` |
 | Connections | `connections` |
 
-`PUT /v1/config` with a partial `backends` object changes one stage and keeps the others. The
-`budget`, `router`, and `connections` selections apply live. Other stages take effect on the next
-Gateway restart (see
-[Configuration API](/docs/gateway/configuration-api)).
+`PUT /v1/config` with a partial `backends` object changes one stage and keeps the others:
+
+- The `budget`, `router`, and `connections` selections apply live.
+- Other stages take effect on the next Gateway restart.
+
+See [Configuration API](/docs/gateway/configuration-api).
 
 Each registry (for example `RouterRegistry` in `apps/gateway/src/router/mod.rs` and
 `FirewallRegistry` in `apps/gateway/src/firewall/mod.rs`) follows the same shape:
@@ -95,8 +106,12 @@ Most routing needs are configuration, not code. See [Routing](/docs/gateway/rout
 
 The router stage also accepts an upstream router as its backend: `openrouter`, `litellm`, or
 `local` (`UPSTREAM_ROUTER_IDS` in `crates/gateway/router/src/lib.rs`). Set `backends.router` to
-hand `router/<model>` ids, and models that would go to the default provider, to that router. A
-selected router whose provider is not configured fails like any unavailable provider. See
+hand two kinds of request to that router:
+
+- `router/<model>` ids
+- models that would otherwise go to the default provider
+
+A selected router whose provider is not configured fails like any unavailable provider. See
 [upstream routers](/docs/providers/upstream-routers).
 
 A custom router backend implements `RouterBackend`.
@@ -126,12 +141,22 @@ The model map, fallback chain, and tiers are a startup snapshot. Changing them n
 
 A WASM policy plugin (`apps/gateway/src/wasm_policy/mod.rs`) runs untrusted policy code inside the
 Gateway. The guest receives a request excerpt and returns a verdict: allow, or deny with a reason.
-The operator maps a deny to block, sanitize, or warn. It cannot rewrite the request.
+The operator maps a deny to block, sanitize, or warn. The guest cannot rewrite the request.
 
-The sandbox has no WASI and no host imports, so the guest has no filesystem, network, clock, or
-randomness. Fuel, an epoch deadline, and a memory limit bound each call, and every request gets a
-fresh `Store`. A trap, timeout, or invalid output becomes a failure verdict, which fails closed by
-default.
+The sandbox bounds each call:
+
+- No WASI and no host imports, so the guest has no filesystem, network, clock, or randomness.
+- Fuel, an epoch deadline, and a memory limit cap CPU, wall time, and memory.
+- Every request gets a fresh `Store`.
+- A trap, timeout, or invalid output becomes a failure verdict, which fails closed by default.
+
+```mermaid
+flowchart LR
+  Req["Request excerpt"] --> Guest["WASM guest (fresh Store)"]
+  Guest -->|"allow"| Pass["Request continues"]
+  Guest -->|"deny + reason"| Map["Operator action: block, sanitize, or warn"]
+  Guest -->|"trap, timeout, bad output"| Fail["Failure verdict (fails closed)"]
+```
 
 <Callout type="warn">
   WASM policy plugins are an advanced extension point, and the API can change. For most governance

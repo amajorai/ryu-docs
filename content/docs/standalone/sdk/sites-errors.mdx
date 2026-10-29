@@ -38,42 +38,66 @@ becomes a `RyuError` subclass with the Sites `code`, and `fields` is in
 | `422 security_blocked` | `RyuInvalidRequestError` | The secret scan refused to deploy the version. Save new HTML without the secret; that version stays saved but cannot be deployed. |
 | `413` or `429 quota` | `RyuInvalidRequestError` or `RyuRateLimitError` | A size or storage limit. Not retried. |
 
+### Deploy step failures
+
 When a step of `deploy()` fails, `error.details.step` names it (`read`,
 `status`, `version`, or `deploy`), with the `projectId` and the
-`expectedRevision` it sent. A failed deploy step also carries the saved
-`versionId`, so after a transient failure, such as a stale `expectedRevision`,
-you can deploy that version without saving it again. A `422 security_blocked`
-is different: the scan runs on the deploy step, so the version holding the
-secret is already saved and can never be deployed. Remove the secret and save
-new HTML instead of redeploying that `versionId`.
+`expectedRevision` it sent.
+
+A failed deploy step also carries the saved `versionId`. After a transient
+failure, such as a stale `expectedRevision`, you can deploy that version
+without saving it again.
+
+A `422 security_blocked` is different: the scan runs on the deploy step, so the
+version holding the secret is already saved and can never be deployed. Remove
+the secret and save new HTML instead of redeploying that `versionId`.
+
+```mermaid
+flowchart TD
+  Fail["deploy() error"] --> Step{"error.details.step"}
+  Step -->|"read, status, version"| Retry["Fix the cause, call deploy() again"]
+  Step -->|"deploy"| Code{"error.code"}
+  Code -->|"security_blocked"| NewHtml["Remove the secret, save new HTML"]
+  Code -->|"conflict or other"| Again["Deploy details.versionId again"]
+```
 
 ## Idempotency and retries
 
 Sites deduplicates no write, so the SDK sends no `Idempotency-Key`. Every
 change carries `expectedRevision` instead: Sites refuses a stale one with
-`409 conflict`, so a write can never silently overwrite someone else's. The SDK
-never retries a `409`, and never retries a `POST` after a network error,
-timeout, or `5xx`.
+`409 conflict`, so a write can never silently overwrite someone else's.
+
+The SDK never retries a `409`, and never retries a `POST` after a network
+error, timeout, or `5xx`.
 
 Reads are retried on network errors, timeouts, and `500`, `502`, `503`, and
 `504` responses. The defaults are two retries and a 60-second timeout until
 response headers arrive; change them with `maxRetries` and `timeoutMs`.
 
+### Writes that are sent once
+
 `projects.delete()`, `projects.updateSettings()`, and `projects.makePublic()`
 are sent once after a network error, timeout, or `5xx`, although they use `PUT`
-or `DELETE`. Each carries `expectedRevision`, and Sites moves the revision when
-the first attempt commits, so a resend would answer `409 conflict` even though
-the write applied. Only a `429` that names a wait is retried. If the response
-to one of these calls was lost, read the Site with `projects.get()` to see
-whether the change or the removal took effect, then repeat it with the new
-`revision` if it did not.
+or `DELETE`. Only a `429` that names a wait is retried.
+
+Each carries `expectedRevision`, and Sites moves the revision when the first
+attempt commits. So a resend would answer `409 conflict` even though the write
+applied.
+
+If the response to one of these calls was lost:
+
+1. Read the Site with `projects.get()` to see whether the change or the removal
+   took effect.
+2. If it did not, repeat it with the new `revision`.
 
 A `projects.delete()` can fail after Sites has already moved the Site's
 revision, because Sites updates the revision before it removes the Site's
-records; a `503` from that removal leaves the Site in place with a newer
+records. A `503` from that removal leaves the Site in place with a newer
 revision. Read the Site with `projects.get()` and delete again with the new
-`revision`. A `503 unavailable` from the settings route reports a missing
-service, not an outage, and is not retryable.
+`revision`.
+
+A `503 unavailable` from the settings route reports a missing service, not an
+outage, and is not retryable.
 
 ## Read next
 

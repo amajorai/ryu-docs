@@ -3,7 +3,9 @@ title: "Protocol (RHP v1.1)"
 description: "Reference for the Ryu Hardware Protocol (RHP v1.1): the WebSocket endpoint and auth, the encrypted device session, frame types, every control message, device tools, the chat and ambient flows, and the REST routes."
 ---
 
-The Ryu Hardware Protocol (RHP) v1.1 is the wire contract between a Ryu hardware device and a node. It is one WebSocket protocol that runs identically over both transport modes (direct WiFi and the BLE relay). Devices paired with v1.1 run it inside an end-to-end encrypted session. Devices paired under v1 keep working in legacy mode. This page is the reference for firmware, relay, and node authors.
+The Ryu Hardware Protocol (RHP) v1.1 is the wire contract between a Ryu hardware device and a node. This page is the reference for firmware, relay, and node authors.
+
+RHP is one WebSocket protocol that runs identically over both transport modes (direct WiFi and the BLE relay). Devices paired with v1.1 run it inside an end-to-end encrypted session. Devices paired under v1 keep working in legacy mode.
 
 <Callout type="info">
   RHP is implemented three times and kept in lockstep: in **C** for the device firmware, in **Rust** for the node (the `ryu-hardware` crate and Core), and in **TypeScript** for the mobile app (`@ryuhq/protocol`). The message `type` strings and field names are normative across all three, and all three are tested against the same shared test vectors.
@@ -36,6 +38,17 @@ There is no separate endpoint or version header. The node looks at the first mes
 - A v1.1 device always opens with an encrypted handshake. Once it has paired with v1.1 it never falls back to plaintext, even if something on the path asks it to.
 - A device that only has v1 credentials (old firmware, or new firmware that has not been re-paired yet) sends the legacy plaintext `hello` and runs in **legacy mode**. The app badges it as legacy, and re-pairing upgrades it.
 - If the node is too old to understand the encrypted handshake, the device backs off and shows "Update your Ryu node" rather than downgrading.
+
+```mermaid
+flowchart TD
+  Connect["Device opens /api/hardware/ws"] --> Token{"Device or relay token valid?"}
+  Token -->|"No"| Reject["Upgrade rejected"]
+  Token -->|"Yes"| First{"First message"}
+  First -->|"Encrypted handshake"| Node{"Node supports v1.1?"}
+  Node -->|"Yes"| Secure["Encrypted session"]
+  Node -->|"No"| Backoff["Device backs off: Update your Ryu node"]
+  First -->|"Plaintext hello"| Legacy["Legacy mode (v1)"]
+```
 
 ## Frame types
 
@@ -91,7 +104,12 @@ There are 25 control message types: 10 from the client (device or relay) to the 
 
 ## Device tools
 
-A device on an encrypted session can advertise small, typed actions, such as showing a line of text on the watch or beeping so you can find it. It sends them in `capabilities_register`. The node checks every advertised tool against strict limits (names, descriptions, parameter types, sizes, and timeouts), answers with `capabilities_ack`, and offers the accepted ones to your agents as tools from a built-in `device` server. Each call is a `capability_invoke` that the device answers with `capability_result`.
+A device on an encrypted session can advertise small, typed actions, such as showing a line of text on the watch or beeping so you can find it.
+
+1. The device sends its tools in `capabilities_register`.
+2. The node checks every advertised tool against strict limits (names, descriptions, parameter types, sizes, and timeouts) and answers with `capabilities_ack`.
+3. The node offers the accepted tools to your agents from a built-in `device` server.
+4. Each call is a `capability_invoke` that the device answers with `capability_result`.
 
 [Hardware Security](/docs/hardware/security#device-tools) owns the rules for when tools are offered and how to turn them off.
 
@@ -117,6 +135,22 @@ A device on an encrypted session can advertise small, typed actions, such as sho
   </Step>
 </Steps>
 
+```mermaid
+sequenceDiagram
+  participant Dev as Device
+  participant Node as Node (Core)
+  Dev->>Node: mode chat, listen start
+  Dev->>Node: Opus mic frames (16 kHz)
+  Dev->>Node: listen stop
+  Node-->>Dev: stt
+  Node-->>Dev: emotion thinking
+  Node-->>Dev: chat_delta (per sentence)
+  Node-->>Dev: chat_end
+  Node-->>Dev: emotion speaking, tts_start
+  Node-->>Dev: Opus TTS frames (24 kHz)
+  Node-->>Dev: tts_end, emotion neutral
+```
+
 ### Ambient 24/7 capture (mode ambient)
 
 On `hello` an ambient-capable device gets an `ambient_session_id`. It then streams Opus only while its on-device VAD detects speech, and the node answers each ingested chunk with `ambient_ack` or `ambient_skip`. [Ambient Capture](/docs/hardware/ambient-capture#how-it-works) owns the full flow, the VAD defaults, and the Meetings app dependency.
@@ -127,7 +161,7 @@ A `camera_meta` message followed by the JPEG hands the image to a vision-capable
 
 ## REST surface
 
-The non-realtime device endpoints live alongside the WebSocket. Every pairing and registry route needs your node token.
+The non-realtime device endpoints live alongside the WebSocket. The [Pairing](/docs/hardware/pairing) page walks through the pairing steps.
 
 ```text
 POST   /api/hardware/pair/begin     start a v1.1 pairing
@@ -141,12 +175,26 @@ PATCH  /api/hardware/devices/:id    { name?, prefs? }
 DELETE /api/hardware/devices/:id    remove the device and revoke its tokens
 ```
 
-The pairing routes (`/api/hardware/pair` and `/api/hardware/pair/*`), `/api/hardware/identity/reset`,
-and the `/api/hardware/devices` routes require Core's node bearer token. The `/api/hardware/devices`
-routes also require the Hardware Devices app (`@ryu/hardware`, pre-installed) to be enabled. The WebSocket and the `/api/hardware/display/*`
-routes authenticate the per-device token in the handler instead.
+### Authentication by route
 
-The device list reports, per device, its `last_seen` time, online status, battery, whether it runs the encrypted protocol, whether its key was verified at pairing, its key fingerprint, whether it needs re-pairing, its live tools, and its stored preferences. `PATCH` replaces preferences as a whole, so a client that changes one setting sends back every preference it read, with that one changed. The device registry persists in Core (SQLite). The dashboard adds further REST endpoints under `/api/hardware/display/*` and `/api/hardware/devices/:id/dashboard`, covered in [Device Dashboard](/docs/hardware/dashboard). The [Pairing](/docs/hardware/pairing) page walks through the pairing steps.
+| Routes | Auth |
+|---|---|
+| `/api/hardware/pair`, `/api/hardware/pair/*`, `/api/hardware/identity/reset` | Core's node bearer token |
+| `/api/hardware/devices` and `/api/hardware/devices/:id` | Core's node bearer token, and the Hardware Devices app (`@ryu/hardware`, pre-installed) must be enabled |
+| `/api/hardware/ws` and `/api/hardware/display/*` | The per-device token, checked in the handler |
+
+### The device list
+
+`GET /api/hardware/devices` reports, per device:
+
+- its `last_seen` time, online status, and battery;
+- whether it runs the encrypted protocol, whether its key was verified at pairing, and its key fingerprint;
+- whether it needs re-pairing;
+- its live tools and its stored preferences.
+
+`PATCH` replaces preferences as a whole, so a client that changes one setting sends back every preference it read, with that one changed. The device registry persists in Core (SQLite).
+
+The dashboard adds further REST endpoints under `/api/hardware/display/*` and `/api/hardware/devices/:id/dashboard`, covered in [Device Dashboard](/docs/hardware/dashboard).
 
 ## Non-goals
 

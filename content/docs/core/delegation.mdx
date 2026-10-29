@@ -4,25 +4,35 @@ description: "Reference for Core delegation: the delegate.fanout tool, the strea
 ---
 
 Delegation lets a parent agent or workflow node hand one or more self-contained tasks to
-**sub-agents** that run in parallel, each with a clean context, and collect their results in input
-order. The engine lives in `apps/core/src/workflow/delegation.rs`; it is exposed three ways: as the
-built-in `delegate.fanout` tool, as the `AgentDelegate` workflow node, and as a streaming
-endpoint (`POST /api/delegate/stream`).
+**sub-agents**. They run in parallel, each with a clean context, and their results come back in input
+order.
+
+<Figure name="agent-teams" />
+
+The engine lives in `apps/core/src/workflow/delegation.rs`. It is exposed three ways:
+
+- the built-in `delegate.fanout` agent tool;
+- the `AgentDelegate` workflow node;
+- the streaming endpoint `POST /api/delegate/stream`.
 
 This is **Core** logic. It decides *what runs*: which sub-agent, with what task, how deep, and how
 many at once. The delegate's runtime and configuration determine its model path. Gateway budgets,
-firewall, and audit apply to requests routed through its endpoint. See [Core vs Gateway](/docs/start-here/architecture/core-vs-gateway).
+firewall, and audit apply to requests routed through its endpoint. See
+[Core vs Gateway](/docs/start-here/architecture/core-vs-gateway).
 
 ## As an agent tool (`delegate.fanout`)
 
 Any agent can fan work out mid-task by calling the built-in `delegate.fanout` tool
-(`apps/core/src/sidecar/mcp/delegate.rs`). It is registered as a reserved registry server
-(`delegate`), so it is allowlist-gated and audited on both planes (ACP and OpenAI-compatible) like
-every other built-in. New agents start with no tool grants. Grant `delegate.fanout` explicitly to the
-parent agent before expecting it to delegate.
+(`apps/core/src/sidecar/mcp/delegate.rs`). It is a reserved registry server (`delegate`), so it is
+allowlist-gated and audited on both planes (ACP and OpenAI-compatible) like every other built-in.
 
-`delegate.fanout` takes a `tasks` array plus optional `max_concurrent` and `wall_time_secs`, runs
-the tasks in parallel in clean contexts, and returns all results in one call as
+<Callout type="info">
+New agents start with no tool grants. Grant `delegate.fanout` to the parent agent before expecting
+it to delegate.
+</Callout>
+
+`delegate.fanout` takes a `tasks` array plus optional `max_concurrent` and `wall_time_secs`. It runs
+the tasks in parallel in clean contexts and returns all results in one call as
 `{ ok, results: [{ index, output, error }], count }`. Each task has these fields:
 
 | Field | Meaning |
@@ -33,19 +43,19 @@ the tasks in parallel in clean contexts, and returns all results in one call as
 | `model` | Model for an inline sub-agent; only used with `system_prompt` |
 | `tools` | Tool names listed in an inline sub-agent's prompt for awareness only; it cannot execute them |
 
-The tool does not expose `preset`, so every task uses the default `code_read` preset. A
-registered agent's full tool loop runs only for a `code_write` delegate (see
-[two execution paths](#two-execution-paths)), so `delegate.fanout` tasks run as single
+The tool does not expose `preset`, so every task uses the default `code_read` preset. A registered
+agent's full tool loop runs only for a `code_write` delegate (see
+[two execution paths](#two-execution-paths)). `delegate.fanout` tasks therefore run as single
 clean-context Gateway completions.
 
-A delegated sub-agent can itself hold the tool, so a process-global semaphore
-(`MAX_CONCURRENT_FANOUTS = 4`) bounds how many fan-outs run at once across the whole process. With
-the per-fan-out concurrency cap, this bounds the worst-case number of simultaneous sub-agents and
-stops runaway re-entrant delegation.
+A delegated sub-agent can itself hold the tool. A process-global semaphore
+(`MAX_CONCURRENT_FANOUTS = 4`) bounds how many fan-outs run at once across the whole process.
+Together with the per-fan-out concurrency cap, this bounds the worst-case number of simultaneous
+sub-agents and stops runaway re-entrant delegation.
 
-For durable, long-running workers that a coordinator checks over time, use the
-[coordinator threads](/docs/core/coordinator-threads) (`threads.*`) tools instead. `delegate.fanout`
-is for ephemeral, parallel subtasks; `threads` is for persistent workers.
+`delegate.fanout` is for ephemeral, parallel subtasks. For durable, long-running workers that a
+coordinator checks over time, use the [coordinator threads](/docs/core/coordinator-threads)
+(`threads.*`) tools instead.
 
 <Callout type="info">
   The desktop app has no Delegation screen. Agents use delegation through the chat tool loop. The
@@ -75,11 +85,22 @@ flowchart TD
 
 `call_sub_agent` picks one of two paths:
 
-- **Registered agent.** When the delegate's preset is `code_write`, it has no `inline` definition, it
-  sets `agent_id`, and a runner is published (`global_agent_runner()`), the named agent runs through
-  the chat path. Its own engine binding, Gateway routing, tools, and system prompt govern the
-  sub-task, with the per-delegate `max_tokens` cap. The wall-time timeout still bounds it. Read-only
-  presets never take this path, so naming an agent cannot bypass their read-only promise.
+```mermaid
+flowchart TD
+  Spec["Delegate spec"] --> Check{"code_write preset, no inline,<br/>agent_id set, runner published?"}
+  Check -- yes --> Agent["Registered agent via the chat path"]
+  Check -- no --> Clean["Single POST /v1/chat/completions to the Gateway"]
+  Agent --> Result["DelegateResult"]
+  Clean --> Result
+```
+
+- **Registered agent.** The named agent runs through the chat path when all of these hold: the
+  preset is `code_write`, there is no `inline` definition, `agent_id` is set, and a runner is
+  published (`global_agent_runner()`).
+  - Its own engine binding, Gateway routing, tools, and system prompt govern the sub-task, with the
+    per-delegate `max_tokens` cap and the wall-time timeout.
+  - Read-only presets never take this path, so naming an agent cannot bypass their read-only
+    promise.
 - **Clean completion.** Otherwise the engine sends a single non-streaming
   `POST /v1/chat/completions` to the Gateway. The system message describes the preset (or carries
   the inline `system_prompt`), and the task is the only user turn. The model is the inline `model`
@@ -149,19 +170,21 @@ Gateway enforces the matching policy. The default, `code_read`, can read but nev
 | Concurrent delegates | `max_concurrent` | `5` (`MAX_CONCURRENT_DELEGATES`) | clamped to 5 |
 | Nesting depth | (the `depth` argument) | `1` | `3` (`MAX_DELEGATION_DEPTH`) |
 
-`max_concurrent` is clamped to the range 1 to 5 by `effective_concurrency()`, so a request asking for
-99 still runs at most 5 at a time and a request asking for 0 runs 1. A `depth` above 3 is rejected
-before any delegate runs (`DelegationError::DepthExceeded`), and an empty `delegates` array is rejected
-(`DelegationError::Empty`).
+- `effective_concurrency()` clamps `max_concurrent` to 1 to 5. A request asking for 99 runs at most 5
+  at a time, and a request asking for 0 runs 1.
+- A `depth` above 3 is rejected before any delegate runs (`DelegationError::DepthExceeded`).
+- An empty `delegates` array is rejected (`DelegationError::Empty`).
 
 ## The AgentDelegate workflow node
 
-The same engine backs a workflow node. `NodeKind::AgentDelegate { delegates, caps }`
-(`apps/core/src/workflow/mod.rs`) fans out concurrently and sets the node's output to the JSON array
-of per-delegate results. Each delegate gets the node input appended to its `task`, so an upstream node
-feeds the delegates as clean input. The executor (`executor.rs`, `run_agent_delegate`) calls
-`run_fanout_with_checkpoint` so the fan-out participates in workflow durability. See
-[Workflows](/docs/core/workflows) for the canvas and node model.
+The same engine backs a workflow node, `NodeKind::AgentDelegate { delegates, caps }`
+(`apps/core/src/workflow/mod.rs`). It fans out concurrently and sets the node's output to the JSON
+array of per-delegate results.
+
+Each delegate gets the node input appended to its `task`, so an upstream node feeds the delegates as
+clean input. The executor (`executor.rs`, `run_agent_delegate`) calls `run_fanout_with_checkpoint`,
+so the fan-out takes part in workflow durability. See [Workflows](/docs/core/workflows) for the
+canvas and node model.
 
 <Callout type="info">
   Delegation runs unrelated sub-agents in parallel from a clean slate. To assemble a standing group of
@@ -172,11 +195,19 @@ feeds the delegates as clean input. The executor (`executor.rs`, `run_agent_dele
 ## Durable fan-out
 
 When `run_fanout` is given a checkpoint key (`FanoutCheckpointKey` of `run_id` plus `node_id`), each
-completed delegate's result is persisted to `~/.ryu/state/fanout-checkpoints/<run_id>/<node_id>/<delegate_id>.json`.
-On resume with the same key, delegates whose checkpoint file exists are skipped and their recorded
-result reused, so input-order results are preserved without re-running completed work. Writes are
-atomic (temp file then rename) so a mid-write crash never leaves a partial checkpoint that resume would
-mistake for complete. All path segments are validated against directory traversal.
+completed delegate's result is persisted to
+`~/.ryu/state/fanout-checkpoints/<run_id>/<node_id>/<delegate_id>.json`.
+
+- On resume with the same key, delegates whose checkpoint exists are skipped and their recorded
+  result is reused. Input-order results are kept without re-running completed work.
+- The result body is sealed with a content key derived from the master key and written owner-only.
+  Without a key nothing is written, and the delegate reruns on resume. A checkpoint that does not
+  open is treated as absent.
+- Writes are atomic (temp file, then rename), so a mid-write crash never leaves a partial checkpoint
+  that resume would mistake for complete.
+- All path segments are validated against directory traversal.
+- At startup, Core seals plaintext checkpoints left by older builds and deletes the checkpoints of
+  completed runs.
 
 ## Failure model
 
@@ -188,10 +219,10 @@ mistake for complete. All path segments are validated against directory traversa
 | Delegate task panics | Replaced with a failed `DelegateResult` so the batch still completes |
 
 <Callout type="warn">
-  Fail-closed is the default: if the Gateway cannot be reached, a delegate errors rather than calling a
-  provider directly. The `RYU_ALLOW_GATEWAY_FALLBACK=1` escape hatch exists mainly for tests that point
-  the Gateway at a blackhole address. In normal operation leave it unset so all delegate egress stays
-  governed.
+  Fail-closed is the default: if the Gateway cannot be reached, a delegate errors instead of calling
+  a provider directly. The `RYU_ALLOW_GATEWAY_FALLBACK=1` escape hatch exists mainly for tests that
+  point the Gateway at a blackhole address. Leave it unset in normal operation so all delegate egress
+  stays governed.
 </Callout>
 
 ## Related

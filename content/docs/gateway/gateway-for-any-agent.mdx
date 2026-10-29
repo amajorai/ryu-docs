@@ -4,14 +4,16 @@ description: How to point the OpenAI SDK, Mastra, LangChain, or a BYO agent at t
 ---
 
 The Gateway serves an OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`). A framework
-that accepts a custom `baseURL` works without code changes. Change the URL and add a Gateway API
-key. Each request then runs through the Gateway firewall, PII/DLP, rate limits, budgets, evals, and
+that accepts a custom `baseURL` works without code changes: change the URL and add a Gateway API
+key.
+
+Each request then runs through the Gateway firewall, PII/DLP, rate limits, budgets, evals, and
 audit log before it reaches the upstream provider.
 
 ## Prerequisites
 
-- The Gateway running locally (default `http://127.0.0.1:7981`)
-- A Gateway API key configured in your `gateway.toml` (see [Auth config](#auth-config) below)
+- The Gateway running locally (default `http://127.0.0.1:7981`).
+- A Gateway API key configured in your `gateway.toml` (see [Auth config](#auth-config) below).
 
 ## Auth config
 
@@ -27,25 +29,27 @@ key  = "<at-least-24-character-random-secret>"   # e.g. from `openssl rand -hex 
 name = "my-app"
 ```
 
-Keys shorter than 24 printable characters, or containing whitespace, stop the
-Gateway from starting. All requests must include the key as a Bearer token
-(`YOUR_GATEWAY_KEY` below stands for the value you configured):
+Keys shorter than 24 printable characters, or containing whitespace, stop the Gateway from
+starting. Every request must send the key as a Bearer token (`YOUR_GATEWAY_KEY` below stands for
+the value you configured):
 
 ```http
 Authorization: Bearer YOUR_GATEWAY_KEY
 ```
 
-When `require_auth = false` (an explicit local development override), every request is accepted
+`require_auth = false` is an explicit local development override: every request is accepted
 regardless of the header. The [field reference](/docs/gateway/configuration-access#field-reference)
 lists every `[auth]` key.
 
 ### Manage local keys in Desktop
 
-In Desktop, open **Settings → Gateway → API & traffic** to copy the OpenAI-compatible,
-Anthropic Messages, or Gemini endpoint URL for the selected node. Enter a name such as `Cursor`,
-then choose **Create key**. Desktop shows the plaintext key once; copy and save it before leaving
-that screen. The key list masks its value afterward. Choose **Revoke** to remove a local key.
-If a create or revoke request fails, the current key list remains visible so you can retry.
+1. Open **Settings → Gateway → API & traffic**.
+2. Copy the OpenAI-compatible, Anthropic Messages, or Gemini endpoint URL for the selected node.
+3. Enter a name such as `Cursor`, then choose **Create key**.
+4. Copy the plaintext key now. Desktop shows it once, and the key list masks it afterward.
+
+Choose **Revoke** to remove a local key. If a create or revoke request fails, the current key list
+stays visible so you can retry.
 
 ## Connect a local CLI from Desktop
 
@@ -122,9 +126,9 @@ Chat responses carry these diagnostic headers:
 | `x-routed-model` | The actual model selected after routing (may differ from the requested model) |
 | `x-cache` | `HIT` or `MISS`, on non-streaming responses only |
 
-Each accepted media generation receives a separate server-generated debit
-reference. Audit correlation remains available for matching project receipts;
-reusing a correlation ID does not deduplicate generation or its charges.
+Each accepted media generation receives a separate server-generated debit reference. Audit
+correlation remains available for matching project receipts, but reusing a correlation ID does not
+deduplicate generation or its charges.
 
 ## Smoke test
 
@@ -151,73 +155,113 @@ config.
 
 ## Subscription-preserving passthrough (Claude Code, Codex)
 
-The base-URL change above works for any agent that speaks OpenAI-compatible JSON and authenticates
-with an API key. Some agents do neither. Claude Code speaks the Anthropic Messages format and
-authenticates with the user's own Pro/Max OAuth bearer, and Codex (in ChatGPT-login mode) speaks the
-OpenAI Responses format and authenticates with an OAuth bearer plus a `ChatGPT-Account-ID` header.
-The OpenAI-compatible chat path cannot govern either. It would substitute the Gateway's own
+The base-URL change above works for agents that speak OpenAI-compatible JSON and authenticate with
+an API key. Two agents do neither:
+
+| Agent | Wire format | Credential |
+|---|---|---|
+| Claude Code | Anthropic Messages | The user's own Pro/Max OAuth bearer |
+| Codex (ChatGPT-login mode) | OpenAI Responses | An OAuth bearer plus a `ChatGPT-Account-ID` header |
+
+The OpenAI-compatible chat path cannot govern either one. It would substitute the Gateway's own
 provider key and move the request off the user's subscription billing.
 
-For those agents the Gateway runs a **transparent reverse proxy** in the agent's native wire format,
-`apps/gateway/src/passthrough/mod.rs`. See also [Loopback and internal routes](/docs/gateway/loopback-routes)
-for the full list of non-standard-client endpoints. The agent is pointed at the proxy through a
-base-URL env var.
-The proxy accepts the native request, applies request-side DLP, forwards it upstream with the
-caller's own `Authorization` header (and `ChatGPT-Account-ID` for Codex) unchanged, then streams the
-response back through response-side DLP and audit. Because the format is never translated, the
-agent's subscription billing is preserved end to end.
+For these agents the Gateway runs a **transparent reverse proxy** in the agent's native wire format
+(`apps/gateway/src/passthrough/mod.rs`). Core points the agent at the proxy (see
+[Default and opt-out](#default-and-opt-out)). Because the format is never translated and the caller's own credential is
+forwarded unchanged, subscription billing is preserved end to end.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent (loopback)
+    participant Proxy as Gateway passthrough
+    participant Up as Provider upstream
+    Agent->>Proxy: Native request + own OAuth bearer
+    Note over Proxy: Request-side DLP, locked guardrails, model list
+    Proxy->>Up: Forward with caller's auth unchanged
+    Up-->>Proxy: Response stream
+    Note over Proxy: Response-side DLP (buffered)
+    Proxy-->>Agent: Redacted response
+    Note over Proxy: Audit row written
+```
 
 | Route | Upstream | Auth forwarded unchanged | Wire format |
 |---|---|---|---|
 | `/passthrough/anthropic/*` | `api.anthropic.com` | subscription OAuth bearer | Anthropic Messages |
 | `/passthrough/openai-responses/*` | `chatgpt.com/backend-api/codex` | OAuth bearer + `ChatGPT-Account-ID` | OpenAI Responses |
 
-Both upstreams are overridable without a rebuild, via `RYU_PASSTHROUGH_ANTHROPIC_UPSTREAM` and
-`RYU_PASSTHROUGH_CODEX_UPSTREAM`.
+Both upstreams can be overridden without a rebuild through `RYU_PASSTHROUGH_ANTHROPIC_UPSTREAM` and
+`RYU_PASSTHROUGH_CODEX_UPSTREAM`. Endpoint-by-endpoint handling (which paths are inspected, proxied
+or refused) is on [Loopback and internal routes](/docs/gateway/loopback-routes#passthrough-proxies-loopback-only).
 
 ### What the proxy redacts
 
 The proxy uses the same firewall configuration as the OpenAI-compatible path (see
-[Security](/docs/gateway/security)), including organization and agent overlays and custom
-patterns, but it applies that configuration differently for agent traffic. The audit record is
-always emitted, even when the firewall is off and even when the upstream call fails, so with the
-firewall disabled the proxy is a transparent forwarder plus an audit log.
+[Security](/docs/gateway/security)), including organization and agent overlays and custom patterns.
+It applies that configuration differently for agent traffic.
 
-- **Request side**: when the firewall is enabled, the outbound body is parsed and every
-  prompt-bearing string is redacted. For Anthropic that is `system`, message text, `tool_use`
-  inputs, `tool_result` content (where file contents and command output arrive), document and
-  search-result text, and tool definitions. For Codex it is `instructions`, message content,
-  `function_call` arguments, `function_call_output` and custom tool output, local shell calls and
-  their output, and tool definitions. Signed or encrypted fields (thinking blocks, reasoning items,
-  `encrypted_content`) and IDs are forwarded unchanged so the upstream accepts the request. When
-  inspection is on, a compressed or non-JSON prompt body is refused instead of being forwarded
-  uninspected.
-- **Policy**: agent traffic is always redacted, whatever `firewall.policy` says. The proxy does not
-  block a turn because it contains PII or a secret, because the agent would resend the same history
-  on every later turn and the session would stall. The local firewall's prompt-injection patterns
-  are not enforced on this path. Two cases do refuse the request with a 403: a PII or secret match
-  that survives redaction (for example, one obfuscated with zero-width characters), and a
-  control-plane policy violation (a locked guardrail or a model outside the organization's approved
-  list). Locked guardrails are enforced even when the local firewall is off. Locked `pii` and
-  `secrets` guardrails are checked against every prompt-bearing field, including the agent's own
-  system prompt and tool definitions.
+The audit record is always written, even when the firewall is off and even when the upstream call
+fails. With the firewall disabled, the proxy is a transparent forwarder plus an audit log.
 
-  The other locked guardrails (`prompt_injection`, `code_injection`, `toxicity`, and `bias`) are
-  checked against the conversation only (messages, tool calls, and tool results), not the agent's
-  own system prompt or tool definitions, whose built-in wording (for example a shell tool's
-  `$(cat <<'EOF' …)` commit example) would otherwise match on every turn. Tool results are part of
-  the conversation, so a file or command output that matches one of those patterns still refuses
-  that turn and the later turns that replay it. With the local firewall off nothing is redacted
-  first, so a locked `pii` or `secrets` guardrail refuses any request that contains a match.
-- **Response side**: when the firewall is enabled, the upstream response is buffered (up to 8 MB)
-  and redacted in one contiguous pass before any bytes reach the caller, so a secret split across
-  two text-delta events is still rewritten to `[REDACTED:…]`. Non-text events (`message_start`,
-  `ping`, tool-call deltas) pass through verbatim and SSE framing is preserved. The redacted text
-  is scanned once more to audit any residual outbound violation. An unparseable event passes
-  through verbatim (fail open).
-- **Attribution**: the proxy takes no Gateway credential, so `x-ryu-user-id`, `x-ryu-agent-id`,
-  and `x-ryu-feature` are recorded on the audit row only when the request also carries a trusted
-  forwarder credential. `x-ryu-*` headers are never forwarded to the provider.
+#### Request side
+
+When the firewall is enabled, the outbound body is parsed and every prompt-bearing string is
+redacted:
+
+| Agent | Redacted fields |
+|---|---|
+| Anthropic | `system`, message text, `tool_use` inputs, `tool_result` content (file contents and command output), document and search-result text, tool definitions |
+| Codex | `instructions`, message content, `function_call` arguments, `function_call_output` and custom tool output, local shell calls and their output, tool definitions |
+
+Signed or encrypted fields (thinking blocks, reasoning items, `encrypted_content`) and IDs are
+forwarded unchanged so the upstream accepts the request. When inspection is on, a compressed or
+non-JSON prompt body is refused instead of being forwarded uninspected.
+
+#### Policy
+
+Agent traffic is always redacted, whatever `firewall.policy` says. The proxy does not block a turn
+because it contains PII or a secret: the agent resends the same history on every later turn, so a
+block would stall the session. The local firewall's prompt-injection patterns are not enforced on
+this path.
+
+Two cases refuse the request with HTTP 403:
+
+- a PII or secret match that survives redaction (for example, one obfuscated with zero-width
+  characters);
+- a control-plane policy violation, such as a locked guardrail or a model outside the
+  organization's approved list.
+
+Locked guardrails are enforced even when the local firewall is off. Which fields each one checks:
+
+| Locked guardrail | Checked against |
+|---|---|
+| `pii`, `secrets` | Every prompt-bearing field, including the agent's own system prompt and tool definitions |
+| `prompt_injection`, `code_injection`, `toxicity`, `bias` | The conversation only (messages, tool calls, and tool results) |
+
+The second group skips the agent's system prompt and tool definitions because their built-in
+wording (for example a shell tool's `$(cat <<'EOF' …)` commit example) would match on every turn.
+Tool results are part of the conversation, so a file or command output that matches still refuses
+that turn and the later turns that replay it.
+
+With the local firewall off, nothing is redacted first, so a locked `pii` or `secrets` guardrail
+refuses any request that contains a match.
+
+#### Response side
+
+When the firewall is enabled, the upstream response is buffered (up to 8 MB) and redacted in one
+contiguous pass before any bytes reach the caller. A secret split across two text-delta events is
+still rewritten to `[REDACTED:…]`.
+
+- Non-text events (`message_start`, `ping`, tool-call deltas) pass through verbatim, and SSE
+  framing is preserved.
+- The redacted text is scanned once more to audit any residual outbound violation.
+- An unparseable event passes through verbatim (fail open).
+
+#### Attribution
+
+The proxy takes no Gateway credential. `x-ryu-user-id`, `x-ryu-agent-id`, and `x-ryu-feature` are
+recorded on the audit row only when the request also carries a trusted forwarder credential.
+`x-ryu-*` headers are never forwarded to the provider.
 
 ### Response-side streaming DLP
 
@@ -241,49 +285,70 @@ request side uses, and becomes a `[REDACTED:NAME]` marker. A scanner-less config
 
 ### Default and opt-out
 
-The passthrough is **on by default** for newly installed and routable ACP agents and remains
-configurable per agent through Core preferences. Claude Code uses the
-`claude-gateway-routing` preference (`apps/core/src/claude_config/mod.rs`), which injects
-`ANTHROPIC_BASE_URL` pointed at the Gateway's `/passthrough/anthropic` route. Codex uses
-`codex-gateway-routing` (`apps/core/src/codex_config/mod.rs`), which writes an isolated `CODEX_HOME`
-whose `config.toml` declares a custom provider with `wire_api = "responses"` and no `env_key` (so the
-subscription credential is what reaches upstream), pointed at `/passthrough/openai-responses`. That
-isolated home starts from a copy of your Codex CLI sign-in, and the newest explicit sign-in wins.
+The passthrough is **on by default** for newly installed and routable ACP agents. Each agent has a
+Core preference that controls it:
 
-Until you sign in, switch accounts, or sign out of Codex from Ryu, the copy follows your Codex CLI:
-signing in to another account there, or signing out, carries over on the next turn, and routine
-token refreshes on either side never stop it following. Once you sign in, switch, or sign out from
-Ryu, that choice changes only the isolated copy and stays in place through Codex CLI token refreshes
-and sign-outs; signing in to a different account in the Codex CLI afterwards is a newer choice, so
-Ryu follows the CLI again from then on. Your Codex CLI's own sign-in is never edited.
+| Agent | Preference | What Core does |
+|---|---|---|
+| Claude Code | `claude-gateway-routing` (`apps/core/src/claude_config/mod.rs`) | Injects `ANTHROPIC_BASE_URL` pointed at `/passthrough/anthropic` |
+| Codex | `codex-gateway-routing` (`apps/core/src/codex_config/mod.rs`) | Writes an isolated `CODEX_HOME` pointed at `/passthrough/openai-responses` |
 
-Both switches default to Gateway-governed egress. Turning either switch off is the explicit
-direct-egress choice when you want the subscription credential to bypass Ryu; existing explicit choices are preserved
-across restarts and upgrades.
+The isolated Codex `config.toml` declares a custom provider with `wire_api = "responses"` and no
+`env_key`, so the subscription credential is what reaches upstream.
+
+Both switches default to Gateway-governed egress. Turning either one off is the explicit
+direct-egress choice, for when you want the subscription credential to bypass Ryu. Existing explicit
+choices are preserved across restarts and upgrades.
+
+#### Codex sign-in
+
+The isolated Codex home starts from a copy of your Codex CLI sign-in, and the newest explicit
+sign-in wins:
+
+- Until you sign in, switch accounts, or sign out of Codex from Ryu, the copy follows your Codex
+  CLI. Signing in to another account there, or signing out, carries over on the next turn. Routine
+  token refreshes on either side never stop it following.
+- Once you sign in, switch, or sign out from Ryu, that choice changes only the isolated copy. It
+  stays in place through Codex CLI token refreshes and sign-outs.
+- Signing in to a different account in the Codex CLI afterwards is a newer choice, so Ryu follows
+  the CLI again from then on.
+
+Your Codex CLI's own sign-in is never edited.
 
 <Callout type="warn">
   The passthrough has not been verified with a full live round trip against a real subscription
-  agent. The proxy is **loopback-only**: it refuses requests from
-  non-loopback peers (`apps/gateway/src/passthrough/mod.rs`), and it is disabled entirely on a
-  fleet (hosted) Gateway, so a remote Gateway never carries a user's subscription bearer. With
-  private networking (mesh) enabled, a tailnet peer can appear as a loopback caller and could relay
-  its own subscription traffic through the node; it cannot use your credentials or set audit
-  attribution. It is on by default for new and routable ACP agents; turn the per-agent switch off only
-  when direct subscription egress is intentional. The Gemini CLI is **not wirable** through either
-  mechanism, because it exposes no base-URL hook.
+  agent. Other limits:
+
+  - The proxy is **loopback-only**: it refuses requests from non-loopback peers
+    (`apps/gateway/src/passthrough/mod.rs`).
+  - It is disabled entirely on a fleet (hosted) Gateway, so a remote Gateway never carries a user's
+    subscription bearer.
+  - With private networking (mesh) enabled, a tailnet peer can appear as a loopback caller and
+    could relay its own subscription traffic through the node. It cannot use your credentials or
+    set audit attribution.
+  - Turn the per-agent switch off only when direct subscription egress is intentional.
+  - The Gemini CLI is **not wirable** through either mechanism, because it exposes no base-URL
+    hook.
 </Callout>
 
 ## Generic Gateway routing for a BYO agent
 
-For an OpenAI-compatible agent the user added themselves (`engine = "acp-exec:<command>"`), Core
-offers a generic per-agent toggle, `apps/core/src/agent_routing/mod.rs`. New and auto-installed
-routable ACP agents start with this toggle on; unless explicitly disabled,
-Core injects `OPENAI_BASE_URL` (the local Gateway `/v1`) and `OPENAI_API_KEY` (the Gateway token)
-into that agent's spawn command via `openai_gateway_cmd`, so an agent whose HTTP client honours the
-OpenAI base URL routes its model calls through the Gateway's firewall, budget, and audit pipeline
-with no manual env wiring. The whole set lives under a single `agent-gateway-routing` preference
-holding a JSON object of agent id to enabled boolean. A missing entry means Gateway-governed egress;
-only an explicit `false` opts out to direct provider traffic.
+For an OpenAI-compatible agent you added yourself (`engine = "acp-exec:<command>"`), Core offers a
+generic per-agent toggle (`apps/core/src/agent_routing/mod.rs`). New and auto-installed routable
+ACP agents start with it on.
+
+Unless the toggle is explicitly disabled, `openai_gateway_cmd` injects two variables into that
+agent's spawn command:
+
+- `OPENAI_BASE_URL`, the local Gateway `/v1`;
+- `OPENAI_API_KEY`, the Gateway token.
+
+An agent whose HTTP client honours the OpenAI base URL then routes its model calls through the
+Gateway's firewall, budget, and audit pipeline with no manual env wiring.
+
+All toggles live under one `agent-gateway-routing` preference, a JSON object of agent id to enabled
+boolean. A missing entry means Gateway-governed egress. Only an explicit `false` opts out to direct
+provider traffic.
 
 <Callout type="warn">
   The toggle has no effect on agents that do not read `OPENAI_BASE_URL`. Gemini speaks Google format,

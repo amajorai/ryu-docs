@@ -39,33 +39,60 @@ exists. `background` and `continuous` describe that host's capture behavior.
 | `rewind` | `{ action: "rewind", id, seconds: 15 }` | On continuous hosts, return recent audio without ending the session. `300` seconds is also supported. |
 | `discard` | `{ action: "discard", id }` | Stop a session and delete its remaining temporary audio. Ask the user to confirm this destructive action. |
 
-Continuous iPhone capture returns `pendingChunks`, `chunkId`, `chunkStartedAt`,
-and `durationMs`. Native code rotates minute-long files while JavaScript is
-suspended. Desktop and Island capture return a whole recording and stop after
-five minutes. Whole-recording hosts do not support `ack` or `rewind`. On Desktop
-and Island, one app at a time can record. A `start` while another app is
-recording fails with an error that names the conflict. Capture stops when the
-app's view is closed, and the pending recording stays available to `read` or
-`discard`. After `stop`, the microphone stays open for about 1.5 seconds without
-keeping audio, so an app that records short clips back to back can `start` again
-without reopening the device. Audio between clips is not captured.
+```mermaid
+stateDiagram-v2
+  idle --> recording: start
+  recording --> recording: ack or rewind (continuous hosts)
+  recording --> pending: stop, or view closed
+  pending --> pending: read and transcribe
+  pending --> idle: discard after saving
+  recording --> idle: discard
+```
+
+### Host differences
+
+| | Continuous host (iPhone) | Whole-recording host (Desktop, Island) |
+| --- | --- | --- |
+| Output | Chunks: `pendingChunks`, `chunkId`, `chunkStartedAt`, `durationMs` | One whole recording |
+| Length | Native code rotates minute-long files while JavaScript is suspended | Stops after five minutes |
+| `ack` and `rewind` | Supported | Not supported |
+| Concurrency | - | One app at a time. A `start` while another app records fails with an error that names the conflict |
+
+On Desktop and Island, capture stops when the app's view is closed, and the pending recording stays
+available to `read` or `discard`.
+
+After `stop`, the microphone stays open for about 1.5 seconds without keeping audio. An app that
+records short clips back to back can `start` again without reopening the device. Audio between
+clips is not captured.
+
+### Transcribe and persist
 
 Process audio with `media.transcribe({ audio, filename: "recording.wav", detailed: true })`.
-Desktop and Island transcribe with the engine the user chose in Voice
-Recognition settings, the same engine their own voice input uses. Apps cannot
-choose an engine. With no saved choice, the Voice Recognition default (Parakeet)
-is used, as for voice input. If the setting cannot be read, the node's default
-engine is used. Local engines keep the audio on the node. The Gateway engine sends it to
-the speech-to-text provider configured for the user's Gateway.
-Persist the result through the existing storage or Spaces bridge before
-acknowledging audio. Track each `chunkId` durably so a lost acknowledgement can
-be retried without duplicating text. A failed transcription must leave audio
-available. Use `discard` after successful persistence on whole-recording hosts.
 
-The native host provides a stop control outside app WebViews, so the user can
-stop a microphone even when an app or its node is unavailable. An app must never
-present a network failure as successful capture or silently restart a terminated
-recording. Do not write audio or transcript contents to logs.
+Desktop and Island transcribe with the engine the user chose in Voice Recognition settings, the
+same engine their own voice input uses. Apps cannot choose an engine.
+
+- With no saved choice, the Voice Recognition default (Parakeet) is used, as for voice input.
+- If the setting cannot be read, the node's default engine is used.
+- Local engines keep the audio on the node. The Gateway engine sends it to the speech-to-text
+  provider configured for the user's Gateway.
+
+Then save the text before you release the audio:
+
+1. Persist the result through the existing storage or Spaces bridge.
+2. Track each `chunkId` durably, so a lost acknowledgement can be retried without duplicating text.
+3. Acknowledge the chunk with `ack` (continuous hosts), or `discard` the recording
+   (whole-recording hosts).
+
+A failed transcription must leave audio available.
+
+### Safety rules
+
+- The native host provides a stop control outside app WebViews, so the user can stop a microphone
+  even when an app or its node is unavailable.
+- Never present a network failure as successful capture, or silently restart a terminated
+  recording.
+- Do not write audio or transcript contents to logs.
 
 ## Speech history
 
@@ -74,11 +101,18 @@ Shadow transcripts on the host's physical computer. Island additionally checks
 its context-reading consent. A phone reads its own microphone recordings rather
 than pretending a remote node's audio came from the phone.
 
-`start` and `end` are RFC 3339 UTC timestamps spanning at most one day. `limit`
-is between 1 and 500 (default 100). `offset` starts at zero and cannot exceed 10,000. The response
-contains `segments` and `nextOffset`. A `truncated: true` response means the pagination bound was reached;
-query a shorter range instead. Keep the time range fixed when following pages and deduplicate
-by segment ID if transcription is still catching up.
+| Parameter | Rule |
+| --- | --- |
+| `start`, `end` | RFC 3339 UTC timestamps spanning at most one day |
+| `limit` | 1 to 500, default 100 |
+| `offset` | Starts at zero, at most 10,000 |
+
+The response contains `segments` and `nextOffset`.
+
+- A `truncated: true` response means the pagination bound was reached. Query a shorter range
+  instead.
+- Keep the time range fixed when following pages.
+- Deduplicate by segment ID if transcription is still catching up.
 
 Each segment contains `id`, `startedAt`, `endedAt`, `text`, and `timing`.
 Shadow returns whole overlapping windows with `timing: "window"`. Consumers

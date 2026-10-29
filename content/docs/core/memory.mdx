@@ -9,16 +9,29 @@ across conversations for a given user and agent. This page covers long-term memo
 (`crates/core/memory`). For short-term context, see
 [Conversations and sessions](/docs/core/conversations-sessions).
 
+<Figure name="memory" />
+
 ## How it works
 
 Long-term memory is stored encrypted in the same SQLite database as conversations
-(`~/.ryu/db/conversations.db`), in a `memory_entries` table.
+(`~/.ryu/db/conversations.db`), in a `memory_entries` table. That table is the authority. Search
+indexes are derived copies, each in its own sealed database.
+
+```mermaid
+flowchart LR
+  Store[("conversations.db: messages and memory_entries")] --> Retrieval[("retrieval.db: memory chunks and vectors")]
+  Store --> Embeds[("message-embeddings.db: message vectors")]
+  Store --> Fts[("message-fts.db: keyed tokens, opt-in")]
+  Retrieval --> Recall["Auto-recall and search"]
+  Embeds --> Recall
+  Fts --> Recall
+```
 
 - **Encryption** - each entry is sealed at rest with Core's unified `FieldCipher`
-  (ChaCha20-Poly1305 AEAD), the same cipher used across the backend. The master key is resolved
-  from the environment, then the OS keychain, then a local file, and a legacy `~/.ryu/secrets/memory.key`
-  is adopted as that master key on first run. Each entry gets its own random nonce, and entries
-  that fail to decrypt are skipped rather than crashing recall. See
+  (ChaCha20-Poly1305 AEAD), with its own random nonce. Entries that fail to decrypt are skipped
+  rather than crashing recall.
+- **Master key** - resolved from the environment, then the OS keychain, then a local file. A legacy
+  `~/.ryu/secrets/memory.key` is adopted as that master key on first run. See
   [Encryption at rest](/docs/core/encryption-at-rest) for the full model.
 - **Typed scopes and facets** - a fact can be scoped to one agent, the user, this node, a project,
   or an organization. GraphRAG keeps Topic, Person, Category, Scope, and Agent nodes distinct. A
@@ -30,27 +43,55 @@ Long-term memory is stored encrypted in the same SQLite database as conversation
   enables it. By default Core recalls a small number of the most recent entries to prefix the model
   context.
 
-The memory graph is a bounded derived projection rebuilt from active source facts. It combines direct
-facet matches with a small number of shared-topic hops before the existing vector/reranker path
-assembles context. It does not reuse the separate Space GraphRAG graph, which remains a
-chunk-term graph owned by each Space.
+The defaults are a short-term limit of the last 10 turns (`DEFAULT_SHORT_TERM_LIMIT`) and a
+long-term recall limit of 5 entries (`DEFAULT_LONG_TERM_LIMIT`). Both are configurable on the
+request.
+
+<Callout type="warn">
+  Memory entries are sealed with the node's single local master key, and there is no remote escrow.
+  Treat that key as a secret: lose it and the encrypted entries become unreadable. To check, adopt,
+  or retire keys, use the key commands on [Encryption at rest](/docs/core/encryption-at-rest).
+</Callout>
+
+The retrieval index that vector search runs on keeps its own sealed copy of memory text and embeddings. Vectors are opened into memory only to
+score a search. Sensitive rows are read-gated, and their derived retrieval rows are removed when
+consent is revoked.
+
+### The memory graph
+
+The memory graph is a bounded derived projection rebuilt from active source facts. It combines
+direct facet matches with a small number of shared-topic hops before the existing vector/reranker
+path assembles context.
+
+It does not reuse the separate Space GraphRAG graph, which remains a chunk-term graph owned by
+each Space.
+
+### Sensitive topics
 
 Sensitive topics are a separate privacy dimension from the memory category. The built-in detector
-covers health conditions, religious beliefs, and several other special categories. **Include
-sensitive topics in memory** is off by default and is stored per verified user on the local node.
-Without consent, sensitive facts are not captured or returned by recency recall, semantic search,
-GraphRAG, or the graph view. Explicit shared sensitive writes are rejected rather than silently
-down-scoped.
+covers health conditions, religious beliefs, and several other special categories.
 
-Temporary chats are a separate read-only case. They do not recall personalized memory or inject
-user personalization unless the user turns on **Use memory in temporary chat** from the Memory
-plugin's composer **+** menu. That control can read existing long-term facts, auto-recall results,
-and user personalization for the current temporary turn, but it cannot write a new fact, sync a raw
-turn to an external memory provider, or save the conversation. The temporary chat can still be
-promoted to a saved conversation with its **Save chat** bookmark action.
+- **Include sensitive topics in memory** (on the Memory settings page) is off by default and is
+  stored per verified user on the local node. It is a separate consent from the general
+  long-term-memory switch.
+- Turning it off hides existing sensitive facts from built-in recall, search, and graph results and
+  stops future capture. It does not delete the encrypted source row.
+- Without consent, sensitive facts are not captured or returned by recency recall, semantic
+  search, GraphRAG, or the graph view.
+- Explicit shared sensitive writes are rejected rather than silently down-scoped.
 
-The defaults are a short-term limit of the last 10 turns (`DEFAULT_SHORT_TERM_LIMIT`) and a
-long-term recall limit of 5 entries (`DEFAULT_LONG_TERM_LIMIT`). Both are configurable on the request.
+### Temporary chats
+
+Temporary chats are read-only. They do not recall personalized memory or inject user
+personalization unless the user turns on **Use memory in temporary chat** from the Memory plugin's
+composer **+** menu.
+
+- That control can read existing long-term facts, auto-recall results, and user personalization
+  for the current temporary turn.
+- It cannot write a new fact, sync a raw turn to an external memory provider, or save the
+  conversation.
+- The temporary chat can still be promoted to a saved conversation with its **Save chat** bookmark
+  action.
 
 ## Routes
 
@@ -82,19 +123,29 @@ The Library's **Graph** view is an access-filtered snapshot of the typed memory 
 which visible facts connect to topics, people, categories, agents, and scope levels. It is a view of
 derived relationships, not a place to edit graph edges or bypass a memory access check.
 
+### Git-backed memory
+
 The Library's optional **Git-backed memory** card is a separate source projection. It writes one
-Markdown file per selected memory below `memory/<scope>/<id>.md`, plus an index file. The projection
-is source-only. The encrypted store remains the authority, and vectors are never
-portable state. Importing Markdown is explicit and only reads that `memory/` subtree. A missing
-file does not delete a memory. Because the Markdown contains plaintext by design, the repository
-must be treated as sensitive and its diffs reviewed before commit or push.
+Markdown file per selected memory below `memory/<scope>/<id>.md`, plus an index file.
+
+- The projection is source-only. The encrypted store remains the authority, and vectors are never
+  portable state.
+- Importing Markdown is explicit and only reads that `memory/` subtree. A missing file does not
+  delete a memory.
+
+<Callout type="warn">
+  The Markdown contains plaintext by design. Treat the repository as sensitive and review its diffs
+  before commit or push.
+</Callout>
 
 Agents can inspect the configured repository's bounded history through
-`GET /api/memory/git/trace?path=memory&limit=20`. Core resolves the repository from the node's
-explicit Memory Git binding and rejects paths outside `memory/`. The trace endpoint does not accept
-an arbitrary agent-supplied filesystem root. Because that binding is node-global, the trace is
-available only on an unbound personal node. Organization-bound nodes refuse it rather than expose
-one member's repository metadata to another.
+`GET /api/memory/git/trace?path=memory&limit=20`.
+
+- Core resolves the repository from the node's explicit Memory Git binding and rejects paths
+  outside `memory/`. The endpoint does not accept an arbitrary agent-supplied filesystem root.
+- Because that binding is node-global, the trace is available only on an unbound personal node.
+  Organization-bound nodes refuse it rather than expose one member's repository metadata to
+  another.
 
 ## Dream review and Reflect
 
@@ -114,9 +165,14 @@ Open the review queue at `/library/memory/dream`. Older nodes that do not provid
 routes show an unavailable state rather than silently discarding a review action.
 
 When the node's automatic Dream preference is enabled, Core periodically prepares the same review
-queue in the background. The scheduler honors the configured quiet hours, never writes a proposal
-without review, and skips organization-bound nodes unless the caller is authorized. Manual review
-and automatic review therefore share one proposal path and the same accept/reject controls.
+queue in the background. Manual and automatic review share one proposal path and the same
+accept/reject controls. The background scheduler:
+
+- honors the configured quiet hours;
+- never writes a proposal without review;
+- skips organization-bound nodes unless the caller is authorized.
+
+### Reflect
 
 Reflect is an on-demand dashboard for a selected seven-, thirty-, or ninety-day period. It
 summarizes activity, recurring topics, and evidence-based observations. It does not make
@@ -127,13 +183,15 @@ productivity, identity, or emotional judgments.
 | `GET /api/memory/reflect?period=7d` | Dashboard for `7d`, `30d`, or `90d` |
 | `GET`, `PATCH /api/memory/reflect/settings` | Read or change Reflect settings |
 
-The dashboard is a projection of the [usage review](/docs/core/usage-review). It reads the same
-conversations and activity, honors the same exclusions, and requires usage review to be turned on.
-Otherwise the request is refused with `usage_review_disabled`, and the desktop dashboard offers a
-**Turn on usage review** button. Every count comes from that review. Trends compare the selected
-period with the period immediately before it, and are omitted when there is nothing to compare
-against. Older nodes without the Reflect route fall back to reading `/api/usage-review`
-directly.
+The dashboard is a projection of the [usage review](/docs/core/usage-review).
+
+- It reads the same conversations and activity, honors the same exclusions, and every count comes
+  from that review.
+- It requires usage review to be turned on. Otherwise the request is refused with
+  `usage_review_disabled`, and the desktop dashboard offers a **Turn on usage review** button.
+- Trends compare the selected period with the period immediately before it, and are omitted when
+  there is nothing to compare against.
+- Older nodes without the Reflect route fall back to reading `/api/usage-review` directly.
 
 Open it at `/library/memory/reflect`. The settings route stores two preferences:
 
@@ -141,18 +199,6 @@ Open it at `/library/memory/reflect`. The settings route stores two preferences:
   automatic Dream review does not run, in addition to Dream's own quiet hours.
 - **Break nudges** (off by default). The preference is saved on the node, but no reminder is
   delivered.
-
-<Callout type="info">
-  Memory encryption uses a single local master key today. There is no key rotation or remote
-  escrow. Treat that key as a secret: lose it and the encrypted entries become unreadable.
-</Callout>
-
-<Callout type="warn">
-  The encrypted memory database is the authority. The retrieval index that vector search runs on
-  keeps its own copy of memory text and embeddings, sealed at rest as well; vectors are opened into
-  memory only to score a search. Sensitive rows are read-gated and their derived retrieval rows are
-  removed when consent is revoked. See [Encryption at rest](/docs/core/encryption-at-rest).
-</Callout>
 
 ## Searchable chat history and auto-recall
 
@@ -163,11 +209,15 @@ semantically searchable by a dedicated message index (`crates/core/search/src/me
 
 Chat message bodies stay encrypted at rest in `conversations.db`. To avoid copying decrypted text
 into a plaintext store, the index lives in its own database (`~/.ryu/db/message-embeddings.db`) and
-holds **only sealed vectors and metadata**, never the message text. Each vector is encrypted and
-bound to its message and embedding model, because embeddings can be inverted into approximate text.
-Searches open the vectors into memory within a shared memory budget. Each row carries the
-`message_id`, `conversation_id`, `role`, `embed_model`, `embed_dims`, and `created_at`. A search returns
-`message_id`s, and the snippet text is re-read and decrypted from `conversations.db` at that point.
+holds **only sealed vectors and metadata**, never the message text.
+
+- Each vector is encrypted and bound to its message and embedding model, because embeddings can be
+  inverted into approximate text. Searches open the vectors into memory within a shared memory
+  budget.
+- Each row carries the `message_id`, `conversation_id`, `role`, `embed_model`, `embed_dims`, and
+  `created_at`.
+- A search returns `message_id`s. The snippet text is then re-read and decrypted from
+  `conversations.db`.
 
 - **Indexed on write** - `ConversationStore::append_message` spawns a best-effort task that embeds
   the plaintext before it is sealed and inserts a vector row. The conversation DB mutex is never
@@ -179,10 +229,13 @@ Searches open the vectors into memory within a shared memory budget. Each row ca
   and restart, the index recreates itself at the new width and re-backfills on the next search.
 
 Search is exposed to agents as the built-in tool `search_conversations.search`
-(`apps/core/src/sidecar/mcp/search_conversations.rs`). It is a reserved registry server, so it rides
-the unified `call_tool` path. It is allowlist-gated and audited on both the ACP and
-OpenAI-compatible planes, and it appears in `GET /api/tools/search`. When no message index is wired (CLI, tests, headless),
-the tool returns an `ok:false` envelope rather than failing.
+(`apps/core/src/sidecar/mcp/search_conversations.rs`).
+
+- It is a reserved registry server, so it rides the unified `call_tool` path. It is
+  allowlist-gated and audited on both the ACP and OpenAI-compatible planes.
+- It appears in `GET /api/tools/search`.
+- When no message index is wired (CLI, tests, headless), the tool returns an `ok:false` envelope
+  rather than failing.
 
 ### Auto-recall
 
@@ -194,31 +247,51 @@ OpenAI-compatible planes receive it. Two sources are pulled:
 - relevant **long-term memory facts**, lazy-backfilled into the retrieval index and then deduped
   **by fact id** against what the recency window already injected, so a fact never appears twice
 
+```mermaid
+flowchart TD
+  Turn["New chat turn"] --> Gate{"auto-recall-enabled?"}
+  Gate -->|off| Skip["No recall"]
+  Gate -->|on| Sem["Semantic message search"]
+  Gate -->|on| Facts["Long-term facts + GraphRAG candidates"]
+  Gate -->|"on, and fts-recall-enabled"| Fts["Full-text message search"]
+  Sem --> Merge["Exclude current chat, dedupe, cap at top-k"]
+  Fts --> Merge
+  Facts --> Merge
+  Merge --> Ctx["Per-turn context (not the system prompt)"]
+```
+
 The memory half also uses the typed GraphRAG projection as an additional bounded candidate source.
 Chat recall carries the active agent id, so `agent`-scope facts only match that agent. User, node,
 project, and explicitly allowed organization scopes keep their existing access rules. Graph edges
 never grant access by themselves.
 
-Auto-recall is **on by default**, gated by the `auto-recall-enabled` preference (env
-`RYU_AUTO_RECALL_ENABLED`). The number of recalled snippets injected per turn, across both sources
-combined, is the `auto-recall-top-k` preference, defaulting to 5. The desktop toggle lives in
-Gateway settings, Plugins, Memory (`apps/desktop/src/components/settings/MemoryTab.tsx`). Auto-recall is orthogonal to
-the memory record toggle. It controls what is recalled, not what is written.
+#### Settings
+
+| Setting | Preference (env) | Default |
+|---|---|---|
+| Auto-recall on or off | `auto-recall-enabled` (`RYU_AUTO_RECALL_ENABLED`) | On |
+| Snippets injected per turn, across both sources | `auto-recall-top-k` (`RYU_AUTO_RECALL_TOP_K`) | 5 |
+| Full-text recall | `fts-recall-enabled` (`RYU_FTS_RECALL_ENABLED`) | Off |
+
+The desktop toggle lives in Gateway settings, Plugins, Memory
+(`apps/desktop/src/components/settings/MemoryTab.tsx`). Auto-recall is orthogonal to the memory
+record toggle. It controls what is recalled, not what is written.
+
+#### Where recalled context goes
 
 Recalled snippets, the recent-memory window, an external memory provider's prefetch, and referenced
-chats all change from turn to turn, so none of them go into the system prompt. On the OpenAI-compatible
-plane they are appended to the newest user message for that request only; the stored message is
-unchanged. On the ACP plane a session's first prompt carries all of them after the reusable
-context, just before the user's text. The agent keeps its own transcript after that, so each later
-turn adds only what was chosen for that message: recalled snippets, the provider prefetch, and
-referenced chats, placed after the user's text. The recent-memory window is not repeated. The
-system prompt and the earlier history stay the same between turns, so provider prompt caches can
-reuse them.
+chats all change from turn to turn, so none of them go into the system prompt.
 
-The same Memory settings page contains **Include sensitive topics in memory**. It is a separate
-per-user consent from the general long-term-memory switch. Turning it off hides existing sensitive
-facts from built-in recall, search, and graph results and stops future capture. It does not delete
-the encrypted source row.
+- **OpenAI-compatible plane.** They are appended to the newest user message for that request
+  only. The stored message is unchanged.
+- **ACP plane, first prompt.** A session's first prompt carries all of them after the reusable
+  context, just before the user's text.
+- **ACP plane, later turns.** The agent keeps its own transcript, so each later turn adds only what
+  was chosen for that message (recalled snippets, the provider prefetch, and referenced chats),
+  placed after the user's text. The recent-memory window is not repeated.
+
+The system prompt and the earlier history stay the same between turns, so provider prompt caches
+can reuse them.
 
 ### Memories cited in chat
 
@@ -247,27 +320,29 @@ message even when the vector does not.
 
 - **Keyed-token index** - the index lives in its own database (`~/.ryu/db/message-fts.db`) and
   stores no words. Each message is split into whole words, very common words are dropped, and every
-  word is replaced by a keyed token derived from your master key before it is indexed, plus a
-  parallel metadata table (`message_id`, `conversation_id`, `role`, `created_at`). A search is
-  tokenized the same way, so matching is **whole-word only**: no phrase, prefix, or NEAR queries,
-  and a search of only common words returns nothing. On a match it returns `message_id`s, and
-  `ConversationStore::fts_search_messages` re-reads and decrypts the snippet from
-  `conversations.db`. An index written by an older build is deleted and rebuilt.
+  word is replaced by a keyed token derived from your master key. A parallel metadata table holds
+  `message_id`, `conversation_id`, `role`, and `created_at`.
+- **Whole-word matching** - a search is tokenized the same way, so there are no phrase, prefix, or
+  NEAR queries, and a search of only common words returns nothing.
+- **Snippets** - a match returns `message_id`s, and `ConversationStore::fts_search_messages`
+  re-reads and decrypts the snippet from `conversations.db`. An index written by an older build is
+  deleted and rebuilt.
 - **Lazy population** - there is no append-time FTS write. The term index materializes on disk only
   when a search runs, so it exists only for users who opt in.
 - **Merged and deduped** - FTS hits fold into the same `chat_hits` set as semantic hits, deduped by
   `message_id` (both passes can surface the same message), with the current conversation excluded and
   the combined result still capped at `top_k`.
 
-FTS is a **sub-source under the auto-recall gate**, off by default. It contributes only when
-auto-recall is on (the default) *and* the `fts-recall-enabled` preference (env
-`RYU_FTS_RECALL_ENABLED`) is on, which defaults **off**. Enabling FTS never re-enables semantic
-recall for a user who disabled auto-recall.
+FTS is a **sub-source under the auto-recall gate**. It contributes only when auto-recall is on
+*and* `fts-recall-enabled` is on (see [Settings](#settings)). Enabling FTS never re-enables
+semantic recall for a user who disabled auto-recall.
 
 <Callout type="warn">
   Privacy tradeoff: the tokens are deterministic for your install. Someone with `message-fts.db`
   cannot read your words, but can see which messages share a word, how many distinct words each
   message has, and how often each token occurs, and with outside knowledge can guess very common
-  words. That is why FTS is opt-in and lazily populated. Turning **Remember chats** off empties the
+  words. That is why FTS is opt-in and lazily populated.
+
+  Turning **Remember chats** off empties the
   index, and deleting a conversation removes its rows.
 </Callout>

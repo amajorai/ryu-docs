@@ -32,29 +32,47 @@ Every endpoint has a `tier`, one of two values.
 - **`generated`** rows list the rest of a vendor's API, read from the OpenAPI
   spec the vendor publishes itself. Each one names the spec's address, the
   date Ryu checked it and the operation it describes (`operation.method` and
-  `operation.path`). A generated row starts `unverified` and has no price, so
-  it shows "No published price" and is never used for a paid call. A weekly
-  check may mark it `verified` when the spec still lists its operation; that
-  confirms the operation exists, not a price, and the row still never routes
-  a paid call until Ryu reviews it into a curated row. Most have
-  no job yet, so they are answered by endpoint lookup
-  (`/api/tool-catalog/catalog/endpoints/{id}`) but not listed in platform
-  views; Ryu assigns a job to some after review, and those are listed under
-  their platform after the reviewed rows.
+  `operation.path`).
 
-A reviewed row always wins: when a curated row covers the same operation, the
+### Generated rows
+
+A generated row starts `unverified` and has no price, so it shows "No
+published price" and is never used for a paid call.
+
+- A weekly check may mark it `verified` when the spec still lists its
+  operation. That confirms the operation exists, not a price.
+- The row still never routes a paid call until Ryu reviews it into a curated
+  row.
+- Most have no job yet. They are answered by endpoint lookup
+  (`/api/tool-catalog/catalog/endpoints/{id}`) but not listed in platform
+  views.
+- Ryu assigns a job to some after review, and those are listed under their
+  platform after the reviewed rows.
+
+A reviewed row always wins. When a curated row covers the same operation, the
 generated one is left out or retired with the curated row as its successor. A
 generated row is also retired when the operation leaves the vendor's spec. Ryu
 reads only specs the vendor publishes, never another catalog.
+
+```mermaid
+flowchart LR
+  S["Vendor OpenAPI spec"] --> G["generated row (unverified, no price)"]
+  G -->|"weekly spec check"| V["generated row (verified)"]
+  V -->|"Ryu review"| C["curated row"]
+  G -->|"curated row covers it"| R["retired"]
+  V -->|"operation leaves spec"| R
+  P["Vendor pricing page and docs"] --> C
+```
 
 ## Free routes
 
 A few endpoints are free for anyone and need no key at the vendor. When Ryu has
 reviewed such an endpoint and checked it with a live call that sent no
-credential, its row carries `freeRoute` - the method (`GET`) and the vendor URL
-as a template, such as `https://api.vendor.example/v1/items/{id}`. Only a
-reviewed (`curated`) row whose price is `free` and whose verification is a live
-call gets one; a row Ryu has not verified never does.
+credential, its row carries `freeRoute`. That is the method (`GET`) and the
+vendor URL as a template, such as `https://api.vendor.example/v1/items/{id}`.
+
+Only a reviewed (`curated`) row whose price is `free` and whose verification is
+a live call gets one. A row Ryu has not verified never does.
 
 <Callout type="warn">
   Free routes are off by default. A Connect deployment serves them only when
@@ -100,11 +118,16 @@ These three routes are `GET`, public, answer JSON with an `ETag`, and return
 An unknown platform or endpoint is `404` with `code: "not_found"`.
 
 Rows are built on the server, so every client compares the same vendors. A
-row lists usable endpoints first, then verified ones, then those with better
-reliability (enough calls, a higher success rate, a lower p95), then the
-cheaper ones. A job Ryu has not promoted yet is listed with `compared: false`
-and no `comparison_key`. The order is information for you to choose with:
-Connect never picks a different endpoint than the one you call.
+row orders its endpoints by:
+
+1. usable endpoints first;
+2. then verified ones;
+3. then better reliability (enough calls, a higher success rate, a lower p95);
+4. then the cheaper ones.
+
+A job Ryu has not promoted yet is listed with `compared: false` and no
+`comparison_key`. The order is information for you to choose with: Connect
+never picks a different endpoint than the one you call.
 
 Each endpoint carries:
 
@@ -121,46 +144,61 @@ Each endpoint carries:
 | `reviews` | [Agent reviews](/docs/standalone/connect-api-reviews) of real calls (counts always; the rating once five organizations reviewed), or `null` when nobody did |
 | `docs_url`, `source`, `tier`, `toolkit` | The vendor's reference page (for a generated row, the vendor's OpenAPI spec), whose catalog it is (`ryu`), the [catalog tier](#catalog-tiers) (`curated` or `generated`), and the Connect toolkit when it has one |
 
-`cost.basis` says what the one-call figure covers: `one_call` (the price
-depends on the number of calls alone), `base_call` (the per-call part; the
-`metered_by` meters, such as `results_over_10`, add to it) or `usage` (the
-price depends only on other meters, such as `pages`, so there is no one-call
-figure and `value` and `usd` are `null`). A free endpoint has `free: true`;
-an unknown price is never shown as free.
+`cost.basis` says what the one-call figure covers:
+
+| `basis` | Meaning |
+|---|---|
+| `one_call` | The price depends on the number of calls alone |
+| `base_call` | The per-call part; the `metered_by` meters, such as `results_over_10`, add to it |
+| `usage` | The price depends only on other meters, such as `pages`. There is no one-call figure, and `value` and `usd` are `null` |
+
+A free endpoint has `free: true`; an unknown price is never shown as free.
 
 ## Search
 
 `GET /api/tool-catalog/catalog/search?q=<words>` searches live endpoints (not
 retired ones) and answers `{ object: "list", version, data, ranking? }`.
-`limit` is 1 to 25 (default 8) and `q` at most 200 characters; an empty `q`
-lists endpoints in catalog order. Each row has `endpoint`, `title`,
-`provider`, `capability`, `platform`, `tier`, `state` (the verification
-state), `docsUrl`, `paidRoutingAllowed` and `score`. Open
-`/catalog/endpoints/{endpoint}` for its price and siblings.
+
+| Parameter | Rule |
+|---|---|
+| `q` | At most 200 characters. An empty `q` lists endpoints in catalog order |
+| `limit` | 1 to 25, default 8 |
+| `ranking` | `hybrid` to also rank by meaning (see below) |
+| `judge` | `true` to rerank the top eight with a small model |
+
+Each row has `endpoint`, `title`, `provider`, `capability`, `platform`, `tier`,
+`state` (the verification state), `docsUrl`, `paidRoutingAllowed` and `score`.
+Open `/catalog/endpoints/{endpoint}` for its price and siblings.
 
 Word search (the default) ranks with the same BM25 scoring as Connect's tool
 search, over the endpoint id, its title, its provider, and the name and
 description of its job and platform. It is free and cacheable.
 
-`ranking=hybrid` also ranks by meaning, and `judge=true` asks a small model to
-put the most useful of the top eight first, exactly as
+### Hybrid search
+
+`ranking=hybrid` and `judge=true` work exactly as
 [Connect's hybrid search](/docs/standalone/connect-api-discovery#hybrid-search)
 does, with the same `ranking` fields on the answer and its rows. Send your Ryu
-Gateway key in `x-ryu-gateway-key`. The query's embedding and the judge run
-through Ryu Gateway and are charged to that key's organization; the catalog's
-own embeddings are Ryu's. Without a key, or when hybrid search is not enabled
-on the deployment, the answer is the word search answer with
-`ranking.fallback` saying why. A hybrid answer is sent `private, no-store`.
+Gateway key in `x-ryu-gateway-key`.
+
+- The query's embedding and the judge run through Ryu Gateway and are charged
+  to that key's organization. The catalog's own embeddings are Ryu's.
+- Without a key, or when hybrid search is not enabled on the deployment, the
+  answer is the word search answer with `ranking.fallback` saying why.
+- A hybrid answer is sent `private, no-store`.
 
 ## Reliability feed
 
 `GET /api/tool-catalog/reliability` returns the evidence for every tool Ryu
 has counted calls for: `{ type: "ryu.tool_reliability", generatedAt,
-windowDays, entries: [{ key, sources, evidence }] }`. `key` is the catalog
-endpoint id (a `composio.<SLUG>` tool keys `<toolkit>.<SLUG>`). `sources`
-holds the per-source counts and latency histograms; `evidence` is the folded
-row described under [reliability](/docs/standalone/connect-api-discovery#reliability).
-The feed is computed at most every five minutes.
+windowDays, entries: [{ key, sources, evidence }] }`. The feed is computed at
+most every five minutes.
+
+| Field | Meaning |
+|---|---|
+| `key` | The catalog endpoint id (a `composio.<SLUG>` tool keys `<toolkit>.<SLUG>`) |
+| `sources` | The per-source counts and latency histograms |
+| `evidence` | The folded row described under [reliability](/docs/standalone/connect-api-discovery#reliability) |
 
 Only tools with a public catalog identity are counted: Composio-shaped tools
 and Ryu's built-in vendor endpoints. Your own registered MCP servers, relay
@@ -172,9 +210,11 @@ answer or error text is part of it.
 `GET /api/tool-catalog/reviews` returns the [review](/docs/standalone/connect-api-reviews)
 summary of every endpoint someone reviewed: `{ type: "ryu.tool_reviews",
 version, generatedAt, entries: { "<endpoint>": summary } }`, keyed like the
-reliability feed. It is computed at most every five minutes from the last 90
-days of reviews, counts each reviewing organization once under an opaque hash,
-and never carries a comment, call id or organization.
+reliability feed.
+
+The summary is computed at most every five minutes from the last 90 days of
+reviews. It counts each reviewing organization once under an opaque hash, and
+never carries a comment, call id or organization.
 
 ## In Ryu's Integrations Store
 

@@ -17,6 +17,16 @@ POST http://localhost:7981/v1/chat/completions
 The Gateway listens on `http://127.0.0.1:7981` by default. Send
 `Authorization: Bearer <gateway-key>` with each request.
 
+```mermaid
+flowchart LR
+  Client["OpenAI client or SDK"] -->|"/v1/chat/completions or /v1/responses"| Auth["Gateway key check"]
+  Auth --> Pipeline["Governance pipeline: firewall, budget, routing, evals"]
+  Pipeline --> Provider["Upstream provider"]
+  Provider --> Pipeline
+  Pipeline --> Audit["Audit log"]
+  Pipeline -->|"response (Chat Completions adds x-* headers)"| Client
+```
+
 ## Responses API
 
 `POST /v1/responses` runs on the same governed pipeline as Chat Completions. The Gateway returns
@@ -59,8 +69,13 @@ Set `"stream": true` for Responses SSE events such as `response.created`,
 `response.output_text.delta`, and `response.completed`. Use the returned `id` as
 `previous_response_id` for a follow-up.
 
-Continuation history is held in bounded process memory for up to four hours (`RESPONSE_TTL` in
-`apps/gateway/src/responses_store.rs`). It is also lost on Gateway restart or capacity eviction.
+Continuation history is held in bounded process memory (`RESPONSE_TTL` in
+`apps/gateway/src/responses_store.rs`). It is lost when any of these happens:
+
+- four hours pass
+- the Gateway restarts
+- capacity eviction removes it
+
 `"store": false` skips retaining the new response, so send the full input history on later turns.
 Use `store: false` with full history whenever a process-local continuation id is unsuitable.
 
@@ -71,10 +86,11 @@ inference grant does not include that permission. With `external_web_access: fal
 only cached results, never live search, and calls report unavailable when no cached-search backend
 exists.
 
-`max_tool_calls` caps Gateway-hosted tool calls (hosted web search) for one response. When the cap
-is reached, the hosted tool is withdrawn, and a further hosted call is reported as a failed
-`web_search_call` with `max_tool_calls_exceeded`. Client tool calls are returned to you and do not
-count toward the cap.
+`max_tool_calls` caps Gateway-hosted tool calls (hosted web search) for one response:
+
+- When the cap is reached, the hosted tool is withdrawn.
+- A further hosted call is reported as a failed `web_search_call` with `max_tool_calls_exceeded`.
+- Client tool calls are returned to you and do not count toward the cap.
 
 ### Not supported
 
@@ -103,11 +119,14 @@ cp .env.example .env.local
 pnpm dev
 ```
 
-Set `RYU_GATEWAY_URL` to the Gateway origin (for example, `http://127.0.0.1:7981`), and set
-`RYU_GATEWAY_KEY` when Gateway auth is enabled. The app server normalizes the URL to `/v1`,
-discovers models from `GET /v1/models`, and keeps the key out of browser code. Its chat route uses
-the AI SDK Chat Completions adapter (`gateway.chat(model)`), which matches Ryu's
-`POST /v1/chat/completions` contract.
+In `.env.local`, set two variables:
+
+- `RYU_GATEWAY_URL` - the Gateway origin, for example `http://127.0.0.1:7981`.
+- `RYU_GATEWAY_KEY` - the Gateway key, when Gateway auth is enabled.
+
+The app server normalizes the URL to `/v1`, discovers models from `GET /v1/models`, and keeps the
+key out of browser code. Its chat route uses the AI SDK Chat Completions adapter
+(`gateway.chat(model)`), which matches Ryu's `POST /v1/chat/completions` contract.
 
 <Callout type="warn">
   The starter's `/api/chat` route is a public demo proxy. Add application auth, rate limiting, and
@@ -212,7 +231,7 @@ the allowlist and audits every call.
 
 See [Gateway tools](/docs/gateway/tools) for the full tool-loop mechanics.
 
-## Streaming
+## Chat Completions streaming
 
 Streaming works the same as the OpenAI API. Send `"stream": true` and receive SSE events.
 The Gateway buffers tool-call rounds on the OpenAI-compat plane, then streams the final response.

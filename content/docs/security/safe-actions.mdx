@@ -12,6 +12,20 @@ plan from executing it:
 4. Core either denies the plan, queues it for review, or issues a short-lived certificate; and
 5. Core executes only the exact certified steps and writes a durable receipt.
 
+```mermaid
+flowchart TD
+  A["Agent: plans.submit"] --> B["Load bound policy and attested catalog"]
+  B --> C["Verifier checks every branch"]
+  C --> D{"Result"}
+  D -- Deny --> E["Plan denied"]
+  D -- "Needs review" --> F["Review queue"]
+  F -- Approve --> G["Short-lived certificate"]
+  F -- Deny --> E
+  D -- Proved --> G
+  G --> H["Execute certified steps"]
+  H --> I["Durable receipt"]
+```
+
 The Safe Actions app is the policy, review, and receipt interface. Core remains the authority: app
 code cannot issue certificates or create an execution bypass.
 
@@ -24,17 +38,20 @@ Install **Safe Actions** from the Store, then:
 3. create a policy in the app's **Policies** tab and bind it to that agent; and
 4. ask the agent to use `plans.submit` for tool work with a caller-generated `request_id`.
 
-The `request_id` is an idempotency key for one intended submission. Reuse it when retrying that
-submission after a lost response; generate a new value for a later intentional execution. Core also
-scopes the key to the calling agent and conversation principal. The key does not change when a
-policy, catalog, or agent revision changes: retrying the same plan returns the original durable
-submission, while reusing the key for different plan bytes is rejected.
+The `request_id` is an idempotency key for one intended submission, scoped to the calling agent and
+conversation principal:
+
+- Reuse it when retrying that submission after a lost response.
+- Generate a new value for a later intentional execution.
+- The key does not change when a policy, catalog, or agent revision changes. Retrying the same plan
+  returns the original durable submission; reusing the key for different plan bytes is rejected.
 
 A verified-plan agent is offered only the three `plans.*` tools (`plans.submit`, `plans.status`, and
-`plans.catalog`). Raw registry tools, discovery
-meta-tools, and the programmatic JavaScript execute/resume tools are hidden. Core also repeats the
-check at dispatch, so calling a hidden tool by name, replaying an old raw approval, or using another
-Core tool-call endpoint does not bypass the profile.
+`plans.catalog`). Raw registry tools, discovery meta-tools, and the programmatic JavaScript
+execute/resume tools are hidden.
+
+Core also repeats the check at dispatch, so calling a hidden tool by name, replaying an old raw
+approval, or using another Core tool-call endpoint does not bypass the profile.
 
 ## Typed plans
 
@@ -50,11 +67,15 @@ Pointer. References must come from a dominating earlier call. Loops, arbitrary c
 names, and a caller-supplied "verified" flag are not part of the language. Both branches of every
 condition are verified, including the branch that does not run.
 
-Verifier v1 supports the JSON Schema subset it can enforce directly: explicit JSON `type`, object
-`properties`, `required`, `additionalProperties`, array `items`, and annotation-only fields such as
-titles and descriptions. Boolean `true` is the only unrestricted schema. Malformed types, boolean
-`false`, `$ref`, combinators, patterns, ranges, and other unsupported validation keywords deny the
-catalog entry instead of being silently ignored.
+Verifier v1 supports the JSON Schema subset it can enforce directly:
+
+| Supported | Denies the catalog entry |
+|---|---|
+| Explicit JSON `type`, object `properties`, `required`, `additionalProperties`, array `items` | Malformed types and boolean `false` |
+| Annotation-only fields such as titles and descriptions | `$ref`, combinators, patterns, and ranges |
+| Boolean `true` (the only unrestricted schema) | Other unsupported validation keywords |
+
+Unsupported keywords deny the entry instead of being silently ignored.
 
 ```json
 {
@@ -104,13 +125,20 @@ before execution. Derived resources are checked against the policy and displayed
 resource evidence, malformed selectors, non-ASCII or traversal-like resource identifiers, and
 missing, untrusted, empty, or changed contracts make the plan fail closed.
 
+### Catalog hash
+
 The catalog hash covers tool schemas, resolved dispatch chains, implementation revision digests,
-and contracts. App implementation digests bind the complete resolved backend configuration, grants,
-permissions, and timeout. MCP digests bind the complete resolved server configuration and owner;
-Core tools bind a versioned ABI marker. An operator attestation is stored against that live digest.
+and contracts. An operator attestation is stored against the live implementation digest:
+
+| Tool kind | Digest binds |
+|---|---|
+| App | The complete resolved backend configuration, grants, permissions, and timeout |
+| MCP | The complete resolved server configuration and owner |
+| Core | A versioned ABI marker |
+
 Replacing a tool, changing a schema or alias target, changing the Core ABI, or editing an attestation
-removes trust until the implementation is re-attested and invalidates certificates based on the old
-catalog.
+removes trust until the implementation is re-attested. It also invalidates certificates based on
+the old catalog.
 
 <Callout type="warn">
 For a remote MCP server, the digest proves the configured endpoint and launch settings. It does not
@@ -149,9 +177,10 @@ are resolved with an atomic pending-to-decided transition.
 
 Every approve or deny request carries the plan hash of the review on screen as `expected_plan_hash`.
 Core refuses the decision unless that hash matches the persisted submission named in the request, so
-a decision can only apply to the plan the reviewer actually inspected. Selecting another review in the
-queue removes the previous review and any open confirmation at once; the decision controls return only
-when the newly selected plan has loaded.
+a decision can only apply to the plan the reviewer actually inspected.
+
+Selecting another review in the queue removes the previous review and any open confirmation at once.
+The decision controls return only when the newly selected plan has loaded.
 
 If policy, catalog, agent, plan, or verifier bindings change after the review was loaded, Core
 invalidates the review instead of authorizing different evidence. The Companion disables approval when
@@ -165,10 +194,15 @@ arguments, results, or provider error text. Per-step retained output is bounded,
 have a Core timeout.
 
 Safe Actions deduplicates retries that use the same `request_id`. It does not claim that every
-external provider supports exactly-once effects. A provider error, timeout, or persistence failure
-after dispatch is recorded as `uncertain`; if Core stops while a step is running, the receipt becomes
-`unknown_after_crash`. Ryu does not silently mark either state successful or retry it. Inspect the
-external system and submit a new request only when it is safe to do so.
+external provider supports exactly-once effects.
+
+| Event | Receipt status |
+|---|---|
+| Provider error, timeout, or persistence failure after dispatch | `uncertain` |
+| Core stops while a step is running | `unknown_after_crash` |
+
+Ryu does not silently mark either state successful or retry it. Inspect the external system and
+submit a new request only when it is safe to do so.
 
 If a tool needs an identity connection or consent during certified execution, its elicitation
 envelope is recorded as `blocked`, never as a successful tool result. Connect the identity and submit
@@ -196,10 +230,16 @@ The app bridge is restricted to `/api/tools/plans/*`. The protected endpoints ar
 
 The v1 Companion bridge requires the `safe-actions:manage` grant for both reads and mutations. The
 host rejects absolute URLs, traversal, queries, and methods outside the fixed route set before a
-request reaches Core. On a shared node, Core additionally requires a verified member of the node's
-organization for reads and an Admin or Owner for policy, contract, or review decisions. Core stamps
-the authenticated user ID on contract attestations and review decisions; local single-user nodes use
-the `local-operator` principal. A node configured as managed but missing its organization
-registration is unavailable for Safe Actions administration instead of falling back to local access.
+request reaches Core.
+
+On a shared node, Core additionally requires:
+
+- a verified member of the node's organization for reads;
+- an Admin or Owner for policy, contract, or review decisions.
+
+Core stamps the authenticated user ID on contract attestations and review decisions; local
+single-user nodes use the `local-operator` principal. A node configured as managed but missing its
+organization registration is unavailable for Safe Actions administration instead of falling back to
+local access.
 
 Continue with [Security](/docs/security), [command approval](/docs/security/command-approval), [Core approvals](/docs/core/approvals), [Gateway governance](/docs/gateway/governance), and the [Safe Actions app](/docs/apps/safe-actions).

@@ -25,19 +25,40 @@ The `ryu-sdk` Python package is not yet published to PyPI, so the Python client 
 ## Tool approvals
 
 A builtin tool or an MCP server declared with `"requireApproval": true` asks
-before each call. Any agent accepts the flag, but only the `anthropic` backend
-supports interactive approvals: starting a session of such an agent in an
-environment on another backend gets `422 unsupported_for_backend`. On the
-`anthropic` and `openai` backends, a provider approval request for a tool that
-did not set `requireApproval` is denied by Ryu and recorded as a
-`session.error` with the code `tool_approval_unsupported`. See
-[tool approvals](/docs/standalone/managed-agents-events#tool-approvals) for the
-events.
+before each call.
+
+- Any agent accepts the flag, but only the `anthropic` backend supports
+  interactive approvals. Starting a session of such an agent in an environment
+  on another backend gets `422 unsupported_for_backend`.
+- On the `anthropic` and `openai` backends, a provider approval request for a
+  tool that did not set `requireApproval` is denied by Ryu and recorded as a
+  `session.error` with the code `tool_approval_unsupported`.
+
+See [tool approvals](/docs/standalone/managed-agents-events#tool-approvals)
+for the events.
 
 When the agent wants to run such a tool, the log gets the `agent.tool_use`
 with the call's input, then an `agent.tool_approval_request`, and the turn
 stops with `requires_action`. Answer before the request's `expiresAt` (10
 minutes after it was appended); after that Ryu denies the call.
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant Log as Session log
+  participant SDK as Your code (SDK)
+  Agent->>Log: agent.tool_use
+  Agent->>Log: agent.tool_approval_request
+  Log-->>SDK: turn stops: requires_action
+  alt answered before expiresAt
+    SDK->>Log: user.tool_approval (allow or deny)
+    Log-->>Agent: run or skip the tool
+  else 10 minutes pass
+    Log-->>Agent: Ryu denies the call
+  end
+```
+
+## Answer with a handler
 
 The SDK never answers for you. Pass `onToolApproval` to `sessions.run()` or
 `sessions.follow()` to decide each request; the follow sends your answer and
@@ -76,20 +97,27 @@ data, error, meta = ryu.managed_agents.sessions.run(
 On `AsyncRyu` the handler may also be an `async def`.
 
 The handler returns `"allow"`, `"deny"`, or `{ decision, message }`, where
-`message` is shown to the model with a denial. It is asked once per open
-request, after the follow has caught up with the head of the log. A request
-whose answer is already in the log (yours, another client's, or Ryu's
-timeout denial) is never asked about. `sessions.follow(id, { after,
-onToolApproval })` also asks about requests opened at or before `after`, and it
-reads them first. If the handler throws, the run fails with the code
-`tool_approval_handler_failed`, its `cause` is your error, and nothing is
-answered.
+`message` is shown to the model with a denial.
+
+- It is asked once per open request, after the follow has caught up with the
+  head of the log.
+- A request whose answer is already in the log (yours, another client's, or
+  Ryu's timeout denial) is never asked about.
+- `sessions.follow(id, { after, onToolApproval })` also asks about requests
+  opened at or before `after`, and it reads them first.
+- If the handler throws, the run fails with the code
+  `tool_approval_handler_failed`, its `cause` is your error, and nothing is
+  answered.
+
+## Answer pending requests yourself
 
 Returning `undefined`, or passing no handler, leaves the request open. The run
 or follow then stops at the `requires_action` idle, also with
 `until: "terminal"`, so it never sits waiting while the request runs into its
-timeout. `data.pendingApprovals` lists the open requests. Answer them
-yourself, then follow the rest of the turn from your answer:
+timeout.
+
+`data.pendingApprovals` lists the open requests. Answer them yourself, then
+follow the rest of the turn from your answer:
 
 ```ts tab="Node"
 if (data) {
@@ -129,11 +157,16 @@ if data:
 one `user.tool_approval` event and resolve to it.
 `respondToApproval(sessionId, toolUseId, decision, { message })` (Python:
 `respond_to_approval(session_id, tool_use_id, decision, message=...)`) does
-the same with the decision as an argument. By default the `Idempotency-Key`
-is derived from the decision, the `toolUseId`, and the message, so retrying
-the same answer replays the first result. A retry must repeat the same
-message; a different message is a different answer. Ryu accepts one answer
-per request:
+the same with the decision as an argument.
+
+## Retries and conflicts
+
+By default the `Idempotency-Key` is derived from the decision, the
+`toolUseId`, and the message, so retrying the same answer replays the first
+result. A retry must repeat the same message; a different message is a
+different answer.
+
+Ryu accepts one answer per request:
 
 - `409 tool_result_already_submitted` - the request already has an answer. This
   includes a request that expired, because Ryu's timeout denial is the
@@ -142,17 +175,22 @@ per request:
   answered, for example a wrong id or a request an interrupt abandoned.
 
 Both are `RyuConflictError`. Ryu stores a `4xx` answer under its key for 24
-hours and replays it. So when a derived key gets `409 unknown_tool_use`, for
-example because you answered a moment before the request was appended, the
-SDK asks once more with a fresh key. A key you pass yourself is never
-replaced. Inside `onToolApproval`, these codes mean the request is already
-settled, and the follow goes on.
+hours and replays it.
 
-The Python SDK follows the same rules: `on_tool_approval` on
-`sessions.run()` and `sessions.follow()` gets a `ToolApprovalContext`
-(`request`, `session_id`, `tool_use`) and returns the same decisions, with
-`None` for "leave it open". It derives the same `Idempotency-Key`, and its
-`sessions.run()` returns the same `pendingApprovals` key as the Node SDK.
+- When a derived key gets `409 unknown_tool_use`, for example because you
+  answered a moment before the request was appended, the SDK asks once more
+  with a fresh key.
+- A key you pass yourself is never replaced.
+- Inside `onToolApproval`, these codes mean the request is already settled,
+  and the follow goes on.
+
+## Python
+
+The Python SDK follows the same rules. `on_tool_approval` on `sessions.run()`
+and `sessions.follow()` gets a `ToolApprovalContext` (`request`, `session_id`,
+`tool_use`) and returns the same decisions, with `None` for "leave it open".
+It derives the same `Idempotency-Key`, and its `sessions.run()` returns the
+same `pendingApprovals` key as the Node SDK.
 
 ## Read next
 

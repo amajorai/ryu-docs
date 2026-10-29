@@ -20,21 +20,56 @@ For the conceptual model, see [the Runnable model](/docs/start-here/architecture
 For a worked example, see the [Plugin manifests tutorial](/docs/extend/develop/extensions/plugin-json-manifest).
 
 <Callout type="warn">
-  The VS-Code-style runtime is partly live. The manifest carries a `contributes` block,
-  `activation_events`, and an `engines.ryu` version pin (`apps/core/src/plugin_manifest/mod.rs`).
-  An activation runtime (`apps/core/src/runnable/mod.rs`) wakes a plugin's runnables when its
-  startup, chat, command, route, or capability cold-start events fire. The runtime is bounded. A
-  plugin gets no arbitrary in-process Core API and cannot mutate Core routes. UI uses pre-built
-  widget, Companion, and extension-host seams, and each declarative contribution is only as live
-  as its owning surface. See [activation runtime](/docs/extend/develop/sdk/plugin-activation) and
+  The VS-Code-style runtime is partly live and bounded. The manifest carries a `contributes`
+  block, `activation_events`, and an `engines.ryu` version pin
+  (`apps/core/src/plugin_manifest/mod.rs`). The activation runtime
+  (`apps/core/src/runnable/mod.rs`) wakes a plugin's runnables when its startup, chat, command,
+  route, or capability cold-start events fire.
+
+  A plugin gets no arbitrary in-process Core API and cannot mutate Core routes. UI uses pre-built widget, Companion, and extension-host seams.
+  Each declarative contribution is only as live as its owning surface.
+
+  See [activation runtime](/docs/extend/develop/sdk/plugin-activation) and
   [remaining runtime boundaries](/docs/extend/develop/sdk/plugin-activation#remaining-runtime-boundaries).
 </Callout>
+
 ## What a plugin is
 
 A **plugin** is a bundle of one or more **Runnables** plus the **permission grants** they need,
 packaged so Core can install, enable, disable, and update it as a unit. The canonical manifest file
 name is `manifest.json`. Core still reads the earlier `plugin.json` and legacy `ryu.json` names.
 `bunx ryu pack` writes its bundle to `dist/plugin.bundle.json`.
+
+```mermaid
+classDiagram
+  class PluginManifest {
+    id
+    name
+    version
+    permission_grants
+    activation_events
+  }
+  class RunnableEntry {
+    id
+    name
+    kind
+    config
+  }
+  class CompanionSurface {
+    label
+    icon
+    shortcut
+  }
+  class Contributes {
+    tools
+    agents
+    message_actions
+  }
+  PluginManifest "1" --> "*" RunnableEntry : runnables
+  PluginManifest --> CompanionSurface : companion
+  PluginManifest --> Contributes : contributes
+  Contributes ..> RunnableEntry : references by id
+```
 
 The authoritative Rust types live in `crates/core/kernel-contracts/src/{manifest.rs,schema.rs}`.
 Core (`apps/core/src/plugin_manifest/`) and the [Rust SDK](/docs/extend/develop/sdk/rust) re-export
@@ -86,12 +121,14 @@ control how it appears in the marketplace catalog and the storefront index.
 | `icon` | string | Icon token or URL for the catalog card. |
 | `iconDither` | object | Optional `{ from, to, direction }` dither treatment for the icon. |
 
-Uninstall protection and the official or verified publisher marks are **not** manifest fields a
-third-party author sets. Core decides which plugins are protected system components (see
-[App lifecycle](/docs/core/app-manifest-lifecycle)), and the Marketplace derives publisher marks
-from publisher verification. There is also no `preinstalled` manifest field: fresh-install records
-come from Core's preinstall policy, while install-on-demand packages remain absent until the user
-installs them.
+Some attributes are **not** manifest fields a third-party author sets:
+
+- **Uninstall protection.** Core decides which plugins are protected system components (see
+  [App lifecycle](/docs/core/app-manifest-lifecycle)).
+- **Official or verified publisher marks.** The Marketplace derives them from publisher
+  verification.
+- **Pre-installation.** There is no `preinstalled` field. Fresh-install records come from Core's
+  preinstall policy. Install-on-demand packages stay absent until the user installs them.
 
 `validate_plugin_id` (`crates/core/kernel-contracts/src/manifest.rs`, mirrored in `ryu-sdk`)
 enforces the id rules above so an `id` can never escape `~/.ryu/plugins/<id>/`.
@@ -197,16 +234,19 @@ caller's app permissions.
 ### Uninstall and app data
 
 Uninstalling removes the package but keeps the plugin's data by default, so a later reinstall picks
-up where it left off. `GET /api/plugins/:id/uninstall-data` lists the optional data the plugin
-currently owns, with a label, description, count, and size for each item; only items the plugin
-actually has are returned. To delete some of it in the same uninstall, send their ids in the body:
+up where it left off.
+
+`GET /api/plugins/:id/uninstall-data` lists the optional data the plugin currently owns. Each item
+has a label, description, count, and size. Only items the plugin actually has are returned.
+
+To delete some of it in the same uninstall, send their ids in the body:
 `POST /api/plugins/:id/uninstall` with `{ "cleanup": ["settings", "files"] }`.
 
 | Cleanup id | Label | What it deletes |
 |---|---|---|
 | `keybindings` | Keyboard shortcuts | Saved shortcut overrides for the plugin's commands |
 | `settings` | Saved app settings | The plugin's saved settings values |
-| `secrets` | Saved credentials | The plugin's encrypted secret slots |
+| `secrets` | Saved credentials | The plugin's encrypted secret slots. Always applied, even when not selected, so a credential never outlives the app it was given to. |
 | `storage` | Plugin storage | Key/value records the plugin stored |
 | `scheduler` | Scheduled automations | Automations the plugin created |
 | `oauth` | Connected accounts | Accounts connected for the plugin's MCP servers |
@@ -214,7 +254,9 @@ actually has are returned. To delete some of it in the same uninstall, send thei
 | `files` | App files | The plugin's own data folder, `<data dir>/plugin-data/<dir>/` (its databases, preferences, media, and caches) |
 | `data:<category>` | The category's title | A data category the plugin declares in its manifest |
 
-A cleanup step that fails is reported in the response without blocking the uninstall itself.
+A cleanup step that fails is reported in the response without blocking the uninstall itself. The
+body also accepts `delete_storage: true` (alias `deleteStorage`), which is the same as selecting
+`storage`.
 
 ## Related
 

@@ -5,16 +5,31 @@ description: "Where Gateway configuration comes from, how credentials are separa
 
 The Gateway reads one TOML file, applies environment variable overrides, and exposes a runtime API
 for live edits. When Core runs the Gateway as a sidecar, Core sets most of this. When you run the
-Gateway standalone in front of your own agents, you own the file. For that standalone
-setup, see [Gateway for any agent](/docs/gateway/gateway-for-any-agent).
+Gateway standalone in front of your own agents, you own the file; see
+[Gateway for any agent](/docs/gateway/gateway-for-any-agent).
 
 ## Credential purposes
 
 Managed nodes do not use one bearer for every Gateway operation. Initial enrollment uses a
-single-use bootstrap exchange. The response separates a **node-control** credential for lifecycle
-and resolution calls from an **inference-relay** credential for model traffic. Each route declares
-the purpose and operation it accepts; an ambiguous, missing, or wrong-purpose credential fails
-closed. Core persists the pair before acknowledging bootstrap consumption, so a crash cannot adopt
+single-use bootstrap exchange, and the response returns two credentials:
+
+- a **node-control** credential for lifecycle and resolution calls;
+- an **inference-relay** credential for model traffic.
+
+Each route declares the purpose and operation it accepts. An ambiguous, missing, or wrong-purpose
+credential fails closed.
+
+```mermaid
+sequenceDiagram
+  participant N as Core on the node
+  participant CP as Control plane
+  N->>CP: single-use bootstrap exchange
+  CP-->>N: node-control and inference-relay credentials
+  N->>N: persist both credentials
+  N->>CP: acknowledge bootstrap consumption
+```
+
+Core persists the pair before acknowledging bootstrap consumption, so a crash cannot adopt
 credentials that were never made durable.
 
 Standalone API keys remain separate from this managed lifecycle. They do not become control-plane
@@ -22,12 +37,16 @@ credentials, and a control credential cannot be used as an inference bearer.
 
 ## Where config comes from
 
-The Gateway resolves `gateway.toml` from `GATEWAY_CONFIG` if set, otherwise from
-`<os-config>/ryu<suffix>/gateway.toml`, where the suffix is empty for the `release` profile and
-`-<profile>` otherwise (`GatewayConfig::config_path`, `apps/gateway/src/config.rs`). Values
-from the file are the base; specific environment variables override individual keys at load time
-(`from_env` in the same file). Writes through the API are persisted back to the same path through a file
-transaction that checks the file revision before it commits (`GatewayConfig::save`).
+The Gateway resolves `gateway.toml` in this order (`GatewayConfig::config_path`,
+`apps/gateway/src/config.rs`):
+
+1. `GATEWAY_CONFIG`, if set.
+2. Otherwise `<os-config>/ryu<suffix>/gateway.toml`. The suffix is empty for the `release` profile
+   and `-<profile>` otherwise.
+
+Values from the file are the base. Specific environment variables override individual keys at load
+time (`from_env` in the same file). Writes through the API are persisted back to the same path
+through a file transaction that checks the file revision before it commits (`GatewayConfig::save`).
 
 ```text
 gateway.toml          base config (TOML)
@@ -37,10 +56,15 @@ gateway.toml          base config (TOML)
 
 ### Credentials in the file are encrypted
 
-Every credential in `gateway.toml` (provider and account keys, `[auth]` client keys and
-`master_key`, channel tokens and secrets, and the `[composio]`, `[control_plane]`, `[credits]`,
-and `[compression]` secrets) is stored as a sealed `encc:v1:` value. Other settings stay readable.
-You can still type a credential in plaintext when you edit the file by hand: the Gateway reads it
+Every credential in `gateway.toml` is stored as a sealed `encc:v1:` value. Other settings stay
+readable. Sealed credentials include:
+
+- provider and account keys;
+- `[auth]` client keys and `master_key`;
+- channel tokens and secrets;
+- the `[composio]`, `[control_plane]`, `[credits]`, and `[compression]` secrets.
+
+You can still type a credential in plaintext when you edit the file by hand. The Gateway reads it
 and seals it in place on its next start, keeping your comments and layout.
 
 The sealing key is derived from Ryu's master key. When Ryu starts the Gateway it supplies that key
@@ -55,11 +79,14 @@ credentials. Give it one of these:
   value for both.
 
 Without a key, a plaintext file still loads, but the Gateway refuses to write a new credential in
-plaintext. When the Gateway is external (`RYU_GATEWAY_MANAGED=0`) and the file holds no sealed
-credential yet, Ryu also refuses to save a new credential into it until you have done one of the
-above, because the Gateway could not read the sealed value. Ryu still saves other settings, and
-leaves credentials you typed in plaintext as they are. Environment-variable
-credentials are never written to the file. See
+plaintext.
+
+When the Gateway is external (`RYU_GATEWAY_MANAGED=0`) and the file holds no sealed credential yet,
+Ryu also refuses to save a new credential into it until you have done one of the above. The Gateway
+could not read the sealed value otherwise. Ryu still saves other settings, and leaves credentials
+you typed in plaintext as they are.
+
+Environment-variable credentials are never written to the file. See
 [Gateway configuration sealing](/docs/core/encryption-credential-files#gateway-configuration).
 
 ## Ask the assistant to change it
@@ -83,11 +110,13 @@ See [Self-API](/docs/extend/develop/extensions/self-api) for how these calls are
 
 ## Read the governance boundary
 
-The setting you change and the agent path you use determine what the Gateway can enforce. An
-OpenAI-compatible request, or an ACP agent with gateway routing enabled, crosses the Gateway policy
-chain. An ACP agent whose routing switch is off (or whose client does not support the injected base
-URL) can send its own model calls directly to a provider. Its Ryu MCP and exec tool path is still a
-separate governed surface.
+The setting you change and the agent path you use determine what the Gateway can enforce.
+
+- An OpenAI-compatible request, or an ACP agent with gateway routing enabled, crosses the Gateway
+  policy chain.
+- An ACP agent whose routing switch is off (or whose client does not support the injected base URL)
+  can send its own model calls directly to a provider.
+- That agent's Ryu MCP and exec tool path is still a separate governed surface.
 
 ```mermaid
 flowchart LR

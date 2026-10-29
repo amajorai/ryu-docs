@@ -3,15 +3,30 @@ title: "Run an Eval from the Evaluator Catalog"
 description: "How-to for the Gateway evaluator catalog: list it, read which evaluators actually run inline, then score a dataset with POST /v1/evals/run."
 ---
 
-The Gateway ships a shared evaluator catalog with 30 built-in entries across Security, Safety,
-Quality, Conversation, Trajectory, Image, and Voice. Two of them are blank Custom templates (an LLM
-rubric and a JS/Python function). This recipe reads the catalog, checks which entries are wired to
-execution, and runs an offline evaluation over a small dataset.
+This recipe reads the Gateway evaluator catalog, checks which entries are wired to execution, and
+runs an offline evaluation over a small dataset.
 
-"Eval" means two things here. The catalog (`GET /v1/evaluators`) is the shared definition surface.
-The offline runner (`POST /v1/evals/run`) replays a dataset and scores each case. Pass registry
-`evaluators` ids (run-level, per-case, or both) to score with catalog judges, or use `assertions` for
-deterministic checks.
+The catalog has 30 built-in entries. Two are blank Custom templates: an LLM rubric
+(`llm_as_a_judge`) and a JS/Python function (`code_evaluator`). The other 28 cover Security, Safety,
+Quality, Conversation, Trajectory, Image, and Voice.
+
+"Eval" means two things here:
+
+- **The catalog** (`GET /v1/evaluators`) is the shared definition surface.
+- **The offline runner** (`POST /v1/evals/run`) replays a dataset and scores each case, with catalog
+  `evaluators` ids, deterministic `assertions`, or both.
+
+```mermaid
+flowchart LR
+  A["Desktop or script"] --> B["Core: POST /api/gateway/evals/run"]
+  A --> C["Gateway: POST /v1/evals/run"]
+  B -->|"code_evaluators stripped"| C
+  B --> D["Core runs code evaluators"]
+  C --> E["Replay: firewall, routing, provider"]
+  E --> F["Score: assertions and evaluators"]
+  F --> G["Per-case results and aggregate"]
+  D -->|"merged into each case"| G
+```
 
 ## What you'll use
 
@@ -20,7 +35,8 @@ deterministic checks.
 
 ## Prerequisites
 
-- **A running Ryu Core**, which runs the Gateway as a managed sidecar on `http://127.0.0.1:7981`.
+- **A running Ryu Core**, which runs the Gateway as a managed sidecar. The release profile serves it
+  on `http://127.0.0.1:7981`.
 - A model the Gateway can route, so a dataset run has something to call.
 
 ## Steps
@@ -33,17 +49,28 @@ deterministic checks.
 
 The catalog endpoint is read-only and is not behind the admin gate. It returns the built-in seed
 table merged with any custom evaluators in the Gateway config. A custom entry overrides a built-in
-with the same `id` and reports `builtin: false`. List it from the Gateway:
+with the same `id` and reports `builtin: false`.
 
 ```bash
 curl http://127.0.0.1:7981/v1/evaluators
 ```
 
-The response is `{ "evaluators": [...] }`. Each entry carries an `id`, a `category`, a `target`
-(`Input` / `Output` / `Conversation` / `Trajectory` / `Image` / `Audio`), and a `capabilities`
-object with `inline` and `offline` booleans. Read `capabilities` first. The Quality, Conversation,
-Trajectory, and Voice categories are **offline-only** and are never offered as inline guardrails,
-because they need a reference, a full conversation, or a trajectory to score.
+The response is `{ "evaluators": [...] }`. Each entry carries:
+
+| Field | Values |
+|---|---|
+| `id` | Stable evaluator id, such as `pii_leakage` |
+| `category` | `security`, `safety`, `quality`, `conversation`, `trajectory`, `image`, `voice`, or `custom` |
+| `target` | `input`, `output`, `conversation`, `trajectory`, `image`, or `audio` |
+| `capabilities` | `{ "inline": bool, "offline": bool }` |
+
+Read `capabilities` first:
+
+- The Quality, Conversation, Trajectory, and Voice categories are **offline-only**. They are never
+  offered as inline guardrails, because they need a reference, a full conversation, or a trajectory
+  to score.
+- Entries that target `image` or `audio`, and the `code_evaluator` template, report `false` for
+  both `inline` and `offline`. They are catalogued definitions with no executor yet.
 
 </Step>
 
@@ -73,10 +100,12 @@ or warn on the request path right now. Treat the rest as catalogued definitions,
 ### Run an offline eval set
 
 The runner is `POST /v1/evals/run`. It replays each prompt in `dataset` through the full pipeline
-(firewall, routing, provider call) and scores each case. Pass registry evaluator ids in a run-level
-`evaluators` array, per-case `evaluators`, or both. Use `assertions` for deterministic checks. An
-explicit run always scores, independent of passive evals. Use `max_concurrency`, `timeout_ms`,
-`repeat`, `cache`, and `tags` to bound and label the run:
+(firewall, routing, provider call) and scores each case. An explicit run always scores, independent
+of passive evals.
+
+- Pass registry evaluator ids in a run-level `evaluators` array, per-case `evaluators`, or both.
+- Use `assertions` for deterministic checks.
+- Use `max_concurrency`, `timeout_ms`, `repeat`, `cache`, and `tags` to bound and label the run.
 
 ```bash
 curl -X POST http://127.0.0.1:7981/v1/evals/run \
@@ -98,19 +127,33 @@ curl -X POST http://127.0.0.1:7981/v1/evals/run \
   }'
 ```
 
-Assertions include deterministic containment/validity/latency/cost/Levenshtein and nested assertion
-sets, plus model-assisted rubric/similarity/factuality/relevance checks. Set `judge_model` to hold one
-judge fixed across every case. The response returns per-case raw usage, provider/model, rendered prompt,
-metadata, assertion results, and per-evaluator breakdowns plus an aggregate. An empty `dataset` uses a
+Assertion kinds fall into two families:
+
+- **Deterministic** - containment, validity, latency, cost, Levenshtein distance, and nested
+  assertion sets.
+- **Model-assisted** - rubric, similarity, factuality, and relevance checks. Set `judge_model` to
+  hold one judge fixed across every case.
+
+The response returns, per case, raw usage, provider and model, the rendered prompt, metadata,
+assertion results, and per-evaluator breakdowns, plus an aggregate. An empty `dataset` uses a
 built-in 3-case set. See [Gateway evals](/docs/gateway/evals) for the full field list.
 
-From Core, `POST /api/gateway/evals/run` accepts the same body. Add the optional
-`code_evaluators: [{ id, lang, source }]` (`lang` = `js` | `python`) for user functions Core runs
-locally and merges into each case's `evaluators` array.
+#### Run through Core
+
+`POST /api/gateway/evals/run` on Core accepts the same body. It forwards the run with the Gateway
+token when one is configured, and otherwise passes your `Authorization` header through.
+
+It also takes an optional `code_evaluators: [{ id, lang, source }]` array (`lang` is `js` or
+`python`). Core strips that array before forwarding, runs those functions locally, and merges their
+scores into each case's `evaluators` array on a successful run. JavaScript runs in a deny-all
+sandbox. A Python case is refused with `executed: false` when no command-capable sandbox is
+available.
+
+#### Score a completed call
 
 To score a production result after the model call has already completed, use
-`POST /api/gateway/evals/score` from Core. It accepts the response, optional trace latency/cost, and
-the same assertions/evaluator ids without replaying the provider call.
+`POST /api/gateway/evals/score` from Core. It accepts the response, optional trace latency and cost,
+and the same assertions and evaluator ids, without replaying the provider call.
 
 </Step>
 
@@ -119,9 +162,8 @@ the same assertions/evaluator ids without replaying the provider call.
 ## Check your work
 
 - With no custom evaluators configured, `GET /v1/evaluators` returns 30 entries. Exactly five report
-  `enforced: true`
-  (`pii_leakage`, `code_injection`, `prompt_injection`, `toxicity`, `bias_fairness`). Every other
-  entry, including both image judges, reports `false`.
+  `enforced: true` (the five listed in step 2). Every other entry, including both image judges,
+  reports `false`.
 - `POST /v1/evals/run` returns per-case scores and an aggregate. Registry `evaluators` add
   per-evaluator breakdowns.
 - A multi-model run with `llm_judge` fans out `models * cases * (1 + judge_calls)` provider calls
@@ -129,6 +171,8 @@ the same assertions/evaluator ids without replaying the provider call.
 
 ## Going further
 
-- Bias routing toward the current best provider using rolling eval scores: eval-driven routing in [Routing](/docs/gateway/routing#the-strategies).
+- Bias routing toward the current best provider with rolling eval scores: eval-driven routing in
+  [Routing](/docs/gateway/routing#the-strategies).
 - Read every scored call back out of the queryable audit log: [Gateway audit](/docs/gateway/audit).
-- Cap what a run can spend before it fans out: [Cap what an agent can spend](/docs/learn/cookbook/cap-spend-with-a-budget).
+- Cap what a run can spend before it fans out:
+  [Cap what an agent can spend](/docs/learn/cookbook/cap-spend-with-a-budget).

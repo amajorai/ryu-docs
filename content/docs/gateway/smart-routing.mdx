@@ -9,11 +9,15 @@ model itself before normal provider routing. The default **LLM classifier** uses
 rules like *"coding or debugging → claude-sonnet-4-5"*, while the other router types split,
 stage, escalate, or explicitly preserve the requested model.
 
-It runs before the normal routing in `apply_smart_routing` (`apps/gateway/src/pipeline/routing_smart.rs`):
+<Figure name="routing" />
+
+It runs before the normal routing in `apply_smart_routing` (`apps/gateway/src/pipeline/routing_smart.rs`).
 `SmartRouter::resolve` (`apps/gateway/src/router/smart.rs`) chooses a target according to the
-configured `router_type`. The chosen model rewrites `body["model"]` *before* `pre_process` runs,
-so it then resolves its provider through the ordinary `ModelRouter`. Nothing about providers is
-hardcoded: the target is any routable model id, including local models and `openrouter/…` slugs.
+configured `router_type`.
+
+The chosen model rewrites `body["model"]` *before* `pre_process` runs, so it then resolves its
+provider through the ordinary `ModelRouter`. Nothing about providers is hardcoded: the target is
+any routable model id, including local models and `openrouter/…` slugs.
 
 This is **Plane A** model routing: it rewrites the model inside one completion request. It is one of
 two routing planes; the model-vs-agent split and the ownership rule are on the
@@ -89,18 +93,6 @@ Smart routing only runs when `enabled` is set and the selected type has the targ
 classifier model; `random` needs at least two weighted targets; `stage_router` needs both tiers;
 `escalation` needs weak, strong, and judge models. `passthrough` needs no targets.
 
-Edit rules in Desktop under **Gateway → Model routing → Smart routing**, or configure them directly
-in `gateway.toml`. The Desktop editor requires `gateway.configure`; without that permission, its
-controls, including rule removal and saving, remain read-only. Confirmation counts below 1 are
-saved as the default 2, and the editor reflects that saved value.
-
-Before saving, the editor requires each classifier rule to have both a description and target
-model. Weighted random requires at least two targets, each with a model and positive weight. Remove
-an unfinished row or complete it before retrying Save. A saved `smart_routing` change is swapped into
-the running Gateway through `PUT /v1/config` with no restart. The rest of the routing section
-(`model_map`, `fallback_chain`, and provider tiers) is read at startup and takes effect on the next
-Gateway restart.
-
 For example, a reproducible 3:1 traffic split is:
 
 ```toml
@@ -113,6 +105,29 @@ rules = [
   { description = "candidate", model = "gpt-4o-mini", weight = 1.0 },
 ]
 ```
+
+### Edit in Desktop
+
+Edit rules in Desktop under **Gateway → Model routing → Smart routing**, or configure them directly
+in `gateway.toml`.
+
+- The Desktop editor requires `gateway.configure`. Without it, its controls, including rule removal
+  and saving, remain read-only.
+- Confirmation counts below 1 are saved as the default 2, and the editor reflects that saved value.
+- Each classifier rule needs both a description and a target model. Weighted random needs at least
+  two targets, each with a model and positive weight. Remove or complete an unfinished row before
+  retrying Save.
+
+A saved `smart_routing` change is swapped into the running Gateway through `PUT /v1/config` with no
+restart. The rest of the routing section (`model_map`, `fallback_chain`, and provider tiers) is read
+at startup and takes effect on the next Gateway restart.
+
+The **Smart routing** card reads and writes the routing config through the same config endpoint as
+the rest of the **Gateway → Model routing** dialog. If the Gateway config read fails while the node
+is reachable, select **Retry** on the card to reload it.
+
+An older Gateway that does not report `routing.smart_routing` keeps the editor disabled, which avoids writing a fabricated default into
+the full routing section.
 
 ## Routing pools
 
@@ -162,12 +177,16 @@ When nothing in the pool can serve a request, smart routing does not run and the
 kept. Pools limit routing decisions only. A model that the caller requests directly is governed by
 the organization's `approved_models` allowlist and other model policy, not by the routing pool.
 
-The Gateway identifies the agent from the same identity it uses for per-agent budgets. That is
-`x-ryu-agent-id` from a trusted forwarder, such as Core forwarding an OpenAI-compatible agent's
-chat, or the Core-proven `/v1/agents/<id>` route that ACP agents use when their provider traffic is
-routed through the Gateway. A caller cannot select a different agent's pool. An ACP agent with
-direct provider egress does not send its model calls through the Gateway, so its pool has no effect
-until Gateway routing is turned back on.
+The Gateway identifies the agent from the same identity it uses for per-agent budgets, so a caller
+cannot select a different agent's pool. That identity is one of:
+
+- `x-ryu-agent-id` from a trusted forwarder, such as Core forwarding an OpenAI-compatible agent's
+  chat;
+- the Core-proven `/v1/agents/<id>` route that ACP agents use when their provider traffic is routed
+  through the Gateway.
+
+An ACP agent with direct provider egress does not send its model calls through the Gateway, so its
+pool has no effect until Gateway routing is turned back on.
 
 In Desktop, edit the node pool under **Gateway → Model routing → Smart routing → Routing pool**. Edit an
 agent's pool in that agent's settings under **Routing pool**. Both editors need the
@@ -229,33 +248,36 @@ rules = [
 ```
 
 The Gateway applies the override to every request attributed to that agent, using the same agent
-identity as [routing pools](#routing-pools) and per-agent budgets: `x-ryu-agent-id` from a trusted
-forwarder, or the Core-proven `/v1/agents/<id>` route. That covers OpenAI-compatible agents and ACP
-agents whose model calls go through the Gateway. An ACP agent with direct provider egress bypasses
-the Gateway, so its override has no effect until Gateway routing is turned back on.
+identity as [routing pools](#routing-pools). That covers OpenAI-compatible agents and ACP agents
+whose model calls go through the Gateway. An ACP agent with direct provider egress bypasses the
+Gateway, so its override has no effect until Gateway routing is turned back on.
 
-`configured_agent_router` in `apps/gateway/src/pipeline/routing_smart.rs` builds or reuses one `SmartRouter` per
-distinct override (hashed JSON, cached in `AppState.per_agent_routers`). An override's own
-`agent_pools` and `agent_routes` are ignored. An override can define its own `allowed_models` and
-`allowed_providers`; the node pool and that agent's `agent_pools` entry still apply, so an override
-cannot leave the node's [routing pool](#routing-pools).
+`configured_agent_router` in `apps/gateway/src/pipeline/routing_smart.rs` builds or reuses one
+`SmartRouter` per distinct override (hashed JSON, cached in `AppState.per_agent_routers`).
 
-Core can also send a request-scoped override as the private `ryu_smart_route` body field, which the
-Gateway accepts only from a trusted forwarder and strips before the provider call. When present, it
-wins over the stored `agent_routes` entry. Older Desktop builds stored overrides in the
-`agent-smart-route` Core preference, which Core sends this way only for OpenAI-compatible chat. The
-agent editor loads such an entry as its starting draft, and saving moves it to `agent_routes` and
-removes the Core copy.
+- An override's own `agent_pools` and `agent_routes` are ignored.
+- An override can define its own `allowed_models` and `allowed_providers`. The node pool and that
+  agent's `agent_pools` entry still apply, so an override cannot leave the node's
+  [routing pool](#routing-pools).
 
-In Desktop, open an agent's settings and use **Override model routing for this agent**. Saving
-requires the `gateway.configure` permission. The editor keeps the draft if a read or save fails. Turning the override off removes only that agent's entry. Changes apply to new requests
-without a Gateway restart.
+### Request-scoped override
 
-The **Smart routing** card in **Gateway → Model routing** reads and writes the routing config
-through the same config endpoint as the rest of the dialog. If the Gateway config read fails while
-the node is reachable, select **Retry** on the card to reload it.
-An older Gateway that does not report `routing.smart_routing` keeps the editor disabled; this avoids
-writing a fabricated default into the full routing section.
+Core can also send a request-scoped override as the private `ryu_smart_route` body field. The
+Gateway accepts it only from a trusted forwarder and strips it before the provider call. When
+present, it wins over the stored `agent_routes` entry.
+
+Older Desktop builds stored overrides in the `agent-smart-route` Core preference, which Core sends
+this way only for OpenAI-compatible chat. The agent editor loads such an entry as its starting
+draft, and saving moves it to `agent_routes` and removes the Core copy.
+
+### Edit an override in Desktop
+
+Open an agent's settings and use **Override model routing for this agent**.
+
+- Saving requires the `gateway.configure` permission.
+- The editor keeps the draft if a read or save fails.
+- Turning the override off removes only that agent's entry.
+- Changes apply to new requests without a Gateway restart.
 
 ## Behavior and guarantees
 
