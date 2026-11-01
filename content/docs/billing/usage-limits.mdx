@@ -1,12 +1,13 @@
 ---
 title: "Spend Limits and Usage API"
-description: "Set organization, member, team, key, and service account spend caps and rate limits, read current-window status, and export usage by member, key, team, model, provider, project, or service account."
+description: "Set organization, member, team, key, service account, project, and bot spend caps and rate limits, split budgets between API and subscription credit, read current-window status, and export usage by member, key, team, model, provider, project, or service account."
 ---
 
 Organization owners can cap managed spend and request rates for the whole organization, for every
-member, for individual members and teams, for individual keys, and for service accounts. Console and
-the HTTP API report how much of each cap is used in its current window and break usage down by
-member, key, team, model, provider, project, or service account.
+member, for individual members and teams, for individual keys, for service accounts, for projects,
+and for bots. Any cap can also limit how much of its spend comes from API credit and how much from
+subscription credit. Console and the HTTP API report how much of each cap is used in its current
+window and break usage down by member, key, team, model, provider, project, or service account.
 
 <Figure name="budgets" />
 
@@ -26,7 +27,7 @@ The platform margin is taken once, as the deposit fee on a top-up.
 
 ## How limits are evaluated
 
-A limit (a **limit spec**) can be attached at six places:
+A limit (a **limit spec**) can be attached at eight places:
 
 | Scope | Applies to |
 |---|---|
@@ -36,11 +37,17 @@ A limit (a **limit spec**) can be attached at six places:
 | `teams[teamId]` | Usage attributed to one team |
 | `keys[keyId]` | One Gateway credential or organization API key (see [Per-key limits](#per-key-limits)) |
 | `serviceAccounts[serviceAccountId]` | Every Gateway key of one service account (see [Service account limits](#service-account-limits)) |
+| `projects[projectId]` | Usage attributed to one project (see [Project limits](/docs/billing/scoped-budgets#project-limits)) |
+| `bots[botId]` | Usage of one verified agent or Managed Agent (see [Bot limits](/docs/billing/scoped-budgets#bot-limits)) |
+
+A member cap is a user-specific budget: `members[userId]` sets one person's cap, and
+`memberDefault` gives every other member the same cap of their own.
 
 Every applicable cap is checked for each request: the member cap (or the member default), the team
-cap, the organization cap, the key cap, and the cap of the service account that owns the key. A
-request is blocked when **any** applicable cap with the `stop` action is exhausted, so a generous
-member cap never lifts an exhausted organization cap.
+cap, the organization cap, the key cap, the cap of the service account that owns the key, the
+project cap, and the bot cap. A request is blocked when **any** applicable cap with the `stop`
+action is exhausted, so a generous member or project cap never lifts an exhausted organization
+cap.
 
 ```mermaid
 flowchart LR
@@ -49,11 +56,15 @@ flowchart LR
   R --> O["Organization cap"]
   R --> K["Key cap"]
   R --> S["Service account cap"]
+  R --> P["Project cap"]
+  R --> BT["Bot cap"]
   M --> D{"Any stop cap exhausted?"}
   T --> D
   O --> D
   K --> D
   S --> D
+  P --> D
+  BT --> D
   D -->|Yes| B["Blocked"]
   D -->|No| A["Allowed"]
 ```
@@ -93,11 +104,19 @@ personal node for their own caps, team caps, and user layer.
 | `alertThresholdsPct` | integer array | Percentages of the cap that notify owners and admins, for example `[50, 80, 100]`. |
 | `rpm` | integer or `null` | Requests per minute. |
 | `tpm` | integer or `null` | Tokens per minute. |
+| `fundingBudgets` | object | `subscriptionMicroUsd` and `apiMicroUsd`: caps on the spend paid from subscription credit and from API credit, each integer or `null`. See [API and subscription credit budgets](/docs/billing/scoped-budgets#api-and-subscription-credit-budgets). |
 
 Omitted fields default to no spend cap, a `monthly` window, the `notify` action, no alert
-thresholds, and no rate caps. On the hosted Gateway the
+thresholds, no rate caps, and no credit-source caps. On the hosted Gateway the
 [plan rate ceiling](#plan-rate-ceilings-on-the-hosted-gateway) still applies. A `notify` cap without
 explicit thresholds sends one alert when it is reached.
+
+## Credit-source, project, and bot budgets
+
+Any cap can also limit how much of its spend comes from subscription credit and how much from API
+credit (`fundingBudgets`), and caps can be set per project (`projects`) and per bot (`bots`). See
+[Project, Bot, and Credit-Source Budgets](/docs/billing/scoped-budgets) for what each source counts, how projects and bots
+are attributed, and which Gateway versions enforce them.
 
 ## Several Gateways
 
@@ -140,13 +159,14 @@ spend the rest of the fleet serves in one report interval plus one minute.
 
 ### Large organizations
 
-The organization-wide figures cover up to 5,000 members, teams, keys, and service accounts with
-spend in their current window. Explicit member, team, key, and service account caps are filled
-first, then members on the member default, each starting with the largest spender.
+The organization-wide figures cover up to 5,000 members, teams, keys, service accounts, projects,
+and bots with spend in their current window. Explicit caps are filled first, then members on the
+member default, each starting with the largest spender.
 
 If more subjects have spend, the smallest spenders are left out, and the Gateway is told the largest
-spend that was left out in each scope. It checks every unlisted member, team, key, or service account
-against that amount plus the spend it has served since, because none of them can have spent more.
+spend that was left out in each scope. It checks every unlisted member, team, key, service account,
+project, or bot against that amount plus the spend it has served since, because none of them can
+have spent more.
 
 - A subject that was left out is never checked against its own count alone, but it can be blocked
   sooner than its actual spend requires.
@@ -257,7 +277,9 @@ An organization API key's entry is enforced by the Ryu API when it authenticates
 that key, not by a Gateway:
 
 - A `stop` spend cap refuses the request with `402` once the spend recorded for the key in the
-  current window reaches the cap. `downgrade` and `notify` caps don't block these requests.
+  current window reaches the cap, or once a [credit-source cap](/docs/billing/scoped-budgets#where-credit-source-caps-apply)
+  of the credit the wallet draws from next is spent. `downgrade` and `notify` caps don't block
+  these requests.
 - `rpm` refuses the request with `429` after that many requests in the current minute. Each Ryu API
   server counts separately, so the combined ceiling is up to `rpm` per server. Use `rateLimitMax`
   and `rateLimitTimeWindow` for an exact ceiling that every server shares.
@@ -342,5 +364,6 @@ organization activity log.
 ## Related
 
 <Cards>
+  <Card title="Project, Bot, and Credit-Source Budgets" href="/docs/billing/scoped-budgets" description="Cap spend per project and per bot, and split a budget between subscription and API credit." />
   <Card title="Limits and Usage API" href="/docs/billing/usage-limits-api" description="Read and replace limits, check current-window status, and break down or export usage." />
 </Cards>

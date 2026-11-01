@@ -5,7 +5,7 @@ const userGuide = new URL(
   import.meta.url,
 );
 const agentEditor = new URL(
-  "../../../../packages/blocks/src/desktop/agent-edit.tsx",
+  "../../../../packages/blocks/src/desktop/agent-edit-settings-form.tsx",
   import.meta.url,
 );
 const runHistoryView = new URL(

@@ -1,6 +1,6 @@
 ---
 title: "Hosted Budgets and Credit Gates"
-description: "How Ryu's hosted Gateway enforces organization budgets and rate limits, runs the pre-flight credit gate, debits per tool call, and meters remote sandboxes."
+description: "How Ryu's hosted Gateway enforces organization, project, and bot budgets, API and subscription credit budgets, and rate limits, runs the pre-flight credit gate, debits per tool call, and meters remote sandboxes."
 ---
 
 On the [managed data plane](/docs/gateway/managed-data-plane), each resolved `rgw_` token carries
@@ -20,6 +20,9 @@ resolution and apply to every request on the organization's `rgw_` tokens:
 | Member | One verified user. Users without their own entry get the member default |
 | Team | Every verified member of the team |
 | Key | Traffic on one `rgw_` credential |
+| Service account | Every `rgw_` credential one service account holds |
+| Project | Traffic attributed to one project: a node running for the project, or a key scoped to it |
+| Bot | One verified Ryu agent, or one Managed Agent (`ma:<id>`) |
 
 ### What a cap can set
 
@@ -29,9 +32,38 @@ resolution and apply to every request on the organization's `rgw_` tokens:
 | Exhaustion action | `stop`, `downgrade` to a named cheaper model, or `notify` |
 | Alert thresholds | Early-warning percentages of the budget |
 | `rpm`, `tpm` | Requests-per-minute and tokens-per-minute ceilings, at least `1` |
+| Credit-source budgets | Separate amounts for spend paid from subscription credit and from API credit, over the same window |
 
 Leave a field empty (`null`) for no limit. A budget of `0` is a real cap that blocks all charged
 spend.
+
+### API and subscription credit
+
+A cap can say how much of its spend may come from each kind of credit, for example $1,000 a month
+from API credit and $10,000 a month from subscription credit:
+
+- **Subscription credit** is your plan's included credit.
+- **API credit** is purchased credit: on-demand top-ups and standalone service credits.
+- Free (promotional, referral, and challenge) credit and gift balance count toward neither. They
+  count only toward the cap's total budget.
+
+Each source is checked on its own, alongside the total. When the Gateway fetches the organization's
+limits it receives the spend already debited from each source in the current window. It counts the
+spend it serves afterwards against the source the organization's wallet is drawing from at that
+moment, or against both when that is unknown, so a credit-source cap is never under-counted. See
+[API and subscription credit budgets](/docs/billing/scoped-budgets#api-and-subscription-credit-budgets)
+for the full rules.
+
+### Project and bot attribution
+
+- **Project.** The project comes from the node's project binding, which Ryu validates against the
+  credential before applying it, or from a key's configured `project_id`.
+- **Bot.** The agent id counts only when the Gateway verified it: a dynamic credential Core signed
+  for that agent, or a trusted-forwarder key. Any other caller's `x-ryu-agent-id` header is
+  ignored for bot caps.
+
+Older self-hosted Gateways ignore project caps, bot caps, and credit-source budgets; Ryu's hosted
+Gateway always enforces them.
 
 ### How caps are enforced
 
@@ -39,11 +71,12 @@ spend.
   applicable `stop` cap is exhausted.
 - A `stop` returns `402 budget_exceeded`.
 - Exhausted caps and crossed thresholds are reported on the `x-ryu-policy-alert` response header.
-- Rate ceilings return `429` and keep a separate bucket per member, team, key, and organization.
+- Rate ceilings return `429` and keep a separate bucket per member, team, key, service account,
+  project, bot, and organization.
 
 The node's own `[budgets]` rules still apply alongside the organization's caps. Spend counters
-persist next to the audit database, and the Gateway reports daily spend per user, key, and team
-back to the control plane.
+persist next to the audit database, and the Gateway reports daily spend per user, key, team,
+project, and bot back to the control plane.
 
 ### Plan rate ceilings
 

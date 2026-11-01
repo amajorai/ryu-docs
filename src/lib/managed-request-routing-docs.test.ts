@@ -49,7 +49,23 @@ function sectionBody(source: string, sectionId: string): string {
 }
 
 test("Desktop renders the Managed request routing card only in Gateway → Network", async () => {
-  const dialog = await Bun.file(gatewayDialogPath).text();
+  // GatewayDialog.tsx is split into `GatewayDialog-*.ts(x)` parts; read them all.
+  const dialogDirectory = join(gatewayDialogPath, "..");
+  const dialogParts = (await readdir(dialogDirectory))
+    .filter(
+      (name) =>
+        name.startsWith("GatewayDialog-") &&
+        /\.tsx?$/.test(name) &&
+        !name.includes(".test."),
+    )
+    .sort();
+  const dialog = (
+    await Promise.all(
+      [gatewayDialogPath, ...dialogParts.map((name) => join(dialogDirectory, name))].map(
+        (path) => Bun.file(path).text(),
+      ),
+    )
+  ).join("\n");
   const card = await Bun.file(nodeRoutingSettingsPath).text();
 
   expect(card).toContain(`title="${CARD_TITLE}"`);

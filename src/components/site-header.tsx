@@ -1,12 +1,18 @@
 "use client";
 
+import {
+  CHALLENGES_FLAG,
+  featureFlagFallback,
+} from "@ryu/auth/lib/feature-flags";
 import { hiddenProductListings } from "@ryu/auth/lib/product-launch-flags";
-import { DownloadMenu } from "@ryu/blocks/web/download-menu.tsx";
+import { DOWNLOAD_PAGE_PATH } from "@ryu/blocks/web/download-share-links.ts";
+import { HeaderDownloadCta } from "@ryu/blocks/web/header-download-cta.tsx";
 import {
   HeaderLinkOrigin,
   ProductsMenu,
   ResourcesMenu,
 } from "@ryu/blocks/web/header-catalog-menus.tsx";
+import { useSendDownloadLink } from "@ryu/blocks/web/send-download-link.tsx";
 import { badgeVariants } from "@ryu/ui/components/badge";
 import { buttonVariants } from "@ryu/ui/components/button";
 import {
@@ -21,7 +27,7 @@ import {
   SearchTrigger,
 } from "fumadocs-ui/layouts/shared/slots/search-trigger";
 import { ThemeSwitch } from "fumadocs-ui/layouts/shared/slots/theme-switch";
-import { LanguagesIcon } from "lucide-react";
+import { DownloadIcon, LanguagesIcon } from "lucide-react";
 import { usePathname } from "next/navigation";
 
 import { LocalizedLink } from "@/components/localized-link";
@@ -57,6 +63,16 @@ export const SITE_SIGN_IN_URL = `${MAIN_SITE_URL}/login`;
  */
 const DOCS_HIDDEN_PRODUCT_IDS = hiddenProductListings(null);
 
+/*
+ * Resources the landing leaves out under the same defaults: Challenges while
+ * `community.challenges` is closed (apps/web/src/components/site-header.tsx).
+ */
+const DOCS_HIDDEN_RESOURCE_HREFS: readonly string[] = featureFlagFallback(
+  CHALLENGES_FLAG,
+)
+  ? []
+  : ["/challenges"];
+
 const NAV_LINK_CLASS = cn(
   buttonVariants({ size: "sm", variant: "ghost" }),
   "text-foreground hover:bg-muted hover:text-foreground",
@@ -72,6 +88,33 @@ function GitHubIcon() {
     <svg aria-hidden="true" fill="currentColor" viewBox="0 0 24 24">
       <path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.07 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.62-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .32.21.69.82.57A12 12 0 0 0 12 .3" />
     </svg>
+  );
+}
+
+/*
+ * On a phone the split download button does not fit beside Sign in, so the
+ * header shows one icon-only mono pill instead. Like the split button's
+ * primary segment, a tap on a phone opens the "send the link to yourself"
+ * drawer; anywhere else it opens the download page on ryuhq.com.
+ */
+function MobileDownloadButton({ className }: { className?: string }) {
+  const sendLink = useSendDownloadLink(MAIN_SITE_URL);
+  return (
+    <>
+      <a
+        aria-haspopup={sendLink.mobile ? "dialog" : undefined}
+        aria-label="Download"
+        className={cn(
+          buttonVariants({ radius: "pill", size: "icon-sm", variant: "mono" }),
+          className,
+        )}
+        href={`${MAIN_SITE_URL}${DOWNLOAD_PAGE_PATH}`}
+        onClick={sendLink.intercept}
+      >
+        <DownloadIcon aria-hidden="true" className="size-4" />
+      </a>
+      {sendLink.drawer}
+    </>
   );
 }
 
@@ -140,7 +183,10 @@ export function SiteHeader({
                   />
                 </MotionNavigationMenuItem>
                 <MotionNavigationMenuItem value="resources">
-                  <ResourcesMenu pathname="" />
+                  <ResourcesMenu
+                    hiddenHrefs={DOCS_HIDDEN_RESOURCE_HREFS}
+                    pathname=""
+                  />
                 </MotionNavigationMenuItem>
               </MotionNavigationMenuList>
             </MotionNavigationMenu>
@@ -185,17 +231,20 @@ export function SiteHeader({
             <GitHubIcon />
           </a>
           <ThemeSwitch className="rounded-full max-md:hidden" />
-          {/* The landing's split download button and sign-in, styled as on
-              ryuhq.com (apps/web/src/components/site-header-client.tsx). */}
+          {/* The landing header's own download button (HeaderDownloadCta, shared
+              with apps/web/src/components/site-header-client.tsx) and sign-in. The
+              whole split control (primary and chevron) gives way to the
+              icon-only button on phones. */}
           <div className="ms-1.5 flex items-center gap-2 [&>button]:rounded-full">
-            <DownloadMenu
-              className="hidden sm:inline-flex"
-              contentAlign="end"
-              showSeparator={false}
-              siteOrigin={MAIN_SITE_URL}
-              size="sm"
-              variant="mono"
-            />
+            <MobileDownloadButton className="sm:hidden" />
+            <div className="hidden sm:contents">
+              <HeaderDownloadCta
+                beam={transparent}
+                showSeparator={false}
+                siteOrigin={MAIN_SITE_URL}
+                variant="mono"
+              />
+            </div>
             <a
               className={buttonVariants({ size: "sm", variant: "ghost" })}
               href={SITE_SIGN_IN_URL}

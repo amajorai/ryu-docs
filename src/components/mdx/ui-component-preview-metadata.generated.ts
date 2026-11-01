@@ -145,7 +145,6 @@ export const UI_COMPONENT_PREVIEW_METADATA = {
         "voice-call-muted",
         "workbench-status",
         "workbench-tab-close",
-        "worktree-handoff",
       ],
       radius: ["default", "pill", "small"],
       typography: ["caption", "compact", "default"],
@@ -343,7 +342,7 @@ export const UI_COMPONENT_PREVIEW_METADATA = {
   "components/item": {
     props: {
       size: ["default", "sm", "xs"],
-      variant: ["default", "icon", "image", "muted", "outline"],
+      variant: ["default", "flush", "icon", "image", "muted", "outline"],
     },
     targetExport: "Item",
   },
@@ -352,15 +351,16 @@ export const UI_COMPONENT_PREVIEW_METADATA = {
     targetExport: "MotionNavigationMenu",
   },
   "components/navigation-menu": { props: {}, targetExport: "NavigationMenu" },
-  "components/page-header": { props: {}, targetExport: "PageHeader" },
+  "components/page-header": {
+    props: { size: ["app", "default"] },
+    targetExport: "PageHeader",
+  },
   "components/pagination": { props: {}, targetExport: "Pagination" },
   "components/resizable": { props: {}, targetExport: "ResizableHandle" },
   "components/sidebar": {
     props: {
       side: ["left", "right"],
-      size: ["compact", "default", "lg", "md", "sm"],
-      state: ["collapsed", "expanded"],
-      variant: ["default", "floating", "inset", "outline", "sidebar"],
+      variant: ["floating", "inset", "sidebar"],
       defaultOpen: ["false", "true"],
       open: ["false", "true"],
     },

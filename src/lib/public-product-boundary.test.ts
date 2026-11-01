@@ -28,7 +28,9 @@ const forbiddenPublicPatterns = [
   },
   {
     label: "internal benchmark commentary",
-    pattern: /\b(?:benchmark pushback|benchmarks are fake|the .*crowd)\b/i,
+    // A quoted label before "crowd" (the "benchmarks are fake" crowd). A bare
+    // `the .*crowd` also matched ordinary release-note prose ("re-colour the crowd").
+    pattern: /\b(?:benchmark pushback|benchmarks are fake|the ["“][^"”\n]+["”] crowd)\b/i,
   },
   {
     label: "internal roadmap milestone",

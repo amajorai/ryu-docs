@@ -131,6 +131,11 @@ export const catalogManifestSchema = z.object({
       apps: z
         .array(z.object({ id: optionalText, min_version: optionalText }))
         .optional(),
+      capabilities: z
+        .array(
+          z.object({ capability: optionalText, min_version: optionalText }),
+        )
+        .optional(),
       grants: optionalTexts,
     })
     .optional(),

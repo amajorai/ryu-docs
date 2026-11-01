@@ -76,6 +76,11 @@ export const docs = defineDocs({
 export default defineConfig({
   plugins: [lastModified({ versionControl: getLastModified })],
   mdxOptions: {
+    // Remote images are still sized at build time (the deploy badges need it),
+    // but a slow or failed fetch no longer fails the whole docs build: release
+    // notes pages carry many package icons from raw.githubusercontent.com, and
+    // `DocsImage` (src/components/mdx.tsx) renders those at a fixed size anyway.
+    remarkImageOptions: { external: { timeout: 15_000 }, onError: "ignore" },
     // Convert ```mermaid code blocks into the <Mermaid> client component and
     // mark readable blocks so the docs feedback popover can attribute a
     // submission to the paragraph or list item the reader selected.

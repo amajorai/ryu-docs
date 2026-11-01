@@ -38,6 +38,36 @@ function FramedTable(props: ComponentProps<"table">) {
   );
 }
 
+const DefaultImage = defaultMdxComponents.img;
+const PACKAGE_ICON_SOURCE =
+  /^https:\/\/raw\.githubusercontent\.com\/amajorai\/ryu-marketplace\/[^?#]+-(light|dark)\.png$/;
+
+/** Release notes pages list every package icon twice, light then dark
+ * (tools/release-notes-docs-pages.mjs), because Markdown has no `<picture>`.
+ * Show the one that matches the reader's theme at text size; every other image
+ * keeps the default figure treatment. */
+function DocsImage(props: ComponentProps<"img">) {
+  const theme =
+    typeof props.src === "string"
+      ? PACKAGE_ICON_SOURCE.exec(props.src)?.[1]
+      : undefined;
+  if (!theme) {
+    return <DefaultImage {...(props as ComponentProps<typeof DefaultImage>)} />;
+  }
+  return (
+    // biome-ignore lint/performance/noImgElement: a 20px remote package icon needs no image optimizer or remote-pattern config
+    <img
+      alt=""
+      className={`not-prose m-0 inline-block size-5 rounded align-text-bottom ${theme === "dark" ? "hidden dark:inline-block" : "dark:hidden"}`}
+      decoding="async"
+      height={20}
+      loading="lazy"
+      src={props.src}
+      width={20}
+    />
+  );
+}
+
 function DocsCard({ href, ...props }: ComponentProps<typeof FumadocsCard>) {
   return <LocalizedCard {...props} href={canonicalDocsHref(href)} />;
 }
@@ -64,6 +94,7 @@ export function getMDXComponents(
     File,
     Files,
     Folder,
+    img: DocsImage,
     Mermaid,
     Quiz,
     SurfacePreview,

@@ -997,21 +997,33 @@ function contributesSection(
   return lines.join("\n");
 }
 
+function minVersionSuffix(minVersion: string | undefined): string {
+  return minVersion ? ` (min \`${cell(minVersion)}\`)` : "";
+}
+
 function requiresSection(m: Manifest): string {
   const req = m.requires;
   const apps = req?.apps ?? [];
+  const capabilities = req?.capabilities ?? [];
   const grants = req?.grants ?? [];
-  if (apps.length === 0 && grants.length === 0) {
+  if (apps.length === 0 && capabilities.length === 0 && grants.length === 0) {
     return "";
   }
   const lines: string[] = ["", "## Dependencies"];
   if (apps.length > 0) {
     lines.push("", "Requires these apps:");
     for (const app of apps) {
-      const version = app.min_version
-        ? ` (min \`${cell(app.min_version)}\`)`
-        : "";
-      lines.push(`- \`${cell(app.id ?? "")}\`${version}`);
+      lines.push(
+        `- \`${cell(app.id ?? "")}\`${minVersionSuffix(app.min_version)}`,
+      );
+    }
+  }
+  if (capabilities.length > 0) {
+    lines.push("", "Requires these capabilities:");
+    for (const cap of capabilities) {
+      lines.push(
+        `- \`${cell(cap.capability ?? "")}\`${minVersionSuffix(cap.min_version)}`,
+      );
     }
   }
   if (grants.length > 0) {

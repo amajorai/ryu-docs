@@ -2,13 +2,13 @@
 title: "Ghost"
 description: "Let agents see and drive your desktop"
 tags: ["Automation"]
-catalog: {"kind":"plugin","id":"@ryu/ghost","category":"Automation","version":"0.1.14","official":true,"builtIn":true,"system":false,"preInstalled":true,"stability":"stable","hidden":false,"surfaces":{"gateway":"none","core":"full","desktop":"full","island":"full","mobile":"full","extension":"full","web":"full","cli":"full"},"layer":"Computer"}
+catalog: {"kind":"plugin","id":"@ryu/ghost","category":"Automation","version":"0.1.15","official":true,"builtIn":true,"system":false,"preInstalled":true,"stability":"stable","hidden":false,"surfaces":{"gateway":"none","core":"full","desktop":"full","island":"full","mobile":"full","extension":"full","web":"full","cli":"full"},"layer":"Computer"}
 generated: "generate:catalog"
 ---
 
 ## What it does
 
-Desktop automation: 29 screen perception and input control tools. Cross-platform (Windows, macOS, Linux).
+Desktop automation: 31 screen perception and input control tools. Cross-platform (Windows, macOS, Linux).
 
 This page is part of the [Plugins catalog](/docs/plugins), [plugin manifests](/docs/extend/develop/extensions/plugin-json-manifest), [plugin runtime](/docs/extend/develop/extensions/plugin-runtime), [unified tool catalog](/docs/core/unified-tool-catalog), [Marketplace](/docs/extend/develop/extensions/marketplace), [Gateway governance](/docs/gateway/governance) documentation path. In the same category, compare [Codex Computer Use](/docs/plugins/codex-computer-use), [Effort Escalator](/docs/plugins/effort-escalator), [Subagents](/docs/plugins/pi-subagent), [Usage Pacer](/docs/plugins/usage-pacer).
 
@@ -30,7 +30,7 @@ This page is part of the [Plugins catalog](/docs/plugins), [plugin manifests](/d
 
 MCP (Model Context Protocol) is a standard way for an AI host to find and call tools. An MCP server provides those tools.
 
-- **`ghost`** - Ghost - desktop automation (29 tools: screen perception + input control). Cross-platform (Windows, macOS, Linux); install the `ghost` sidecar to enable. Unavailable until installed.
+- **`ghost`** - Ghost - desktop automation (31 tools: screen perception + input control). Cross-platform (Windows, macOS, Linux); install the `ghost` sidecar to enable. Unavailable until installed.
 
 ## Visible computer-use cursor
 
@@ -44,6 +44,92 @@ cursor over the target display, so the agent never takes over your real pointer.
 - Long titles fade at the clipped edge so the label stays compact.
 - The overlay fades after the action.
 
+## Element references
+
+`ghost_snapshot` captures the focused window once and labels actionable elements with refs, so
+later calls act on a ref instead of describing the element again.
+
+- The tree shows short refs such as `@e3`. The response's `ref_prefix` turns them into the
+  preferred qualified form, `@<snapshot_id>:e3`, which always resolves against that snapshot.
+- A short ref resolves against the latest snapshot, and the result names that snapshot in
+  `ref_resolved_against`. When a different identified agent took the latest snapshot, a short ref
+  is refused; use the qualified form.
+- Ghost re-finds the element by its position and identity before it acts. It never matches on a
+  field's current value. If the element is gone or changed, its window changed, or several
+  elements match, the call is refused with `STALE_REF` or `AMBIGUOUS_TARGET` instead of
+  guessing. Take a new snapshot and retry.
+- `complete: false` means the walk hit a size or time limit. Elements marked
+  `subtree_truncated` have children that were not captured, so snapshot that part with `root`
+  before you conclude an element is missing.
+
+## Accessibility actions
+
+`ghost_click` acts on a ref or query target through the platform accessibility API first, without
+moving your pointer. Its `action` parameter accepts:
+
+| Action | Effect |
+| --- | --- |
+| `press` (default) | Activate a button, link, or menu item |
+| `focus` | Move keyboard focus to the element |
+| `toggle` | Flip a checkbox or switch |
+| `check`, `uncheck` | Set a checkbox or switch to a state |
+| `expand`, `collapse` | Open or close a tree item, disclosure, or combo box |
+| `select` | Select a list item, tab, or row |
+| `scroll_into_view` | Scroll the element into view |
+| `show_menu` | Open the element's context menu |
+
+- An element already in the requested state, such as a checked box asked to `check`, succeeds
+  without acting. The result reports `already_in_state` and a delivery of `not_delivered`.
+- Ghost uses mouse or keyboard input only when the accessibility action is not supported, the
+  call allows it (`allow_hid`, on by default), and the session has a desktop. The result then
+  reports `via: "hid"` with a `fallback_reason`. In a headless session, physical input is
+  always refused.
+- `ghost_type` with a ref and `replace: true` sets a field's whole value through accessibility and reads it
+  back. With a ref and `verify: true`, the field is read back after typing. Other calls do not
+  read the field back.
+- Stateful actions return a `verification` that says whether the effect was read back from the
+  element.
+
+## Errors
+
+A failed call returns `isError: true` with text that starts `Error: <CODE>:`, plus a structured
+error with a `code`, a `message`, a `disposition`, and an optional `suggestion`. The disposition
+says whether input may have reached the app (`delivery`) and whether repeating the call is safe
+(`retry`).
+
+| Code | Meaning | Delivery | Retry |
+| --- | --- | --- | --- |
+| `STALE_REF` | The ref no longer matches the screen | `not_delivered` | `safe` |
+| `AMBIGUOUS_TARGET` | More than one element matches | `not_delivered` | `safe` |
+| `ELEMENT_NOT_FOUND` | No element matches | `not_delivered` | `safe` |
+| `ACTION_NOT_SUPPORTED` | The element does not support the action | `not_delivered` | `safe` |
+| `POLICY_DENIED` | A safety rule refused the call | `not_delivered` | `safe` |
+| `PERM_DENIED` | An OS permission is missing | `not_delivered` | `safe` |
+| `INVALID_ARGS` | The arguments are invalid | `not_delivered` | `safe` |
+| `APP_NOT_FOUND` | The target app is not running | `not_delivered` | `safe` |
+| `PLATFORM_NOT_SUPPORTED` | Not available on this platform | `not_delivered` | `safe` |
+| `UNKNOWN_TOOL` | The tool name is unknown | `not_delivered` | `safe` |
+| `ACTION_FAILED` | The action ran but failed | `unknown` | `unknown` |
+| `TIMEOUT` | The action did not finish in time | `unknown` | `unknown` |
+| `APP_UNRESPONSIVE` | The app stopped responding | `unknown` | `unknown` |
+| `INTERNAL` | An unexpected error | `not_delivered` from a read-only tool (`ghost_snapshot`, `ghost_find`, `ghost_read`, ...), otherwise `unknown` | `safe` from a read-only tool, otherwise `unknown` |
+
+These are the default dispositions. When input was already sent, a call reports a delivered
+state such as `delivered_unverified` with retry `unsafe`, so do not repeat it blindly. Successful
+input calls also return a `disposition`. A `ghost_wait` timeout is a successful result with
+`timed_out: true`, not an error.
+
+## Safety
+
+- Password fields are marked `secure` with `value_withheld: true`. Their values never appear in
+  snapshots, reads, search, or errors, and queries never match against their values.
+- Typed text is never echoed. `ghost_type` reports `typed_chars`, a character count.
+- `ghost_press` and `ghost_hotkey` refuse system shortcuts that quit apps, log out, lock the
+  screen, switch apps, or open system dialogs, such as Cmd+Q on macOS and Alt+F4 on Windows and
+  Linux, with `POLICY_DENIED`. The refusal happens before any app is focused. Set `force` only
+  when the user explicitly asked for that shortcut.
+- Unknown key or modifier names are refused with `INVALID_ARGS` instead of being dropped.
+
 ## Device access
 
 | Platform | What Ghost needs |
@@ -55,6 +141,11 @@ cursor over the target display, so the agent never takes over your real pointer.
 On macOS, review each permission under **Settings → Privacy → Device permissions**, then restart
 Ryu and retry the operation. A standalone sidecar can be attributed to the terminal or host app
 that launched it, so check which application is listed in System Settings.
+
+On macOS, Chromium browsers and Electron apps build their web accessibility tree only when an
+assistive client asks for it. Ghost turns it on when it snapshots or acts on such an app and
+reports the result in the snapshot's `accessibility_enabled` field. If that fails, the snapshot or action still runs
+on the tree that is available.
 
 When you run the Ghost binary directly, `ghost doctor` checks capture and automation support on the current machine.
 

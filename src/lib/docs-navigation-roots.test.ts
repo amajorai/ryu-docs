@@ -97,6 +97,7 @@ describe("docs navigation: API roots, billing, and links", () => {
       "sandbox-billing",
       "usage-analytics",
       "usage-limits",
+      "scoped-budgets",
       "usage-limits-api",
       "notifications",
       "---Organizations & accounts---",
