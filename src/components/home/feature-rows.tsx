@@ -203,7 +203,7 @@ function Row({ row, flip }: { flip: boolean; row: FeatureRow }) {
                 </span>
                 <ArrowRight
                   aria-hidden="true"
-                  className="mt-0.5 size-4 shrink-0 text-fd-muted-foreground transition-[translate,color] group-hover:text-fd-foreground motion-safe:group-hover:translate-x-0.5"
+                  className="mt-0.5 size-4 shrink-0 text-fd-muted-foreground transition-[translate,color] group-hover:text-fd-foreground motion-safe:group-hover:translate-x-0.5 rtl:-scale-x-100 rtl:motion-safe:group-hover:-translate-x-0.5"
                 />
               </Link>
             </li>

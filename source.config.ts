@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { catalogAttributesSchema } from "./src/lib/catalog";
 import { createContentTimestampReader } from "./src/lib/content-timestamps";
+import { remarkExcalidrawDimensions } from "./src/lib/remark-excalidraw-dimensions";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,8 +85,10 @@ export default defineConfig({
     // Convert ```mermaid code blocks into the <Mermaid> client component and
     // mark readable blocks so the docs feedback popover can attribute a
     // submission to the paragraph or list item the reader selected.
+    // `<Excalidraw>` gets its SVG export's size so the image reserves its box.
     remarkPlugins: [
       remarkMdxMermaid,
+      remarkExcalidrawDimensions,
       [remarkBlockId, { addDataAttribute: "feedback" }],
     ],
   },

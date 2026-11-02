@@ -66,7 +66,8 @@ and PII in definitions as well.
 The pattern sets above ship built in. Add your own with `custom_patterns`. Each entry carries a
 `name`, `regex`, and `kind` (PII, secret, or prompt injection) and joins the built-in sets through
 the [policy cascade](#hierarchical-policy-resolution). Manage custom patterns through Gateway
-settings, `gateway.toml`, or the authenticated configuration API.
+settings, `gateway.toml`, or the authenticated configuration API. Each
+pattern checks both the original and the Unicode-normalized text.
 
 In Desktop, open **Gateway → Safety filters** to edit the node baseline or an org/agent overlay.
 For an agent overlay, choose an installed agent from the searchable **Agent** picker; the overlay
@@ -113,7 +114,8 @@ unchanged from one turn to the next, so [provider prompt caching](/docs/gateway/
 reusing the prefix.
 
 The same applies when the inspector or an inline evaluator uses the Sanitize action. Once one is
-configured, PII and secret spans are redacted on every request, not only on flagged ones.
+configured, PII and secret spans are redacted on every request, not only on flagged ones. A turn
+the inspector flags for PII or secrets that redaction leaves unchanged is refused with a 403.
 
 The master switch and each direction are independent toggles. All are hot-swappable through
 `PUT /v1/config` (see [Configuration](/docs/gateway/configuration)).
@@ -234,14 +236,22 @@ Evaluator bindings (`FirewallConfig.evaluators`) cascade by the same union-plus-
 
 `FirewallResolver::scanner_for` caches a compiled `FirewallScanner` keyed by a stable hash of the resolved config. Identical resolved policies share one scanner.
 
-Because a 64-bit hash can collide, the cache stores the config alongside the scanner and re-verifies equality on every hit. A collision costs at most a rebuild, never a wrong-scanner hit. Any config or overlay write invalidates the whole cache.
+Because a 64-bit hash can collide, the cache keeps the config with the scanner and re-checks it on each hit. A collision costs at most a rebuild, never a wrong-scanner hit. Any config or overlay write invalidates the whole cache.
 
 ## Model-based screens
 
-Two opt-in screens add a model's judgement on top of the pattern scanner: the LLM traffic inspector
+Two opt-in screens add a model's judgement to the pattern scanner: the LLM traffic inspector
 (prompt injection and leaks) and the hazard screener (MLCommons hazard categories and prompt
 attacks). Both resolve through the same cascade. See
 [LLM inspector and hazard screener](/docs/gateway/model-screening).
+
+The inspector judges the whole turn as untrusted data, newest first. Under `block` it refuses a turn
+it could not judge: a refusal, a content-filter stop, an empty, cut-off or prose reply, JSON without
+a verdict, an unreachable judge, or a turn past about 60,000 characters (`warn_and_continue` keeps
+serving while the judge is down). With the inspector on, the tool loop also judges each appended
+tool result and model turn; a flag under `block` or `sanitize` ends the loop with a 403. An inline
+LLM-judge evaluator flags a judge refusal; a custom rubric also flags any reply without a verdict,
+or an over-long text.
 
 ## Governed auxiliary requests
 
@@ -318,8 +328,8 @@ configuration. See
 
 `POST /v1/firewall/check` runs the scanner over an arbitrary `text` for the requested guardrails,
 without making a model call. It uses the same per-request scanner as the request path, including
-organization and agent overlays and their custom patterns, exposed for testing patterns or
-validating content out of band.
+organization and agent overlays and their custom patterns. A `checks` name it does not know returns
+400 `unknown_guardrail_check` rather than an allow.
 
 Authenticate with a valid Gateway credential before scanning. Rejected credentials never
 reach the scanner or write audit rows. Guardrail blocks use the verified caller identity

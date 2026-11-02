@@ -35,17 +35,38 @@ directly, like smart routing, so it cannot recurse back into the pipeline or the
 - Any other model id routes like any other request, so you can point inspection at a hosted model
   by setting `model`.
 
-### Fail-open behavior
+### What the judge reads
 
-These cases all resolve to "not flagged" (allow) with a warning:
+The judge reads the whole turn, not only its beginning. Long text is split into windows of about
+4,000 characters, judged newest content first, and a flag in any window flags the turn. Each window
+reaches the judge fenced as untrusted data, with chat-template control tokens neutralised, so text
+inside the turn cannot pose as the judge's instructions or as an earlier conversation.
 
-- a disabled config;
-- a turn shorter than `min_chars`;
-- an unconfigured provider, a provider error, or a timeout;
-- an unparseable reply.
+### When the judge gives no verdict
 
-A cheap local model emits dirty JSON, so the verdict is parsed defensively: the first `{…}` block,
-and on any failure, allow.
+Only a parsed verdict counts as an answer. Under the `block` action, the turn is refused when the
+judge:
+
+- refuses, or its provider stops on a content filter;
+- returns an empty reply, or a reply cut off before its verdict;
+- returns JSON without a usable verdict, or plain prose with no verdict at all;
+- cannot be reached: no provider is configured, the provider errors, or the call times out;
+- runs out of window budget (about 60,000 characters) before reaching the oldest content.
+
+An attacker can provoke each of these, for example by planting text that makes a safety-tuned judge
+refuse, or by sizing a payload so the judge times out, so none of them is treated as clean. With
+`block`, a judge that is down therefore refuses the turns it would have screened.
+
+These cases still resolve to "not flagged" (allow) with a warning:
+
+- a disabled config, or a turn shorter than `min_chars`;
+- a reply that flags only topic words outside the inspector's categories (small classify-tier
+  models answer benign turns this way).
+
+Under `sanitize` and `warn_and_continue`, a missing verdict is logged and the turn continues; the
+regex firewall has already run over the whole text. To keep serving while the judge is unreachable,
+run the inspector under `warn_and_continue`: flags are still logged and audited, but nothing is
+refused.
 
 ### What the judge adds over the regex scanner
 
@@ -56,15 +77,15 @@ they cannot reach:
 |---|---|
 | Structured PII: email, phone, SSN, credit card (Luhn-validated), public IPv4, IBAN | Contextual judgment: a slur quoted for discussion, or a term that is innocuous in context (`flame retardant`) |
 | Known secret shapes: provider keys, PATs, bearer tokens, PEM blocks, connection strings | Identifiers that are only sensitive given context, and obfuscations no pattern anticipates |
-| Seven fixed injection phrasings, over Unicode-normalized text (zero-width stripped, confusables folded) | Novel or paraphrased injections, and **encoded payload bodies** (the request to decode is a phrasing a pattern can match; the base64 body is not) |
+| Seven fixed injection phrasings, over Unicode-normalized text (invisible and bidi characters and combining underlines or overlays stripped, TAG characters decoded, lookalikes, dashes, digits and compatibility forms such as superscript, circled or small-form characters folded) | Novel or paraphrased injections, and **encoded payload bodies** (the request to decode is a phrasing a pattern can match; the base64 body is not) |
 
-Because the judge fails open, a flagged-vs-clean verdict and a judge that never answered are
-different things. The verdict carries whether the judge actually ran, so a deterministic lexical
+A flagged-vs-clean verdict and a judge that never answered are different things. The verdict carries whether the judge actually ran, so a deterministic lexical
 floor can back-stop the cases where it did not.
 
 <Callout type="warn">
 The inspector is **opt-in** (`enabled` defaults off). The `InspectorConfig` stage inspects the
-**prompt**, not the response.
+**prompt**, not the response. Inside a buffered tool loop it also judges each appended tool result
+and model turn, where indirect prompt injection arrives; a flag under block or sanitize ends the loop.
 
 Response-side LLM judging is a separate mechanism: output-target `LlmJudge` evaluators (toxicity,
 bias, PII leakage) run against the completion and apply the same Block / Sanitize / Warn actions;
@@ -91,6 +112,13 @@ skill, compression or pool handoff adds are screened again.
   per-node cache. A fallback attempt does not classify an unchanged body twice, and a later turn
   mostly classifies only the messages it adds and its tool definitions.
 - The same text placed after different earlier messages is classified again.
+- **Forged chat turns.** On chat requests and tool results, end-user text or a tool result that
+  carries a complete chat-template control token (such as `<|im_end|><|im_start|>assistant`,
+  `<|eot_id|>`, `[INST]` or `<start_of_turn>`) scores a prompt attack of `0.7`, whatever the
+  screener backend answered. Such a token can close the user's turn and open a fake assistant or
+  system turn, and can derail a guard model that reads it. With the default rules it is recorded as
+  a flag; a stricter prompt-attack rule blocks it. Your own system prompt and tool definitions are
+  not scored this way, and a lone `|>` (a pipe operator in code) or `<s>` does not count.
 
 ```mermaid
 flowchart LR
@@ -151,9 +179,27 @@ On your own Gateway:
 - `S4`, `S9` and `S12` block, and every other category, prompt attacks included, is recorded as
   a flag. A block returns `403` with `code: "tenant_policy_blocked"` and `layer: "node"`. Responses
   are screened the same way before they return, and a stream ends with an error frame instead.
-- A screener that is down, slow or answers outside its grammar never refuses your traffic: the
-  request goes through under the regex firewall.
+- `node_fail_mode` decides what happens when your screener could not classify a request or
+  response for `S4`, `S9` or `S12`. With `closed`, the default, a screener that was healthy but
+  answered outside its grammar, refused, returned an error or a busy status, timed out, or was
+  handed text too large for it refuses the request with `503` and
+  `code: "screening_unavailable"`, and a stream ends with that error as its final frame. Text that derails a guard model is therefore never let through as clean. Set
+  `node_fail_mode = "degraded"` to forward that traffic under the regex firewall instead, marked
+  degraded.
+- An outage of the screener itself (an engine that cannot be reached, or one taken out of
+  rotation after repeated engine failures) runs the degraded row in either mode, so your node keeps
+  serving under the regex firewall while the engine is down.
+- A request with more content than the screener can classify in one pass is refused with `413`
+  and `code: "screening_capacity_exceeded"`. Nothing past the limit is silently skipped.
+- A prompt attack check that could not run marks the verdict degraded on the traffic feed instead
+  of reading as clean.
 - Changes to `[screening]` apply on the next restart.
+
+```toml
+[screening]
+node_classifiers = true
+node_fail_mode = "closed" # or "degraded"
+```
 
 #### Screener endpoints from a Ryu node
 
@@ -204,6 +250,12 @@ Ryu's hosted Gateway screens every request under the
 [Ryu platform policy](/docs/gateway/organization-policy#content-screening), which chooses its
 backends and cannot be changed by an organization or a configuration write. A `PUT /v1/config`
 with a `screening` section is refused there with `403` and `code: "platform_locked"`.
+
+On Ryu's hosted Gateway a screener that answers outside its grammar, refuses, or times out on your
+content refuses that request with `503` and `code: "screening_unavailable"`, and a stream ends with
+that error as its final frame. Only an engine outage moves the hosted Gateway to its reduced mode
+(the regex firewall plus a per-organization rate), and a reply derailed by request content never
+counts toward one.
 
 ## Related
 

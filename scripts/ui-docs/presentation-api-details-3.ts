@@ -63,7 +63,7 @@ export const PRESENTATION_API_DETAILS_3 = {
   "components/button": [
     "## Download and composer presentation",
     "",
-    'Use `spacing="regular"` for the regular icon-label gap, `"standard"` for a slightly wider gap, or `"comfortable"` for the widest gap, and `edge="joined"` to remove the right border when joining adjacent controls. Both options are available on `Button` and `buttonVariants`; choose the surrounding layout at the calling site.',
+    'Use `spacing="regular"` for the regular icon-label gap, `"standard"` for a slightly wider gap, or `"comfortable"` for the widest gap, and `edge="joined"` to remove the inline-end border (the right border in left-to-right text, the left in right-to-left) when joining adjacent controls. Both options are available on `Button` and `buttonVariants`; choose the surrounding layout at the calling site.',
     "",
     'Use `appearance="download-primary"` or `"download-primary-transparent"` for the primary download action, and `"download-trigger"` or `"download-trigger-transparent"` for its adjacent trigger. The transparent choices use a transparent background, a subtle border, and a slight backdrop blur. Download trigger appearances retain their dedicated dimensions for `size="sm"`, the default size, and `"lg"`.',
     "",

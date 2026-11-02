@@ -74,6 +74,30 @@ Key flags per entry:
 The five enforced inline detectors run on the chat pipeline for both input and output. See
 [Binding an evaluator](#binding-an-evaluator) for how bindings cascade.
 
+### How an LLM judge's reply is read
+
+Offline LLM-judge evaluators and model-graded assertions (`llm_judge`, `llm_rubric`, `similar`,
+`factuality`, `context_faithfulness`, `answer_relevance`) ask the judge model to reply on one line
+with `VERDICT: PASS` or `VERDICT: FAIL`, then `SCORE:` and a number from 0 to 1. The output under
+test reaches the judge as untrusted data, so a verdict written inside it cannot become the judge's
+reply. The score is read only from `SCORE:`.
+
+A reply that did not judge is reported with `executed: false` and never passes:
+
+- the judge refused, either in a refusal field or in prose without a verdict ("I can't help with
+  that", "I'll pass on this");
+- the provider filtered or cut off the reply (finish reason `content_filter`, `length` or
+  `refusal`), or the reply was empty;
+- the reply states two different verdicts or scores;
+- the `SCORE:` is not one plain number from 0 to 1 (for example `3/10`, `85%` or `7`), so it is
+  never clamped into a passing score.
+
+A negative-signal evaluator (`higherIsBetter: false`, such as `toxicity`) also needs the judge's
+own `SCORE:`: a bare `VERDICT: FAIL` is not read as a clean score of `0`. An unexecuted check fails
+its case's assertions, and is left out of the evaluator's mean score and pass rate
+(`executedCount`). Dataset runs, online evals and `POST /v1/evals/score` all follow this rule. An
+online eval record with an unexecuted evaluator has `pass: false`, so `failed_only` lists it.
+
 ## Custom evaluators
 
 Two blank-slate evaluators let you create your own:
@@ -89,8 +113,10 @@ Saving a custom evaluator (`PUT /v1/config` with `custom_evaluators`) applies im
 catalog, dataset runs, online evals, and inline guardrails use the new set on the next request, and
 the configuration receipt reports `restartRequired: false`.
 
-Custom `regex` evaluators run their own patterns inline and offline. Patterns that do not compile
-within the size limit are rejected when you save.
+Custom `regex` evaluators run their own patterns inline and offline. Each pattern is tried against
+the raw text and against the same Unicode-normalized form the firewall scans, so zero-width
+splits, fullwidth or lookalike letters, dash variants, and digits from other scripts do not hide a
+match. Patterns that do not compile within the size limit are rejected when you save.
 
 ### Builtin detectors
 
@@ -129,6 +155,12 @@ semantics as the firewall dials (see [Hierarchical policy resolution](/docs/gate
 | `inline_action` | The `FirewallPolicy` (Block / Sanitize / Warn) applied inline when it fires |
 | `offline` | Offline scoring config (threshold, judge model) |
 | `locked` | Freeze the binding so a narrower scope can only tighten it |
+
+Under `Sanitize`, a flagged request is redacted with the firewall's PII and secret patterns. When
+that redaction leaves the request unchanged, the request is refused with a 403 instead of being
+forwarded: an LLM judge's flag names no span to redact, so passing it on would quietly turn
+Sanitize into Warn. Only an injection detector (`prompt_injection`, `code_injection`) continues
+unchanged, as the firewall's own injection match does.
 
 <Callout type="info">
 Bindings are enforced on the chat pipeline only for evaluators that report `enforced: true`.

@@ -17,6 +17,10 @@ export const ContributionSurfaces = dynamic(() =>
   ),
 );
 
+export const Excalidraw = dynamic(() =>
+  import("@/components/mdx/excalidraw").then((mod) => mod.Excalidraw),
+);
+
 export const Mermaid = dynamic(() =>
   import("@/components/mdx/mermaid").then((mod) => mod.Mermaid),
 );

@@ -14,8 +14,9 @@ export function isReleaseNotesPage(slugs: readonly string[]): boolean {
 /**
  * Search index entry for one docs page.
  *
- * Release notes are generated changelogs of about 2 MB across 43 pages, with
- * thousands of headings. `createFromSource` indexes every page once per locale
+ * Release notes are generated changelogs of several megabytes across every
+ * release and prerelease build, with thousands of headings. `createFromSource`
+ * indexes every page once per locale
  * (twelve, each falling back to the English page), so indexing their bodies
  * would hold that text twelve times in memory and slow every cold start. A
  * release page is found by its title and description (the version and date);
@@ -34,13 +35,31 @@ export function buildDocsSearchIndex(page: DocsPage): AdvancedIndex {
   return { ...entry, structuredData: page.data.structuredData };
 }
 
-const VERSION_SLUG = /^v(\d+)\.(\d+)\.(\d+)$/;
+const VERSION_SLUG =
+  /^v(\d+)\.(\d+)\.(\d+)(?:-(canary|nightly)\.(\d{8})\.(\d+))?$/;
+
+/** Sort key: stable releases before channel builds, then newest first. */
+function versionSlugKey(slug: string): number[] {
+  const match = VERSION_SLUG.exec(slug);
+  if (!match) {
+    return [2];
+  }
+  const [, major, minor, patch, channel, date, run] = match;
+  return [
+    channel ? 1 : 0,
+    -Number(major),
+    -Number(minor),
+    -Number(patch),
+    -Number(date ?? 0),
+    -Number(run ?? 0),
+  ];
+}
 
 function compareVersionSlugsDescending(a: string, b: string): number {
-  const left = VERSION_SLUG.exec(a)?.slice(1).map(Number) ?? [];
-  const right = VERSION_SLUG.exec(b)?.slice(1).map(Number) ?? [];
-  for (let i = 0; i < 3; i++) {
-    const difference = (right[i] ?? 0) - (left[i] ?? 0);
+  const left = versionSlugKey(a);
+  const right = versionSlugKey(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const difference = (left[i] ?? 0) - (right[i] ?? 0);
     if (difference !== 0) {
       return difference;
     }
@@ -51,9 +70,10 @@ function compareVersionSlugsDescending(a: string, b: string): number {
 /**
  * Split the release notes pages for /llms-sections/release-notes.
  *
- * Returning all 43 pages is a response of about 2 MB, which defeats excluding
- * the archive from llms-full.txt. The section index and the newest releases are
- * inlined; every older release is a link the agent can fetch on its own.
+ * Returning every page is a response of several megabytes, which defeats
+ * excluding the archive from llms-full.txt. The section index and the newest
+ * stable releases are inlined; every older release and every canary or nightly
+ * build is a link the agent can fetch on its own.
  */
 export function splitReleaseNotesForLlms<
   T extends { slugs: readonly string[] },

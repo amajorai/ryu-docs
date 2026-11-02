@@ -206,7 +206,7 @@ export const REALMS: Realm[] = [
     slug: "release-notes",
     title: "Release notes",
     description:
-      "Highlights and the package changelog for every stable release.",
+      "Highlights and the package changelog for every stable release, plus canary and nightly builds.",
     track: "use",
   },
 ];

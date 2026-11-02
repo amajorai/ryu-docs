@@ -12,6 +12,7 @@ import { AutoCards, DocCard } from "@/components/mdx/doc-cards";
 import { Figure } from "@/components/mdx/figure";
 import {
   ContributionSurfaces,
+  Excalidraw,
   Mermaid,
   Quiz,
   SurfacePreview,
@@ -90,6 +91,7 @@ export function getMDXComponents(
     Card: DocsCard,
     ContributionSurfaces,
     DocCard: (props) => <DocCard {...props} locale={locale} />,
+    Excalidraw,
     Figure,
     File,
     Files,

@@ -49,6 +49,7 @@ export const DOCS_FIGURES: Record<string, FigureSize> = {
   programs: { width: 640, height: 400 },
   providers: { width: 640, height: 380 },
   reference: { width: 640, height: 400 },
+  "release-notes": { width: 640, height: 400 },
   routing: { width: 640, height: 400 },
   rsi: { width: 640, height: 400 },
   sandbox: { width: 640, height: 400 },

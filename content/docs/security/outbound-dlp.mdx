@@ -54,7 +54,7 @@ The firewall `policy` decides what a streaming violation does:
 | Policy | Streaming behavior |
 |---|---|
 | `block` (default) | The stream ends with the block notice. Text sent before the violation stays with the caller, but no part of the matched secret or PII is sent |
-| `sanitize` | The stream continues with the match redacted |
+| `sanitize` | The stream continues with the match redacted. A match redaction cannot remove is replaced with `[REDACTED]`, or ends the stream with a block notice |
 | `warn_and_continue` | The detection is logged and the stream continues |
 
 Some responses are buffered in full before any of them is sent:
@@ -64,7 +64,26 @@ Some responses are buffered in full before any of them is sent:
 
 <Callout type="info">
 Content deltas are scanned together, without provider metadata such as `id` or `model` between them. Metadata is scanned separately. When a protected value spans several JSON strings, Ryu may replace the held payload with `[REDACTED]` instead of keeping fragments that could rebuild the value in the client.
+
+Text is held back by its visible length. Zero-width, combining and TAG characters count for nothing, so invisible padding inside a value cannot release its start before the whole value is scanned.
 </Callout>
+
+## Obfuscated matches under sanitize
+
+A model can spell PII or a secret so the scanner still detects it but a plain pattern cannot
+rewrite it: a fullwidth `＠`, a zero-width character inside an address, fullwidth digits in a card
+number, or invisible Unicode TAG characters. `sanitize` never releases such a match as redacted:
+
+- When a string still holds PII or a secret after redaction, the Gateway folds it to its plain form
+  and redacts it again. If the value survives that too, the whole string becomes `[REDACTED]`.
+- When a value spans several strings, a stream replaces the held text with `[REDACTED]`. If the
+  value still survives, a buffered response is refused with a 403 and a stream ends with a block
+  notice.
+- An output evaluator with the `sanitize` action, such as `pii_leakage`, re-checks the redacted
+  reply. If its detector still matches, including when `redact_pii` is off so nothing was redacted,
+  the response is blocked and the audit row records `blocked` instead of `sanitized`.
+
+Telemetry exports of the response content get the same per-string redaction.
 
 ## Which policy applies
 
@@ -95,6 +114,12 @@ Core forwards requests that come from the context companion (a screen-capture so
 This path ignores `enabled`, `redact_pii`, and `redact_secrets`, so screen-captured text is always
 sanitized, even when the firewall is fully disabled. It is one of the Gateway's
 [locked guardrails](/docs/gateway/security#locked-guardrails).
+
+Screen text can hide PII from a plain pattern: fullwidth or lookalike characters, zero-width or bidi
+characters inside an address, combining underlines, dash variants, superscript, circled or
+small-form characters, digits from other scripts, or invisible Unicode TAG characters. When the firewall still detects PII or a secret after the first redaction pass, the
+Gateway folds the text to its plain form and redacts it again. If the value survives that too, the
+whole message text is replaced with `[REDACTED:COMPANION_TEXT]` instead of being forwarded.
 
 ## Passthrough responses
 

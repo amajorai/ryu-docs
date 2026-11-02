@@ -122,6 +122,9 @@ These are registered globally (`src/components/mdx.tsx`); use them, do not impor
 - `<AutoCards url="/docs/…" />` - list every child page of a folder index.
 - `<Mermaid chart={`…`} />` or a ```mermaid fenced block - diagrams for concept pages. Use one
   wherever a flow, lifecycle, request path or set of relationships is easier to see than to read.
+- `<Excalidraw src="/diagrams/<name>.excalidraw.svg" alt="…" />` - a hand-drawn diagram exported
+  from Excalidraw, for layouts Mermaid cannot express. Optional `darkSrc` (a separate dark export)
+  and `caption`. See [Excalidraw diagrams](#excalidraw-diagrams).
 - `<Figure name="…" />` - an Anatomy-style isometric drawing with no text in it, from
   `scripts/figures/docs/<name>.mjs` (built with the vendored kit in `scripts/figures/vendor/anatomy`).
   Run `bun run generate:figures` after adding or changing one, and preview it with
@@ -133,6 +136,38 @@ These are registered globally (`src/components/mdx.tsx`); use them, do not impor
   renders an inert link, so it never breaks the build.
 - Standard markdown tables, fenced code blocks (with a language), `<Steps>` from Fumadocs for
   numbered tutorials when helpful.
+
+### Excalidraw diagrams
+
+Prefer Mermaid when the diagram is a flow, sequence or state chart: its source lives in the page
+and stays diffable. Use Excalidraw when the layout itself carries the meaning.
+
+1. Draw it at [excalidraw.com](https://excalidraw.com) or in the Excalidraw app, in the light
+   theme.
+2. Export with **File -> Export image -> SVG**, with **Embed scene** on, so the file can be opened
+   in Excalidraw again and edited instead of redrawn. Turn **Background** off so the diagram sits
+   on the page like a Mermaid diagram instead of in a white (or, in dark mode, grey) box.
+3. Save it as `public/diagrams/<name>.excalidraw.svg` and use it:
+
+   ```mdx
+   <Excalidraw
+     src="/diagrams/request-path.excalidraw.svg"
+     alt="Desktop sends the request to Core, which routes it to the Gateway"
+     caption="Request path"
+   />
+   ```
+
+- `alt` is required and is the diagram's text equivalent: say what it shows, not "diagram". It
+  also names the click-to-expand button. The prose around it must still carry the meaning.
+- Dark mode inverts the light export the way Excalidraw's own dark theme does
+  (`invert(93%) hue-rotate(180deg)`). When that reads badly (photos, brand colours), export a
+  second file with the dark theme on and pass it as `darkSrc`.
+- `src` is site-relative under `public/`. The build reads the SVG's `viewBox` to size the image
+  (`src/lib/remark-excalidraw-dimensions.ts`), so do not pass `width`/`height` by hand. Avoid
+  remote URLs: they are not sized at build time and depend on a third-party host.
+- Clicking the diagram opens the same pan-and-zoom viewer as Mermaid
+  (`src/components/mdx/diagram-lightbox.tsx`). The SVG is rendered through `<img>`, so scripts or
+  links inside it never run in the page.
 
 ## Paragraphs and scanning
 

@@ -18,6 +18,27 @@ async function source(path: string): Promise<string> {
   return Bun.file(new URL(path, repoRoot)).text();
 }
 
+/**
+ * The modules that register routes onto `messagingRouter`: routers/messaging.ts
+ * and each module it imports for that side effect (`import "./messaging-*.ts"`).
+ * The same rule as apps/web's OpenAPI test and packages/services' lockstep
+ * test, so all three read the same route table.
+ */
+async function routerSource(): Promise<string> {
+  const dir = "packages/api/src/routers/";
+  const entry = await source(`${dir}messaging.ts`);
+  const modules = [
+    ...entry.matchAll(/^import "\.\/(messaging-[a-z-]+\.ts)";$/gmu),
+  ].map((match) => match[1] ?? "");
+  if (!modules.includes("messaging-router.ts")) {
+    throw new Error("routers/messaging.ts no longer imports messaging-router.ts");
+  }
+  const sources = await Promise.all(
+    modules.map((name) => source(`${dir}${name}`)),
+  );
+  return [entry, ...sources].join("\n");
+}
+
 /** Line breaks folded so assertions do not depend on wrapping. */
 function folded(content: string): string {
   return content.replace(/\s+/g, " ");
@@ -105,7 +126,9 @@ describe("Ryu Messaging public docs", () => {
   });
 
   test("the endpoint table lists every customer route the router serves", async () => {
-    const router = await source("packages/api/src/routers/messaging.ts");
+    // routers/messaging.ts imports `messaging-router.ts` and the
+    // `messaging-routes-*.ts` modules, which register onto `messagingRouter`.
+    const router = await routerSource();
     const routes = [
       ...router.matchAll(
         /messagingRouter\.(get|post|put|patch|delete)\(\s*"([^"]+)"/g,

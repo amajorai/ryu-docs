@@ -36,6 +36,32 @@ test("the llms section inlines the index and newest releases and links the rest"
   expect(RELEASE_NOTES_LLMS_FULL_PAGES).toBe(3);
 });
 
+test("canary and nightly builds are linked after every stable release, never inlined", () => {
+  const pages = [
+    page("release-notes", "v0.5.1-nightly.20261101.264"),
+    page("release-notes", "v0.4.0"),
+    page("release-notes", "v0.5.1-canary.20261101.136"),
+    page("release-notes", "v0.5.0"),
+    page("release-notes", "v0.5.1-canary.20261030.129"),
+    page("release-notes"),
+    page("release-notes", "v0.3.1"),
+    page("release-notes", "v0.0.9"),
+  ];
+  const { full, linked } = splitReleaseNotesForLlms(pages);
+  expect(full.map((entry) => entry.slugs.join("/"))).toEqual([
+    "release-notes",
+    "release-notes/v0.5.0",
+    "release-notes/v0.4.0",
+    "release-notes/v0.3.1",
+  ]);
+  expect(linked.map((entry) => entry.slugs[1])).toEqual([
+    "v0.0.9",
+    "v0.5.1-nightly.20261101.264",
+    "v0.5.1-canary.20261101.136",
+    "v0.5.1-canary.20261030.129",
+  ]);
+});
+
 test("the real release notes section is bounded and never inlines the archive", () => {
   const pages = source
     .getPages("en")
