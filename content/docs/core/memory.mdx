@@ -1,6 +1,6 @@
 ---
 title: Memory
-description: Reference for Core long-term memory, covering encrypted storage, scopes and GraphRAG facets, sensitive-topic consent, the /api/memory routes, Dream and Reflect, and chat auto-recall
+description: Reference for Core long-term memory, covering encrypted storage, scopes and GraphRAG facets, write frequency and provenance, sensitive-topic consent, the /api/memory routes, and chat auto-recall
 ---
 
 Ryu gives agents two kinds of recall. **Short-term memory** is the recent turns of the current
@@ -40,12 +40,29 @@ flowchart LR
   An explicit sensitive fact cannot be stored outside user scope. Automatic chat capture keeps
   sensitive content at user scope instead.
 - **Opt-in on the chat path** - long-term memory is recorded and recalled when the chat request
-  enables it. By default Core recalls a small number of the most recent entries to prefix the model
-  context.
+  enables it. Each turn Core adds a short block of saved notes, ranked by importance and then date.
 
 The defaults are a short-term limit of the last 10 turns (`DEFAULT_SHORT_TERM_LIMIT`) and a
 long-term recall limit of 5 entries (`DEFAULT_LONG_TERM_LIMIT`). Both are configurable on the
 request.
+
+### Recalled notes
+
+The **Recall budget** memory setting bounds the block:
+
+| Recall budget | Notes | Characters |
+|---|---|---|
+| Low | 2 | 1,000 |
+| Balanced (default) | 5 | 2,500 |
+| High | 15 | 6,000 |
+
+Notes go in rank order until the next would pass the character budget. Each is cut to about 500
+characters and labelled `[category · date saved · source]`, plus its "when to use" guidance. A
+header says the notes may be out of date or wrong: the model should check one that matters against
+the conversation or past chats, and correct a wrong one with the memory tool when available. Notes
+stay wrapped as untrusted text, and **Memories cited** lists exactly the notes included.
+When memory tools are offered, a short fixed guide in the system prompt says what memory is for
+and names them.
 
 <Callout type="warn">
   Memory entries are sealed with the node's single local master key, and there is no remote escrow.
@@ -56,6 +73,29 @@ request.
 The retrieval index that vector search runs on keeps its own sealed copy of memory text and embeddings. Vectors are opened into memory only to
 score a search. Sensitive rows are read-gated, and their derived retrieval rows are removed when
 consent is revoked.
+
+### Writing memory
+
+The **Write frequency** memory setting decides how a chat turn adds memory. It only narrows what the
+request enabled: a request that does not opt into memory writes nothing in any mode.
+
+| Write frequency | What a saved chat turn writes |
+|---|---|
+| Each turn (default) | The user's message, auto-classified, as one memory |
+| Reviewed | Nothing. [Dream](/docs/core/memory-dream) proposes facts from saved chats for review |
+| Never | Nothing. Existing memory is still recalled |
+
+Reviewed relies on Dream, which reads chats only while **Remember chats** is on. With Remember chats
+off, or with no Dream review run (automatic or manual), Reviewed adds no memory.
+
+Every write records its provenance, sealed with the entry: the source (`conversation`, `import`,
+`feedback` for a thumbs-up or thumbs-down on an answer, `consolidation` for an accepted Dream
+proposal, or `user` for a memory added directly or through the API) and, for a chat capture, the
+conversation id and the stored user message it came from. A `feedback` memory cites the
+conversation and the rated assistant message. The profile memory written during onboarding is
+drafted by the assistant, so it is recorded as `conversation` and cites the onboarding profile
+conversation and the assistant reply it was drafted from. Recalled notes show the source in their
+label.
 
 ### The memory graph
 
@@ -101,7 +141,7 @@ the authority for auto-recall.
 
 | Method + path | Purpose |
 |---|---|
-| `GET`, `POST /api/memory` | List or create memories |
+| `GET`, `POST /api/memory` | List active memories (`include_history=true` adds the rest) or create one |
 | `GET`, `PUT`, `DELETE /api/memory/:id` | Read, edit, or remove one memory |
 | `GET`, `PUT /api/memory/settings` | Read or change memory settings |
 | `GET /api/memory/graph` | Access-filtered snapshot of the typed memory graph |
@@ -154,56 +194,12 @@ Agents can inspect the configured repository's bounded history through
 
 ## Dream review and Reflect
 
-Dream is the review step for memories inferred from recent conversations. It presents each
-proposal as a before/after diff and requires an explicit accept or reject action. A proposal is
-never written to the memory store only because it was generated. The desktop calls these routes:
-
-| Method + path | Purpose |
-|---|---|
-| `GET /api/memory/dream/review` | Read the review queue |
-| `POST /api/memory/dream/review` | Prepare a new review |
-| `GET`, `PATCH /api/memory/dream/review/settings` | Read or change Dream settings |
-| `POST /api/memory/dream/review/proposals/:id/accept` | Accept one proposal |
-| `POST /api/memory/dream/review/proposals/:id/reject` | Reject one proposal |
-
-Open the review queue at `/library/memory/dream`. Older nodes that do not provide the Dream
-routes show an unavailable state rather than silently discarding a review action.
-
-When the node's automatic Dream preference is enabled, Core periodically prepares the same review
-queue in the background. Manual and automatic review share one proposal path and the same
-accept/reject controls. The background scheduler:
-
-- honors the configured quiet hours;
-- never writes a proposal without review;
-- skips organization-bound nodes unless the caller is authorized.
-
-### Reflect
-
-Reflect is an on-demand dashboard for a selected seven-, thirty-, or ninety-day period. It
-summarizes activity, recurring topics, and evidence-based observations. It does not make
-productivity, identity, or emotional judgments.
-
-| Method + path | Purpose |
-|---|---|
-| `GET /api/memory/reflect?period=7d` | Dashboard for `7d`, `30d`, or `90d` |
-| `GET`, `PATCH /api/memory/reflect/settings` | Read or change Reflect settings |
-
-The dashboard is a projection of the [usage review](/docs/core/usage-review).
-
-- It reads the same conversations and activity, honors the same exclusions, and every count comes
-  from that review.
-- It requires usage review to be turned on. Otherwise the request is refused with
-  `usage_review_disabled`, and the desktop dashboard offers a **Turn on usage review** button.
-- Trends compare the selected period with the period immediately before it, and are omitted when
-  there is nothing to compare against.
-- Older nodes without the Reflect route fall back to reading `/api/usage-review` directly.
-
-Open it at `/library/memory/reflect`. The settings route stores two preferences:
-
-- **Quiet hours** (on by default, 22:00 to 08:00 local time). While the window is active, the
-  automatic Dream review does not run, in addition to Dream's own quiet hours.
-- **Break nudges** (off by default). The preference is saved on the node, but no reminder is
-  delivered.
+Dream proposes memories inferred from recent conversations and writes one only after you accept
+it. It also checks your existing memories against those conversations: when a chat contradicts a
+memory, or two memories say the same thing, Dream proposes a revised version. Accepting a revision
+supersedes the old memory, so recall returns only the new text. Dream can also propose archiving a
+memory that no longer holds, which takes it out of recall without deleting it. Reflect is an activity dashboard over the same period. Both are covered in
+[Dream and Reflect](/docs/core/memory-dream).
 
 ## Searchable chat history and auto-recall
 
@@ -282,6 +278,11 @@ The desktop toggle lives in Gateway settings, Plugins, Memory
 (`apps/desktop/src/components/settings/MemoryTab.tsx`). Auto-recall is orthogonal to the memory
 record toggle. It controls what is recalled, not what is written.
 
+The **Minimum relevance** memory setting (Off by default) drops memory facts that score below its
+level, so a turn with nothing related gets no facts. Levels sit above the embedding model's
+measured score for unrelated text (unfiltered if that fails). Keyword and graph matches and
+past-chat snippets are not filtered.
+
 #### Where recalled context goes
 
 Recalled snippets, the recent-memory window, an external memory provider's prefetch, and referenced
@@ -308,6 +309,13 @@ reopened, so it describes the turn rather than asking the assistant to reconstru
 The action is hidden when no built-in memory fact was injected. It covers both the recent-memory
 window and memory facts selected by auto-recall. Past-chat snippets, Space documents, and an
 external memory provider's summary are not labeled as built-in memories.
+
+The same facts are counted. When a turn that injected them completes, each one's `recall_count`
+goes up by one and `last_recalled_at` records the time (Unix milliseconds). A turn that fails is not
+counted. Nor is a temporary chat, even when it may read memory, so it leaves no timestamp behind. Both appear on memories returned by
+`/api/memory`. Counting never changes a memory's text or `updated_at`, and a failed count never
+affects the reply. [Dream](/docs/core/memory-dream#retiring-memories) uses the counts to find old
+event memories that no chat has used.
 
 <Callout type="warn">
   The whole auto-recall step runs inside a 4 second wall-clock budget and is fully fail-open: any

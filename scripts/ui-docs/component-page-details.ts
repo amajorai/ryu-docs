@@ -53,7 +53,7 @@ export function componentDetailSections(
       ? [
           "## Recent colors",
           "",
-          "The complete panel follows the Fluid Functionalism interaction model with saturation/brightness, hue, alpha, and format controls for HEX, RGB, HSL, and OKLCH values. The built-in swatch strip shows recent selections above any supplied `swatches` presets.",
+          "The complete panel follows the Fluid Functionalism interaction model with saturation/brightness, hue, alpha, and format controls for HEX, RGB, HSL, and OKLCH values. The built-in swatch strip shows recent selections above any supplied `swatches` presets. The hue and alpha sliders keep a physical left-to-right spectrum in right-to-left layouts, so pointer and arrow-key input match the painted colors.",
           "",
           "Recent colors are shared by Ryu picker instances and retained in local browser storage. Set `showRecentColors={false}` when a surface should show only its supplied presets. Use `ColorPickerPanel` to compose the complete panel while preserving a custom trigger, or use `ColorPickerPopover` for the compact swatch trigger and panel together.",
           "",

@@ -192,7 +192,7 @@ function PreviewSidebar({ active }: { active: SurfacePreviewSurface }) {
               {selected ? (
                 <CircleDot
                   aria-hidden="true"
-                  className="ml-auto text-primary"
+                  className="ms-auto text-primary"
                   size={10}
                 />
               ) : null}
@@ -406,4 +406,3 @@ function MiniNode({
     </div>
   );
 }
-

@@ -19,7 +19,7 @@ export function SearchTrigger() {
     // say what they see (an aria-label that differs fails WCAG 2.5.3).
     <button
       aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
-      className="group flex w-full items-center gap-3 rounded-full border border-fd-border bg-fd-background/80 px-5 py-3.5 text-left backdrop-blur-md transition-colors hover:bg-fd-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
+      className="group flex w-full items-center gap-3 rounded-full border border-fd-border bg-fd-background/80 px-5 py-3.5 text-start backdrop-blur-md transition-colors hover:bg-fd-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
       onClick={() => setOpenSearch(true)}
       type="button"
     >

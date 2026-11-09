@@ -14,6 +14,7 @@ import {
 } from "react";
 
 import { cn } from "@/lib/cn";
+import { type DocsChromeCopy, docsChromeCopy } from "@/lib/docs-chrome-copy";
 import styles from "./feedback.module.css";
 
 import {
@@ -32,6 +33,12 @@ const POPOVER_HEIGHT = 260;
 
 type FeedbackTextProps = {
   children: ReactNode;
+  /**
+   * The route's chrome copy; English when omitted (e.g. the /proof page). The
+   * popover takes the route's lang and dir, since the prose around it may be
+   * an English fallback region.
+   */
+  copy?: DocsChromeCopy;
   onSendAction: (feedback: BlockFeedback) => Promise<ActionResponse>;
 };
 
@@ -142,7 +149,14 @@ function isExternalUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
-export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
+const ENGLISH_CHROME = docsChromeCopy("en");
+
+export function FeedbackText({
+  children,
+  copy = ENGLISH_CHROME,
+  onSendAction,
+}: FeedbackTextProps) {
+  const { blockFeedback: blockCopy, feedback: formCopy } = copy;
   const pathname = usePathname();
   const popoverRef = useRef<HTMLDivElement>(null);
   const [target, setTarget] = useState<SelectionTarget | null>(null);
@@ -240,7 +254,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
         setMessage("");
         setError(null);
       } catch {
-        setError("We couldn’t send that feedback. Please try again.");
+        setError(formCopy.sendError);
       }
     });
   }
@@ -267,12 +281,14 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
       {target ? (
         <div
           ref={popoverRef}
-          aria-label="Feedback on selected documentation"
+          aria-label={blockCopy.dialog}
           className={cn(
             styles.popover,
             "fixed z-50 w-full max-w-sm rounded-2xl bg-fd-popover p-4 text-fd-popover-foreground shadow-xl",
           )}
           data-feedback-popover="true"
+          dir={copy.dir}
+          lang={copy.lang}
           role="dialog"
           style={popoverStyle}
         >
@@ -280,13 +296,13 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
             <div className="min-w-0 flex-1">
               <p className="flex items-center gap-1.5 text-xs font-medium text-fd-muted-foreground">
                 <MessageSquare aria-hidden="true" className="size-3.5" />
-                Feedback on this section
+                {blockCopy.heading}
               </p>
               <p className="mt-1 line-clamp-3 text-sm">“{target.excerpt}”</p>
             </div>
             <button
               type="button"
-              aria-label="Close block feedback"
+              aria-label={blockCopy.close}
               className={cn(
                 buttonVariants({ color: "ghost", size: "sm" }),
                 "size-8 shrink-0 p-0 touch-manipulation",
@@ -303,9 +319,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
               className="mt-4 rounded-xl bg-fd-muted p-3 text-sm text-fd-muted-foreground"
             >
               <p>
-                {submission.response.submitted
-                  ? "Thanks - your feedback was sent."
-                  : "Thanks - your feedback is ready to send."}
+                {submission.response.submitted ? formCopy.sent : formCopy.ready}
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <a
@@ -319,8 +333,8 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                   )}
                 >
                   {submission.response.submitted
-                    ? "View feedback"
-                    : "Open email draft"}
+                    ? formCopy.viewFeedback
+                    : formCopy.openEmailDraft}
                 </a>
                 <button
                   type="button"
@@ -330,7 +344,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                   )}
                   onClick={submitAgain}
                 >
-                  Submit again
+                  {formCopy.submitAgain}
                 </button>
               </div>
             </div>
@@ -340,7 +354,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                 htmlFor="docs-block-feedback-message"
                 className="text-sm font-medium"
               >
-                What should change?
+                {blockCopy.prompt}
               </label>
               <textarea
                 id="docs-block-feedback-message"
@@ -350,7 +364,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                 rows={3}
                 value={message}
                 onChange={(event) => setMessage(event.target.value)}
-                placeholder="Leave feedback…"
+                placeholder={formCopy.placeholder}
                 className="w-full resize-y rounded-xl bg-fd-secondary p-3 text-sm text-fd-secondary-foreground placeholder:text-fd-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
               />
               {error ? (
@@ -378,7 +392,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                       setError(null);
                     }}
                   >
-                    Cancel
+                    {formCopy.cancel}
                   </button>
                   <button
                     type="submit"
@@ -388,7 +402,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                       "touch-manipulation",
                     )}
                   >
-                    {isPending ? "Sending…" : "Submit feedback"}
+                    {isPending ? formCopy.sending : formCopy.submit}
                   </button>
                 </div>
               </div>
@@ -398,7 +412,7 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  aria-label="Mark this section as helpful"
+                  aria-label={blockCopy.helpfulLabel}
                   className={cn(
                     buttonVariants({ color: "secondary", size: "sm" }),
                     "gap-1.5 rounded-full touch-manipulation",
@@ -409,11 +423,11 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                   }}
                 >
                   <ThumbsUp aria-hidden="true" className="size-4" />
-                  Helpful
+                  {blockCopy.helpful}
                 </button>
                 <button
                   type="button"
-                  aria-label="Suggest an improvement for this section"
+                  aria-label={blockCopy.needsWorkLabel}
                   className={cn(
                     buttonVariants({ color: "secondary", size: "sm" }),
                     "gap-1.5 rounded-full touch-manipulation",
@@ -424,11 +438,11 @@ export function FeedbackText({ children, onSendAction }: FeedbackTextProps) {
                   }}
                 >
                   <ThumbsDown aria-hidden="true" className="size-4" />
-                  Needs work
+                  {blockCopy.needsWork}
                 </button>
               </div>
               <p className="mt-2 text-xs text-fd-muted-foreground">
-                Select a rating to add a note for the Ryu Docs team.
+                {blockCopy.hint}
               </p>
             </>
           )}

@@ -66,8 +66,8 @@ and PII in definitions as well.
 The pattern sets above ship built in. Add your own with `custom_patterns`. Each entry carries a
 `name`, `regex`, and `kind` (PII, secret, or prompt injection) and joins the built-in sets through
 the [policy cascade](#hierarchical-policy-resolution). Manage custom patterns through Gateway
-settings, `gateway.toml`, or the authenticated configuration API. Each
-pattern checks both the original and the Unicode-normalized text.
+settings, `gateway.toml`, or the authenticated configuration API. Every
+pattern, built in or custom, checks both the original and the Unicode-normalized text.
 
 In Desktop, open **Gateway → Safety filters** to edit the node baseline or an org/agent overlay.
 For an agent overlay, choose an installed agent from the searchable **Agent** picker; the overlay
@@ -103,15 +103,13 @@ Sanitize redacts the same fields the inbound scan reads. Two cases behave differ
 - A prompt-injection match cannot be redacted. Under Sanitize the request continues with the
   injection text unchanged (any PII or secrets alongside it are still redacted). Use `block` to stop
   detected injections.
-- A PII or secret match that survives redaction is blocked with a 403 instead of being forwarded.
-  This happens when the match is obfuscated, for example split with zero-width characters, so the
-  scanner detects it but cannot rewrite it. Categories you turned off with `redact_pii` or
+- A PII or secret match that survives redaction, such as one split with zero-width characters, is
+  blocked with a 403 instead of being forwarded. Categories you turned off with `redact_pii` or
   `redact_secrets` are not blocked this way.
 
-Sanitize rewrites each string the same way on every request, whether or not that request tripped a
-detection. The tools, system prompt, and earlier turns a client resends therefore reach the provider
-unchanged from one turn to the next, so [provider prompt caching](/docs/gateway/prompt-caching) keeps
-reusing the prefix.
+Sanitize rewrites each string the same way on every request, flagged or not, so the tools, system
+prompt and earlier turns a client resends stay unchanged and
+[provider prompt caching](/docs/gateway/prompt-caching) keeps reusing the prefix.
 
 The same applies when the inspector or an inline evaluator uses the Sanitize action. Once one is
 configured, PII and secret spans are redacted on every request, not only on flagged ones. A turn
@@ -125,7 +123,7 @@ The master switch and each direction are independent toggles. All are hot-swappa
 | `firewall.enabled` | `true` | Master switch for inbound and outbound scanning |
 | `scan_inbound` | `true` | Scan prompts before the provider call |
 | `scan_outbound` | `true` | Scan responses after the provider call |
-| `log_detections` | `true` | Emit a detection record per match |
+| `log_detections` | `true` | Log let-through matches at `warn` once per response, with the request ID (`debug` if `false`); blocked responses always warn |
 | `redact_pii` | `true` | Redact PII spans when `policy = sanitize` |
 | `redact_secrets` | `true` | Redact secret spans when `policy = sanitize` |
 
@@ -245,13 +243,12 @@ Two opt-in screens add a model's judgement to the pattern scanner: the LLM traff
 attacks). Both resolve through the same cascade. See
 [LLM inspector and hazard screener](/docs/gateway/model-screening).
 
-The inspector judges the whole turn as untrusted data, newest first. Under `block` it refuses a turn
-it could not judge: a refusal, a content-filter stop, an empty, cut-off or prose reply, JSON without
-a verdict, an unreachable judge, or a turn past about 60,000 characters (`warn_and_continue` keeps
-serving while the judge is down). With the inspector on, the tool loop also judges each appended
-tool result and model turn; a flag under `block` or `sanitize` ends the loop with a 403. An inline
-LLM-judge evaluator flags a judge refusal; a custom rubric also flags any reply without a verdict,
-or an over-long text.
+The inspector judges the whole turn as untrusted data, newest first. With `fail_mode` closed (the
+default under `block`) it refuses, under `block` or `sanitize`, a turn it could not judge: a
+refusal, a filter stop, an empty, cut-off or prose reply, an unreachable judge, or a turn past its
+`max_windows` budget. The tool loop judges each appended tool result and model turn the same way. An
+inline LLM-judge evaluator flags a judge refusal; a custom rubric also flags a reply without a
+verdict, an over-long text and, bound to block with `fail_mode` closed, an unreachable judge.
 
 ## Governed auxiliary requests
 
@@ -270,41 +267,41 @@ Routing configuration and session caches are bounded. Metering follows these rul
 
 ## Outbound DLP
 
-Beyond the inbound firewall, the Gateway applies outbound data-loss-prevention on every response:
+Beyond the inbound firewall, the Gateway applies outbound data-loss-prevention on responses:
 
 | Feature | What it redacts | When |
 |---|---|---|
-| **Outbound secret redaction** | GitHub PATs, OpenAI keys, AWS keys, bearer tokens, `token`/`secret` params | All outbound responses (firewall must be enabled) |
+| **Outbound secret redaction** | GitHub PATs, OpenAI keys, AWS keys, bearer tokens, `token`/`secret` params | Chat, Messages, Responses and multimodal replies, even with the firewall off; not embeddings or rerank |
 | **Companion egress redaction** | Unconditional PII + secrets | Requests with `x-ryu-companion-source` header (screen-captured content) |
 | **Streaming response DLP** | PII/secrets in SSE text deltas, one contiguous pass | Passthrough proxy responses (Claude Code, Codex) |
 
-The outbound marker list and the per-policy streaming behavior are on
-[Outbound DLP](/docs/security/outbound-dlp). The outbound scanner reuses the inbound scanner's
-compiled regex patterns, so a single config governs both directions. The `redact_pii` and
-`redact_secrets` flags control each direction independently.
+Markers and per-policy streaming behavior are on [Outbound DLP](/docs/security/outbound-dlp). One
+config and one set of compiled patterns govern both directions; `redact_pii` and `redact_secrets`
+apply to each direction independently.
 
 ### Streaming responses
 
-Buffered and streaming chat responses are scanned with the same per-request policy: the node
-baseline plus the organization, team and agent overlays. An overlay that turns on `scan_outbound`,
-sets a stricter `policy` or adds `custom_patterns` also applies to `stream: true` responses.
+Buffered and streaming chat responses share one per-request policy (the node baseline plus the
+organization, team and agent overlays), so every overlay setting also applies to `stream: true`.
 
 - With only the built-in patterns, a streamed reply is scanned and released incrementally.
-- If any scope adds a custom pattern, the stream is buffered and scanned in one pass before it is
-  returned.
-- When `Block` ends a stream, the client receives the block notice in place of the rest of the
-  reply, and the Gateway writes a `firewall` audit row. That includes a match that only completes
-  in the final chunks.
+- A custom `pii` or `secret` pattern, or an enabled inline output evaluator, in any scope buffers
+  the stream and scans it in one pass. Output evaluators judge each choice on its own.
+- When `Block` ends a stream, even on a match that completes only in the final chunks, the client
+  gets the block notice in place of the rest of the reply and the Gateway writes a `firewall` audit
+  row.
 
 ### Keys and logprobs
 
 Outbound scanning reads every string in the response and every object key, so a value placed in a
 key of object-typed tool arguments is scanned and redacted like any other text.
 
-A streamed frame whose choice carries `logprobs` is held until the reply ends and scanned as a
-whole, because each logprob token mirrors part of the text. When `Sanitize` rewrites a response,
-buffered or streamed, the Gateway sets `logprobs` to `null` on the rewritten choices so the tokens
-cannot rebuild the redacted value.
+A streamed frame whose choice carries `logprobs` or vLLM's `token_ids` is held until the reply
+ends and scanned as a whole: each logprob token mirrors part of the text, and vLLM sends ids
+before text it holds back for a stop string. Whenever the Gateway redacts, sanitizes or masks a
+choice's text, it sets that choice's `logprobs` and token ids (`token_ids`, `delta.token_id`) to
+`null`, so the tokens cannot rebuild the redacted value. In a held or wholly rewritten reply, any
+text change nulls every choice's mirrors; unchanged text keeps them.
 
 ## Companion egress redaction
 
@@ -331,9 +328,8 @@ without making a model call. It uses the same per-request scanner as the request
 organization and agent overlays and their custom patterns. A `checks` name it does not know returns
 400 `unknown_guardrail_check` rather than an allow.
 
-Authenticate with a valid Gateway credential before scanning. Rejected credentials never
-reach the scanner or write audit rows. Guardrail blocks use the verified caller identity
-for their audit record; arbitrary bearer strings cannot impersonate another caller.
+It needs a valid Gateway credential; rejected credentials never reach the scanner or write audit
+rows. Guardrail blocks audit the verified caller, so a bearer string cannot impersonate another.
 
 ```http
 POST /v1/firewall/check

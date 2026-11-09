@@ -374,7 +374,7 @@ export function DiagramLightbox({
             </button>
             <button
               aria-label="Close diagram viewer"
-              className="ml-2 rounded-md bg-fd-secondary p-1 text-fd-muted-foreground transition-colors hover:bg-fd-accent hover:text-fd-foreground"
+              className="ms-2 rounded-md bg-fd-secondary p-1 text-fd-muted-foreground transition-colors hover:bg-fd-accent hover:text-fd-foreground"
               onClick={onClose}
               type="button"
             >

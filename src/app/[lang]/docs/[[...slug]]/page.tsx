@@ -14,6 +14,7 @@ import { notFound, permanentRedirect } from "next/navigation";
 import { APIPage } from "@/components/api-page";
 import { CatalogMetadata } from "@/components/catalog-metadata";
 import { DocsTOC } from "@/components/docs-toc";
+import { EnglishFallbackRegion } from "@/components/english-fallback-region";
 import { Feedback } from "@/components/feedback/client";
 import { FeedbackText } from "@/components/feedback/text";
 import { JsonLd } from "@/components/json-ld";
@@ -21,6 +22,7 @@ import { DocsAnchor, getMDXComponents } from "@/components/mdx";
 import { LevelBadge } from "@/components/mdx/level-badge";
 import { DocsPageOpenMenu } from "@/components/page-actions";
 import { hasLocalizedDocsContent } from "@/lib/canonical-docs";
+import { docsChromeCopy } from "@/lib/docs-chrome-copy";
 import {
   submitDocsBlockFeedback,
   submitDocsFeedback,
@@ -84,6 +86,7 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
 
   const hasTranslation = hasLocalizedDocsContent(page);
   const canonicalPage = getCanonicalDocsPage(page);
+  const chrome = docsChromeCopy(lang);
 
   const MDX = page.data.body;
   const description =
@@ -173,16 +176,21 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
             tableOfContent={{ container: { className: "xl:hidden" } }}
             toc={page.data.toc}
           >
-            {page.data.level === undefined ? null : (
-              <div className="mb-1">
-                <LevelBadge level={page.data.level} />
-              </div>
-            )}
-            <DocsTitle>{page.data.title}</DocsTitle>
-            <DocsDescription className="mb-0">
-              {page.data.description}
-            </DocsDescription>
-            <CatalogMetadata attributes={page.data.catalog} />
+            {/* An untranslated page shows the English source; its title and
+                prose are tagged English and left-to-right while the chrome
+                around them keeps the route's language. */}
+            <EnglishFallbackRegion fallback={!hasTranslation}>
+              {page.data.level === undefined ? null : (
+                <div className="mb-1">
+                  <LevelBadge level={page.data.level} />
+                </div>
+              )}
+              <DocsTitle>{page.data.title}</DocsTitle>
+              <DocsDescription className="mb-0">
+                {page.data.description}
+              </DocsDescription>
+              <CatalogMetadata attributes={page.data.catalog} />
+            </EnglishFallbackRegion>
             <div className="flex flex-row gap-2 items-center pb-6">
               <MarkdownCopyButton markdownUrl={`${page.url}.mdx`} />
               <DocsPageOpenMenu
@@ -192,25 +200,33 @@ export default async function Page({ params: paramsPromise }: DocsRouteProps) {
                 pageUrl={pageUrl}
               />
             </div>
-            <DocsBody>
-              <FeedbackText onSendAction={submitDocsBlockFeedback}>
-                <MDX
-                  components={getMDXComponents(
-                    {
-                      // this allows you to link to other pages with relative file paths.
-                      a: createRelativeLink(source, page, DocsAnchor),
-                      // renders the interactive OpenAPI reference in generated API pages
-                      // with the current page's schema preloaded server-side.
-                      APIPage: async (props: GeneratedPageProps) => (
-                        <APIPage page={page} {...props} />
-                      ),
-                    },
-                    lang,
-                  )}
-                />
-              </FeedbackText>
-            </DocsBody>
-            <Feedback onSendAction={submitDocsFeedback} />
+            <EnglishFallbackRegion fallback={!hasTranslation}>
+              <DocsBody>
+                <FeedbackText
+                  copy={chrome}
+                  onSendAction={submitDocsBlockFeedback}
+                >
+                  <MDX
+                    components={getMDXComponents(
+                      {
+                        // this allows you to link to other pages with relative file paths.
+                        a: createRelativeLink(source, page, DocsAnchor),
+                        // renders the interactive OpenAPI reference in generated API pages
+                        // with the current page's schema preloaded server-side.
+                        APIPage: async (props: GeneratedPageProps) => (
+                          <APIPage page={page} {...props} />
+                        ),
+                      },
+                      lang,
+                    )}
+                  />
+                </FeedbackText>
+              </DocsBody>
+            </EnglishFallbackRegion>
+            <Feedback
+              copy={chrome.feedback}
+              onSendAction={submitDocsFeedback}
+            />
             {page.data.lastModified ? (
               <PageLastUpdate date={page.data.lastModified} />
             ) : null}

@@ -21,6 +21,8 @@ export const PRESENTATION_API_DETAILS_3 = {
     "",
     'Use `typography="small"` on `Textarea` to request small body text, or `typography="caption"` to request caption text. Existing responsive typography still applies, and the size and visual variants remain available. Use `variant="code-caption"` for its monospace caption treatment. Keep editor heights, values, labels, and input handlers at the calling site.',
     "",
+    'Under a right-to-left language, the `code` and `code-caption` variants of `Textarea` set `dir="ltr"` so paths and commands read left to right; other variants get `dir="auto"` and follow their first strong character. Pass `dir` to override the default.',
+    "",
   ],
   "components/toggle": [
     "## Calendar filter purpose",

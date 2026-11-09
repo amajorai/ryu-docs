@@ -67,6 +67,13 @@ The host renders your plugin in an `<iframe sandbox="allow-scripts">` **without*
 - Full-HTML companions and model-generated artifact documents receive their CSP and bridge shell
   before any app-controlled HTML is parsed, including scripts placed before a `<head>` element.
   Keep the frame's `connect-src 'none'` policy; direct network access is not a companion API.
+- Navigating the companion frame away from its own document (for example by assigning
+  `location.href`) ends the session: the host stops answering the new page, closes the bridge,
+  and blanks the frame. This holds on every host (desktop, island, web, and MCP App widgets).
+  Use in-app routing or hash changes instead of document navigation.
+- The default companion policy also carries `webrtc 'block'`, so peer connections (WebRTC) are not
+  a companion API either. Browser engines that do not yet enforce that directive may still let a
+  frame open a peer connection outside `connect-src`; do not rely on that, it can be removed.
 
 There is one narrow addition for client-side form handlers. Compiled-in first-party full-HTML
 Companions may receive `allow-forms` when their host-built CSP contains both
@@ -132,6 +139,21 @@ window.addEventListener("message", (ev) => {
 Point-to-point ports sidestep the `targetOrigin: "*"` ambiguity that a null-origin frame would
 otherwise force on every message.
 
+Answer the host's liveness probe on that port. The host delivers your window-level messages (for
+example MCP Apps JSON-RPC) only after the document that holds the port acknowledges a probe, so a
+page that replaced yours in the frame cannot use the bridge:
+
+```js
+function onPortMessage(ev) {
+  const msg = ev.data;
+  if (msg?.kind === "ryu-plugin-liveness") {
+    port.postMessage({ kind: "ryu-plugin-liveness-ack", id: msg.id });
+    return;
+  }
+  // handle RPC replies
+}
+```
+
 ## Step 3 - Call Core over the gated bridge
 
 Send a request envelope over the port and correlate the reply by `id`. The envelope shape is
@@ -169,6 +191,8 @@ These are the envelope kinds exchanged over the bridge (`rpc.ts`):
 | `ryu-plugin-host-port` | host to frame | `{ nonce }` + a transferred `MessagePort` |
 | `ryu-plugin-rpc` | frame to host | `{ id, method, args }` |
 | `ryu-plugin-rpc-result` | host to frame | `{ id, result }` or `{ id, error }` |
+| `ryu-plugin-liveness` | host to frame (port) | `{ id }` |
+| `ryu-plugin-liveness-ack` | frame to host (port) | `{ id }` echoing the probe |
 
 The host validates every inbound payload with `asRpcRequest`, so any message not shaped like the
 envelope is dropped before it reaches dispatch.
@@ -194,7 +218,7 @@ that is not in the map is **unknown** and always rejected. There is no default-a
 | `ui.openExternal` | `ui.displayMode` | none (local host capability) | Opens an HTTP(S) URL through the trusted host |
 | `assistant.publishContext`, `assistant.clearContext` | `assistant.context` | `assistant:context` | Replace or clear this app's context chips in the Ask Ryu assistant |
 | `assistant.registerSurface`, `assistant.clearSurface` | `assistant.context` | `assistant:context` | Lend the Ask Ryu assistant this page's label, instructions, starter prompts, and optional `thread` (one conversation per topic), or hand it back |
-| `assistant.open` | `assistant.context` | `assistant:context` | Show the Ask Ryu assistant, optionally asking a question attributed to the app |
+| `assistant.open` | `assistant.context` | `assistant:context` | Show the Ask Ryu assistant, optionally placing a question attributed to the app in its composer. The question is never sent automatically; the user reviews it and presses Send |
 
 The app's approved `hook:run-agent` grant does not replace the signed-in caller's `agent.run`
 permission. Core resolves an omitted or routed agent id, then checks permission for that concrete

@@ -6,12 +6,12 @@ import {
 } from "@ryu/auth/lib/feature-flags";
 import { hiddenProductListings } from "@ryu/auth/lib/product-launch-flags";
 import { DOWNLOAD_PAGE_PATH } from "@ryu/blocks/web/download-share-links.ts";
-import { HeaderDownloadCta } from "@ryu/blocks/web/header-download-cta.tsx";
 import {
   HeaderLinkOrigin,
   ProductsMenu,
   ResourcesMenu,
 } from "@ryu/blocks/web/header-catalog-menus.tsx";
+import { HeaderDownloadCta } from "@ryu/blocks/web/header-download-cta.tsx";
 import { useSendDownloadLink } from "@ryu/blocks/web/send-download-link.tsx";
 import { badgeVariants } from "@ryu/ui/components/badge";
 import { buttonVariants } from "@ryu/ui/components/button";
@@ -28,10 +28,11 @@ import {
 } from "fumadocs-ui/layouts/shared/slots/search-trigger";
 import { ThemeSwitch } from "fumadocs-ui/layouts/shared/slots/theme-switch";
 import { DownloadIcon, LanguagesIcon } from "lucide-react";
-import { usePathname } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 
 import { LocalizedLink } from "@/components/localized-link";
 import { RyuLogo } from "@/components/ryu-logo";
+import { type DocsLandmarkCopy, docsChromeCopy } from "@/lib/docs-chrome-copy";
 import { DOCS_ENTRY_PATH, isDocsPathname } from "@/lib/docs-version";
 import { gitConfig, MAIN_SITE_URL } from "@/lib/layout.shared";
 
@@ -97,13 +98,19 @@ function GitHubIcon() {
  * primary segment, a tap on a phone opens the "send the link to yourself"
  * drawer; anywhere else it opens the download page on ryuhq.com.
  */
-function MobileDownloadButton({ className }: { className?: string }) {
+function MobileDownloadButton({
+  className,
+  label,
+}: {
+  className?: string;
+  label: string;
+}) {
   const sendLink = useSendDownloadLink(MAIN_SITE_URL);
   return (
     <>
       <a
         aria-haspopup={sendLink.mobile ? "dialog" : undefined}
-        aria-label="Download"
+        aria-label={label}
         className={cn(
           buttonVariants({ radius: "pill", size: "icon-sm", variant: "mono" }),
           className,
@@ -130,6 +137,9 @@ export function SiteHeader({
   transparent?: boolean;
 }) {
   const inDocs = isDocsPathname(usePathname());
+  const landmarks: DocsLandmarkCopy = docsChromeCopy(
+    useParams<{ lang?: string }>()?.lang,
+  ).landmarks;
   return (
     <header
       className={cn("sticky top-0 z-40 h-(--site-header-height)", className)}
@@ -147,7 +157,7 @@ export function SiteHeader({
           {/* The ghost is the Ryu brand, so it goes to the main site; the
               Docs badge beside it is this site's home. */}
           <a
-            aria-label="Ryu home"
+            aria-label={landmarks.home}
             className="-m-1.5 flex min-h-10 shrink-0 items-center p-1.5 text-foreground"
             href={MAIN_SITE_URL}
           >
@@ -222,7 +232,7 @@ export function SiteHeader({
             <LanguagesIcon aria-hidden="true" className="size-4" />
           </LanguageSelect>
           <a
-            aria-label="Ryu on GitHub"
+            aria-label={landmarks.github}
             className={cn(ICON_BUTTON_CLASS, "max-md:hidden [&_svg]:size-4")}
             href={`https://github.com/${gitConfig.user}/${gitConfig.repo}`}
             rel="noopener noreferrer"
@@ -236,7 +246,10 @@ export function SiteHeader({
               whole split control (primary and chevron) gives way to the
               icon-only button on phones. */}
           <div className="ms-1.5 flex items-center gap-2 [&>button]:rounded-full">
-            <MobileDownloadButton className="sm:hidden" />
+            <MobileDownloadButton
+              className="sm:hidden"
+              label={landmarks.download}
+            />
             <div className="hidden sm:contents">
               <HeaderDownloadCta
                 beam={transparent}

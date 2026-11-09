@@ -64,7 +64,9 @@ server. An OAuth declaration cannot be combined with a static `Authorization` he
 
 After enabling the app or plugin, its account appears under **Marketplace → Connections**. The user
 chooses an identity profile and selects **Connect**. Ryu opens the system browser and polls the
-short-lived flow until it completes.
+short-lived flow until it completes. On a node with a hosted callback, the browser then shows a
+one-time code, which the user enters in Ryu to finish (see [Hosted callbacks need owner
+confirmation](#hosted-callbacks-need-owner-confirmation)).
 
 ```mermaid
 sequenceDiagram
@@ -85,10 +87,27 @@ sequenceDiagram
 | Node | Callback |
 |---|---|
 | Personal node | An ephemeral `127.0.0.1` callback per flow |
-| Remote node with an HTTPS `RYU_NODE_PUBLIC_URL` | A fixed, state-bound hosted callback. The node also publishes a Client ID Metadata Document from the same origin |
+| Remote node with an HTTPS `RYU_NODE_PUBLIC_URL` | A fixed, state-bound hosted callback, confirmed with a one-time code. The node also publishes a Client ID Metadata Document from the same origin |
 
 In both modes, Core performs the code exchange on the node that owns the PKCE verifier. The
 browser never receives an access or refresh token.
+
+### Hosted callbacks need owner confirmation
+
+The hosted callback is one public URL, and an authorization link can be forwarded. Ryu therefore
+does not save a hosted connection when the browser returns. It exchanges the code, holds the tokens,
+and shows a one-time code such as `ABCD-EFGH` in the browser. The connection is saved only when the
+person who selected **Connect** enters that code in Ryu, on the **Connections** card or in the
+chat's connect card.
+
+- The code works only for the Ryu user who started the connection, within five minutes of signing
+  in.
+- Five wrong codes end the attempt. The held tokens are discarded and an existing connection is
+  left unchanged.
+- If the code is never entered, the attempt expires and Ryu asks the provider to revoke the held
+  tokens.
+- If someone sends you a sign-in link you did not start, close the browser page and do not share
+  the code. Sharing it would connect your provider account to their Ryu account.
 
 ### Hosted callbacks need the `iss` parameter
 
@@ -125,7 +144,9 @@ Connecting an account does not attach the server's tools to an agent. Agent tool
 normal Gateway capability checks remain authoritative.
 
 If a tool is called before the account is connected, or a refresh token is no longer valid, Ryu
-pauses the action with a Connect prompt. After authorization, the user can retry the operation.
+pauses the action with a Connect prompt. After authorization, the user can retry the operation. On a
+node with a hosted callback, the prompt carries no sign-in link: the agent asks you to connect from
+**Connections** or the chat's connect card, where you can enter the confirmation code.
 
 ## Connection API
 
@@ -134,12 +155,23 @@ The protected Core API exposes metadata and flow status, never credential materi
 - `GET /api/plugins/{plugin_id}/auth` lists OAuth MCP servers and connections for the caller.
 - `POST /api/plugins/{plugin_id}/auth/{server_name}/connect` accepts `profile_id` and an optional
   `callback_mode` of `auto`, `loopback`, or `hosted`.
-- `GET /api/plugins/{plugin_id}/auth/flows/{flow_id}` reports `pending`, `connected`, or `failed`.
+- `GET /api/plugins/{plugin_id}/auth/flows/{flow_id}` reports `pending`, `awaiting_confirmation`,
+  `connected`, or `failed`.
+- `POST /api/plugins/{plugin_id}/auth/flows/{flow_id}/confirm` accepts `{ "code": "ABCD-EFGH" }` from
+  the caller who started a hosted flow and saves the connection.
 - `DELETE /api/plugins/{plugin_id}/auth/{server_name}?profile_id=…` revokes when possible and always
   deletes the binding in the configured identity service.
 
 `connect` returns a short-lived `authorization_url`, `flow_id`, callback mode, requested scopes,
-status, and expiry. The caller opens the URL and polls the flow endpoint.
+status, and expiry. The caller opens the URL and polls the flow endpoint. When the flow reports
+`awaiting_confirmation`, the caller asks the user for the code the browser shows and posts it to
+`confirm`.
+
+A `failed` flow carries an English `error` and a stable `error_code`, and a refused `confirm`
+answers `400` with `{ "error", "code" }`. Show the user your own message for the code instead of the
+English text: `code_mismatch`, `too_many_attempts`, `expired`, `cancelled`, `not_awaiting`,
+`issuer_mismatch`, `missing_code`, `invalid_state`, or `protocol` for any other provider or
+token-exchange failure. Older nodes send only `error`.
 
 ## Credential lifecycle
 

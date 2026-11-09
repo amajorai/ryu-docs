@@ -1,0 +1,227 @@
+---
+title: "Dream and Reflect"
+description: "Reference for Dream, the reviewed chat-to-memory proposal queue, and Reflect, the on-demand activity dashboard built on usage review"
+---
+
+These are the review surfaces of [long-term memory](/docs/core/memory).
+
+## Dream review
+
+Dream is the review step for memories inferred from recent conversations. It presents each
+proposal as a before/after diff and requires an explicit accept or reject action. A proposal is
+never written to the memory store only because it was generated. The desktop calls these routes:
+
+| Method + path | Purpose |
+|---|---|
+| `GET /api/memory/dream/review` | Read the review queue |
+| `POST /api/memory/dream/review` | Prepare a new review |
+| `GET`, `PATCH /api/memory/dream/review/settings` | Read or change Dream settings |
+| `POST /api/memory/dream/review/proposals/:id/accept` | Accept one proposal |
+| `POST /api/memory/dream/review/proposals/:id/reject` | Reject one proposal |
+| `POST /api/memory/dream/review/proposals/:id/rollback` | Undo an accepted proposal |
+
+Open the review queue at `/library/memory/dream`. Older nodes that do not provide the Dream
+routes show an unavailable state rather than silently discarding a review action.
+
+Dream reads saved chats, and your working memory, only while **Remember chats** is on. When the **Write frequency** memory
+setting is Reviewed, chat turns become memory only through Dream; see
+[Writing memory](/docs/core/memory#writing-memory).
+
+Dream writes the review summary and each proposal's reason in the node's UI language. The proposed
+memory text keeps the language of the source messages it cites.
+
+### What Dream proposes
+
+Dream writes notes for a future session that cannot re-read your chats. It looks for what that
+session would need and could not otherwise recover:
+
+- preferences and corrections you stated;
+- decisions and the reasons behind them;
+- approaches that failed and the lesson learned;
+- rules or procedures that were tested and held.
+
+It skips what your files or environment already show, along with greetings, one-off requests,
+speculation, and credentials. Chat text is passed to the model as quoted data, so a message cannot
+pose as another source or give Dream instructions.
+
+Each proposal cites the messages it came from. The review response lists each cited message with a
+short excerpt of up to 160 characters, plus the model's confidence from 0 to 1. Excerpts are kept
+only with the encrypted proposal; accepting it saves the fact, not the excerpt. A suggestion you
+rejected is not proposed again.
+
+### Working memory as a source
+
+Dream also reads your resource-scope [working memory](/docs/extend/develop/sdk/working-memory): the
+notes agents keep about you across chats. It reads only the one document your chats read and write
+for you, whose resource id is your account. On an organization-bound node that is your verified
+account, so another member's notes never appear. Resource documents an app or SDK agent keys by
+something else, such as one per customer, are not notes about you and are not read. Thread-scope
+notes, which belong to a single chat, are not read either.
+
+- Each run reads at most 4,000 characters of that document. They count toward the same size limit
+  as the chats.
+- A document that is empty or still matches its unfilled template is skipped. Without sensitive
+  topics turned on, a document that touches one is skipped too.
+- A document is passed to the model as quoted data, like a chat message, with the role
+  `working_memory`.
+- A proposal cites a document as `working:<resource id>@v<version>`, the revision Dream read. The
+  review response lists that id with a short excerpt and `conversation_id` set to `null`.
+- Accepting the proposal keeps the citation in the memory's provenance.
+
+### Updating existing memories
+
+Dream also checks the memories you already have. Each run passes the model up to 40 of your active
+memories (about 8,000 characters in all), as quoted data like the chats. Memories most related to
+the chats come first, then the most recently updated. On an organization-bound node these are only
+your own memories, so Dream never shows or rewrites another member's notes.
+
+When the chats contradict one of those memories, or two of them should become one, Dream proposes
+a revision instead of a new memory. The review shows the current memory as **Before** next to the
+**Proposed** text. A merge revises one memory and names the other in its reason. A revision:
+
+- must target one of the memories sent in that run and cite at least one chat message;
+- keeps the target's scope, category, importance, and tags, and changes only its text;
+- records the revised memory in its provenance, alongside the cited messages;
+- is not proposed while another revision of the same memory is waiting for review;
+- is dropped when its text touches a sensitive topic and the memory is not in user scope, because
+  sensitive memory is kept in user scope only, even with sensitive topics turned on.
+
+Accepting a revision writes the new text as a new memory and marks the old one superseded.
+Superseded memories stay in the history for audit, but recall no longer returns them
+and the old memory is removed from the similarity-search index. In the review response a revision has `operation` set to `revise`, a
+`target_memory_id`, and the memory it replaces in `current`. A new memory has `operation` set to
+`create` and `current` set to `null`.
+
+### Retiring memories
+
+Dream can also propose retiring a memory. It does so in two cases:
+
+- **From chats.** The model may list, under `archive`, a memory it was shown when the chats show it
+  is no longer true and nothing replaces it, or when it records an event that is now over. Each
+  memory sent to the model carries the date it was saved, and the prompt carries today's date. An
+  archive must target one of the memories sent in that run. Citing messages is optional, because a
+  past date can be enough on its own. Cited messages are kept as excerpts, like other proposals.
+- **Without the model.** Every run, including an automatic run with no new chats, looks for
+  active memories in the `event` category that were saved more than 90 days ago and have never been
+  recalled in a chat (see [Memories cited in chat](/docs/core/memory#memories-cited-in-chat)). Recall
+  counting started with this feature, so a memory saved before an upgrade is only checked once the
+  node has counted recalls for 90 days. It proposes archiving at most five of them, oldest first.
+  Every such memory is checked, however many newer events you have. Only memories you can see are
+  checked, and on an organization-bound node only your own.
+
+Dream does not propose retiring a memory that has another proposal waiting for review, that the
+same run revises, or whose retirement you already rejected or rolled back, however long ago.
+
+In the review response an archive has `operation` set to `archive`, a `target_memory_id`, and the
+memory as it is now in `current`. Nothing is written from its `proposed` body: its `content` is
+empty and it keeps the memory's scope, category, and importance. The review shows the current text
+under **Retire this memory**.
+
+Accepting an archive moves the memory to the archived state in one step, and only while it is still
+active. A memory that was revised or archived since the proposal was made is left alone and the
+proposal stays pending. An archived memory is kept for audit but is no longer recalled, and it is
+removed from the similarity-search index.
+
+Deleting a memory rejects every proposal still waiting to revise or archive it, with `system` as
+the reviewer, and removes the proposed text from those proposals. They leave the review queue, and
+accepting or rejecting one returns `409 Conflict`. A proposal whose accepted memory is later deleted
+keeps its status but loses its text too, so deleted content does not linger in the proposal history.
+
+### Accept and reject responses
+
+Accepting returns the memory that was written, or the archived memory. Accepting a proposal that is
+already accepted returns that memory again. Rejecting returns `{ "success": true }`, also when you
+already rejected the proposal. When a review cannot change the proposal, nothing is written and the
+response is `409 Conflict` with an `error` message and a `code`:
+
+| `code` | Meaning | Returned by |
+|---|---|---|
+| `already_accepted` | The proposal was accepted. Undo it instead. | Reject |
+| `already_rejected` | The proposal was rejected. | Accept |
+| `already_undone` | The proposal was accepted and then undone. | Accept, reject |
+| `target_deleted` | The memory it targets was deleted, so it was rejected automatically. | Accept, reject |
+| `target_changed` | The memory it targets was revised or archived since the proposal was made. The proposal stays pending. | Accept |
+
+A proposal that does not exist or belongs to someone else returns `404 Not Found`. Accepting a
+proposal with sensitive topics while they are turned off returns `400 Bad Request`. The desktop
+shows the cause of a `409` and reloads the queue.
+
+### Undoing an accepted proposal
+
+An accepted proposal can be undone. Undo never deletes anything: the memory the proposal wrote is
+marked retracted, and the memory it replaced or archived becomes active again. Both stay in the
+history, and the proposal is marked `rolled_back`.
+
+| Accepted operation | Undo |
+|---|---|
+| `create` | Retracts the new memory. |
+| `revise` | Retracts the revision and makes the original memory active again. |
+| `archive` | Makes the archived memory active again. |
+
+Undo runs in one step. The new memory is removed from the similarity-search index, and the
+restored memory is indexed again, so recall returns the restored version from the next turn.
+
+Undo is refused with `409 Conflict`, and nothing changes, when:
+
+- the proposal is not accepted, for example because it is still pending or was already undone;
+- a later change built on it: the revision was itself revised or deleted, or the archived memory
+  was changed since. Undo the later proposal first.
+
+A proposal that belongs to someone else returns `404 Not Found`. The response carries the proposal
+with its new status and, under `restored`, the memory that is active again (`null` after undoing a
+new memory).
+
+The review response lists the proposals you accepted in the last seven days under `recent`, newest
+first and at most five, in the same shape as pending proposals with `status` set to `applied`. Only
+changes that are still current are listed: once a later change builds on one, it drops off the
+list. Sensitive proposals follow the same consent rule as the queue. The desktop shows this list as
+**Recently accepted**, with an **Undo** button on each entry.
+
+When the node's automatic Dream preference is enabled, Core periodically prepares the same review
+queue in the background. Manual and automatic review share one proposal path and the same
+accept/reject controls. The background scheduler:
+
+- honors Dream's quiet hours (`quiet_hours_start` and `quiet_hours_end`, whole hours from 0 to 23 in
+  the node's local time, 22 to 8 by default; equal values mean no quiet window) and Reflect's quiet
+  hours;
+- never writes a proposal without review;
+- never runs on an organization-bound node, because an unattended run has no verified person whose
+  private memory it could read. **Run Dream now** still works there for a signed-in member;
+- does not call the model when no chat message or working-memory document is newer than the last
+  completed run, and returns the current queue instead. **Run Dream now** always runs.
+
+The review's last-run time is when Dream last completed a run, not when the queue was read.
+
+`GET` and `PATCH /api/memory/dream/review/settings` read and change `automatic`,
+`quiet_hours_start`, and `quiet_hours_end`; a `PATCH` changes only the fields it sends and refuses an
+hour above 23. The desktop's **Automatic review** card in the Dream view edits these settings. It
+reads `managed` from `GET /api/gateway/org-features` and, on an organization-bound node, shows the
+switch off and disabled with the reason.
+
+## Reflect
+
+Reflect is an on-demand dashboard for a selected seven-, thirty-, or ninety-day period. It
+summarizes activity, recurring topics, and evidence-based observations. It does not make
+productivity, identity, or emotional judgments.
+
+| Method + path | Purpose |
+|---|---|
+| `GET /api/memory/reflect?period=7d` | Dashboard for `7d`, `30d`, or `90d` |
+| `GET`, `PATCH /api/memory/reflect/settings` | Read or change Reflect settings |
+
+The dashboard is a projection of the [usage review](/docs/core/usage-review).
+
+- It reads the same conversations and activity, honors the same exclusions, and every count comes
+  from that review.
+- It requires usage review to be turned on. Otherwise the request is refused with
+  `usage_review_disabled`, and the desktop dashboard offers a **Turn on usage review** button.
+- Trends compare the selected period with the period immediately before it, and are omitted when
+  there is nothing to compare against.
+- Older nodes without the Reflect route fall back to reading `/api/usage-review` directly.
+
+Open it at `/library/memory/reflect`. The settings route stores two preferences:
+
+- **Quiet hours** (on by default, 22:00 to 08:00 local time). While the window is active, the
+  automatic Dream review does not run, in addition to Dream's own quiet hours.
+- **Break nudges** (off by default). The preference is saved on the node, but no reminder is
+  delivered.

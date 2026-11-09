@@ -22,8 +22,10 @@ whether the inbound turn is a prompt injection or leaks PII or secrets, then app
 | `model` | The judge model. Blank resolves to the local classifier tier (see below) |
 | `mode` | What to look for: `injection`, `dlp` (PII and secret leaks), or `both` (the default) |
 | `min_chars` | Turns shorter than this many characters are not inspected. Default `40` |
-| `timeout_ms` | Per-inspection timeout. On timeout the request is allowed. Default `1500` |
+| `timeout_ms` | Per-inspection timeout. A timeout is a missing verdict (see below). Default `1500` |
 | `action` | The `FirewallPolicy` action for a flagged turn. Defaults to block |
+| `fail_mode` | `closed` or `open`: what a missing verdict does. Defaults to `closed` when `action` is block and `open` otherwise |
+| `max_windows` | Windows of about 4,000 characters the judge reads per turn, newest first. Default `16` (about 60,000 characters), at most `64` |
 
 ### Model choice
 
@@ -38,24 +40,28 @@ directly, like smart routing, so it cannot recurse back into the pipeline or the
 ### What the judge reads
 
 The judge reads the whole turn, not only its beginning. Long text is split into windows of about
-4,000 characters, judged newest content first, and a flag in any window flags the turn. Each window
+4,000 characters, judged newest content first, and a flag in any window flags the turn. The number of
+windows per turn is `max_windows`: raise it to judge longer conversations, or lower it to bound the
+judge's cost per turn. A turn longer than the budget is never judged in part and passed. Each window
 reaches the judge fenced as untrusted data, with chat-template control tokens neutralised, so text
 inside the turn cannot pose as the judge's instructions or as an earlier conversation.
 
 ### When the judge gives no verdict
 
-Only a parsed verdict counts as an answer. Under the `block` action, the turn is refused when the
+Only a parsed verdict counts as an answer. With `fail_mode = "closed"` (the default under the
+`block` action), the turn is flagged as `inspector_unavailable`, and refused under `block`, when the
 judge:
 
 - refuses, or its provider stops on a content filter;
 - returns an empty reply, or a reply cut off before its verdict;
 - returns JSON without a usable verdict, or plain prose with no verdict at all;
 - cannot be reached: no provider is configured, the provider errors, or the call times out;
-- runs out of window budget (about 60,000 characters) before reaching the oldest content.
+- runs out of window budget (`max_windows`, about 60,000 characters by default) before reaching
+  the oldest content.
 
 An attacker can provoke each of these, for example by planting text that makes a safety-tuned judge
-refuse, or by sizing a payload so the judge times out, so none of them is treated as clean. With
-`block`, a judge that is down therefore refuses the turns it would have screened.
+refuse, or by sizing a payload so the judge times out, so none of them is treated as clean. With the
+defaults, a judge that is down therefore refuses the turns it would have screened.
 
 These cases still resolve to "not flagged" (allow) with a warning:
 
@@ -63,10 +69,27 @@ These cases still resolve to "not flagged" (allow) with a warning:
 - a reply that flags only topic words outside the inspector's categories (small classify-tier
   models answer benign turns this way).
 
-Under `sanitize` and `warn_and_continue`, a missing verdict is logged and the turn continues; the
-regex firewall has already run over the whole text. To keep serving while the judge is unreachable,
-run the inspector under `warn_and_continue`: flags are still logged and audited, but nothing is
-refused.
+With `fail_mode = "open"` (the default under `sanitize` and `warn_and_continue`), a missing
+verdict is logged and the turn continues; the regex firewall has already run over the whole text.
+To keep serving under `block` while the judge is unreachable, set `fail_mode = "open"`: real flags
+still refuse, but a turn the judge could not answer goes through. Setting `fail_mode = "closed"`
+under `warn_and_continue` logs and audits every unjudged turn as a flag without refusing it. A
+narrower scope can close a locked inspector's `fail_mode` but cannot open it, or shrink its
+`max_windows`.
+
+Under `sanitize` with `fail_mode = "closed"`, a turn the judge could not answer is refused like
+under `block`: redaction cannot stand in for a verdict that never came, so it is not sent to the
+redactor. An injection flag under `sanitize` is forwarded, since there is nothing to redact, but it
+does not end the judging: the rest of the turn is still judged for PII and secrets, and a part the
+judge could not answer still follows `fail_mode`. `fail_mode` also governs the tool loop's check of each appended tool result and model
+turn: closed, an unjudged item ends the loop under `block` or `sanitize`; open, the loop continues.
+
+```toml
+[firewall.inspector]
+enabled = true
+action = "block"
+fail_mode = "open"
+```
 
 ### What the judge adds over the regex scanner
 
@@ -181,14 +204,16 @@ On your own Gateway:
   are screened the same way before they return, and a stream ends with an error frame instead.
 - `node_fail_mode` decides what happens when your screener could not classify a request or
   response for `S4`, `S9` or `S12`. With `closed`, the default, a screener that was healthy but
-  answered outside its grammar, refused, returned an error or a busy status, timed out, or was
-  handed text too large for it refuses the request with `503` and
+  answered outside its grammar, refused, returned an error or a busy status, timed out, dropped
+  the connection mid-request, or was handed text too large for it refuses the request with `503` and
   `code: "screening_unavailable"`, and a stream ends with that error as its final frame. Text that derails a guard model is therefore never let through as clean. Set
   `node_fail_mode = "degraded"` to forward that traffic under the regex firewall instead, marked
   degraded.
 - An outage of the screener itself (an engine that cannot be reached, or one taken out of
   rotation after repeated engine failures) runs the degraded row in either mode, so your node keeps
-  serving under the regex firewall while the engine is down.
+  serving under the regex firewall while the engine is down. Engine failures one caller can cause
+  on a healthy engine (a timeout, a busy status, a dropped connection) count once per tenant toward
+  taking it out of rotation, so one tenant cannot move every tenant onto the degraded row.
 - A request with more content than the screener can classify in one pass is refused with `413`
   and `code: "screening_capacity_exceeded"`. Nothing past the limit is silently skipped.
 - A prompt attack check that could not run marks the verdict degraded on the traffic feed instead

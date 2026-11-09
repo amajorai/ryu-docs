@@ -6,6 +6,10 @@ import { usePathname } from "next/navigation";
 import { type FormEvent, useEffect, useState, useTransition } from "react";
 
 import { cn } from "@/lib/cn";
+import {
+  DOCS_FEEDBACK_COPY,
+  type DocsFeedbackCopy,
+} from "@/lib/docs-feedback-copy";
 import styles from "./feedback.module.css";
 
 import {
@@ -17,6 +21,8 @@ import {
 } from "./schema";
 
 type FeedbackProps = {
+  /** The route's copy; English when omitted (e.g. the /proof page). */
+  copy?: DocsFeedbackCopy;
   onSendAction: (feedback: PageFeedback) => Promise<ActionResponse>;
 };
 
@@ -52,7 +58,10 @@ function isExternalUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
-export function Feedback({ onSendAction }: FeedbackProps) {
+export function Feedback({
+  copy = DOCS_FEEDBACK_COPY.en,
+  onSendAction,
+}: FeedbackProps) {
   const pathname = usePathname();
   const storageKey = `ryu-docs-feedback:${pathname}`;
   const [previous, setPrevious] = useState<StoredSubmission | null>(null);
@@ -88,7 +97,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
         setOpinion(null);
         setError(null);
       } catch {
-        setError("We couldn’t send that feedback. Please try again.");
+        setError(copy.sendError);
       }
     });
   }
@@ -108,10 +117,10 @@ export function Feedback({ onSendAction }: FeedbackProps) {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h2 id="docs-feedback-title" className="text-sm font-medium">
-            How is this guide?
+            {copy.title}
           </h2>
           <p className="mt-1 text-sm text-fd-muted-foreground">
-            Your feedback helps us make the docs clearer.
+            {copy.subtitle}
           </p>
         </div>
 
@@ -133,7 +142,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
             }}
           >
             <ThumbsUp aria-hidden="true" className="size-4" />
-            Good
+            {copy.good}
           </button>
           <button
             type="button"
@@ -152,7 +161,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
             }}
           >
             <ThumbsDown aria-hidden="true" className="size-4" />
-            Bad
+            {copy.bad}
           </button>
         </div>
       </div>
@@ -162,11 +171,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
           aria-live="polite"
           className="mt-4 flex flex-col gap-3 rounded-xl bg-fd-card p-4 text-sm text-fd-muted-foreground sm:flex-row sm:items-center sm:justify-between"
         >
-          <p>
-            {previous.response.submitted
-              ? "Thanks — your feedback was sent."
-              : "Thanks — your feedback is ready to send."}
-          </p>
+          <p>{previous.response.submitted ? copy.sent : copy.ready}</p>
           <div className="flex flex-wrap gap-2">
             <a
               href={previous.response.destinationUrl}
@@ -182,8 +187,8 @@ export function Feedback({ onSendAction }: FeedbackProps) {
               )}
             >
               {previous.response.submitted
-                ? "View feedback"
-                : "Open email draft"}
+                ? copy.viewFeedback
+                : copy.openEmailDraft}
             </a>
             <button
               type="button"
@@ -196,7 +201,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
               )}
               onClick={reset}
             >
-              Submit again
+              {copy.submitAgain}
             </button>
           </div>
         </div>
@@ -206,7 +211,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
             htmlFor="docs-feedback-message"
             className="text-sm font-medium"
           >
-            What would improve this page?
+            {copy.improvePrompt}
           </label>
           <textarea
             id="docs-feedback-message"
@@ -216,7 +221,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
             rows={4}
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder="Leave feedback…"
+            placeholder={copy.placeholder}
             className="w-full resize-y rounded-xl bg-fd-secondary p-3 text-sm text-fd-secondary-foreground placeholder:text-fd-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-ring"
           />
           {error ? (
@@ -244,7 +249,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
                   setError(null);
                 }}
               >
-                Cancel
+                {copy.cancel}
               </button>
               <button
                 type="submit"
@@ -254,7 +259,7 @@ export function Feedback({ onSendAction }: FeedbackProps) {
                   "touch-manipulation",
                 )}
               >
-                {isPending ? "Sending…" : "Submit feedback"}
+                {isPending ? copy.sending : copy.submit}
               </button>
             </div>
           </div>

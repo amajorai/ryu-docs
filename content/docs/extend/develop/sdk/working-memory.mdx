@@ -20,6 +20,10 @@ caller that wrote it. On a node that belongs to an organization, that caller is 
 so another user's thread or resource id never reaches your document. A `thread` id that names an
 existing conversation also requires access to that conversation.
 
+[Dream](/docs/core/memory-dream#working-memory-as-a-source) also reads your resource-scope
+documents when it proposes long-term memories, and cites the document revision it read. Nothing
+it proposes is saved until you accept it.
+
 ## SDK agents
 
 Pass `workingMemory` to an `Agent` that runs its own loop (an agent without `sessionId`):
@@ -44,6 +48,11 @@ with the current document (or the empty template). It also gets an `update_worki
 
 - In template mode the model sends the complete new Markdown as `content`.
 - In schema mode it sends only the changed fields as `data`.
+- The `<working_memory>` message shows the document's version, and the model sends it back as
+  `expected_version`. If the document changed after that read (another run, another conversation on
+  a `resource` document, or your own code), nothing is saved. The tool result tells the model what
+  happened and includes the current document, so the model can merge its change and call the tool
+  again with the new version. A call without `expected_version` overwrites the document.
 
 ```mermaid
 sequenceDiagram
@@ -106,8 +115,9 @@ const rememberAirport = defineTool({
 ```
 
 `get()` and `update()` use the agent's configured scope and id unless you pass `{ scope, id }`.
-`expectedVersion` makes the write fail with a 409 if someone else changed the document after you
-read it. Use `0` to mean "must not exist yet".
+`expectedVersion` makes the write fail if someone else changed the document after you read it: the
+promise rejects with a `WorkingMemoryConflictError` (exported from `@ryuhq/sdk`) whose
+`currentVersion` is the version the document is at now. Use `0` to mean "must not exist yet".
 
 Working memory and compaction run in the SDK-owned loop. For an agent with a `sessionId`, Core runs
 the turn, so set them on the Core agent instead, as described in [Core agents](#core-agents).
@@ -167,6 +177,11 @@ fields.
   conversations with that agent.
 - The agent receives the document on each turn and updates it with the built-in
   `working_memory.update_working_memory` tool.
+- The document shown to the agent includes its version, and the tool takes it back as
+  `expected_version`. If something else changed the document first, such as another conversation
+  on a `resource` document or a `PUT` from your code, the update is refused. The agent gets the
+  current document instead, so it can merge its change and try again. A call without
+  `expected_version` overwrites the document.
 
 Working memory is left out of temporary chats, of turns from public or untrusted callers, and of
 turns where a member chats in a conversation another member owns.
@@ -190,16 +205,25 @@ for this agent's turns. Fields you leave out keep the node setting.
 | `GET` | `/api/memory/working?scope=thread\|resource&id=…` | Read a document (`working_memory` is `null` when none exists) |
 | `PUT` | `/api/memory/working?scope=…&id=…` | Create or update. Body: `content`, `data`, `template`, `schema`, `mode`, `replace`, `expected_version` |
 | `DELETE` | `/api/memory/working?scope=…&id=…` | Delete a document |
+| `GET` | `/api/memory/working/history?scope=…&id=…&limit=…` | List the document's recent versions, newest first |
 
 Errors: 400 for an invalid request or schema violation, 403 when the caller lacks memory
 permission, 409 when `expected_version` does not match. Deleting a conversation also deletes its
 thread working memory.
+
+Core keeps the last 20 versions of each document, encrypted like the document. The history route
+returns them newest first as `versions`, each with `version`, `mode`, `updated_at`, and the
+`content` (template mode) or `data` (schema mode) of that version. `limit` (1 to 20) asks for
+fewer. Like the other routes, it only returns the caller's own versions, and a `thread` id that names
+an existing conversation requires access to it. Deleting a document, or the conversation that owns
+a `thread` document, deletes its earlier versions too.
 
 The same calls are available as typed functions:
 
 ```typescript
 import {
   getWorkingMemory,
+  getWorkingMemoryHistory,
   updateWorkingMemory,
   deleteWorkingMemory,
 } from "@ryuhq/core-client/working-memory";
@@ -207,4 +231,5 @@ import {
 const ref = { scope: "resource", id: "user-1" } as const;
 await updateWorkingMemory(target, ref, { data: { plan: "pro" }, schema: { type: "object" } });
 const doc = await getWorkingMemory(target, ref); // { mode: "schema", data: { plan: "pro" }, version: 1, … }
+const versions = await getWorkingMemoryHistory(target, ref, 5); // [{ version: 1, mode: "schema", data: …, updatedAt }, …]
 ```

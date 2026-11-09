@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
+import { docsChromeCopy } from "@/lib/docs-chrome-copy";
 import { baseOptions } from "@/lib/layout.shared";
 
 export default async function Layout({
@@ -19,7 +20,7 @@ export default async function Layout({
     <HomeLayout {...options} nav={{ ...options.nav, enabled: false }}>
       <SiteHeader transparent />
       {children}
-      <SiteFooter />
+      <SiteFooter landmarks={docsChromeCopy(lang).landmarks} />
     </HomeLayout>
   );
 }

@@ -30,10 +30,19 @@ The browser window's own interface follows your Ryu interface language: the tab 
 toolbar, menu, settings, history, downloads, and activity pages, its messages, and
 the system dialogs it opens (site permission prompts, save and folder pickers). Arabic
 lays the window out right to left. File sizes and times such as "5 min ago" use that
-language's conventions. Until the desktop panel connects, the window starts in your
-operating system's language. Text with no translation yet appears in English, and
-websites in tabs keep their own language. On Windows and Linux the window has no native
+language's conventions. The window remembers the last Ryu language the desktop panel
+sent, so when an agent opens the browser on its own it starts in that language; before
+the panel has ever connected, it starts in your operating system's language. Error
+messages are shown in that language too: when an action fails for a reason the browser
+cannot describe in it, such as a folder with no extension manifest, you see a short
+translated message instead of the engine's English text. Text with no translation yet
+appears in English, and websites in tabs keep their own language. On Windows and Linux the window has no native
 menu bar; its commands are in the Browser menu on the toolbar.
+
+On Windows and Linux, the controls the browser engine draws inside pages also use that
+language: form validation messages, date, time, and list pickers, and media controls. Sites
+are asked for content in that language first too. These follow a language change the next
+time the browser starts. On macOS they follow your system language.
 
 ## Activity center
 
@@ -79,7 +88,8 @@ Downloads, and Browser settings.
 ### Desktop Browser dock
 
 The Desktop dock opens a URL in the sidecar, refreshes its tab list, and lets you select or close
-a tab. To annotate a page:
+a tab. Choose **Agents** to watch an agent's own browser instead (see
+[Watching an agent's browser](#watching-an-agents-browser)). To annotate a page:
 
 1. Choose **Annotate** to freeze the current preview, then click an element or drag an area.
    Hold **Shift** while clicking to add more targets.
@@ -139,6 +149,69 @@ Each agent also keeps its own:
 
 Your own browser's history, site permissions, and download settings are unchanged.
 
+### Agent network access
+
+Each agent's browser traffic goes through its own network guard, separate from your browser's.
+Local and private network addresses are always blocked.
+
+When you limit an agent to a list of sites (**Allowed sites** on the agent editor's **Advanced**
+tab), that agent's browser can reach only those hosts.
+An entry is either one host, such as `example.com`, or every subdomain of a domain, such as
+`*.example.com`. Requests to any other host fail before they leave the browser. Other agents
+and your own browser are not affected. A shorter list applies right away. A longer list
+applies after the agent's browser session restarts, for example after Browser stops when idle.
+
+To keep agent traffic behind the guard:
+
+- WebRTC in agent tabs (calls, screen sharing, peer connections) never sends traffic around
+  the guard.
+- Browser does not use DNS over HTTPS. Names are resolved where the guard checks them.
+- If Browser is started with a command-line option that changes or bypasses its proxy or name
+  resolution, agent sessions do not open.
+
+### Watching an agent's browser
+
+Agent profiles run in hidden windows. To see what an agent is doing, open the Desktop Browser
+dock and choose **Agents**. The list shows every agent whose browser session is open and that
+agent's tabs. Pick a tab to watch it live.
+
+- The view is read-only. Nothing you do in it reaches the agent's page.
+- Agents can't open this view, so one agent never sees another agent's pages.
+- Opening the view doesn't start a browser session for an agent. An agent appears once it has
+  used the browser.
+- The picture updates while you watch and stops when you pick another tab, choose **Agents**
+  again, or hide the dock. Up to four agent tabs can be watched at once.
+- Turning off **Let Ryu control the built-in browser** in Browser settings also turns this
+  view off.
+
+### Managing agent profiles
+
+Each agent's profile (its sign-ins, site storage, history, site permissions, and downloads) stays
+on the node until you delete it. Through the Browser API, the owner can:
+
+- **List profiles** with `GET /api/ext/@ryu/browser/profiles`: every agent profile on the node,
+  its size, how many history entries, site permissions, and downloads it holds, and, when the
+  agent's browser session is open, which agent and session it belongs to.
+- **Export a profile** with `GET /api/ext/@ryu/browser/profiles/<id>/export`: its history, site
+  permissions, download list, and the names, domains, and expiry of its cookies. Cookie values
+  and site storage are never exported, because they are live sign-ins.
+- **Delete a profile** with `DELETE /api/ext/@ryu/browser/profiles/<id>`: closes the agent's
+  session, clears its cookies, site storage, and cache, and removes its history, site
+  permissions, and downloads. The agent signs in again the next time it browses.
+
+Agents can't list, export, or delete profiles, including their own.
+
+### Agent browser sessions
+
+An agent's browser session is its open hidden window and tabs. An agent can manage only its own:
+
+- `chromium.list_sessions` returns the agent's open session, its id, and its tabs. The list is
+  empty until the agent uses the browser.
+- `chromium.close_session` closes the agent's tabs and window. Its profile stays, and its next
+  browser call opens a new session with a new id.
+
+Both tools are also available to agents connected over Ryu's hosted MCP endpoint.
+
 ### Upgrading from earlier versions
 
 | Upgrading from | What changes once |
@@ -187,8 +260,42 @@ Ryu fills credentials only under these rules:
 - Each agent sees and fills only the accounts it created. Listing accounts returns names and
   addresses, never passwords or two-factor secrets.
 
+### Items you attach to an agent's session
+
+You can also let an agent sign in with one of your own vault items, without giving it the value.
+Attach the item under **Attached sign-ins** on the agent editor's **Advanced** tab
+([how](/docs/surfaces/desktop/user-guide/agent-attached-sign-ins)); `chromium.list_accounts` then lists it under
+`attached` with a handle such as `attached:1`, and the agent fills it with
+`chromium.fill_credential`. The same rules apply, plus:
+
+- The item fills only on its own site, and only in the browser session that filled from the set
+  first. Closing that session, or a browser restart, ends the agent's use of the set.
+- The agent can't create, read, or keep attached items, and they expire when you revoke the set
+  or it times out.
+- In a session Box an attached item fills only through the login URL you set for it, or anywhere
+  on its site if you allowed a Box fill without a login URL (the agent can then capture it).
+
 Reading a QR code needs Chromium's built-in barcode detection, which is not available on every
 platform. The text setup key works everywhere.
+
+### Login URLs and fills in a session Box
+
+An account can carry up to four **login URLs**: the `https` pages on its site that its sign-in
+form submits to. `chromium.create_account` takes them as `submit_urls`, the agent can replace them
+with `chromium.set_account_login_urls`, and you can change them under **Account login URLs** on
+the agent editor's **Advanced** tab. Every change is recorded in the vault audit log.
+
+In a session Box the agent fills with `browser.fill_credential` and finds account ids with
+`browser.list_credentials` (metadata only). There a password is typed as a single-use
+placeholder, and the Box's egress puts the real value in only when the form is submitted to one
+of the account's login URLs ([how it works](/docs/standalone/box-network-secrets#browser-credential-fills)).
+An account without login URLs is refused in a Box. The same tools work with this app installed:
+Ryu maps them to `chromium.fill_credential` and `chromium.list_accounts`.
+
+Own accounts have a limit. The agent picks its own account's site and login URLs, so a fill
+protects that password only from hosts the agent does not control: an agent that points an
+account at a site it runs can read the password it generated. None of your passwords is involved;
+for items you attach, the login URL is yours to set.
 
 ## Security keys
 

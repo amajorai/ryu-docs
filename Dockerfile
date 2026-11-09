@@ -34,6 +34,9 @@ COPY --chown=node:node --from=builder /app/.next/static ./.next/static
 # fumadocs-openapi resolves the API reference specs from /app at request time,
 # so they must be in the runtime image as well as in the builder.
 COPY --chown=node:node --from=builder /app/specs ./specs
+# API reference pages read their generated MDX source at request time
+# (`page.data.getText("raw")`); it is not traced into .next/standalone.
+COPY --chown=node:node --from=builder /app/content/docs ./content/docs
 COPY --chown=node:node --from=builder /app/public ./public
 # Copied as node above; only the WORKDIR itself still needs handing over. A
 # recursive chown here would duplicate every copied file into a new layer.

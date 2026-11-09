@@ -249,13 +249,16 @@ refuses any request that contains a match.
 #### Response side
 
 When the firewall is enabled, the upstream response is buffered (up to 8 MB) and redacted in one
-contiguous pass before any bytes reach the caller. A secret split across two text-delta events is
-still rewritten to `[REDACTED:…]`.
+contiguous pass before any bytes reach the caller, so the agent receives the reply in one piece
+when the upstream finishes. A secret split across two text-delta events is still rewritten to
+`[REDACTED:…]`. With the firewall disabled, the response streams through unchanged.
 
-- Non-text events (`message_start`, `ping`, tool-call deltas) pass through verbatim, and SSE
-  framing is preserved.
-- The redacted text is scanned once more to audit any residual outbound violation.
-- An unparseable event passes through verbatim (fail open).
+- Other events (`message_start`, `ping`, tool-call and thinking deltas, unparseable `data:` lines)
+  keep their SSE framing and content, except that the outbound secret scrub also runs over them.
+- A JSON (non-streaming) response gets only the outbound secret scrub, not PII redaction.
+- The redacted text is scanned once more to audit any residual outbound violation. The audit
+  records the violation and does not block the response.
+- A response over 8 MB, or an upstream read error, ends the response with nothing delivered.
 
 #### Attribution
 
@@ -265,22 +268,26 @@ recorded on the audit row only when the request also carries a trusted forwarder
 
 ### Response-side streaming DLP
 
-The response redactor (`redact_response_passthrough`) reassembles each complete
-`\n\n`-terminated SSE event from raw bytes, so a multibyte UTF-8 character split across network
-chunks is never corrupted. It then rewrites only the assistant-text delta:
+The response redactor (`redact_response_passthrough`) decodes the buffered body once, so a
+multibyte UTF-8 character split across network chunks is never corrupted. It joins the
+assistant-text deltas of every event, redacts the joined text, and writes it back:
 
 | Wire format | Event rewritten | Field redacted |
 |---|---|---|
 | Anthropic | `content_block_delta` | `delta.text` (the `text_delta`) |
 | OpenAI Responses | `output_text.delta` | top-level `delta` string |
 
-Each matched span runs through the firewall's `fw.sanitize()`, the same config-gated routine the
-request side uses, and becomes a `[REDACTED:NAME]` marker. A scanner-less config or an unparseable
-`data:` payload passes the raw event through unchanged.
+The joined text runs through the firewall's `sanitize`, the same routine the request side uses
+(it follows `redact_pii` and `redact_secrets`), and then the outbound secret scrub (GitHub tokens,
+`sk-` keys, AWS access key IDs, `Bearer` tokens, and `token=`, `api_key=`, and `password=`
+values). Each match becomes a `[REDACTED:NAME]` marker. The redacted text is placed in the first
+text-delta event and later text-delta events are emptied, so a reply with several text blocks
+arrives with all of its text in the first one.
 
 <Callout type="warn">
-  Streaming redaction is unit-tested across chunk boundaries. The full live round-trip needs a real
-  subscription agent and has not been exercised end to end.
+  Response redaction is tested through the proxy against a local stand-in upstream, including a
+  secret split across two text deltas. The full live round-trip needs a real subscription agent
+  and has not been exercised end to end.
 </Callout>
 
 ### Default and opt-out
